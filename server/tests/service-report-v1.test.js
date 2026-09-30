@@ -1,6 +1,8 @@
 // Legacy pressureFromFindings + computePressureIndex have been replaced by
 // the pest-pressure engine. See server/tests/pest-pressure-*.test.js for
 // the equivalent coverage against the new 5-component weighted formula.
+// The customer map URL is HMAC-signed with the server secret (signed-map-image.js).
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-signed-map-images';
 const { renderTreatmentMap } = require('../services/service-report/treatment-map');
 const { buildSatelliteTreatmentMapContext } = require('../services/service-report/satellite-treatment-map');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
@@ -1215,7 +1217,9 @@ describe('service report v1', () => {
 
       expect(enabled.available).toBe(true);
       expect(enabled.provider).toBe('google_maps');
-      expect(enabled.live.url).toContain('maps.googleapis.com/maps/api/staticmap');
+      // The customer payload carries a signed proxy path, never the keyed Google URL.
+      expect(enabled.live.url).toMatch(/^\/api\/public\/map-image\/v1\./);
+      expect(JSON.stringify(enabled)).not.toMatch(/maps\.googleapis\.com|key=/);
       expect(enabled.capabilities.canUseInPdf).toBe(false);
       expect(enabled.capabilities.canUseInSmsPreview).toBe(false);
       expect(enabled.overlay.zones[0].overlaySource).toBe('local_schematic');
@@ -3288,7 +3292,8 @@ describe('service report v1', () => {
       },
     });
 
-    expect(email.text).toContain('Findings: 0 findings');
+    expect(email.text).not.toMatch(/^Findings:/m);
+    expect(email.html).not.toContain('>Findings<');
     expect(email.text).toContain('No action-required findings were documented during this visit.');
     expect(email.text).not.toContain('Top findings: No activity observed this visit');
     expect(email.html).not.toContain('Top findings');

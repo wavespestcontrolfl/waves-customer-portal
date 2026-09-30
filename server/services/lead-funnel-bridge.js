@@ -253,9 +253,10 @@ async function resolveStoredTouch(db, lead) {
  * at 'booked' while its row still reads 'duplicate'). Idempotent on the
  * UNIQUE lead_id; returns the id of the row THIS call inserted, or null when
  * one already existed / nothing applied / the write failed (best-effort,
- * like the bridge).
+ * like the bridge). `rethrow` (a caller inside its own transaction) throws a
+ * write failure instead.
  */
-async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = null } = {}) {
+async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = null, rethrow = false } = {}) {
   const db = database || require('../models/db');
   try {
     if (!lead) return null;
@@ -282,6 +283,11 @@ async function stampLeadFunnelRow(database, lead, { customerId = null, serviceIn
     }).onConflict('lead_id').ignore().returning('id');
     return inserted ? inserted.id : null;
   } catch (err) {
+    // A caller stamping INSIDE its own transaction must not swallow the error:
+    // a failed statement aborts that transaction, and swallowing it would let
+    // the caller commit (silently rolled back) or carry on against an aborted
+    // handle.
+    if (rethrow) throw err;
     logger.warn(`[lead-funnel-bridge] funnel row stamp failed for lead ${lead?.id}: ${err.message}`);
     return null;
   }

@@ -215,11 +215,19 @@ never read `parts[0]`, and budget output tokens for the thinking spend.
 
 **Lawn visit exception (owner 2026-09-08, DECISIONS.md):** the lawn visit
 assessment (`services/lawn-visit-assessment.js`, `GATE_LAWN_VISIT_ASSESSMENT`)
-is Gemini-first with **GPT-6 Astra** (`MODEL_OPENAI_FRONTIER`) as its fallback —
+is Gemini-first with **GPT-6 Sol** (`OPENAI_LAWN_ASSESSMENT`, `MODEL_OPENAI_LAWN_ASSESSMENT`;
+Astra until the 2026-09-29 ruling) as its fallback —
 no Claude vision leg, no parallel providers. It is still a two-provider
 `TEXT_POLICIES` entry (`lawnVisitAssessment`) through `dispatchWithFallback`;
-only the fallback provider differs. Do not copy this shape to another lane
-without an owner ruling. Gemini `thinkingLevel` (LOW | MEDIUM | HIGH) and
+only the fallback provider differs. Behind the dark `GATE_LAWN_ASSESSMENT_REFEREE`
+(owner 2026-09-29) `analyzeVisit` adds a Sol second opinion when Gemini's
+answer is unsure or serious (low/unknown-confidence or moderate/severe finding,
+unknown grass) and a Claude Fable 5.1 tie-break (`ROUTES.lawnAssessmentReferee`,
+`MODEL_LAWN_ASSESSMENT_REFEREE`, effort high, single leg, called through
+`llm/call.js#dispatch`) ONLY when Gemini and Sol disagree on a NAME (grass type
+or what a finding is); scores, severities and every other field always stay as
+Gemini read them (`services/lawn-visit-referee.js`). Do not copy this shape to
+another lane without an owner ruling. Gemini `thinkingLevel` (LOW | MEDIUM | HIGH) and
 image `label` parts (numbered photos) are dispatcher payload fields any lane
 may use.
 

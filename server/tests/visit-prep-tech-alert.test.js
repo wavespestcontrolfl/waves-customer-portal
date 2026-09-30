@@ -5,6 +5,7 @@
 // losing the card, and the exact push copy.
 const mockInsertCard = jest.fn().mockResolvedValue(undefined);
 const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
+const mockHandoffChecks = [];
 
 jest.mock('../models/db', () => jest.fn());
 // The shared per-visit ordering chain (tech-visit-notifications.js).
@@ -18,6 +19,9 @@ jest.mock('../services/push-notifications', () => ({
   // provider handoff; a false return sends nothing.
   sendToAdminUsers: async (ids, notification, opts = {}) => {
     if (typeof opts.beforeDispatch === 'function' && (await opts.beforeDispatch()) === false) return { superseded: true };
+    // And beforeHandoff at the device's final boundary (codex #5421 r3).
+    mockHandoffChecks.push(typeof opts.beforeHandoff);
+    if (typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
     return mockSendToAdminUser(ids[0], notification);
   },
 }));
@@ -137,6 +141,7 @@ describe('notifyTechVisitPrepPhotos', () => {
       expect(mockLastSvcChain.forShare).toHaveBeenCalled();
       // The technician row too, so an office-only edit can't slip in.
       expect(mockLastTechChain.forShare).toHaveBeenCalled();
+      expect(mockHandoffChecks[mockHandoffChecks.length - 1]).toBe('function');
       expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
         title: 'A customer sent photos for a visit on your route',
         body: '',

@@ -32,6 +32,12 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+// The real admin-customers.js route file is huge and pulls in a wide
+// dependency graph unrelated to this suite; securePendingPrepayCoverageReasons
+// only needs its ANNUAL_PREPAY_LOCK_NS namespace constant (the same value
+// topUpRecurringSeriesLocked already borrows the same way — see its own
+// comment in admin-schedule.js), so it's mocked down to that.
+jest.mock('../routes/admin-customers', () => ({ _private: { ANNUAL_PREPAY_LOCK_NS: 0x4150 } }));
 
 const { findBillingCoveredVisits } = require('../routes/admin-schedule');
 
@@ -42,13 +48,29 @@ const { findBillingCoveredVisits } = require('../routes/admin-schedule');
 function fakeQuery(allRows) {
   const q = {};
   let rows = allRows;
-  for (const m of ['where', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'noWait', 'select']) {
+  for (const m of ['where', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'joinRaw', 'orderBy', 'forUpdate', 'noWait', 'select', 'whereRaw']) {
     q[m] = jest.fn(() => q);
   }
   // Only an `id` filter is honored (the first-application rail's locked
   // re-read of its stamped invoices); every other filter stays a no-op.
   q.whereIn = jest.fn((col, vals) => {
     if (col === 'id') rows = allRows.filter((r) => vals.map(String).includes(String(r.id)));
+    return q;
+  });
+  // A real filter (unlike the rest of this fake): the secure-prepay
+  // coverage rail's canonical coverageRowsForTerm (annual-prepay-renewals.js,
+  // unmocked in this file) runs its own scheduled_date window query through
+  // this, and a term-window exclusion test needs it to actually exclude —
+  // every OTHER caller of coverageCandidateRows in the real module keys the
+  // SAME column, so this stays a single, narrow real filter.
+  q.whereBetween = jest.fn((col, range) => {
+    if (col === 'scheduled_date' && Array.isArray(range)) {
+      const [lo, hi] = range;
+      rows = rows.filter((r) => {
+        const d = String(r?.scheduled_date || '').slice(0, 10);
+        return !!d && d >= lo && d <= hi;
+      });
+    }
     return q;
   });
   q.first = jest.fn(async () => rows[0] || null);
@@ -67,10 +89,19 @@ function fakeQuery(allRows) {
 // `hasColumns` keys are `table.column` — default present (matches
 // `hasTables`' default-true shape) so existing fixtures that never mention
 // the new prepay/first-application columns keep reading them as available.
-function makeConn({ hasTables = {}, hasColumns = {}, byTable = {}, tryLockAcquired = true } = {}) {
+function makeConn({
+  hasTables = {}, hasColumns = {}, byTable = {}, tryLockAcquired = true, securePrepayLockAcquired = true,
+} = {}) {
   const conn = (table) => fakeQuery(byTable[table] || []);
-  // pg_try_advisory_xact_lock (the anchor mint try-lock).
-  conn.raw = jest.fn(async () => ({ rows: [{ acquired: tryLockAcquired }] }));
+  // Two DISTINCT pg_try_advisory_xact_lock call sites share this one raw()
+  // mock, told apart by their own SQL alias (never by call order): the
+  // anchor mint try-lock (memberBillingInvoiceRows, `AS acquired`) and the
+  // secure-prepay coverage rail's per-customer ANNUAL_PREPAY_LOCK_NS try-lock
+  // (securePendingPrepayCoverageReasons, `AS locked` — the SAME alias every
+  // other acquirer of that namespace uses, per advisoryTryLockAcquired).
+  conn.raw = jest.fn(async (sql) => (/AS locked/.test(String(sql))
+    ? { rows: [{ locked: securePrepayLockAcquired }] }
+    : { rows: [{ acquired: tryLockAcquired }] }));
   conn.schema = {
     hasTable: jest.fn(async (name) => hasTables[name] !== false),
     hasColumn: jest.fn(async (table, column) => hasColumns[`${table}.${column}`] !== false),
@@ -371,6 +402,578 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
   test('without liveInvoice the combined first-application link is not read', async () => {
     const covered = await findBillingCoveredVisits(fixture([inv('inv1', [aggregateLine])]), [{ id: 'v2' }]);
     expect(covered.size).toBe(0);
+  });
+});
+
+// The /secure card-confirmation page's unpaid annual-prepay pick (owner
+// ruling 2026-09-29, "secure prepay coverage rail"): a payment_pending term
+// with a still-open prepay invoice, decided through the SAME canonical
+// predicates payment activation uses (annual-prepay-renewals.js's
+// coverageRowsForTerm — genuinely exercised here, unmocked, against the fake
+// conn's real `whereBetween` filter), never a hand-built date/service-type
+// window of this route's own.
+describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', () => {
+  const TERM_TABLE = 'annual_prepay_terms as t';
+  // The rail projects first activation "as if paid today" (the late-payment
+  // window slide), so the clock is pinned to the terms' start: no lag unless
+  // a test moves it. Only Date is faked — timers/microtasks stay real.
+  const REAL_TIMERS = ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+    'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'];
+  const pinToday = (iso) => jest.useFakeTimers({ now: new Date(iso), doNotFake: REAL_TIMERS });
+  beforeEach(() => pinToday('2026-01-01T17:00:00Z'));
+  afterEach(() => jest.useRealTimers());
+  const term = (overrides = {}) => ({
+    id: 't1',
+    customer_id: 'c1',
+    status: 'payment_pending',
+    term_start: '2026-01-01',
+    term_end: '2026-12-31',
+    coverage_service_type: 'Quarterly Pest Control Service',
+    coverage_visit_count: 1,
+    renewed_from_term_id: null,
+    ...overrides,
+  });
+  const visit = (overrides = {}) => ({
+    id: 'v1',
+    customer_id: 'c1',
+    service_type: 'Quarterly Pest Control Service',
+    status: 'pending',
+    scheduled_date: '2026-03-15',
+    is_recurring: false,
+    recurring_pattern: null,
+    recurring_parent_id: null,
+    source_estimate_id: null,
+    property_id: null,
+    service_id: null,
+    service_key_snapshot: null,
+    annual_prepay_term_id: null,
+    prepaid_amount: null,
+    prepaid_method: null,
+    is_callback: false,
+    ...overrides,
+  });
+  const fixture = ({ visits = [], terms = [term()], ...connOpts } = {}) => makeConn({
+    hasTables: ALL_TABLES_PRESENT,
+    byTable: {
+      estimate_card_holds: [],
+      appointment_card_requests: [],
+      invoices: [],
+      'invoices as inv': [],
+      'visit_completion_packet_items as p': [],
+      scheduled_services: visits,
+      [TERM_TABLE]: terms,
+    },
+    ...connOpts,
+  });
+
+  // findBillingCoveredVisits reads this rail straight off the CALLER'S own
+  // visit row (no query of its own — see securePendingPrepayCoverageReasons'
+  // header comment), so every test below passes the same full `visit()` row
+  // both as the fixture AND as the `visits` argument, exactly like each of
+  // the three real callers (the price guard's priceGuardRow, the conversion
+  // siblings, the 'following' guard rows) now does.
+  test('a visit that matches the pending term\'s coverage blocks the reprice', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a different service type is outside canonical coverage and does not block', async () => {
+    const v1 = visit({ service_type: 'Lawn Care' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a visit beyond the term\'s sold visit count does not block', async () => {
+    // Two matching, in-window visits; the term sold only 1. coverageRowsForTerm
+    // keeps the EARLIEST (v1) and drops the later one (v2) — same slicing the
+    // canonical function applies for activation itself.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-06-15' });
+    const conn = fixture({ visits: [v1, v2] });
+    const covered = await findBillingCoveredVisits(conn, [v2], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+    // Sanity: the SAME term genuinely covers v1 (proves the slicing, rather
+    // than a mismatch, is why v2 was excluded).
+    const coveredV1 = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(coveredV1.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a visit outside the term\'s window does not block', async () => {
+    const v1 = visit({ scheduled_date: '2027-06-01' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a term no longer payment_pending (paid) does not block through this rail', async () => {
+    // Convention matches the invoice-status tests above: the fixture
+    // represents what the real status filter (t.status = 'payment_pending')
+    // already excludes, so a paid term simply never appears here.
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], terms: [] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a date moved INTO coverage in the same save blocks (the proposed, not the stored, date)', async () => {
+    // Stored OUTSIDE the term window; the save proposes a date INSIDE it —
+    // _proposed is how admin-schedule.js's update-details handler
+    // threads the save's coverage columns through (Codex requirement 3).
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1] });
+    const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(storedOnly.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { scheduled_date: '2026-03-15' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a same-day start time moved EARLIER in the same save takes the sold slot (the proposed, not the stored, start)', async () => {
+    // One sold slot, two same-day visits: v2 (09:00) stored ahead of v1
+    // (10:00). The save moves v1 to 08:00 — _proposed carries
+    // updates.window_start, so v1 competes at its final position.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15', window_start: '10:00:00' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-15', window_start: '09:00:00' });
+    const conn = fixture({ visits: [v2, v1] });
+    const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(storedOnly.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { window_start: '08:00:00' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a visit moved INTO the window keeps its start time when competing for a same-day slot', async () => {
+    // v1 stored outside the window (so no DB row to recover window_start
+    // from); moved onto v2's day at 08:00, ahead of v2's 09:00.
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-01-10', window_start: '08:00:00' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-15', window_start: '09:00:00' });
+    const conn = fixture({ visits: [v2] });
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { scheduled_date: '2026-03-15' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a service change INTO the covered family in the same save blocks (the proposed, not the stored, service)', async () => {
+    const v1 = visit({ service_type: 'Lawn Care' });
+    const conn = fixture({ visits: [v1] });
+    const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(storedOnly.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { service_type: 'Quarterly Pest Control Service' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a service change OUT of the covered family in the same save does not block', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _proposed: { service_type: 'Lawn Care' } }],
+      { liveInvoice: true },
+    );
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a late payment\'s window slide is projected as if paid today (Fable P2 on #5387)', async () => {
+    // Stored window ends 2026-12-31; paid "today" 2026-03-01 slides the end
+    // by the same 59-day lag first activation applies → 2027-02-28.
+    pinToday('2026-03-01T17:00:00Z');
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('no slide on the stored window when paid on the start day', async () => {
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('an active term with no linked visit yet (mid- or failed activation) still blocks (Fable P2 on #5387)', async () => {
+    // The fixture stands in for the SQL filter (pending OR active with no
+    // linked row); this pins that the rail judges such a term the same way.
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active' })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/annual prepay paid at the old price/);
+  });
+
+  test('every visit in one save is judged in ONE pass: a sibling entering coverage takes the slot the edited visit vacates (Codex r2 P1 on #5387)', async () => {
+    // One sold slot. v1 (edited) is stored in-window and moves OUT; v2 is
+    // stored as Lawn Care and is propagated INTO the covered service.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-06-15', service_type: 'Lawn Care' });
+    const conn = fixture({ visits: [v1, v2] });
+    const covered = await findBillingCoveredVisits(conn, [
+      { ...v1, _proposed: { scheduled_date: '2027-06-01' } },
+      { ...v2, _proposed: { service_type: 'Quarterly Pest Control Service' } },
+    ], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+    expect(covered.get('v2')).toMatch(/card-confirmation page/);
+  });
+
+  test('an ACTIVE term that already has linked visits is judged on its stored window (no first-activation slide)', async () => {
+    pinToday('2026-03-01T17:00:00Z');
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active', has_linked_visit: true })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('an ACTIVE term with old links still blocks an unstamped visit in its current coverage (repaid dispute; Codex r2 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active', has_linked_visit: true })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/annual prepay paid at the old price/);
+  });
+
+  test('a cadence-rewritten sibling joins the pass as CONTEXT: moving it later frees the slot for the repriced visit, and it is never marked itself (Codex pre-push P1 on #5387)', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-06-15' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-10' });
+    const conn = fixture({ visits: [v2, v1] });
+    const alone = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(alone.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _coverageContext: [{ ...v2, _proposed: { scheduled_date: '2026-08-01' } }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  test('dispute-suspended terms are filtered out of the held-terms read (Codex r3 P1 on #5387)', async () => {
+    const v1 = visit();
+    const base = fixture({ visits: [v1] });
+    const whereNullCalls = [];
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === TERM_TABLE) {
+        const orig = q.whereNull ? q.whereNull.bind(q) : null;
+        q.whereNull = (...args) => { whereNullCalls.push(args[0]); return orig ? orig(...args) : q; };
+      }
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.raw = base.raw;
+    await findBillingCoveredVisits(wrapped, [v1], { liveInvoice: true });
+    expect(whereNullCalls).toContain('t.dispute_suspended_at');
+  });
+
+  test('securePrepay:false (a service-only following edit) skips this rail — price-only ruling (Codex r6 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true, securePrepay: false });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a visit this save will INSERT that the term would cover refuses the save against the edited visit (Codex r6 P1 on #5387)', async () => {
+    // Edited v1 is outside the window; the spawn inserts a child inside it.
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const conn = fixture({ visits: [v1] });
+    const alone = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(alone.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2026-06-01' }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
+  test('a planned insert TIED with an existing visit at the sold-slot boundary counts as covered (its real id is unknown; Codex r8 P1 on #5387)', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const other = visit({ id: '00000000-0000-4000-8000-000000000001', scheduled_date: '2026-06-01', window_start: '09:00:00' });
+    const conn = fixture({ visits: [other, v1] });
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1,
+      _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2026-06-01', window_start: '09:00:00' }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
+  test('a planned insert outside the window does not refuse', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2027-05-01' }],
+    }], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a sibling the conversion turns into a free re-service callback is judged post-save and does not block (Codex r7 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const stored = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(stored.get('v1')).toMatch(/card-confirmation page/);
+    const converted = await findBillingCoveredVisits(conn, [{
+      ...v1, _proposed: { is_callback: true, service_type: 'Pest Control Re-Service' },
+    }], { liveInvoice: true });
+    expect(converted.has('v1')).toBe(false);
+  });
+
+  test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });
+    await expect(findBillingCoveredVisits(conn, [v1], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+  });
+
+  test('without liveInvoice this rail is never read', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1]);
+    expect(covered.size).toBe(0);
+  });
+
+  // ---- Stamp-time price hold interplay (Codex r10 on #5387) ----------------
+  // The /secure mint record the stamp-time hold judges against: the term was
+  // sold at $100 per visit. Wraps a fixture conn so the activity_log lookup
+  // (securePlanSoldPerVisitCents) answers with it (or nothing).
+  const withSoldBaseline = (base, perVisit = 100) => {
+    const conn = (table) => {
+      if (table === 'activity_log') return fakeQuery(perVisit == null ? [] : [{
+        metadata: { source: 'secure_plan_choice', per_visit_amount: perVisit, annual_prepay_term_id: 't1' },
+      }]);
+      return base(table);
+    };
+    conn.schema = base.schema; conn.raw = base.raw;
+    return conn;
+  };
+
+  test('D: an edit that puts a HELD (unstamped, drifted) visit back at the sold price is allowed', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('D: a move AWAY from the sold price stays blocked (held visit repriced again)', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 130 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('D: a visit the term already STAMPED is never exempt, even back at the sold price', async () => {
+    const v1 = visit({
+      estimated_price: 125, _proposedPrice: 100,
+      prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1',
+    });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(true);
+  });
+
+  test('D: a term with no /secure sold baseline never exempts (nothing to restore to)', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }), null);
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('D: a planned insert is never exempt', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01', estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [visit({ id: 'planned-insert-0', scheduled_date: '2026-03-15' })],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
+  // C, end to end through the 'following' propagation: a service-scoped stored
+  // discount re-derives each sibling's estimated_price on a SERVICE-ONLY save,
+  // so the rail must judge by the derived final price, not by priceChanged.
+  const followingSave = async ({ discountKey }) => {
+    const sib = visit({
+      id: 'sib1', primary_line_price: 100, estimated_price: 100, pre_service_brief_type: null,
+      discount_type: 'fixed_amount', discount_amount: 10, discount_service_key_filter: discountKey,
+    });
+    const base = fixture({ visits: [sib] });
+    const conn = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services') q.update = jest.fn(async () => 1);
+      return q;
+    };
+    conn.schema = base.schema; conn.raw = base.raw;
+    const { propagatePriceServiceToFollowingSiblings } = require('../routes/admin-schedule')._test;
+    return propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited-1', editedRow: null, parentId: 'parent-1', fromDateStr: null,
+      fields: { service_id: 'svc-a', service_key_snapshot: 'key_a', service_type: 'Quarterly Pest Control Service' },
+      serviceChanged: true, priceChanged: false,
+      cols: { service_id: {}, service_key_snapshot: {}, service_type: {}, estimated_price: {}, discount_dollars: {} },
+    });
+  };
+
+  test('C: a service-only following save that REPRICES a sibling (service-scoped discount now applies) runs the rail and refuses', async () => {
+    await expect(followingSave({ discountKey: 'key_a' })).rejects.toMatchObject({
+      statusCode: 409, message: expect.stringMatching(/card-confirmation page/),
+    });
+  });
+
+  test('C: a service-only following save whose derived sibling price is UNCHANGED stays exempt (price-only ruling)', async () => {
+    await expect(followingSave({ discountKey: 'key_other' })).resolves.toEqual(['sib1']);
+  });
+
+  test('C: a row flagged _securePrepayExempt (service-only save, price unchanged) is never marked but still holds its slot', async () => {
+    // Term sold 1 visit. v1 (earliest) is exempt; v2 is judged and would only
+    // be covered if v1 did NOT keep the slot.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15', _securePrepayExempt: true });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-06-15', _proposedPrice: 80 });
+    const conn = fixture({ visits: [v1, v2] });
+    const covered = await findBillingCoveredVisits(conn, [v1, v2], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+    expect(covered.has('v2')).toBe(false);
+    // Sanity: without the exemption v1 is marked.
+    const plain = await findBillingCoveredVisits(conn, [visit({ id: 'v1', scheduled_date: '2026-03-15' })], { liveInvoice: true });
+    expect(plain.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+});
+
+// A member an old pod's mint left UNSTAMPED (scheduled_services.
+// first_application_invoice_id NULL until reconcileRecentUnstampedAccepts
+// runs, owner-ordered follow-up to #5301): the guard discovers itemized
+// coverage straight from invoices.line_items (client_id
+// scheduled_<member>_primary) instead of relying on the stamp.
+describe('liveInvoice reaches an UNSTAMPED combined-invoice member through its itemized line', () => {
+  // 'scheduled_services as ss' is empty: no stamp. 'invoices as itemized' is
+  // the unlocked discovery read; 'invoices' is the locked candidate read
+  // (also the direct read — the fake ignores filters, so fixtures for the
+  // direct read stay empty and the locked read is keyed off `locked`).
+  const memberLine = { client_id: 'scheduled_v2_primary', description: 'Lawn Care', quantity: 1, unit_price: 200, amount: 200 };
+  const anchorLine = { client_id: 'scheduled_anchor_primary', description: 'Pest Control', quantity: 1, unit_price: 200, amount: 200 };
+  const inv = (id, lines, { status = 'draft', anchor = 'anchor' } = {}) => ({
+    id, status, scheduled_service_id: anchor, credit_applied: 0, stripe_payment_intent_id: null, total: 400,
+    line_items: JSON.stringify(lines),
+  });
+  const fixture = ({ discovered = [], locked = discovered, tryLockAcquired = true } = {}) => {
+    const conn = makeConn({
+      hasTables: ALL_TABLES_PRESENT,
+      tryLockAcquired,
+      byTable: {
+        estimate_card_holds: [],
+        appointment_card_requests: [],
+        invoices: locked,
+        'invoices as inv': [],
+        'visit_completion_packet_items as p': [],
+        'scheduled_services as ss': [],
+        'invoices as itemized': discovered,
+      },
+    });
+    // The direct read (`invoices` keyed by scheduled_service_id) shares the
+    // 'invoices' fixture with the locked read in this fake; without a stamp
+    // and with the candidate on ANOTHER visit's id it can't match v2 anyway
+    // (mark() keys on the row's own scheduled_service_id, 'anchor').
+    return conn;
+  };
+
+  test('an unstamped member itemized on another visit\'s open invoice blocks', async () => {
+    const conn = fixture({ discovered: [inv('inv1', [anchorLine, memberLine])] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+  });
+
+  test('a PAID invoice itemizing the unstamped member blocks with the money-on-it reason', async () => {
+    const conn = fixture({ discovered: [inv('inv1', [anchorLine, memberLine], { status: 'paid' })] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/money on it/);
+  });
+
+  test('the discovery query excludes void/cancelled statuses and matches by jsonb containment on the member client_id', async () => {
+    const conn = fixture();
+    const seen = [];
+    const wrapped = (table) => {
+      const q = conn(table);
+      if (table === 'invoices as itemized') {
+        const wn = q.whereNotIn; const wr = q.whereRaw;
+        q.whereNotIn = jest.fn((...a) => { seen.push(['whereNotIn', ...a]); return wn(...a); });
+        q.whereRaw = jest.fn((...a) => { seen.push(['whereRaw', ...a]); return wr(...a); });
+      }
+      return q;
+    };
+    wrapped.schema = conn.schema; wrapped.raw = conn.raw;
+    await findBillingCoveredVisits(wrapped, [{ id: 'v2' }, { id: 'v3' }], { liveInvoice: true });
+    const notIn = seen.find((c) => c[0] === 'whereNotIn');
+    expect(notIn[2]).toEqual(expect.arrayContaining(['void']));
+    const raw = seen.find((c) => c[0] === 'whereRaw');
+    expect(raw[1]).toBe('(itemized.line_items @> ?::jsonb OR itemized.line_items @> ?::jsonb)');
+    expect(raw[2]).toEqual([
+      JSON.stringify([{ client_id: 'scheduled_v2_primary' }]),
+      JSON.stringify([{ client_id: 'scheduled_v3_primary' }]),
+    ]);
+  });
+
+  test('an invoice that went void between discovery and the locked read does not block', async () => {
+    const conn = fixture({ discovered: [inv('inv1', [anchorLine, memberLine])], locked: [] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+  });
+
+  test("an invoice on the member's OWN visit is excluded from discovery — no anchor lock taken, nothing double-counted", async () => {
+    const conn = fixture({ discovered: [inv('inv5', [memberLine], { anchor: 'v2' })], locked: [] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+    expect(conn.raw).not.toHaveBeenCalled();
+  });
+
+  test('a discovered invoice that does not itemize the member does not block, and takes no lock', async () => {
+    const conn = fixture({ discovered: [inv('inv6', [anchorLine])] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.has('v2')).toBe(false);
+    expect(conn.raw).not.toHaveBeenCalled();
+  });
+
+  test("the discovered invoice's anchor mint lock is TRIED; held elsewhere maps to VISIT_BUSY_RETRY", async () => {
+    const conn = fixture({ discovered: [inv('inv1', [anchorLine, memberLine])], tryLockAcquired: false });
+    await expect(findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+    expect(conn.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_try_advisory_xact_lock/), expect.arrayContaining(['anchor']));
+  });
+
+  test('a locked discovered invoice (55P03) maps to VISIT_BUSY_RETRY', async () => {
+    const base = fixture({ discovered: [inv('inv1', [anchorLine, memberLine])] });
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === 'invoices') q.noWait = jest.fn(() => { const e = new Error('lock'); e.code = '55P03'; q.then = (res, rej) => Promise.reject(e).then(res, rej); return q; });
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.raw = base.raw;
+    await expect(findBillingCoveredVisits(wrapped, [{ id: 'v2' }], { liveInvoice: true }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+  });
+
+  test('an anchor that only shows up on the SECOND discovery pass is try-locked too (an invoice minted between the read and the lock)', async () => {
+    const first = inv('inv1', [anchorLine, memberLine], { anchor: 'anchor-a' });
+    const second = inv('inv2', [memberLine], { anchor: 'anchor-b' });
+    let reads = 0;
+    const base = fixture({ discovered: [first], locked: [first, second] });
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === 'invoices as itemized') {
+        reads += 1;
+        const rows = reads === 1 ? [first] : [first, second];
+        q.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      }
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.raw = base.raw;
+    const covered = await findBillingCoveredVisits(wrapped, [{ id: 'v2' }], { liveInvoice: true });
+    expect(covered.get('v2')).toMatch(/combined first-application invoice/);
+    const locked = base.raw.mock.calls.map((c) => c[1][1]);
+    expect(locked).toEqual(['anchor-a', 'anchor-b']);
   });
 });
 

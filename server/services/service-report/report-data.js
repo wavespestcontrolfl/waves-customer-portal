@@ -26,6 +26,8 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+const { resolveWateringRule } = require('./lawn-watering-rule');
+const { buildWateringInstruction, composeBannerLines } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -55,9 +57,9 @@ const {
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
-const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
-const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
+const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const {
@@ -228,6 +230,11 @@ function approvedReportProductFacts(catalog = {}) {
     // rendered directly, only classified deterministically.
     moaGroup: catalog.moa_group || null,
     rainfastMinutes: Number.isFinite(Number(catalog.rainfast_minutes)) ? Number(catalog.rainfast_minutes) : null,
+    // Post-application watering rule (hold / water_in / none, or null =
+    // unknown), frozen with the other facts so a later catalog edit never
+    // rewrites what an old visit told the customer. Internal only: it is NOT
+    // copied onto applications[].product (the public payload).
+    wateringRule: resolveWateringRule(catalog),
   };
 }
 
@@ -237,7 +244,69 @@ function approvedReportProductFacts(catalog = {}) {
 // approval, un-approval, label edit, or row delete must not rewrite what
 // this report says was applied. Ids absent from the map (pre-snapshot
 // records, or a product attached after the freeze) keep the live lookup.
-async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
+async function attachApprovedReportProductFacts(knex, products = [], options = {}) {
+  const attached = await attachApprovedReportProductFactsBase(knex, products, options);
+  return attachLiveWateringRules(knex, attached);
+}
+
+// Visits completed before the watering rule existed froze product facts with
+// no `wateringRule` key. For those (and only those) resolve the rule from the
+// live catalog and attach it to a COPY of the frozen facts: the snapshot object
+// itself is never mutated, and a product the snapshot marked unapproved (null
+// facts) keeps no rule. A failed lookup leaves the facts as they were (no rule
+// = no claim).
+async function attachLiveWateringRules(knex, products) {
+  if (!Array.isArray(products) || !products.length) return products;
+  const needsRule = (product) => {
+    const facts = product?.approved_report_product_facts;
+    return !!facts && typeof facts === 'object'
+      && !Object.prototype.hasOwnProperty.call(facts, 'wateringRule')
+      && !!canonicalProductId(product.product_id);
+  };
+  const ids = [...new Set(products.filter(needsRule).map((product) => canonicalProductId(product.product_id)))];
+  if (!ids.length) return products;
+  let rows = [];
+  try {
+    rows = await knex('products_catalog')
+      .whereIn('id', ids)
+      .select(
+        'id',
+        'name',
+        'category',
+        'subcategory',
+        'active_ingredient',
+        'formulation',
+        'application_method',
+        'irrigation_required',
+        'rainfast_minutes',
+        'post_application_watering',
+      );
+  } catch {
+    // The rules of these products are UNKNOWN, not absent: flag the list so the
+    // watering instruction is neither built nor frozen from a partial rule set.
+    const unread = products.slice();
+    if (products.catalogEnrichmentFailed) unread.catalogEnrichmentFailed = true;
+    unread.wateringRuleLookupFailed = true;
+    return unread;
+  }
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  const out = products.map((product) => {
+    if (!needsRule(product)) return product;
+    const row = byId.get(String(canonicalProductId(product.product_id)));
+    if (!row) return product;
+    return {
+      ...product,
+      approved_report_product_facts: {
+        ...product.approved_report_product_facts,
+        wateringRule: resolveWateringRule(row),
+      },
+    };
+  });
+  if (products.catalogEnrichmentFailed) out.catalogEnrichmentFailed = true;
+  return out;
+}
+
+async function attachApprovedReportProductFactsBase(knex, products = [], { frozenFacts = null } = {}) {
   const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
   // service_products.product_id is ON DELETE SET NULL: a catalog row deleted
   // after completion leaves the applied row keyed only by its snapshot
@@ -309,6 +378,10 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
         'approved_for_service_report',
         'moa_group',
         'rainfast_minutes',
+        'subcategory',
+        'formulation',
+        'application_method',
+        'post_application_watering',
       );
   } catch {
     // Signal the failure instead of silently returning bare rows (codex P2
@@ -2474,7 +2547,46 @@ class PinnedAssessmentUnavailable extends Error {
 // the old any-zone pairing must not be reused.
 // p6: lawn water-plan credits now require explicit product-instruction
 // provenance; older PDFs may contain the former inferred 24-hour instruction.
-const LAWN_RENDER_STRATEGY = 'p6-aftercare-guards-20260927';
+// p7: GATE_LAWN_WATERING_RULE — the report can carry a product-instruction
+// aftercare, a top-of-report banner payload and a hold "not before" plan
+// overlay; PDFs rendered before the watering instruction existed must re-key.
+const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
+
+// ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
+// pairs the render would use. Reads the record itself, so a partial row from a
+// cache-lookup caller stamps the same as the full one. A failed read stamps
+// random (fail-open to a re-render, like the prefs read above).
+async function lawnWateringRuleStamp(service, knex) {
+  if (!service?.id) return ':wr=1';
+  try {
+    const row = await knex('service_records').where({ id: service.id }).first('structured_notes', 'service_data');
+    // A frozen visit's payload never changes by the clock (owner ruling
+    // 2026-09-30: the report is a record), so its stamp is constant.
+    if (readFrozenWateringInstruction(parseJsonObject(row?.structured_notes))) return ':wr=1';
+    const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
+    const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+      frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
+    });
+    // A failed live rule lookup leaves rules UNKNOWN, not absent: hashing them
+    // as null would match a PDF cached before the rule existed.
+    if (products?.wateringRuleLookupFailed || products?.catalogEnrichmentFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+    // Each catalog row's revision too: a rule edited A -> B -> A during a
+    // render ends on the same value, but not the same updated_at, so the
+    // post-render stability check sees it.
+    const ids = [...new Set((products || []).map((p) => canonicalProductId(p.product_id)).filter(Boolean))];
+    const revisions = ids.length
+      ? await knex('products_catalog').whereIn('id', ids).select('id', 'updated_at')
+      : [];
+    const revisionOf = new Map(revisions.map((r) => [String(r.id), r.updated_at ? new Date(r.updated_at).toISOString() : '']));
+    const pairs = (products || []).map((p) => {
+      const id = canonicalProductId(p.product_id);
+      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
+    }).sort();
+    return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
+  } catch {
+    return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+}
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2527,6 +2639,12 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     weekPlanAvailableAt = snapshot?.availableAt && planBindsToService(snapshot, premise) ? new Date(snapshot.availableAt).toISOString() : null;
     irrigationStamp += `:plan=${weekPlanAvailableAt || 'none'}`;
   }
+  // The watering instruction is a render input once its gate is on (gate off
+  // leaves the signature byte-identical to before).
+  // A visit with no frozen instruction renders from the LIVE catalog rules, so
+  // those rules ride the stamp: an owner correcting a product's rule re-keys the
+  // cached PDF. A frozen visit replays its snapshot and keeps the constant.
+  if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3369,7 +3487,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // must not claim a nonexistent run was covered (codex gh-r16).
       // afterTreatment: the plan reduced by a credited watering-in (the card
       // shows it INSTEAD of the unreduced plan under the credit note).
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }) } : null;
+      // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
+      // {holdUntil}" sentence, used while a product watering hold is in
+      // force. The literal token is filled (or the key dropped) by
+      // applyAfterHoldOverlay once the visit's instruction is known.
+      const afterHold = featureGates.lawnWateringRuleLive()
+        ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+        : null;
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
     }
   }
 
@@ -3447,6 +3572,96 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
+  };
+}
+
+// GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
+// the per-product rules FROZEN with the visit (approved_report_product_facts
+// .wateringRule — never the live catalog, never the public applications[]
+// .product), the completion time and the customer's own irrigation entries.
+// Runtime facts come from the same property_preferences row
+// portalIrrigationInches reads, and are withheld after a move
+// (scheduleUnconfirmed: the entries describe the former home).
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }) {
+  const waterContext = lawnAssessment?.waterContext || {};
+  let runtime = null;
+  if (!waterContext.scheduleUnconfirmed) {
+    // A FAILED read is not a missing row: it throws out of here so no
+    // instruction is built (and none is frozen) from generic minutes; the
+    // caller renders the legacy path and a later render retries.
+    const prefs = await knex('property_preferences')
+      .where({ customer_id: service.customer_id })
+      .first();
+    if (prefs) {
+      runtime = {
+        runMinutes: prefs.irrigation_run_minutes,
+        wateringDays: prefs.watering_days,
+        headTypes: prefs.irrigation_system_type,
+        explicitInchesPerWeek: numberOrNull(prefs.irrigation_inches_per_week),
+      };
+    }
+  }
+  return buildWateringInstruction({
+    rules: (Array.isArray(products) ? products : []).map((p) => ({
+      name: p?.product_name || null,
+      rule: p?.approved_report_product_facts?.wateringRule || null,
+    })),
+    completedAt: completionTime,
+    runtime,
+  });
+}
+
+// The instruction frozen at completion (lawn-report-write-gate.js, under
+// structured_notes.lawnWateringFreeze.wateringInstruction; the older
+// lawnReportV2.wateringInstruction location is still read). Later reads replay it, so
+// a sprinkler-head or run-minutes edit after the visit never rewrites the
+// minutes an old report told the customer. Shape-checked; anything else is
+// ignored and the instruction is regenerated.
+const FROZEN_INSTRUCTION_STATES = ['hold', 'water_in', 'hold_then_water_in', 'none'];
+function readFrozenWateringInstruction(structured) {
+  const frozen = structured?.lawnWateringFreeze?.wateringInstruction || structured?.lawnReportV2?.wateringInstruction;
+  if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
+  const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
+  const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
+  // A state-null instruction is a no-claim, never a snapshot: it is regenerated.
+  return frozen.state !== null && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+}
+
+// Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
+// end time, or drop the overlay when this visit has no hold. The token can
+// never survive into the payload. Returns a copy; the input is untouched.
+function applyAfterHoldOverlay(waterContext, instruction) {
+  const plan = waterContext?.weekPlan;
+  if (!plan || !Object.prototype.hasOwnProperty.call(plan, 'afterHold')) return waterContext;
+  const { afterHold, ...rest } = plan;
+  // An until-dry hold reads "the spray has dried" in the plan sentence (no clock time).
+  const label = instruction?.holdUntilPlanLabel || instruction?.holdUntilLabel;
+  const detail = typeof afterHold?.detail === 'string' && label ? afterHold.detail.split(HOLD_UNTIL_TOKEN).join(label) : null;
+  const filled = detail && !detail.includes(HOLD_UNTIL_TOKEN) ? { ...afterHold, detail } : null;
+  return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
+}
+
+// The banner payload: one server-built object the client, PDF and (later)
+// the completion text all read. expiresAt is when the instruction lapses.
+// The plan-dependent sentence is composed here, from the weekly plan present on
+// THIS render (composeBannerLines); the frozen instruction never carries it.
+function buildWateringBanner(instruction, weekPlan = null) {
+  if (!instruction || !instruction.state || !instruction.lines.length) return null;
+  const planPresent = !!weekPlan?.title && weekPlan.visitInPlanWeek !== false;
+  const runDepth = weekPlan?.depthInches;
+  return {
+    state: instruction.state,
+    lines: composeBannerLines(instruction, {
+      hasWeekPlan: planPresent,
+      planRunInches: planPresent && weekPlan.prescribesRun === true && runDepth != null && runDepth !== '' ? numberOrNull(runDepth) : null,
+    }),
+    holdUntil: instruction.holdUntil,
+    waterInBy: instruction.waterInBy,
+    // The instruction's own expiry is authoritative: a hold that waits for
+    // drying has none, and falling back to holdUntil would end its banner at
+    // the clock time.
+    expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
+    ruleSource: instruction.ruleSource,
   };
 }
 
@@ -4984,8 +5199,46 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       } catch { /* snapshots table optional — trend simply doesn't render */ }
 
+      // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
+      // byte-identical to before.
+      let wateringInstruction = null;
+      let wateringInputsFailed = false;
+      if (featureGates.lawnWateringRuleLive()) {
+        // Rules are UNKNOWN (not absent) when either catalog read failed: the
+        // live rule lookup, or the base enrichment (which a product that
+        // already carries its category does not surface as productsLoadFailed).
+        const rulesUnknown = !!(products.wateringRuleLookupFailed || products.catalogEnrichmentFailed);
+        try {
+          // Replay the frozen instruction; regenerate only when none exists (and
+          // only from a complete rule set: a failed catalog read builds none).
+          wateringInstruction = readFrozenWateringInstruction(structured)
+            || (rulesUnknown ? null
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
+        } catch { wateringInstruction = null; wateringInputsFailed = true; }
+        // An UNFROZEN render whose inputs could not be read omits the customer's
+        // watering direction: serve it, never cache it, and let a pinned delivery
+        // defer (the week-weather / prefs-read flags pdf-queue and reports-public
+        // already gate on). A frozen render read nothing and is unaffected.
+        if (!readFrozenWateringInstruction(structured)
+          && (wateringInputsFailed || rulesUnknown || productsLoadFailed)) {
+          lawnAssessment.wateringInputsUnavailable = true;
+          lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.weekWeatherPendingReason = lawnAssessment.weekWeatherPendingReason || 'unfrozen';
+          lawnAssessment.portalPrefsReadFailed = true;
+        }
+        // Out-param for the write gate, which freezes the complete instruction.
+        if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
+          opts.wateringInstructionOut.instruction = wateringInstruction;
+          // A failed product read means the rules were unknown, not absent.
+          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
+        }
+        // In place, so the lawnAssessment the payload returns never carries
+        // the raw {holdUntil} token either (a null instruction drops it).
+        lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
+        wateringInstruction,
         mowingHeight,
         applications,
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
@@ -4994,6 +5247,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterGapHistory,
         mowingTrendFallback,
       });
+      if (reportV2 && wateringInstruction) {
+        const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
+        if (banner) reportV2.banner = banner;
+      }
       // AI "What we applied today" narrative — same contract as the T&S path
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
@@ -6648,6 +6905,9 @@ module.exports = {
   resolvePestWeekWeather,
   resolvePestWeekWeatherForBuild,
   LAWN_RENDER_STRATEGY,
+  buildReportWateringInstruction,
+  applyAfterHoldOverlay,
+  buildWateringBanner,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,

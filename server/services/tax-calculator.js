@@ -147,7 +147,7 @@ const TaxCalculator = {
    */
   /**
    * The spelling every reader matches EXACTLY: inferCountyFromZip's return
-   * values, plus DeSoto (service-area county with interior caps). A rate
+   * values, plus DeSoto (a tax-rate county with interior caps; NOT a service-area county). A rate
    * stored under any other casing of these names is invisible to
    * calculateTax and getCurrentTaxRates, so the write path must key on
    * this and never on whatever a legacy row happened to carry (codex

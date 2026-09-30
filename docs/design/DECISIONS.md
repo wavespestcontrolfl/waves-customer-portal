@@ -2729,6 +2729,66 @@ referee's own quality verdict joins `photoReadFor` and an unusable referee
 read merges nothing, and admin-only `internal.referee` diagnostics. Full
 detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
 
+## 2026-09-29 — Lawn visit assessment backup: GPT-6 Sol replaces Astra
+
+Owner ruling 2026-09-29. The lawn visit assessment
+(`services/lawn-visit-assessment.js`, `TEXT_POLICIES.lawnVisitAssessment`,
+`GATE_LAWN_VISIT_ASSESSMENT`) keeps Gemini 3.8 Flash first; its backup leg
+moves from GPT-6 Astra (`OPENAI_FRONTIER`) to GPT-6 Sol on its own selector,
+`OPENAI_LAWN_ASSESSMENT` (`MODEL_OPENAI_LAWN_ASSESSMENT` override). Reason:
+the same evidence as the 2026-09-28 plant ruling — on the hardest photos Sol
+did no worse than Astra and was less often confidently wrong, at about a
+third of the cost (2.7¢ vs 7.6¢ per photo). Still sequential, still no
+Claude leg. The pest identifier's `photoIdVision` keeps Astra.
+
+Caveat recorded with the ruling: the assessment scores a visit (density,
+weeds, color, fungus, thatch, stress) rather than naming a plant, so the
+ranking carries over by assumption, not measurement. A Fable referee for
+this lane is not part of this change.
+
+## 2026-09-29 — Lawn visit assessment: Fable name referee (dark)
+
+Owner ruling 2026-09-29, following the Sol-backup entry above and mirroring the
+plant engine's narrowed referee. Ships dark behind
+`GATE_LAWN_ASSESSMENT_REFEREE` (off unless exactly `'true'`, read at call time
+via `lawnAssessmentRefereeLive()`); one gate covers both new calls.
+
+**Second opinion, "unsure or serious".** When Gemini answered (not the OpenAI
+fallback) and the gate is on, GPT-6 Sol re-reads the same visit (the policy's
+OpenAI leg called alone: same system prompt, photos, schema) ONLY if Gemini's
+read is unsure or serious: any finding with confidence low or unknown, any
+finding with severity moderate or severe, or `grass_type` `unknown`. Otherwise
+no extra call. The second opinion exists only to feed the referee.
+
+**Referee scope: names only.** Claude Fable 5.1 (`ROUTES.lawnAssessmentReferee`,
+effort `high`, `MODEL_LAWN_ASSESSMENT_REFEREE`, ~60 s cap) fires ONLY when
+Gemini and Sol disagreed on (a) the grass type (both definite, neither
+`unknown`/`mixed`) or (b) what a finding IS. Finding names are free text, so
+they are canonicalized through the production cause catalog
+(`safeConditionLabel`); Gemini's and Sol's findings pair by an overlapping
+photo (or the same known zone when a side cites none), and a dispute needs a
+unique pair with one conflicting cause each. Agreement (however scored), a
+missing or invalid Sol answer, a symptom-only / clean / negated / multi-cause
+name, or an ambiguous pairing never draws the call. Scores (turf_density,
+weed_coverage, color_health), `severities{}`, finding severity and urgency, and
+every other field always stay as Gemini read them.
+
+**Merge: tie-break only.** Fable answers a / b / neither per disputed item.
+Matching Sol's side replaces that name (the grass type, or the finding's name
+with Sol's own wording and confirmation step) and caps the finding's confidence
+at `moderate`, never above Sol's own rating of that cause; matching Gemini's side keeps Gemini's name and caps at
+`moderate` as well. A third answer, no usable answer, timeout, or error leaves
+that item, and on a failed call the whole result, exactly as Gemini read it. No
+partial credit. `analyzeVisit` never throws for any of it.
+
+Internal only: diagnostics are a `referee` object on `analyzeVisit`'s return,
+present only when the gate is on, never persisted as a column and never in
+customer copy; the extra calls' tokens are added to the run's token columns. No
+migration. Off, or unset: byte-identical to today. Cost shape: a confident read
+draws no extra call; an unsure-or-serious read draws one Sol re-read; only a
+name dispute also draws one Fable call. Full detail: `CLAUDE.md`'s "Lawn visit
+assessment name referee" paragraph and `server/services/lawn-visit-referee.js`.
+
 ## 2026-09-29 — Cockroach "Work completed today" chips become an auto-filled field derived from the recorded products
 
 **Decision:** The cockroach `work_completed` chips are no longer tapped by the tech. The field stays on the typed `cockroach` schema as `autoFilled: true` (hidden from the Complete Service form, exactly like Tree & Shrub `treatments_completed`) and `complete-scheduled-service.js` derives it from the SUBMITTED product rows before the typed snapshot freezes (owner ruling 2026-09-26; report-completion-sync plan Step 2). That type only — German knockdown, palmetto, one-time pest, bed bug, lawn and palm keep their tapped chips.

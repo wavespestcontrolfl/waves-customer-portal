@@ -5,7 +5,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
 const logger = require('../services/logger');
-const NotificationService = require('../services/notification-service');
+const { raiseAdminAlert, cutAtWord, firstSentence, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 // A non-GSM first name (Á) would flip the whole confirmation text to UCS-2
 // and past two segments — fold it before rendering (codex pre-push P1).
@@ -780,13 +780,16 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // Internal admin alert only. Service requests should surface in the admin
     // notification feed, not text the office number. The notification is now
     // the primary triage surface (there is no dedicated Requests page), so the
-    // full request description goes in the body — it's capped at 500 chars by
+    // full request description rides in `detail` — it's capped at 500 chars by
     // the create-request validation above.
     try {
-      const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
-      const title = isCancellation
-        ? `⚠️ ${urgencyTag}Cancellation request from ${customerName}`
-        : `${urgencyTag}New service request from ${customerName}`;
+      const requestSummary = firstSentence(cleanDescription || cleanSubject).replace(/!+/g, '.');
+      const action = isCancellation
+        ? `review ${customerName}'s cancellation`
+        : `answer ${customerName}'s ${validUrgency === 'urgent' ? 'urgent ' : ''}${categoryLabel} request`;
+      const cancelWhy = cancellationResult && cancellationResult.ok
+        ? `Auto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled.`
+        : 'Auto-processing did not finish; check the calendar and account.';
       const cancellationSummary = isCancellation
         ? (cancellationResult && cancellationResult.ok
             ? `\n\nAuto-processed: ${cancellationResult.cancelledCount} upcoming visit(s) pulled, ` +
@@ -798,19 +801,27 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
                 ? ` (failed: ${cancellationResult.errors.join(', ')})`
                 : ''))
         : '';
-      const notif = await NotificationService.notifyAdmin(
+      const notif = await raiseAdminAlert(
         'service',
-        title,
-        `Category: ${categoryLabel}\n` +
-          `Subject: ${cleanSubject}` +
-          (requestProperty ? `\nProperty: ${requestProperty.label ? `${requestProperty.label} — ` : ''}${requestProperty.address}${requestProperty.isPrimary ? '' : ' (not the primary address)'}` : '') +
-          (locationLabel ? `\nLocation: ${locationLabel}` : '') +
-          (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
-          (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
-          cancellationSummary,
         {
-          icon: isCancellation ? '⚠️' : (validUrgency === 'urgent' ? '🚨' : '🏠'),
+          area: 'Customers',
+          action: cutAtWord(action, MAX_HEADLINE_CHARS - 'Customers — '.length),
+          why: cutAtWord(isCancellation ? cancelWhy : requestSummary, MAX_WHY_CHARS),
+          severity: 'needs-you',
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
+          subject: { type: 'customer', id: req.customer.id },
+          doneWhen: isCancellation ? 'cancellation_reviewed' : 'request_answered',
+          who: 'person',
+        },
+        {
+          detail: `Category: ${categoryLabel}\n` +
+            `Subject: ${cleanSubject}` +
+            (requestProperty ? `\nProperty: ${requestProperty.label ? `${requestProperty.label} — ` : ''}${requestProperty.address}${requestProperty.isPrimary ? '' : ' (not the primary address)'}` : '') +
+            (locationLabel ? `\nLocation: ${locationLabel}` : '') +
+            (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
+            (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
+            cancellationSummary,
+          icon: isCancellation ? '⚠️' : (validUrgency === 'urgent' ? '🚨' : '🏠'),
           metadata: {
             requestId: request.id,
             customerId: req.customer.id,
@@ -1221,6 +1232,17 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       });
     } catch (execErr) {
       logger.error(`[cancel-resolution] accepted action failed for case ${caseRow?.id}: ${execErr.message}`);
+      // A pause with nothing inside the away dates (hold_not_needed) is a
+      // pure precondition refusal: the case must not stand as 'accepted',
+      // or it replays for 24 h and hides the card for 12 months. Released
+      // only under the accept lock, from a fresh read, while no receipt and
+      // no hold stand for this case — a concurrent or retried execution of
+      // the same case that did succeed is never undone.
+      if (execErr.code === 'hold_not_needed' && caseRow?.id) {
+        try {
+          await CancellationResolution.releaseUnappliedCase({ caseId: caseRow.id, customerId: req.customer.id, code: execErr.code });
+        } catch (markErr) { logger.warn(`[cancel-resolution] refused case ${caseRow.id} not released: ${markErr.message}`); }
+      }
       return res.status(execErr.code ? 409 : 500).json({
         error: execErr.code
           ? execErr.message

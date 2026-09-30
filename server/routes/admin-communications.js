@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
@@ -865,7 +866,7 @@ router.post('/sms', async (req, res, next) => {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'created_at');
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
@@ -926,6 +927,9 @@ router.post('/sms', async (req, res, next) => {
             if (!consent.allowed) return { consent };
             const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
             if (!gate.allowed) return { gate };
+            // The send-time click guard every review sender uses: a customer who
+            // tapped a tracked review link since this draft's anchor is not asked again.
+            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -994,6 +998,9 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
+        }
+        if (seam.clicked) {
+          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -1966,7 +1973,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at', 'messages.twilio_sid',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -2000,8 +2007,30 @@ router.get('/log', async (req, res, next) => {
 
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
-    if (req.query.phone !== undefined) {
-      const phones = phoneMatchDigits(req.query.phone);
+    // `twilioSid` anchors the read on one message (an alert's deep link, which
+    // must not carry a phone number), under the same visibility scoping as every
+    // other read here. Alone it resolves to that message's contact; with
+    // `customerId` it leaves the customer scope as it is and only guarantees the
+    // anchor row is in the response — a sid that is not that customer's is not
+    // found, so it never pulls in a foreign row. Either way the row is added to
+    // page 1 below when the newest-first cap would leave it out.
+    let contactFilter = req.query.phone;
+    let anchorSid = null;
+    if (req.query.twilioSid !== undefined) {
+      const sid = typeof req.query.twilioSid === 'string' ? req.query.twilioSid.trim() : '';
+      const anchor = sid && await query.clone().clearSelect().clearOrder()
+        .where('messages.twilio_sid', sid)
+        .modify((q) => { if (customerId) q.where('conversations.customer_id', customerId); })
+        .first(db.raw(`${addressProjection.contactPhoneSql} as contact`));
+      if (anchor?.contact) {
+        anchorSid = sid;
+        if (!customerId) contactFilter = anchor.contact;
+      } else if (!customerId) {
+        return res.json({ messages: [], page: 1, limit: DEFAULT_SMS_LOG_LIMIT, hasMore: false, nextPage: null });
+      }
+    }
+    if (contactFilter !== undefined) {
+      const phones = phoneMatchDigits(contactFilter);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
       query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
@@ -2046,6 +2075,8 @@ router.get('/log', async (req, res, next) => {
       }
     }
 
+    // Every filter applied, before paging: the anchor row is read through it.
+    const filtered = anchorSid ? query.clone() : null;
     query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
@@ -2055,7 +2086,15 @@ router.get('/log', async (req, res, next) => {
       .limit(effectiveLimit + 1)
       .offset((requestedPage - 1) * effectiveLimit);
     const hasMore = rowsPlusOne.length > effectiveLimit;
-    const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    const pageRows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    // The anchored message is older than a full newest-first page: add it (same
+    // projection and scoping) rather than page around it. hasMore / nextPage
+    // still describe the ordinary pages; a later page repeats the row harmlessly
+    // (clients merge by id).
+    const anchorRow = anchorSid && requestedPage === 1 && !pageRows.some((r) => r.twilio_sid === anchorSid)
+      ? await filtered.where('messages.twilio_sid', anchorSid).first()
+      : null;
+    const rows = anchorRow ? [...pageRows, anchorRow] : pageRows;
     const priorOutboundBodies = await loadPriorOutboundBodies(db, rows, { customerScoped: !!customerId });
     for (const row of rows) {
       if (priorOutboundBodies.has(String(row.id))) {
@@ -2097,7 +2136,7 @@ router.get('/log', async (req, res, next) => {
         replyToMessageId: m.response_reply_to_message_id,
       });
       return {
-        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, twilioSid: m.twilio_sid || null, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         responseMessageType,
         responseStatus,
@@ -2811,6 +2850,7 @@ const EMAIL_LEG_REASONS = {
   // Post-dispatch throw: the provider MAY hold it — never "try again".
   email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
   already_reviewed: 'This customer is already marked as having left a review',
+  review_link_clicked: ClickGuard.REVIEW_LINK_CLICKED_REASON,
   no_customer: 'That customer could not be found',
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.
@@ -2894,7 +2934,15 @@ async function emailReviewAskNow(primaryId) {
     return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
   }
   if (awaiting?.id) {
-    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    // Under the same review-send lock as the ordinary Both delivery, so a tap
+    // on the delivered text cannot land between the click check inside
+    // sendInlineEmailCopy and the email provider call.
+    const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+      { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(copy)) {
+      return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };
+    }
     if (copy?.sent) {
       const firstName = await emailContactFirstName(primaryId);
       return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };
@@ -3921,10 +3969,26 @@ async function recruitingReplyContext(messageId, to) {
 // status flip that strands one of those obligations (Codex round 1 on
 // #5224, P1). This handler only translates that shared result back to the
 // exact responses it always gave.
+//
+// `refuseWorkflowOwned: true` (found during a #5224 pre-push audit): a row an
+// automated workflow owns (any metadata.entry_point other than recruiting,
+// replay_purpose, or a bundled review request) is refused with 409 rather
+// than silently deleted — deleting it here never runs that workflow's own
+// cleanup and would strand its state, exactly like the Intelligence Bar's
+// cancel_queued_message already refuses to. Recruiting texts and
+// Agent-Review-linked rows are unaffected (the writer reconciles both).
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    const result = await cancelScheduledSmsRow({ id: req.params.id, techRole: req.techRole, technicianId: req.technicianId });
+    const result = await cancelScheduledSmsRow({
+      id: req.params.id, techRole: req.techRole, technicianId: req.technicianId, refuseWorkflowOwned: true,
+    });
     if (result.outcome === 'forbidden') return res.status(403).json({ error: 'Admin access required' });
+    if (result.outcome === 'workflow_owned') {
+      const label = String(result.workflow || '').replace(/_/g, ' ').trim();
+      return res.status(409).json({
+        error: `This text is queued by an automated workflow${label ? ` (${label})` : ''} and can't be deleted from the inbox. It will send or resolve on its own as that workflow finishes.`,
+      });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

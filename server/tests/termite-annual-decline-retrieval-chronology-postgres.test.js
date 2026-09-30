@@ -152,8 +152,8 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     expect(await ownTaskRow(t)).toBeUndefined();
     const bell = await trx('notifications')
       .whereRaw("metadata->>'dedupeKey' = ?", [`termite-annual-decline-retrieval:${t.termId}:${t.termEnd}:superseded_by_newer`])
-      .first('body');
-    expect(bell.body).toContain('A newer station-retrieval instruction already stands on this account');
+      .first('body', 'detail');
+    expect((bell.detail || bell.body)).toContain('A newer station-retrieval instruction already stands on this account');
 
     // The confirmed bell settles it (outcome superseded_by_newer), so the
     // sweep stops re-checking it and it never holds a bounded slot.

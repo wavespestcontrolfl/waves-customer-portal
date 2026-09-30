@@ -31,6 +31,7 @@ const {
 } = require('./billing-channel-email-authority');
 const { billingEmailRefusal } = require('./billing-email-sender');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+const BillingEmailDetails = require('./billing-email-details');
 
 function acceptedInvoiceEmailEvidence(result) {
   return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
@@ -136,6 +137,30 @@ function invoiceRecipientFor(customer, prefs, recipientOverride) {
   return { recipient };
 }
 
+// The customer row, delivery preferences and channel choice the invoice email is addressed
+// from: the raw customers row (no account-primary fallback) and the customer's own
+// notification_prefs, refused the way sendInvoiceEmail refuses. One function for the
+// sender and for anything that must know whether this email would go (the visit-summary
+// fold, billing-text-verdict.js), so they cannot drift apart.
+async function loadInvoiceEmailContext(invoice, options = {}) {
+  const customer = await db('customers').where({ id: invoice.customer_id })
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .first();
+  if (!customer) return { refusal: { ok: false, error: 'Customer not found' } };
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
+    prefsLookupFailed = true;
+    return null;
+  });
+  if (options.billingDeliveryCategory && !invoice.payer_id) {
+    if (prefsLookupFailed) return { refusal: { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' } };
+    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
+      return { refusal: { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' } };
+    }
+  }
+  return { customer, prefs };
+}
+
 async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
@@ -171,21 +196,9 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
-  const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
-    .first();
-  if (!customer) return { ok: false, error: 'Customer not found' };
-  let prefsLookupFailed = false;
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
-    prefsLookupFailed = true;
-    return null;
-  });
-  if (options.billingDeliveryCategory && !invoice.payer_id) {
-    if (prefsLookupFailed) return { ok: false, error: 'Invoice delivery preferences unavailable', code: 'billing_prefs_unavailable' };
-    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
-      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
-    }
-  }
+  const emailContext = await loadInvoiceEmailContext(invoice, options);
+  if (emailContext.refusal) return emailContext.refusal;
+  const { customer, prefs } = emailContext;
 
   // Third-party Bill-To reroute. When this invoice carries a payer snapshot,
   // attach the payer (for the PDF bill-to block) and — unless the operator
@@ -465,6 +478,38 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     }
   };
 
+  // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
+  // address and payment method on file. The
+  // template rows are variable-driven, so gate off nothing below is filled and
+  // the email is exactly what it was.
+  const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
+  let detailPayload = {};
+  if (detailsLive) {
+    // Details are additive: any lookup failure sends the email without them.
+    try {
+      const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+      detailPayload = {
+        service_label: service.label,
+        service_date: service.date,
+        property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+        // An operator's one-off recipient or a payer's AP inbox must never see
+        // the homeowner's card: only the customer's own delivery names it.
+        // A distinct saved billing contact (notification_prefs.billing_email)
+        // is a third party here too: the RESOLVED recipient must be the
+        // customer's own primary address, not just "no override".
+        payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, {
+          allowed: !effectiveOverride
+            && recipient.role === 'primary'
+            && !!cleanEmail(customer.email)
+            && cleanEmail(recipient.email) === cleanEmail(customer.email),
+        }),
+      };
+    } catch (err) {
+      detailPayload = {};
+      logger.warn(`[invoice-email] detail lookup failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+  }
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -486,6 +531,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',
+          ...detailPayload,
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
@@ -651,7 +697,7 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
 // answers with ({ ok: false, error, code? }).
 async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   // A routed receipt (the receipt delivery queue, the no-show fee) is billing
   // mail: its recipient, the customer's receipt channel choice and the
@@ -757,6 +803,26 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     return { ok: false, error: 'PDF generation failed' };
   }
 
+  // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
+  // address and the tender behind the payment (cash, check, ACH... not just a
+  // card). Gate off, nothing is filled.
+  const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
+  let detailPayload = {};
+  if (detailsLive) {
+    try {
+      const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+      detailPayload = {
+        service_label: service.label,
+        service_date: service.date,
+        property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+        payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
+      };
+    } catch (err) {
+      detailPayload = {};
+      logger.warn(`[invoice-email] receipt detail lookup failed for ${invoice.invoice_number}: ${err.message}`);
+    }
+  }
+
   const first = recipient.name || customer.first_name || 'there';
   const heading = 'Payment received — thank you';
   const memoEscaped = memo
@@ -819,6 +885,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
           service_label: invoice.service_type || '',
           payment_method: cardText || '',
           memo: memo ? `Note from Waves: ${memo}` : '',
+          ...detailPayload,
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
@@ -898,6 +965,8 @@ module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
   resolveReceiptEmailRecipient,
+  loadInvoiceEmailContext,
+  invoiceRecipientFor,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

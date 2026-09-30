@@ -459,7 +459,7 @@
                 "DeSoto",
                 null
               ],
-              "description": "Service area constraint. If present and not one of these, set triage_flag=out_of_service_area."
+              "description": "County of the service address. Manatee, Sarasota and Charlotte are served; DeSoto may be emitted as a county value but is NOT in the service area (owner ruling 2026-09-30), so a DeSoto address must set triage_flag=out_of_service_area. Any other county also sets out_of_service_area unless it is a served south-Hillsborough town."
             },
             "subdivision_or_community": {
               "type": [

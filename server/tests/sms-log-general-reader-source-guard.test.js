@@ -62,6 +62,21 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/visit-completion-packets.js',
+    snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
+    reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
+  },
+  {
+    file: 'services/visit-completion-summary.js',
+    snippet: "return Boolean(await database('sms_log')",
+    reason: 'summaryReceiptTextHandled: asks whether this invoice\'s receipt text went or is in flight (scoped by its invoice:<id>:receipt event key). An in-flight billing text-leg claim placeholder IS that text going out, so hiding reservations would defeat the check and let the summary duplicate it; review-ask and reply reservations never carry an invoice event key.',
+  },
+  {
+    file: 'services/visit-completion-summary.js',
+    snippet: "if (link.kind === 'pay_link' && await database('sms_log')",
+    reason: 'summaryLinkStillValid: asks whether this invoice\'s own pay-link text went or is in flight (scoped by its invoice:<id>:sent event key). An in-flight billing text-leg claim placeholder counts as the text going out, so the summary goes plain instead of texting the link twice; hiding reservations would defeat that. Review-ask and reply reservations never carry an invoice event key.',
+  },
+  {
     file: 'services/twilio.js',
     snippet: "const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');",
     reason: 'accepted-send recovery idempotency check keyed by the provider SID Twilio just returned; a pre-provider reservation carries no SID, so it structurally cannot match.',
@@ -194,6 +209,11 @@ const ALLOWLIST = [
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
+    file: 'services/scheduled-sms-cancel.js',
+    snippet: 'const current = await trx(\'sms_log\').where({ id, status: \'scheduled\' }).first(\'metadata\');',
+    reason: 'by-id, status \'scheduled\' read of the one row being cancelled (workflow-ownership recheck after the CAS matched nothing) — not a message-history reader, and \'scheduled\' excludes \'sending\' reservations.',
+  },
+  {
     file: 'routes/admin-communications.js',
     snippet: 'const logged = outcome.providerMessageId && await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
@@ -220,7 +240,7 @@ const ALLOWLIST = [
   },
   {
     file: 'routes/estimate-public.js',
-    snippet: 'const recentPacketSend = async () => db(\'sms_log\')',
+    snippet: 'let q = db(\'sms_log\')',
     reason: 'message_type restricted to \'estimate_service_details\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
@@ -480,11 +500,6 @@ const ALLOWLIST = [
     file: 'services/sms-operational-actions.js',
     snippet: 'const candidates = await conn(\'sms_log as s\').modify(withoutScheduledDeliveryTwins, \'s\').where(\'s.created_at\', \'>=\', since).where(\'s.created_at\', \'<=\', now)',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await trx(\'sms_log\').where({ id: initial.sms_log_id }).forUpdate().first();',
-    reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',

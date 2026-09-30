@@ -121,6 +121,18 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
+
+  it('the watering banner renders once, directly under the visit status card', async () => {
+    const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.getAllByTestId('lawn-watering-banner')).toHaveLength(1);
+    const status = container.querySelector('#service-status');
+    const card = screen.getByTestId('lawn-watering-banner').closest('[data-glass="card"]');
+    expect(status.nextElementSibling).toBe(card);
+    // Same 16px rhythm as the report sections, never flush against the status card.
+    expect(card.style.marginTop).toBe('16px');
+  });
 });
 
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
@@ -1427,5 +1439,52 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   it('a customer browser sends no Authorization header', async () => {
     const headers = await askAndReadHeaders();
     expect(headers).not.toHaveProperty('Authorization');
+  });
+});
+
+describe('ReportViewPage — expiring signed map links', () => {
+  const withMapUrl = (url) => ({
+    ...legacyLawnReport,
+    treatmentMap: { ...(legacyLawnReport.treatmentMap || {}), satellite: { available: true, live: { url, width: 640, height: 340 } } },
+  });
+
+  it('refetches once when the map image cannot load (expired link), swapping in the fresh link', async () => {
+    const probed = [];
+    class FakeImage {
+      set src(value) {
+        probed.push(value);
+        if (value.includes('EXPIRED')) setTimeout(() => this.onerror && this.onerror(), 0);
+      }
+    }
+    vi.stubGlobal('Image', FakeImage);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.EXPIRED.sig') })
+      .mockResolvedValue({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.FRESH.sig') });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(probed.some((u) => u.includes('FRESH'))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+    // The fresh link loads, so nothing keeps refetching.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+  });
+
+  it('does not refetch when the map link is still good', async () => {
+    class OkImage { set src(_v) { /* loads fine */ } }
+    vi.stubGlobal('Image', OkImage);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.GOOD.sig') }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/./);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(1);
   });
 });

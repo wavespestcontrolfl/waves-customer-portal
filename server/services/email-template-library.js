@@ -18,6 +18,7 @@ const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
+const { resolveEmailLinks } = require('./email-lead-links');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -1051,6 +1052,14 @@ const ANNUAL_OFFER_GUARD_FAILED = Symbol('annual_offer_guard_failed');
 // from provider errors and the annual-offer guard sentinels.
 const PROVIDER_BOUNDARY_BLOCKED = Symbol('provider_boundary_blocked');
 
+// The caller's boundary check itself could not run (its own read threw — DB
+// unavailable, etc.). sendOne awaits the check BEFORE building or sending the
+// provider request, so this is a definite non-send exactly like a veto, but
+// it is an infrastructure failure, not a policy verdict: the abort result
+// carries `boundaryCheckFailed` so the caller retries it instead of treating
+// it as refused. Tagged by the caller with err.providerBoundaryCheckFailed.
+const PROVIDER_BOUNDARY_CHECK_FAILED = Symbol('provider_boundary_check_failed');
+
 // The caller's locked handoff around one provider request, as a state
 // machine of its own: the request either ran (its result, or its error to
 // classify), was refused before it ran (abort before dispatch), or the
@@ -1204,7 +1213,7 @@ async function auditSendRefusal(err, context = {}) {
 // parallel re-implementation that kept missing one live guard per round):
 // resolve the template + version, the reviewed-content hash, sendable
 // status, and an active version.
-async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false } = {}) {
+async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false, database = db } = {}) {
   let template;
   let version;
   if (versionId) {
@@ -1217,7 +1226,7 @@ async function resolveTemplateForSend({ templateKey, versionId, expectedContentH
     template = row.template;
     version = row;
   } else {
-    const loaded = await loadTemplateByKey(templateKey);
+    const loaded = await loadTemplateByKey(templateKey, database);
     if (!loaded?.template) {
       throw sendRefusal(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
         eventType: 'missing_template', versionId: undefined,
@@ -1450,6 +1459,12 @@ async function sendTemplate({
   // automation executor's email-division ledger fence; see
   // prepareTemplateSend).
   marketingRequiresLedger = false,
+  // Provenance only (email_messages.lead_id / estimate_id, recorded by
+  // resolveEmailLinks; never affects delivery, guards or dedupe): the estimate
+  // the mail concerns when the caller has no `estimateId` to hand the
+  // annual-offer guard (a deposit receipt). The lead is derived from
+  // recipient_id or the estimate's owner; no caller passes one directly.
+  linkEstimateId = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   const auditRefusal = (err) => auditSendRefusal(err, {
@@ -1511,6 +1526,10 @@ async function sendTemplate({
   // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
   // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
   const sendAttemptToken = crypto.randomUUID();
+  // The single chokepoint for tying prospect mail to its lead / estimate.
+  const links = await resolveEmailLinks({
+    recipientType, recipientId, estimateId, estimateIds, linkEstimateId, payload, test,
+  });
   const messageSnapshot = {
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -1522,6 +1541,8 @@ async function sendTemplate({
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
     recipient_id: recipientId || null,
+    lead_id: links.lead_id,
+    estimate_id: links.estimate_id,
     recipient_email_snapshot: to,
     from_name_snapshot: fromName,
     from_email_snapshot: fromEmail,
@@ -1677,8 +1698,8 @@ async function sendTemplate({
       error: err.message, message: failed || { ...message, status: 'failed', error_message: reason }, rendered,
     };
   };
-  const abortProviderBoundaryBeforeDispatch = async () => {
-    const reason = 'provider_boundary_blocked';
+  const abortProviderBoundaryBeforeDispatch = async ({ checkFailed = false } = {}) => {
+    const reason = checkFailed ? 'provider_boundary_check_failed' : 'provider_boundary_blocked';
     const [failed] = await db('email_messages')
       .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
         provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
@@ -1688,8 +1709,8 @@ async function sendTemplate({
         provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
     if (!failed) throw inFlightCollisionError(idempotencyKey || message.id);
     return {
-      sent: false, aborted: true, boundaryBlocked: true, reason, providerAttempted: false,
-      message: failed, rendered,
+      sent: false, aborted: true, ...(checkFailed ? { boundaryCheckFailed: true } : { boundaryBlocked: true }),
+      reason, providerAttempted: false, message: failed, rendered,
     };
   };
   if (typeof onQueued === 'function') {
@@ -1827,6 +1848,10 @@ async function sendTemplate({
           providerRequestDefinitelyUnsent = true;
           return PROVIDER_BOUNDARY_BLOCKED;
         }
+        if (err?.providerBoundaryCheckFailed) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_CHECK_FAILED;
+        }
         throw err;
       }
     };
@@ -1840,6 +1865,12 @@ async function sendTemplate({
       // definitely unsent rather than leaving a started row ambiguous.
       providerHandoffStarted = false;
       return await abortProviderBoundaryBeforeDispatch();
+    }
+    if (result === PROVIDER_BOUNDARY_CHECK_FAILED) {
+      // The boundary check threw before any provider request existed: a
+      // definite non-send, settled 'rejected' so a retry is allowed.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch({ checkFailed: true });
     }
     // Pre-push audit P1: both the withProviderHandoff branch and the direct
     // branch above assign `result` from the SAME dispatchToProvider, so this
@@ -1986,7 +2017,9 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  resolveTemplateForSend,
   activeSuppressionsFor,
+  isMarketingSend,
   GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,
   renderVersion,

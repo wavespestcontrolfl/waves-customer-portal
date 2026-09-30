@@ -36,8 +36,13 @@ jest.mock('../services/visit-prep-read-dispatch', () => ({
 }));
 
 let mockGateOn = true;
+// The pest gate is dark unless a test turns it on: with both live, a stop
+// that also has a pest part is the combined read's, not this engine's
+// (visit-prep-read-key.js).
+let mockPestLive = false;
 jest.mock('../config/feature-gates', () => ({
   visitPrepPlantReadLive: () => mockGateOn,
+  visitPrepPestReadLive: () => mockPestLive,
 }));
 
 const { triggerVisitPrepPlantRead: realTrigger, dailyCap, _internal } = require('../services/visit-prep-plant-read');
@@ -173,6 +178,7 @@ beforeEach(() => {
   mockLockStopForRow.mockReset();
   mockLockStopForRow.mockImplementation(async (trx, id) => id);
   mockGateOn = true;
+  mockPestLive = false;
   delete process.env.VISIT_PREP_READ_DAILY_CAP;
 });
 
@@ -221,7 +227,7 @@ describe('trigger rule', () => {
     expect(mockIdentifyPlantV2.mock.calls[0][0].subject).toBe('tree_shrub');
   });
 
-  test('a pest visit: unsupported, no engine call — pest wins', async () => {
+  test('a pest-only visit: unsupported, no engine call', async () => {
     const conn = fakeConn();
     await triggerVisitPrepPlantRead({
       submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Quarterly Pest Control' }, photos: PHOTOS, conn,
@@ -244,22 +250,50 @@ describe('trigger rule', () => {
     expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(reads ? 1 : 0);
   });
 
-  test('grouped stop: pest wins even when the requested row itself is lawn', async () => {
-    mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
-    const conn = fakeConn({
-      scheduled_services: [
-        { id: 'svc-1', service_type: 'Weekly Lawn Care', status: 'confirmed', visit_id: 'visit-9' },
-        { id: 'svc-2', service_type: 'Quarterly Pest Control', status: 'confirmed', visit_id: 'visit-9' },
-      ],
-    });
-    await triggerVisitPrepPlantRead({
+  describe('a lawn + pest grouped stop (owner ruling 2026-09-30: the combined read owns it while both gates are live)', () => {
+    const groupedLawnAndPest = () => {
+      mockTechStopMemberIds.mockResolvedValue(['svc-1', 'svc-2']);
+      return fakeConn({
+        scheduled_services: [
+          { id: 'svc-1', service_type: 'Weekly Lawn Care', status: 'confirmed', visit_id: 'visit-9' },
+          { id: 'svc-2', service_type: 'Quarterly Pest Control', status: 'confirmed', visit_id: 'visit-9' },
+        ],
+      });
+    };
+    const args = (conn) => ({
       submissionId: 'sub-1',
       svc: { id: 'svc-1', customer_id: 'cust-1', service_type: 'Weekly Lawn Care', visit_id: 'visit-9' },
       photos: PHOTOS,
       conn,
     });
-    expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
-    expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
+
+    test('both gates live: unsupported for this engine, no engine call', async () => {
+      mockPestLive = true;
+      const conn = groupedLawnAndPest();
+      await triggerVisitPrepPlantRead(args(conn));
+      expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+      expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
+    });
+
+    test('pest gate dark: the plant read runs alone on the lawn part', async () => {
+      mockPestLive = false;
+      const conn = groupedLawnAndPest();
+      mockGetPhotoBase64.mockResolvedValue({ data: 'x', mimeType: 'image/jpeg' });
+      mockIdentifyPlantV2.mockResolvedValue(okEngineResult());
+      await triggerVisitPrepPlantRead(args(conn));
+      expect(mockIdentifyPlantV2).toHaveBeenCalledTimes(1);
+      expect(mockIdentifyPlantV2.mock.calls[0][0].subject).toBe('lawn');
+    });
+
+    test('a combined-label stop behaves the same way', async () => {
+      mockPestLive = true;
+      const conn = fakeConn();
+      await triggerVisitPrepPlantRead({
+        submissionId: 'sub-1', svc: { ...BASE_SVC, service_type: 'Lawn Care + Pest Control' }, photos: PHOTOS, conn,
+      });
+      expect(mockIdentifyPlantV2).not.toHaveBeenCalled();
+      expect(readStatusWrites(conn, 'sub-1')).toEqual([{ read_status: 'unsupported' }]);
+    });
   });
 
   test('grouped stop: lawn if a live lawn sibling exists even when the requested row is tree & shrub', async () => {

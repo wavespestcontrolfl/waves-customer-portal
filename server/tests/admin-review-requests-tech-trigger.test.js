@@ -141,3 +141,18 @@ test('a delivered send is reported sent, with no unsent fields at all', async ()
     expect(body.message).toBeUndefined();
   });
 });
+
+test('a tap since the visit is a 409 with no review link to hand the customer (Codex #5367 r7 P2)', async () => {
+  ReviewService.create.mockResolvedValueOnce({
+    id: 'rr-9', token: 'tok-9', status: 'suppressed',
+    sendOutcome: { sent: false, failed: 'review_link_clicked' },
+  });
+  await withServer(async (baseUrl) => {
+    const res = await techTrigger(baseUrl, { serviceRecordId: 'sr-1' });
+    const body = await res.json();
+    expect(res.status).toBe(409);
+    expect(body.code).toBe('review_link_clicked');
+    expect(body.reviewUrl).toBeUndefined();
+    expect(ReviewService.unshortenedReviewUrl).not.toHaveBeenCalled();
+  });
+});

@@ -3,7 +3,7 @@ import { cn } from "../../components/ui";
 import { Bot, AlertTriangle } from "lucide-react";
 import { PillTab, PhoneFrame } from "./autonomous-content/shared";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
-import ContentTab from "./autonomous-content/ActivityTab";
+import ContentTab, { blogHoldDismissable } from "./autonomous-content/ActivityTab";
 import LinksTab from "./autonomous-content/LinksTab";
 import ImpactTab from "./autonomous-content/ImpactTab";
 
@@ -249,7 +249,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   }, [selectedLinkId, linkDetailVersion]);
 
   const submitDecision = async (decision) => {
-    if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending || loading)
+    const holdDismiss = decision === "dismiss" && blogHoldDismissable(selected);
+    if ((!holdDismiss && (view !== "review" || selected?.action_type === "new_supporting_blog")) || !selectedId || actionPending || loading)
       return;
     listRequest.current += 1;
     setActionPending(decision);
