@@ -1191,7 +1191,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).not.toContain('OPEN TIMES');
   });
 
-  test('gate on: a bare pronoun return with a recurring plan tier (no serviceHistory) still fetches OPEN TIMES', async () => {
+  test('gate on: a bare pronoun return with an UPCOMING recurring pest visit (no serviceHistory) still fetches OPEN TIMES; a bare tier does not (round-30 P2)', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
@@ -1203,7 +1203,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
 
     const result = await drafter.generateGroundedDraft({
       client: {},
-      context: { summary: 'Test customer', customer: { id: 'cust-1', tier: 'Gold' }, upcomingServices: [] },
+      context: { summary: 'Test customer', customer: { id: 'cust-1', tier: 'Gold' }, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-20', window: '8-10am' }] },
       inboundMessage: 'still there',
       intent: { intent: 'general_customer_sms_needs_review' },
       schedulingIntent: false,
@@ -1211,7 +1211,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       voiceProfile: null,
     });
 
-    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
+    expect(getAvailableSlots).toHaveBeenCalled();
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
   });
 });
@@ -3601,6 +3601,32 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(out.violations[0]).toMatch(/does not say this customer is eligible|eligible/);
     });
 
+    test('an edited body asserting a DIFFERENT time/window than the live callback is blocked (live Thursday 9:00, edited to 1–3 PM)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        // the live arrival window is 9:00 AM – 11:00 AM
+        for (const ok of ['Your pest re-service is scheduled for Thursday.', 'Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday, 9-11 AM.', 'Your pest re-service is scheduled for Thursday from 9:00 AM to 11:00 AM.', 'Your pest re-service is scheduled for Thursday between 9 and 11 am.']) {
+          await expect(send(ok)).resolves.toBeNull();
+        }
+        for (const bad of ['Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.']) {
+          await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        }
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
     test('an edited body asserting a DIFFERENT day than the live callback is blocked (Friday vs a Thursday callback)', async () => {
       const dt = require('../utils/datetime-et');
       const realEt = dt.etDateString;
@@ -4015,8 +4041,23 @@ describe('PRONOUN_RETURN_TEXT_RE + customerHasPestRelationship — the pronoun-o
   });
 
   describe('customerHasPestRelationship', () => {
-    test('true for any recurring plan tier on file', () => {
-      expect(customerHasPestRelationship({ customer: { tier: 'Gold' } })).toBe(true);
+    // Codex round-30 P2: PEST-BACKED evidence only — never a bare waveguard_tier.
+    test('a bare tier proves nothing (none / One-Time / Commercial / a non-pest-family tier); an active pest plan or pest history does', () => {
+      for (const tier of ['Gold', 'none', 'One-Time', 'Commercial']) expect(customerHasPestRelationship({ customer: { tier } })).toBe(false);
+      expect(customerHasPestRelationship({ customer: { tier: 'Gold' }, upcomingServices: [{ type: 'Mosquito Misting' }] })).toBe(false);
+      expect(customerHasPestRelationship({ customer: { tier: 'Gold' }, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-20' }] })).toBe(true);
+      expect(customerHasPestRelationship({ customer: { tier: 'none' }, serviceHistory: [{ type: 'General Pest Control' }] })).toBe(true);
+    });
+
+    test('pronoun-only "they\'re back" from a tier-only customer is NOT a pest report', () => {
+      const { pestReportSignal, validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      for (const tier of ['none', 'One-Time', 'Commercial']) {
+        const context = { customer: { id: 'c1', tier }, serviceHistory: [], upcomingServices: [] };
+        expect(pestReportSignal("they're back", context)).toBe(false);
+        expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, intendedActions: [], inboundMessage: "they're back", context }).ok).toBe(true);
+      }
+      const withPlan = { customer: { id: 'c1', tier: 'Gold' }, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-20' }] };
+      expect(pestReportSignal("they're back", withPlan)).toBe(true);
     });
 
     test('true for a completed pest-family visit in serviceHistory', () => {

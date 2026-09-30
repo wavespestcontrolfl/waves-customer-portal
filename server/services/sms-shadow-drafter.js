@@ -1620,6 +1620,28 @@ function reserviceAssertedDays(sentence) {
   for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
   return out;
 }
+// The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
+function reserviceAssertedTimes(sentence) {
+  const out = [];
+  let rest = String(sentence);
+  const push = (h, mi, mer) => out.push({ minutes: (Number(h) % 12) * 60 + Number(mi || 0) + (mer === 'p' ? 720 : 0), mer: mer || null });
+  rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:-|–|—|to|and|until)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h1, m1, mer1, h2, m2, mer2) => {
+    const second = mer2[0].toLowerCase();
+    const first = mer1 ? mer1[0].toLowerCase() : ((Number(h1) % 12) > (Number(h2) % 12) ? (second === 'p' ? 'a' : 'p') : second);
+    push(h1, m1, first);
+    push(h2, m2, second);
+    return ' ';
+  });
+  rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h, mi, mer) => { push(h, mi, mer[0].toLowerCase()); return ' '; });
+  for (const m of rest.matchAll(/\bat\s+(\d{1,2})(?::(\d{2}))?\b|\b(\d{1,2}):(\d{2})\b/gi)) push(m[1] || m[3], m[2] || m[4], null);
+  return out;
+}
+function reserviceLiveWindowMinutes(windowStart) {
+  const { arrivalWindowRange } = require('../utils/sms-time-format');
+  const range = arrivalWindowRange(windowStart);
+  if (!range) return null;
+  return range.split('-').map((hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; });
+}
 function reserviceLiveDayTokens(dateStr) {
   const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
   return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`]);
@@ -1634,7 +1656,7 @@ function reserviceBookedClaims(body, info, lane) {
   // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
   const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
   const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
-  const claims = { refers: false, relative: new Set(), days: new Set() };
+  const claims = { refers: false, relative: new Set(), days: new Set(), times: [] };
   for (const sentence of String(body).split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
     if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
@@ -1643,6 +1665,7 @@ function reserviceBookedClaims(body, info, lane) {
     if (lanesNamed.length && !lanesNamed.includes(lane)) continue;
     claims.refers = true;
     for (const d of reserviceAssertedDays(sentence)) claims.days.add(d);
+    claims.times.push(...reserviceAssertedTimes(sentence));
     if (relative) claims.relative.add(relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today');
   }
   return claims;
@@ -1660,13 +1683,20 @@ async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
     const live = reserviceLiveDayTokens(open[lane].date);
     return [...claims.days].some((day) => !live.has(day));
   };
+  // ...and so must an asserted clock time / window ("Thursday from 1–3 PM" vs a 9:00 callback, whose arrival window is 9–11)
+  const assertedTimeStale = (lane, claims) => {
+    if (!claims.times.length || !open[lane] || !open[lane].windowStart) return false;
+    const live = reserviceLiveWindowMinutes(String(open[lane].windowStart).slice(0, 5));
+    if (!live) return false;
+    return claims.times.some((t) => !live.some((minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720)));
+  };
   const relativeStale = (lane, claims) => {
     const live = open[lane] && String(open[lane].date).slice(0, 10);
     return [...claims.relative].some((rel) => live !== (rel === 'tomorrow' ? now.tomorrow : now.today));
   };
   const moved = entries.filter(([lane, info, claims]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date
     || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5))
-    || relativeStale(lane, claims) || assertedDayStale(lane, claims));
+    || relativeStale(lane, claims) || assertedDayStale(lane, claims) || assertedTimeStale(lane, claims));
   return moved.length ? `reservice_booking_changed — the already-booked ${moved.map(([lane]) => lane).join(' and ')} re-service appointment was cancelled or moved since this reply was drafted` : null;
 }
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
@@ -3222,9 +3252,15 @@ const PRONOUN_RETURN_TEXT_RE = /\b(?:they'?re\s+back|it'?s\s+back|they\s+(?:came
 // harmless (same reasoning as PEST_REPORT_TEXT_RE above) — this leans
 // permissive rather than trying to perfectly classify "pest family" from a
 // free-text service label with no DB round trip.
+// (Round-30: the recurring-tier shortcut is gone — see the body.)
 function customerHasPestRelationship(context) {
-  if (context?.customer?.tier) return true;
-  const history = Array.isArray(context?.serviceHistory) ? context.serviceHistory : [];
+  // Codex round-30 P2: PEST-BACKED evidence only — a pest service in history, or an upcoming pest visit (an active pest
+  // plan). A bare waveguard_tier proves nothing: it can be 'none', 'One-Time', 'Commercial', or stamped from a
+  // mosquito / tree-shrub / termite family (reservice-scheduler.reserviceLanesForCustomer).
+  const history = [
+    ...(Array.isArray(context?.serviceHistory) ? context.serviceHistory : []),
+    ...(Array.isArray(context?.upcomingServices) ? context.upcomingServices : []),
+  ];
   return history.some((s) => {
     const label = String(s?.type || '').toLowerCase();
     if (!label) return false;

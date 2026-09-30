@@ -406,6 +406,15 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Ants are back if you can believe it', true, 'pest', false],
     ['ants are back, whether you believe it or not', true, 'pest', false],
     ['Tell me whether the roaches are back', false, 'pest', false],
+    // round-30 P2: an opener is an auxiliary + SUBJECT, never a contraction / subjectless shorthand
+    ["Can't believe the ants are back", true, 'pest', false],
+    ['Can confirm the ants are back', true, 'pest', false],
+    ['Could not believe the ants are back', true, 'pest', false],
+    ['Can someone check, the ants are back', true, 'pest', false],
+    ['Can you tell me if ants are back?', false, 'pest', false],
+    ['Is it the ants again?', false, 'pest', false],
+    ['Do you spray for ants?', false, 'pest', false],
+    ['Are ants back?', false, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],

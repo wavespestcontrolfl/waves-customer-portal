@@ -412,7 +412,7 @@ const RESERVICE_ANY_PEST_NOUN = `(?:bed[- ]?bugs?|${RESERVICE_PEST_NOUNS_SOURCE}
 // blanked before the negation test. "I don't think / don't believe / not sure ants are back" DENY or doubt it, so
 // they stay negated.
 const RESERVICE_AFFIRMING_EPISTEMIC_RE = new RegExp(
-  "\\b(?:can'?t|couldn'?t|cannot|can\\s+not)\\s+(?:even\\s+|really\\s+)?(?:believe|imagine|understand|fathom)\\b"
+  "\\b(?:can'?t|couldn'?t|cannot|can\\s+not|could\\s+not)\\s+(?:even\\s+|really\\s+)?(?:believe|imagine|understand|fathom)\\b"
   + "|\\b(?:don'?t|doesn'?t|didn'?t|do\\s+not|does\\s+not|did\\s+not)\\s+(?:really\\s+|even\\s+)?(?:know|understand|get|see)\\s+(?:why|how)\\b"
   + "|\\b(?:not|no)\\s+(?:really\\s+)?(?:sure|idea|clue)\\s+(?:why|how)\\b",
   'gi',
@@ -480,7 +480,9 @@ function reserviceClauseDropped(clause) {
 // back?", "If ants are back, what should I do?"): the clause ends in "?", opens with an auxiliary inversion, or is
 // governed by if / whether / unless. WHY-questions presuppose the sighting and stay reports. Such a clause is kept
 // for lane / specialty reading but is never an ACTIVE report.
-const RESERVICE_QUESTION_OPEN_RE = /^\W*(?:(?:and|but|so|also|please|then)\W+)*(?:are|is|was|were|am|do|does|did|can|could|will|would|should|shall|may|might|have|has|had)\b/i;
+// An opener is an AUXILIARY followed by a SUBJECT ("can you", "are the ants", "is it", "do we") — never a contraction
+// ("Can't believe the ants are back") or subjectless shorthand ("Can confirm the ants are back"), Codex round-30 P2.
+const RESERVICE_QUESTION_OPEN_RE = new RegExp(`^\\W*(?:(?:and|but|so|also|please|then)\\W+)*(?:are|is|was|were|am|do|does|did|can|could|will|would|should|shall|may|might|have|has|had)\\s+(?:you|i|we|they|he|she|it|there|someone|somebody|anyone|anybody|everyone|the|my|our|your|these|those|this|that|any|some|no|a|an|${RESERVICE_ANY_PEST_NOUN})\\b`, 'i');
 const RESERVICE_WHY_QUESTION_RE = /^\W*(?:(?:and|but|so)\W+)*(?:why|how\s+come)\b/i;
 const RESERVICE_HYPOTHETICAL_RE = /\b(?:if|whether|unless|in\s+case|suppose|supposing)\b/i;
 function reserviceClauseIsQuestion(clause, delimiter) {
