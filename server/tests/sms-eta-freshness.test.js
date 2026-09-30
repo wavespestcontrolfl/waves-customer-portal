@@ -908,4 +908,23 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     });
     expect(passed).toBeNull();
   });
+
+  // Codex pre-push P1 (round 11): no snapshot, no link — hours must read as
+  // minutes on this path too.
+  test.each([
+    'The tech is 2 hours away.',
+    'He is 1 hr 20 min out.',
+  ])('%p with NO snapshot at all is blocked like its minutes equivalent', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody, now: NOW });
+    expect(reason).toBe('eta_claim_no_snapshot');
+  });
+
+  test.each([
+    'Your 2 hour arrival window starts at 9.',
+    'The treatment takes about 2 hours.',
+    'Your arrival window is 2 hours.',
+  ])('%p with no snapshot is untouched (an appointment window / duration, not an ETA)', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody, now: NOW });
+    expect(reason).toBeNull();
+  });
 });

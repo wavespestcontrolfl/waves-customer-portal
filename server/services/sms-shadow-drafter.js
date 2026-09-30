@@ -657,18 +657,23 @@ function normalizeNumberWords(text) {
 // left as-is on purpose and is rejected outright by bodyHasUnnormalizedHour-
 // Word below — fail closed, never guess. Used only by
 // findGroundedMinutesFigures (the two call sites with a LIVE ETA to compare
-// against): findEtaMinutesClaims keeps its own hour-blind behavior so an
-// ordinary "2 hour arrival window" in a reply with no live tech is never
-// newly treated as an ETA claim.
+// against) AND by findEtaMinutesClaims on every path, snapshot or not (Codex
+// pre-push P1, round 11: with no snapshot or tracking link "The tech is 2
+// hours away." passed while "120 minutes away" failed — hours were only
+// normalized in the live-context path). The tokenizer therefore always sees
+// "120 minutes away", and its existing trigger/duration exclusions apply
+// equally. An hour figure that names a WINDOW ("your 2 hour arrival window",
+// "a 2 hour window", "arrival window is 2 hours") is a scheduling span, never an ETA, and is left alone
+// (the window look-around in normalizeTimeQuantities); dry time / "takes about 2 hours" stay excluded by the
+// duration rules.
 const HOURS_TO_MINUTES = 60;
 function hoursToMinutes(h) {
   return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
 }
 // Hours WITH a minutes part ("1 hr 20 min", "1h20m", "1 hour and 20 minutes",
 // "an hour and 20 minutes") -> one "<total> minutes" figure. Split out because
-// findEtaMinutesClaims (the trigger-based path, which stays hour-blind for a
-// plain "2 hours" — see above) must still read a mixed quantity as ONE figure
-// rather than mistaking its trailing "20 min" for the whole ETA.
+// a mixed quantity must be read as ONE figure rather than mistaking its
+// trailing "20 min" for the whole ETA.
 function normalizeHourMinuteCompounds(text) {
   let out = String(text || '');
   // An article hour is read ONLY when a minutes figure follows it; a bare
@@ -683,16 +688,16 @@ function normalizeHourMinuteCompounds(text) {
 function normalizeTimeQuantities(text) {
   let out = String(text || '');
   // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
-  out = out.replace(/\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi,
+  out = out.replace(/(?<!\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?)\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
     (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
   // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
-  out = out.replace(/\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
+  out = out.replace(/\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
     (m, n) => `${hoursToMinutes(n) + 30} minutes`);
-  out = out.replace(/\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
+  out = out.replace(/\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
     (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
   out = normalizeHourMinuteCompounds(out);
   // "2 hours", "2h", "1.5 hrs".
-  out = out.replace(/\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)/gi,
+  out = out.replace(/(?<!\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:\.\d+)?\s*(?:[-–—]|to|or)\s*)?)\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
     (m, n) => `${hoursToMinutes(n)} minutes`);
   return out;
 }
@@ -837,7 +842,7 @@ function sentenceAt(str, spans, index) {
 }
 function findEtaMinutesClaims(text) {
   const claims = [];
-  const str = normalizeHourMinuteCompounds(normalizeNumberWords(text));
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const consumed = []; // [start, end) of every figure already claimed
   for (const token of ETA_CLAIM_TOKENS) {
@@ -973,7 +978,7 @@ function findGroundedMinutesFigures(text) {
 // count with a non-time noun, an ordinal, a percentage) never trips this
 // backstop; a digit classifyBareEtaNumber can't otherwise explain still does.
 function bodyHasUnclassifiedArrivalDigit(text) {
-  const str = normalizeHourMinuteCompounds(normalizeNumberWords(text));
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const claims = findEtaMinutesClaims(text);
   const digitRe = /\d{1,3}/g;

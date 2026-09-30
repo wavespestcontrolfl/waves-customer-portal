@@ -1050,6 +1050,35 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     });
   });
 
+  // Codex pre-push P1 (round 11, PR #5334): with NO live ETA fact, "2 hours
+  // away" passed while "120 minutes away" failed — hours were only
+  // normalized on the live-context path. They are now normalized on every
+  // path; windows and durations stay unaffected.
+  describe('hour-based arrival claims are rejected with NO live ETA fact, exactly like their minutes equivalents (round 11 P1)', () => {
+    const NO_LIVE = 'LIVE STATUS: tech marked en route to this visit';
+    test.each([
+      ['The tech is 2 hours away.', 'The tech is 120 minutes away.'],
+      ['He is 2 hrs out.', 'He is 120 minutes out.'],
+      ['He is 1 hr 20 min away.', 'He is 80 minutes away.'],
+      ['He should arrive in about 1.5 hours.', 'He should arrive in about 90 minutes.'],
+    ])('%p is rejected like %p', (hours, minutes) => {
+      expect(validateLiveEtaMinutes({ reply: minutes, factsBlock: NO_LIVE }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: hours, factsBlock: NO_LIVE }).ok).toBe(false);
+      expect(findEtaMinutesClaims(hours).map((c) => c.minutes)).toEqual(findEtaMinutesClaims(minutes).map((c) => c.minutes));
+    });
+
+    test.each([
+      'Your 2 hour arrival window starts at 9.',
+      'Your arrival window is 2 hours.',
+      'Your arrival window: 1 to 2 hours.',
+      'The treatment takes about 2 hours.',
+      'Please allow 2 hours before letting pets out.',
+    ])('%p is never an ETA claim', (reply) => {
+      expect(findEtaMinutesClaims(reply)).toEqual([]);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: NO_LIVE })).toEqual({ ok: true, violations: [] });
+    });
+  });
+
   describe('normalizeTimeQuantities — every hour quantity is read WITH its unit (Codex round-9 P2)', () => {
     test.each([
       ['about 2 hours out', 'about 120 minutes out'],
