@@ -1229,20 +1229,23 @@ describe('deferred-replay registry', () => {
     expect(db).not.toHaveBeenCalled();
 
     // Still collectible — nothing to strip.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true });
 
     // Settled zero-due overnight (or otherwise terminal): the report still
     // sends (eligible: true, never cancelled/suppressed — the owner's r8
     // ruling), but the frozen pay-link line is now stale.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'prepaid', payer_id: null }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-terminal:prepaid' });
 
     // Moved to a payer overnight: same treatment — strip, don't suppress.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-1' }));
-    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed' });
   });
 
@@ -1271,6 +1274,21 @@ describe('deferred-replay registry', () => {
     jest.clearAllMocks();
     db.mockReturnValueOnce(throwChain());
     expect(await recheckDeferredReplay('dispatch_completion_deferred', { ...meta, scheduled_sms_attempts: 2 }))
+      .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
+  });
+
+  test('completion recheck (B10 follow-up): a row with no customer_id resolves the customer from the invoice, so a hold still strips', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p' };
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' })); // customer from the invoice
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));          // active dispute hold
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenCalledWith('invoices');
+    expect(db).toHaveBeenLastCalledWith('collections_flags');
+    // The invoice read itself failing fails closed (retryable first attempt), not "no hold".
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
       .toEqual({ eligible: false, reason: 'hold-recheck-failed', retryable: true });
   });
 
@@ -1326,14 +1344,16 @@ describe('deferred-replay registry', () => {
     // a pay link that never had anything actually wrong with it, on
     // nothing more than a DB hiccup that the scheduler's bounded retry
     // ladder would otherwise have resolved on the next pass.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(throwChain());
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
   test('completion recheck (round 10 #4634 finding 3): an invoice row that is simply gone is treated like a confirmed-terminal invoice (strip, never suppress)', async () => {
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain(undefined));
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-missing' });
   });
 
@@ -1341,8 +1361,9 @@ describe('deferred-replay registry', () => {
     // invoiceWithdrawnFromCustomer (invoice-helpers.js, real implementation)
     // keys on the payer_billed: prefix a packet withdrawal stamps on
     // scheduled_send_error — no mock needed, a real row triggers it.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed: adopted 2026-09-20' }));
-    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
+    await expect(recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' }))
       .resolves.toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed-withdrawn' });
   });
 
@@ -1353,10 +1374,11 @@ describe('deferred-replay registry', () => {
     // completion text anyway. It must take the same suppress/terminal path
     // every other genuinely-ineligible reason took before the round-8
     // strip carve-out.
+    db.mockReturnValueOnce(firstChain(undefined)); // no active dispute hold
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     db.mockReturnValueOnce(firstChain({ status: 'stopped' }));
     await expect(recheckDeferredReplay('dispatch_completion_deferred', {
-      invoice_id: 'inv-1', pay_url: 'https://p', followup_sequence_id: 'seq-1',
+      invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1', followup_sequence_id: 'seq-1',
     })).resolves.toEqual({ eligible: false, reason: 'sequence-stopped' });
   });
 

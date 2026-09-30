@@ -454,26 +454,28 @@ const REGISTRY = {
       // A dispute hold that landed after this text was frozen (owner ruling
       // 2026-09-30): the report still goes, the pay link does not. Fail
       // closed - shouldWithholdPayLink answers true when its lookup fails.
-      // Checked BEFORE invoice collectibility: a strip needs no invoice read.
-      // The scheduler enriches meta.customer_id from sms_log.customer_id.
-      // A hold-LOOKUP failure is not a confirmed hold: strip is one-way, so a
+      // Checked BEFORE invoice collectibility.
+      // A hold-LOOKUP (or customer-resolution) failure is not a confirmed hold: strip is one-way, so a
       // DB hiccup on the first attempt must not permanently drop a pay link
       // the customer is entitled to. Hold the row for the rail's bounded
       // 15-minute retry (fresh read each time) and fail closed to a strip
       // only on the last attempt - never a pay link sent unverified.
       const holdReader = require('../collections/collection-hold');
       try {
-        if (await holdReader.customerHasActiveCollectionHoldChecked(meta.customer_id)) {
+        // The scheduler enriches meta.customer_id from sms_log.customer_id; a
+        // row with neither must not read as "no hold" - resolve the customer
+        // from the invoice the pay link belongs to.
+        const holdCustomerId = meta.customer_id || await resolveFollowupCustomerId(meta);
+        if (await holdReader.customerHasActiveCollectionHoldChecked(holdCustomerId)) {
           return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
         }
       } catch (err) {
-        if (err?.code !== holdReader.HOLD_CHECK_FAILED_CODE) throw err;
         const attempts = Number(meta.scheduled_sms_attempts) || 1;
         if (attempts < SCHEDULED_SMS_MAX_ATTEMPTS) {
-          logger.warn(`[deferred-replay] completion hold recheck failed for customer ${meta.customer_id} (attempt ${attempts}/${SCHEDULED_SMS_MAX_ATTEMPTS}, holding for retry): ${err.message}`);
+          logger.warn(`[deferred-replay] completion hold recheck failed for customer ${meta.customer_id || 'unknown'} (attempt ${attempts}/${SCHEDULED_SMS_MAX_ATTEMPTS}, holding for retry): ${err.message}`);
           return { eligible: false, reason: 'hold-recheck-failed', retryable: true };
         }
-        logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id} at the attempt cap - sending report-only: ${err.message}`);
+        logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id || 'unknown'} at the attempt cap - sending report-only: ${err.message}`);
         return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
       }
       const collectible = await invoiceStillCollectible(meta);

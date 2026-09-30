@@ -135,7 +135,13 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
 // failed lookup or write only logs, it never blocks or fails the charge.
 async function recordHoldOverride({ customerId, actorId = null, ip = null, userAgent = null, route = null, invoiceId = null, database = db }) {
   try {
-    if (!(await customerHasActiveCollectionHold(customerId, database))) return false;
+    // On a caller's transaction the lookup runs in a SAVEPOINT: a failed query
+    // would otherwise leave that transaction aborted (25P02) and turn this
+    // best-effort trail into a blocked charge on the next statement.
+    const held = database?.isTransaction && typeof database.transaction === 'function'
+      ? await database.transaction((sp) => customerHasActiveCollectionHold(customerId, sp))
+      : await customerHasActiveCollectionHold(customerId, database);
+    if (!held) return false;
     const { recordAuditEvent } = require('../audit-log');
     const { logAutopay } = require('../autopay-log');
     await recordAuditEvent({

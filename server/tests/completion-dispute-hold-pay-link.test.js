@@ -137,7 +137,7 @@ describe('deferred replay registry wiring', () => {
 
   test('the completion recheck strips the pay link under a dispute hold before reading the invoice', () => {
     const start = src.indexOf('dispatch_completion_deferred: {');
-    const holdAt = src.indexOf("customerHasActiveCollectionHoldChecked(meta.customer_id)", start);
+    const holdAt = src.indexOf("customerHasActiveCollectionHoldChecked(holdCustomerId)", start);
     const invoiceAt = src.indexOf('await invoiceStillCollectible(meta)', start);
     expect(holdAt).toBeGreaterThan(start);
     expect(holdAt).toBeLessThan(invoiceAt);
