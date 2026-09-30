@@ -246,7 +246,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false, requireNoCollectionPending = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -400,6 +400,26 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // completion invoice has no PI; the admin apply-credit route, by contrast,
     // explicitly triages/cancels the PI — auto-apply simply declines.)
     if (invoice.stripe_payment_intent_id) return { applied: 0, skipped: 'has_payment_intent' };
+    // Opt-in collection fence, ATOMIC with the apply (customer-dunning credit
+    // draw): under this invoice lock, refuse to consume credit while a
+    // submitted-but-unresolved saved-card attempt, an orphan charge or a
+    // received deposit awaiting settlement means Stripe may already have taken
+    // (or be taking) this invoice's money. A recognised pending state returns a
+    // skip SENTINEL — never a throw — so the fence's own promotion of a stale
+    // claim to 'ambiguous' commits with this transaction (see
+    // apply-credit-claim-fence-promotion-postgres.test.js). Any other error
+    // proves nothing and propagates: the trx rolls back, nothing is applied.
+    if (requireNoCollectionPending) {
+      try {
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(t, invoice, { lock: false });
+        await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, t);
+      } catch (fenceErr) {
+        if (require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
+          return { applied: 0, skipped: 'collection_pending', pendingCode: fenceErr.code || null };
+        }
+        throw fenceErr;
+      }
+    }
     // An active payment plan snapshots total_balance at creation; auto-applying
     // credit now would reduce amount due while the plan keeps collecting the
     // original balance (over-collection + consumed credit). Skip — the operator
@@ -605,11 +625,11 @@ async function runPostFullCoverageSideEffects(invoiceId) {
  * seams and after the completion-time apply. Returns the applyAccountCreditToInvoice
  * result (with `applied` / `fullyCovered`), or null when gated off / on error.
  */
-async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false } = {}) {
+async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false, requireNoCollectionPending = false } = {}) {
   try {
      
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
-    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
+    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy, ...(requireNoCollectionPending ? { requireNoCollectionPending: true } : {}) }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run
     // the same post-payment side effects the manual apply-credit + record-payment
     // paths run — otherwise a credit-covered invoice keeps dunning followups armed

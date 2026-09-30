@@ -220,3 +220,36 @@ describe('invoiceCreditWouldFullyCover (hoisted from pay-v2)', () => {
     expect(untouched).not.toHaveBeenCalled();
   });
 });
+
+describe('readOnly sibling fence: recognised pending states exclude, anything else degrades', () => {
+  const code = (c, extra = {}) => Object.assign(new Error(c), { code: c, ...extra });
+
+  test.each([
+    ['STRIPE_CHARGE_IN_PROGRESS', code('STRIPE_CHARGE_IN_PROGRESS')],
+    ['STRIPE_AMBIGUOUS_OUTCOME', code('STRIPE_AMBIGUOUS_OUTCOME', { reconciliationRequired: true })],
+    ['STRIPE_CHARGED_DB_FAILED', code('STRIPE_CHARGED_DB_FAILED', { reconciliationRequired: true })],
+    ['DEPOSIT_RECONCILIATION_REQUIRED', code('DEPOSIT_RECONCILIATION_REQUIRED')],
+  ])('readOnly: %s excludes just that sibling', async (_l, err) => {
+    mockOpenBalance.mockResolvedValue([sib('s1'), sib('s2')]);
+    mockReconcile.mockImplementation(async (id) => { if (id === 's1') throw err; });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => i.id)).toEqual(['s2']);
+    expect(reasons).toEqual([]);
+  });
+
+  test('readOnly: an unexpected fence error degrades to incomplete (null)', async () => {
+    mockOpenBalance.mockResolvedValue([sib('s1'), sib('s2')]);
+    mockReconcile.mockImplementation(async (id) => { if (id === 's1') throw new Error('connection terminated'); });
+    await expect(PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }))).resolves.toBeNull();
+    expect(reasons).toEqual(['incomplete']);
+  });
+
+  test('NOT readOnly: the same unexpected error still just excludes the sibling (unchanged)', async () => {
+    mockOpenBalance.mockResolvedValue([sib('s1'), sib('s2')]);
+    mockReconcile.mockImplementation(async (id) => { if (id === 's1') throw new Error('connection terminated'); });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts());
+    expect(out.map((i) => i.id)).toEqual(['s2']);
+    expect(reasons).toEqual([]);
+  });
+});
+

@@ -298,6 +298,16 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly });
           cleared.push(inv);
         } catch (fenceErr) {
+          // Read-only callers (the customer-dunning resolver, which asserts the
+          // set in a message) must tell a recognised pending state — the
+          // sibling really is fenced, exclude it — from an unexpected failure
+          // (a DB error), which proves nothing about the sibling: hold rather
+          // than name a set built on an unread fence. Every other caller keeps
+          // the graceful exclude-on-any-error behaviour.
+          if (readOnly && !require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
+            logger.warn(`[pay-combined] sibling ${inv.invoice_number} fence unreadable (${fenceErr.code || fenceErr.message}) — read-only selection incomplete`);
+            return degrade('incomplete');
+          }
           logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
         }
       }

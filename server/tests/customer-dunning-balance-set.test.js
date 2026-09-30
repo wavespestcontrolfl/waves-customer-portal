@@ -412,9 +412,10 @@ describe('applyCreditBeforeResolve (runner only)', () => {
     const draws = await applyCreditBeforeResolve(CUSTOMER);
     expect(mockAutoApply.mock.calls.map(([id]) => id)).toEqual(['A', 'E']);
     expect(draws).toEqual([{ invoiceId: 'A', amount: 20 }]);
-    // each draw is its own transaction: no caller trx is threaded in, so the
-    // credit helper still runs the full-coverage side effects itself
-    for (const call of mockAutoApply.mock.calls) expect(call).toHaveLength(1);
+    // each draw is its own transaction: no caller trx is threaded in (so the
+    // credit helper still runs the full-coverage side effects itself), and the
+    // collection fence rides INSIDE that transaction via the opt-in option
+    for (const call of mockAutoApply.mock.calls) expect(call[1]).toEqual({ requireNoCollectionPending: true });
   });
 
   test('takes no database handle (a caller\'s handle would make the helper skip its full-coverage side effects)', () => {
@@ -434,5 +435,51 @@ describe('applyCreditBeforeResolve (runner only)', () => {
     const draws = await applyCreditBeforeResolve(CUSTOMER);
     expect(mockAutoApply.mock.calls.map(([id]) => id)).toEqual(['C']);
     expect(draws).toEqual([{ invoiceId: 'C', amount: 5 }]);
+  });
+});
+
+describe('sibling reconciliation fence: pending excludes, an unreadable fence holds (resolver only)', () => {
+  const pending = (code, extra = {}) => Object.assign(new Error(`fenced ${code}`), { code, ...extra });
+
+  test.each([
+    ['STRIPE_CHARGE_IN_PROGRESS', pending('STRIPE_CHARGE_IN_PROGRESS')],
+    ['STRIPE_AMBIGUOUS_OUTCOME', pending('STRIPE_AMBIGUOUS_OUTCOME', { reconciliationRequired: true })],
+    ['STRIPE_CHARGED_DB_FAILED', pending('STRIPE_CHARGED_DB_FAILED', { reconciliationRequired: true })],
+    ['DEPOSIT_RECONCILIATION_REQUIRED', pending('DEPOSIT_RECONCILIATION_REQUIRED')],
+    ['reconciliationRequired flag alone', Object.assign(new Error('parked'), { reconciliationRequired: true })],
+  ])('a sibling fenced with %s is excluded; the rest of the set stands', async (_label, err) => {
+    mockReconcile.mockImplementation(async (invoiceId) => { if (invoiceId === 'B') throw err; });
+    const set = await resolve();
+    expect(set.kind).toBe('multi');
+    expect(ids(set)).toEqual(['A', 'C']);
+  });
+
+  test('an unexpected fence failure (DB down) on a sibling holds the whole set as incomplete', async () => {
+    mockReconcile.mockImplementation(async (invoiceId) => { if (invoiceId === 'B') throw new Error('connection terminated'); });
+    const set = await resolve();
+    expect(set).toMatchObject({ kind: 'hold', reason: 'incomplete' });
+  });
+});
+
+describe('deterministic anchor on equal created_at', () => {
+  const at = '2026-08-01T10:00:00.000Z';
+  const twin = (id) => inv(id, { created_at: at });
+
+  test.each([
+    ['ascending', ['X1', 'X2']],
+    ['descending', ['X2', 'X1']],
+  ])('two invoices sharing created_at (%s input order) pick the same anchor and digest', async (_label, order) => {
+    reset(order.map(twin), { X1: 'active', X2: 'active' });
+    const set = await resolve();
+    expect(set.anchor.id).toBe('X1');
+    expect(ids(set)).toEqual(['X1', 'X2']);
+    reset(['X1', 'X2'].map(twin), { X1: 'active', X2: 'active' });
+    const canonical = await resolve();
+    expect(set.digest).toBe(canonical.digest);
+  });
+
+  test('an older created_at still wins over a smaller id', async () => {
+    reset([inv('A', { created_at: '2026-08-02T00:00:00Z' }), inv('Z', { created_at: '2026-08-01T00:00:00Z' })], { A: 'active', Z: 'active' });
+    expect((await resolve()).anchor.id).toBe('Z');
   });
 });

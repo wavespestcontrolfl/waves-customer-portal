@@ -52,6 +52,18 @@ const pickHold = (reasons) => HOLD_PRECEDENCE.find((r) => reasons.includes(r)) |
 
 const centsOf = (inv) => PayCombined.amountDueCents(inv);
 
+// Total order for "oldest first": created_at, ties broken by id.
+function compareOldestFirst(a, b) {
+  const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+  const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+  if (ta !== tb) return ta - tb;
+  const ia = String(a.id);
+  const ib = String(b.id);
+  if (ia === ib) return 0;
+  return ia < ib ? -1 : 1;
+}
+const sortOldestFirst = (rows) => [...rows].sort(compareOldestFirst);
+
 const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 /**
@@ -227,11 +239,15 @@ async function anchorAndSiblings(anchorRow, database) {
 
 async function resolveUnguarded(customerId, database, now) {
   let incomplete = false;
-  const open = await openBalanceInvoices(customerId, {
+  // Oldest first with a total order (created_at, then id): the open read sorts
+  // on created_at alone, so two invoices with equal timestamps could swap
+  // anchor (and member order) between runs. Sorted here so the anchor and the
+  // digest depend only on the data, never on the order the rows came back in.
+  const open = sortOldestFirst(await openBalanceInvoices(customerId, {
     database,
     onResolveFailure: () => { incomplete = true; },
     onTruncation: () => { incomplete = true; },
-  });
+  }));
   if (incomplete) return result('hold', 'balance_incomplete');
   if (!open.length) return result('empty', 'no_open_invoices');
 
@@ -240,9 +256,10 @@ async function resolveUnguarded(customerId, database, now) {
   const { members: candidates, excluded } = classifyOpen(open, seqMap, mdIds);
   if (!candidates.length) return result('empty', 'all_excluded', { excluded });
 
+  const anchorId = candidates[0].invoice_id;
   // The open read carries no token/title/payer columns; the anchor needs the
   // full row (also what combinedEligibleSiblings and the credit probe read).
-  const anchorRow = await database('invoices').where({ id: candidates[0].invoice_id }).first();
+  const anchorRow = await database('invoices').where({ id: anchorId }).first();
   if (!anchorRow) return result('hold', 'balance_incomplete', { excluded });
 
   const { holds, siblings } = await anchorAndSiblings(anchorRow, database);
@@ -251,8 +268,8 @@ async function resolveUnguarded(customerId, database, now) {
   // probe read), so a credit landing between the two reads cannot leave a
   // stale figure in the digest.
   const members = [
-    memberOf(anchorRow, seqMap.get(candidates[0].invoice_id)),
-    ...siblings.map((s) => memberOf(s, fullSeq.get(String(s.id)))),
+    memberOf(anchorRow, seqMap.get(anchorId)),
+    ...sortOldestFirst(siblings).map((s) => memberOf(s, fullSeq.get(String(s.id)))),
   ];
   const parts = {
     anchor: anchorSummary(anchorRow),
@@ -319,7 +336,10 @@ async function applyCreditBeforeResolve(customerId) {
       logger.warn(`[customer-dunning] credit draw skipped for invoice ${inv.id}: microdeposit state unreadable: ${err.message}`);
     }
     if (mdPending) continue;
-    const drawn = await autoApplyAccountCreditIfEnabled(inv.id);
+    // requireNoCollectionPending: the reconciliation fence runs INSIDE the
+    // draw's own transaction under the invoice lock (a fence checked before
+    // the draw could race a saved-card attempt that submits in between).
+    const drawn = await autoApplyAccountCreditIfEnabled(inv.id, { requireNoCollectionPending: true });
     if (drawn?.applied > 0) draws.push({ invoiceId: String(inv.id), amount: drawn.applied });
   }
   return draws;
