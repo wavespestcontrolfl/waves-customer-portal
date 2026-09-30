@@ -86,6 +86,16 @@ const initials = (c) => `${(c.first_name || '?')[0]}.${(c.last_name || '?')[0]}.
         const res = await releaseFlag({ customerId, flag });
         console.log(res.ok ? `released ${res.released}.` : `release FAILED: ${res.reason}`);
         if (!res.ok) process.exit(1);
+        if (flag === 'wrong_number') {
+          // Report the real do-not-text state: a flag set by this script never
+          // wrote a messaging_suppression row; one from a collections call did,
+          // keyed on the DIALED number (which may differ from customers.phone).
+          const phoneRow = await db('customers').where({ id: customerId }).first('phone');
+          const { toE164 } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'phone'));
+          const e164 = phoneRow?.phone ? toE164(phoneRow.phone) : null;
+          const sup = e164 ? await db('messaging_suppression').where({ phone: e164, active: true }).first('reason') : null;
+          console.log(`note: this releases the collections flag only. Customer's current phone${e164 ? ` ending ${e164.slice(-4)}` : ' (none on file)'}: ${sup ? `do-not-text row active (reason ${sup.reason}) — left in place; it belongs to the phone and clears only on a START text from that number` : 'NO active do-not-text row — non-collections texts can go to this number'}. A number the collections call dialed that differs from the current phone keeps its own row.`);
+        }
       }
       return;
     }
@@ -95,6 +105,9 @@ const initials = (c) => `${(c.first_name || '?')[0]}.${(c.last_name || '?')[0]}.
       const res = await writeFlag({ customerId, flag, reason, createdBy: 'owner:ops-script' });
       console.log(res.ok ? (res.created ? 'set.' : 'already active (raced) — nothing written.') : `write FAILED: ${res.reason}`);
       if (!res.ok) process.exit(1);
+      if (flag === 'wrong_number') {
+        console.log('note: this sets the collections flag only — it blocks collections outreach but writes NO do-not-text (messaging_suppression) row, so reminders and other texts can still go to the number. Add the number to the do-not-contact list if every text should stop.');
+      }
     } else {
       console.log('dry run — add --execute to write.');
     }
