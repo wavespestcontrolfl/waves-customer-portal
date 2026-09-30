@@ -376,6 +376,8 @@ describe('persisted marker + stale unit ask', () => {
     // The replay routes a FRESH extraction on the unwaived verdict unless it names the same service + property type.
     const replaySrc = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
     expect(replaySrc).toContain('waiverInputs(priorV2) !== waiverInputs(currentExtraction)');
+    const verifySrc = require('fs').readFileSync(require.resolve('../scripts/verify-v2-shadow-path'), 'utf8');
+    expect(verifySrc).toContain('waiverInputs(priorEnriched) !== waiverInputs(e)');
     const proc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(proc).toContain('ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived })');
   });
