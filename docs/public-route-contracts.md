@@ -1805,7 +1805,17 @@ buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
 token format gate, generic 404, isEstimateCustomerViewable gate identical
 to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
 draft can never produce a customer-facing document), serviceKey must be
-BOTH a known guide key and a recurring service actually on this estimate,
+BOTH a known guide key and a recurring service actually on this estimate —
+one exception: `lawn_care` is also served when the estimate's only lawn work
+is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
+`top_dressing`), read from the same replayed pricing bundle `/data` sends
+(`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
+data fails closed), and that estimate gets the ONE-TIME variant of the guide
+(no visit count, re-service, or recurring-program content); no other guide
+widens for one-time rows, and the Bermuda-removal sections render only when
+the estimate carries the bermudaSuppression add-on with
+GATE_BERMUDA_SUPPRESSION on. The same membership rule gates
+`POST /api/estimates/:token/service-details/send`;
 60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
 service guide plus PUBLIC product-registry fields only — active
 ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,

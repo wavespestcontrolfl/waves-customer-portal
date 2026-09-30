@@ -10,7 +10,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const migration = require('../models/migrations/20260930120000_prep_lawn_guide_revision');
+const base = require('../models/migrations/20260930120000_prep_lawn_guide_revision');
+// 000001 (Codex r1) supersedes 000000; its TEMPLATES are what customers receive.
+const migration = require('../models/migrations/20260930120001_prep_lawn_guide_revision_codex_r1');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES } = migration;
@@ -64,7 +66,10 @@ describe('prep.lawn revision content', () => {
     expect(faqBlocks).toHaveLength(1);
     expect(faqBlocks[0].rows).toHaveLength(4);
     const bermuda = faqBlocks[0].rows.find((r) => /bermuda/i.test(r.label)).value;
-    expect(bermuda).toMatch(/priced separately/i);
+    expect(bermuda).toMatch(/only when your lawn needs it/i);
+    // CitraBlue is a test-area cultivar (protocol 20260808000001), never eligible outright.
+    expect(bermuda).toMatch(/CitraBlue and any unknown cultivar get a test patch first/);
+    expect(bermuda).not.toMatch(/CitraBlue qualif/i);
     expect(bermuda).toMatch(/spring/i);
     expect(bermuda).toMatch(/cultivar/i);
     expect(bermuda).toMatch(/two applications per growing season/i);
@@ -83,7 +88,23 @@ describe('prep.lawn revision content', () => {
   });
 });
 
-describe('publish mechanics', () => {
+describe('supersession (Codex r1)', () => {
+  test('patches exactly the Bermuda answer and leaves every other block as 000000 shipped it', () => {
+    expect(migration.SUPERSEDES).toBe('migration:20260930120000');
+    const before = base.TEMPLATES[0].blocks;
+    const after = TEMPLATES[0].blocks;
+    expect(after).toHaveLength(before.length);
+    const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
+    expect(changed).toHaveLength(1);
+    expect(changed[0].variant).toBe('faq');
+  });
+});
+
+describe.each([
+  ['000000', base, 'migration:20260930120000'],
+  ['000001', migration, 'migration:20260930120001'],
+])('publish mechanics (%s)', (_name, migration, marker) => {
+  const { TEMPLATES } = migration;
   function makeKnex() {
     const state = {
       template: { id: 't-1', template_key: 'prep.lawn', active_version_id: 'v-1' },
@@ -146,7 +167,7 @@ describe('publish mechanics', () => {
     expect(JSON.parse(state.inserted[0].blocks)).toEqual(TEMPLATES[0].blocks);
     expect(state.versionUpdates.some((u) => u.patch.status === 'archived')).toBe(true);
     expect(state.templateUpdates.some((u) => u.active_version_id === 'v-new-0')).toBe(true);
-    expect(JSON.parse(state.inserted[0].validation_snapshot).source).toBe('migration:20260930120000');
+    expect(JSON.parse(state.inserted[0].validation_snapshot).source).toBe(marker);
   });
 
   test('up is a no-op when the template row is absent', async () => {
@@ -168,7 +189,7 @@ describe('publish mechanics', () => {
     const { knex, state } = makeKnex();
     state.versions = [
       { id: 'v-old', template_id: 't-1', version_number: 3, status: 'archived', validation_snapshot: '{}', blocks: '[]' },
-      { id: 'v-mig', template_id: 't-1', version_number: 4, status: 'active', validation_snapshot: JSON.stringify({ ok: true, source: 'migration:20260930120000' }), blocks: '[]' },
+      { id: 'v-mig', template_id: 't-1', version_number: 4, status: 'active', validation_snapshot: JSON.stringify({ ok: true, source: marker }), blocks: '[]' },
     ];
     state.template.active_version_id = 'v-mig';
     await migration.down(knex);

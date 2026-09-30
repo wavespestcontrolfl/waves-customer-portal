@@ -557,11 +557,17 @@ function renderServiceDetailsPdf(content) {
     // Included + process render at the sections' `{ slot: 'process' }` marker
     // when the copy places one, otherwise in their default spot below.
     const sections = Array.isArray(content.sections) ? content.sections : [];
+    // Either list may be empty (a one-time lawn guide has neither) — no
+    // orphan headings.
     const renderProcess = () => {
-      sectionHeading(doc, "What's included");
-      bullets(doc, content.included || []);
-      sectionHeading(doc, 'How your visits work');
-      bullets(doc, content.process || []);
+      if ((content.included || []).length) {
+        sectionHeading(doc, "What's included");
+        bullets(doc, content.included);
+      }
+      if ((content.process || []).length) {
+        sectionHeading(doc, 'How your visits work');
+        bullets(doc, content.process);
+      }
     };
     const processSlotted = sections.some((s) => s && s.slot === 'process');
     renderSections(doc, sections, (slot) => { if (slot === 'process') renderProcess(); });

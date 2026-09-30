@@ -425,6 +425,12 @@ const SERVICE_DETAILS_COPY = {
   //     note?: string }           // closing paragraph, rendered after the table
   //   { slot: 'process' }         // marker: render "What's included" + "How your
   //                               // visits work" HERE instead of after the sections
+  // Optional markers (stripped before rendering):
+  //   requires: 'bermuda_suppression' on a section — kept only when the estimate
+  //     carries the Bermuda-suppression add-on AND GATE_BERMUDA_SUPPRESSION is on.
+  //   scope: 'recurring' | 'one_time' on a section, a FAQ entry, or a
+  //     { scope, text } entry inside paragraphs/steps/bullets — kept only for
+  //     that lawn scope (see `oneTime` below); unmarked entries always render.
   // Render order inside one section: paragraphs, steps, bullets, table, note.
   lawn_care: {
     title: 'Lawn Care — Service Details',
@@ -449,7 +455,7 @@ const SERVICE_DETAILS_COPY = {
         steps: [
           'Who mows, and what day. We schedule around your mow so product isn’t stripped off the blade the next morning. Why: most liquid applications need a day or two on the leaf to work.',
           'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it on the first visit. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.',
-          'Grass type if you know it, and the sod invoice if you have one. Why: the herbicide list is different for every grass, and for Bermuda removal the St. Augustine cultivar decides whether the treatment is allowed at all (see below).',
+          'Grass type if you know it, and the sod invoice if you have one. Why: the herbicide list is different for every grass, and for Bermuda removal the St. Augustine cultivar decides whether that treatment is allowed at all.',
           'Anything applied in the last 60 days by anyone. Store-bought weed-and-feed, a previous company, a landscaper. Send a photo of the bag or bottle. Why: stacking products injures turf and voids label intervals.',
           'Edible gardens, ponds, beehives, chickens, an invisible-fence wire, and shallow irrigation lines. Why: product placement is planned around them.',
         ],
@@ -474,13 +480,14 @@ const SERVICE_DETAILS_COPY = {
           'Mowing. Wait 1–2 days after liquid applications, longer if the report says so. Never mow a wet application.',
           'Kids and pets. Off the lawn until the treated area is dry for liquids; until watered in for granules. Dogs that graze grass or lick paws are the main exposure route. If you have a grazer, tell us.',
           'What “working” looks like. Weeds yellow and wilt over 1–2 weeks; stubborn perennials may need a second pass. Insect damage stops spreading, but dead turf does not regrow. It fills in by runners, plugs, or sod.',
-          'Call us right away if the lawn yellows in streaks or stripes within days of a visit, or damage is spreading. That’s an immediate look, not wait-and-see. No waiting period for a re-service.',
+          { scope: 'recurring', text: 'Call us right away if the lawn yellows in streaks or stripes within days of a visit, or damage is spreading. That’s an immediate look, not wait-and-see. No waiting period for a re-service.' },
+          { scope: 'one_time', text: 'Call us right away if the lawn yellows in streaks or stripes within days of the visit, or damage is spreading.' },
         ],
       },
       {
         heading: 'Watering your lawn (the everyday rule)',
         paragraphs: [
-          'Water on need, not on a timer: folded blades, a blue-gray cast, and footprints that stay mean it’s time. A typical event is ½–¾ inch, early morning, 1–2 times a week in the dry season and less in the rainy season. Skip a cycle after ½ inch of rain. Your district’s watering days apply; hand-watering rules are looser if a spot needs a drink sooner. Overwatering feeds shallow roots, fungus, dollarweed, and sedges.',
+          'Water on need, not on a timer: folded blades, a blue-gray cast, and footprints that stay mean it’s time. A typical event is ½–¾ inch, early morning. How often is capped by the watering restriction in force for your address, which changes with the season and can drop to one day a week during a water shortage; water only on your allowed days and hours, and less in the rainy season. Skip a cycle after ½ inch of rain. Hand-watering rules are looser if a spot needs a drink sooner. Overwatering feeds shallow roots, fungus, dollarweed, and sedges.',
           'If your irrigation runs are on file in the Waves app, your reports use those numbers. If not, the generic starting point is 30–45 minutes per rotor zone and 10–15 minutes per spray-head zone, then adjust with a tuna can test to ½–¾ inch.',
         ],
       },
@@ -490,14 +497,16 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         heading: 'Bermuda removal from St. Augustine (Recognition + Fusilade II)',
-        paragraphs: ['Part of the lawn program, priced higher on your estimate. This is a multi-application program, not a spray. It is the first selective way to take bermudagrass out of St. Augustine while the St. Augustine lives through it (UF/IFAS SS-AGR-503). Fusilade II is what kills the Bermuda. Recognition carries a safener that lets St. Augustine tolerate it. Neither works alone.'],
+        requires: 'bermuda_suppression',
+        paragraphs: ['Part of your lawn program, priced into your estimate. This is a multi-application program, not a spray. It is the first selective way to take bermudagrass out of St. Augustine while the St. Augustine lives through it (UF/IFAS SS-AGR-503). Fusilade II is what kills the Bermuda. Recognition carries a safener that lets St. Augustine tolerate it. Neither works alone.'],
       },
       {
         heading: 'What has to be true first',
         level: 2,
+        requires: 'bermuda_suppression',
         bullets: [
           'It has to be bermudagrass. Torpedograss is the dangerous look-alike; this mix only suppresses it. We confirm the weed before anything is quoted.',
-          'Your St. Augustine cultivar has to be eligible. Floratam, Palmetto, Raleigh, SunClipse, and CitraBlue: yes. ProVista, Captiva, and Seville: no, our policy, stricter than the label. Unknown cultivar: a test patch first, watched 3–4 weeks. We identify from the sod invoice, builder, or sod farm, never by eye.',
+          'Your St. Augustine cultivar has to be eligible. Floratam, Palmetto, Raleigh, and SunClipse: yes. CitraBlue: a test patch first, watched 3–4 weeks. ProVista, Captiva, and Seville: no, our policy, stricter than the label. Unknown cultivar: a test patch first, watched 3–4 weeks. We identify from the sod invoice, builder, or sod farm, never by eye.',
           'The turf has to be healthy. No drought stress, flooding, active chinch bug or disease damage, recent scalping, or sod younger than 4 weeks.',
           'Spring is the window. UF/IFAS says prioritize spring and avoid late summer and fall, when injury risk climbs. If you’re reading this in August, we map it now and treat in spring.',
           'If Bermuda is already most of the lawn, removing it leaves a hole St. Augustine can’t close. Renovation is the honest answer there, and we’ll say so.',
@@ -506,6 +515,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'What you do',
         level: 2,
+        requires: 'bermuda_suppression',
         bullets: [
           'Mow at normal height about a week before, then don’t mow, edge, or hand-pull for 7 days after. Why: Bermuda has to have leaf to absorb the product and time to move it into the runners and rhizomes.',
           'Don’t scalp. Low mowing removes the leaf we need and is what favors Bermuda in the first place.',
@@ -517,6 +527,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'What you’ll see',
         level: 2,
+        requires: 'bermuda_suppression',
         table: {
           columns: ['When', 'What’s happening', 'What you see'],
           rows: [
@@ -605,16 +616,44 @@ const SERVICE_DETAILS_COPY = {
         'Plugging, dethatching, and top dressing are quoted separately',
       ],
     },
+    // One-time variant (lawnScope 'one_time': the estimate's only lawn work is
+    // a one_time_lawn / plugging / dethatching / top_dressing row). Replaces
+    // the program box and responsibilities, and drops the recurring program
+    // walkthrough (included + process) and every scope:'recurring' entry, so
+    // a one-time customer is never promised visits, re-service, or a program.
+    oneTime: {
+      systemBox: {
+        heading: 'Your lawn service at a glance',
+        rows: [
+          ['Service', 'The one-time lawn work named on your estimate. No recurring schedule'],
+          ['Built for your grass', 'We confirm the grass before anything goes down, because a product or method that helps one grass can injure another'],
+          ['Your part', 'The prep and aftercare below. Plugging, dethatching, and top dressing each have their own before-and-after steps under Special situations'],
+          ['Documentation', 'A service report: findings, photos, any products applied, and watering and mowing instructions'],
+        ],
+        note: 'Your estimate controls scope and terms; only the work it lists is included.',
+      },
+      responsibilities: {
+        heading: 'Not part of this service',
+        bullets: [
+          'Mowing and edging',
+          'Irrigation diagnosis and repair',
+          'Sod installation and aeration',
+          'Ongoing lawn treatments, unless your estimate lists them',
+        ],
+      },
+    },
     faq: [
       {
         q: 'Will my lawn be weed-free?',
         a: 'No company should promise that. Some weeds are prevented, some are treated after they emerge, and grassy weeds inside another grass may have limited selective options. The durable fix is dense turf; where shade, water, or compaction keep it thin, weeds return no matter what’s sprayed, and your report will say so.',
       },
       {
+        scope: 'recurring',
         q: 'How fast will it improve?',
         a: 'Depends on the cause and whether roots are alive. Weeds decline over 1–2 weeks. A treatment stops a pest without replacing dead turf. Your technician tells you which case you have and what to watch for by the next visit.',
       },
       {
+        scope: 'recurring',
         q: 'Do you spray insecticide every visit?',
         a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence.',
       },
@@ -627,6 +666,7 @@ const SERVICE_DETAILS_COPY = {
         a: 'Not with product. No Florida lawn grass thrives in deep shade. Pruning, a shade groundcover, or mulch is the honest answer there.',
       },
       {
+        scope: 'recurring',
         q: 'What happens on a re-service?',
         a: 'It starts with an inspection, not an automatic re-spray. Many treatments need 7–10 days to show their work. We re-treat when it’s the same covered condition and the label allows, and explain the non-treatment fix when that’s what the lawn needs.',
       },
@@ -926,9 +966,45 @@ function estimateStationOwnership(estimate = {}) {
   return found ? 'rent' : 'own';
 }
 
-async function buildServiceDetailsContent(serviceKey, estimate = {}) {
+// Does this estimate carry the Bermuda-suppression add-on, with the gate on?
+// Same detector acceptance uses; the gate is read at request time.
+function estimateHasBermudaSuppression(estimate = {}) {
+  const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+  if (!estimateDataCarriesBermudaSuppression(estimate && estimate.estimate_data)) return false;
+  return !!require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION');
+}
+
+// Resolve the `requires` / `scope` markers on the generic sections (schema on
+// the lawn_care entry). Markers never reach renderers.
+function resolveSections(sections, { lawnScope, bermuda }) {
+  const scopeOk = (scope) => scope == null || scope === lawnScope;
+  const list = (entries) => (Array.isArray(entries)
+    ? entries.reduce((acc, entry) => {
+      if (entry && typeof entry === 'object') {
+        if (scopeOk(entry.scope)) acc.push(entry.text);
+      } else acc.push(entry);
+      return acc;
+    }, [])
+    : entries);
+  return (sections || []).reduce((acc, section) => {
+    if (!section || !scopeOk(section.scope)) return acc;
+    if (section.requires === 'bermuda_suppression' && !bermuda) return acc;
+    const { requires: _requires, scope: _scope, ...rest } = section;
+    for (const field of ['paragraphs', 'steps', 'bullets']) {
+      if (rest[field]) rest[field] = list(rest[field]);
+    }
+    acc.push(rest);
+    return acc;
+  }, []);
+}
+
+// options.lawnScope: 'one_time' when the estimate's only lawn work is a
+// one-time lawn row (the route decides); anything else is the recurring guide.
+async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {}) {
   const copy = SERVICE_DETAILS_COPY[serviceKey];
   if (!copy) return null;
+  const lawnScope = options.lawnScope === 'one_time' && copy.oneTime ? 'one_time' : 'recurring';
+  const variant = lawnScope === 'one_time' ? copy.oneTime : {};
   // Ownership-marked entries (systemBox rows, process steps, FAQ) keep only
   // the variant matching this estimate; unmarked entries always render. The
   // marker never reaches renderers.
@@ -955,18 +1031,24 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
     customerPhone: formatGuidePhone(estimate.customer_phone),
     address: estimate.address || null,
     estimateSlug: estimate.estimate_slug || null,
-    included: copy.included,
-    // Generic ordered blocks rendered right after the systemBox (schema documented
-    // on the lawn_care entry). Passed through unchanged.
-    sections: copy.sections || [],
-    process: (copy.process || []).reduce((acc, step) => {
+    // One-time lawn estimates skip the recurring program walkthrough.
+    included: lawnScope === 'one_time' ? [] : copy.included,
+    // Generic ordered blocks rendered right after the systemBox (schema
+    // documented on the lawn_care entry), markers resolved.
+    sections: resolveSections(copy.sections, {
+      lawnScope,
+      bermuda: (copy.sections || []).some((sec) => sec && sec.requires === 'bermuda_suppression')
+        && estimateHasBermudaSuppression(estimate),
+    }),
+    process: (lawnScope === 'one_time' ? [] : (copy.process || [])).reduce((acc, step) => {
       if (typeof step === 'string') { acc.push(step); return acc; }
       if (step && typeof step === 'object' && ownershipMatches(step.ownership)) acc.push(step.text);
       return acc;
     }, []),
     faq: (copy.faq || [])
       .filter((entry) => ownershipMatches(entry && entry.ownership))
-      .map(({ ownership: _ownership, ...entry }) => entry),
+      .filter((entry) => !(entry && entry.scope) || entry.scope === lawnScope)
+      .map(({ ownership: _ownership, scope: _scope, ...entry }) => entry),
     documentation,
     illustrations: copy.illustrations || [],
     safety: copy.safetyOverride || SAFETY_SECTION,
@@ -994,6 +1076,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
     // point customers at a selector that is intentionally absent. Env read
     // at request time; the marker element never reaches renderers either way.
     systemBox: (() => {
+      if (variant.systemBox) return variant.systemBox;
       if (!copy.systemBox) return null;
       const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
       const rows = (copy.systemBox.rows || [])
@@ -1003,7 +1086,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
         .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
       return { ...copy.systemBox, rows };
     })(),
-    responsibilities: copy.responsibilities || null,
+    responsibilities: variant.responsibilities || copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
     // (termite, pest, mosquito) flagged the mid-document CTA as premature.
     ctaPlacement: copy.ctaPlacement || 'closing_only',

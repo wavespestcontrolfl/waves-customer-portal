@@ -24520,7 +24520,7 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
-  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // Fall back to estData ITSELF like estimateServiceDetailsScope and the
   // accept/read paths — some estimates store `recurring.services` at the
   // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
@@ -26494,27 +26494,39 @@ const serviceDetailsSendLimiter = rateLimit({
 
 // One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
 // carry the lawn prep & service guide too, so an estimate whose only lawn work
-// is one of these rows can fetch/send the 'lawn_care' packet. Keep in step
-// with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+// is one of these rows can fetch/send the 'lawn_care' packet — in its
+// one-time variant (no visit count, re-service, or program promises). Keep in
+// step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
 const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
 
 // The packet only exists for services actually ON this estimate: the
 // recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
 // line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
-// its (recurring-program) packet.
-function estimateRecurringKeysForDetails(estimate) {
+// its (recurring-program) packet. One-time rows are read from the SAME
+// replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
+// stored breakdown as the fallback), so an engine-inputs-only estimate whose
+// page shows the guide row can also fetch it.
+// Returns { keys, lawnScope } — lawnScope is 'recurring', 'one_time', or null.
+async function estimateServiceDetailsScope(estimate) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
   const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
-  if (!keys.has('lawn_care')) {
+  if (keys.has('lawn_care')) return { keys, lawnScope: 'recurring' };
+  try {
+    let breakdown = null;
     try {
-      const oneTimeItems = normalizeOneTimeBreakdown(estData).items;
-      if (oneTimeItems.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service))) keys.add('lawn_care');
-    } catch { /* malformed one-time data: no widening (fail closed) */ }
-  }
-  return keys;
+      breakdown = (await buildPricingBundle(estimate))?.oneTimeBreakdown || null;
+    } catch { /* replay failed: fall back to the stored breakdown */ }
+    if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
+    const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+    if (items.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service))) {
+      keys.add('lawn_care');
+      return { keys, lawnScope: 'one_time' };
+    }
+  } catch { /* malformed one-time data: no widening (fail closed) */ }
+  return { keys, lawnScope: null };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26539,10 +26551,11 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey) ? await estimateServiceDetailsScope(estimate) : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26644,7 +26657,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey) ? await estimateServiceDetailsScope(estimate) : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -26672,7 +26686,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
@@ -28704,7 +28718,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
-module.exports.estimateRecurringKeysForDetails = estimateRecurringKeysForDetails;
+module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;

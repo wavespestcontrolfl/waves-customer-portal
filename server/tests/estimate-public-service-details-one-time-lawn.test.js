@@ -26,9 +26,13 @@ const express = require('express');
 
 const TOKEN = 'one-time-lawn-token-abc123';
 
+// A fresh id per row: the pricing-bundle cache is keyed by estimate id (+
+// updated_at), and each test is a different estimate.
+let rowSeq = 0;
 function estimateRow(estimateData) {
+  rowSeq += 1;
   return {
-    id: 'est-one-time-lawn-1', token: TOKEN, status: 'sent', archived_at: null, expires_at: null,
+    id: `est-one-time-lawn-${rowSeq}`, token: TOKEN, status: 'sent', archived_at: null, expires_at: null,
     customer_id: null, property_id: null, estimate_group_id: null,
     customer_name: 'Sam Customer', customer_phone: '+19415550188', customer_email: 'sam-otl@example.test',
     address: '123 Test Ave, Bradenton, FL',
@@ -92,36 +96,53 @@ const postSend = (service, channel = 'email') => fetch(`${base}/api/estimates/${
   body: JSON.stringify({ service, channel }),
 });
 
-describe('estimateRecurringKeysForDetails', () => {
-  const { estimateRecurringKeysForDetails } = require('../routes/estimate-public');
+describe('estimateServiceDetailsScope', () => {
+  const { estimateServiceDetailsScope } = require('../routes/estimate-public');
 
   test.each([
     ['one_time_lawn'], ['plugging'], ['dethatching'], ['top_dressing'],
-  ])('a one-time %s line unlocks lawn_care and nothing else', (service) => {
-    const keys = estimateRecurringKeysForDetails(estimateRow(oneTime([LAWN_ROW(service, 'Lawn work')])));
+  ])('a one-time %s line unlocks lawn_care (one-time variant) and nothing else', async (service) => {
+    const { keys, lawnScope } = await estimateServiceDetailsScope(estimateRow(oneTime([LAWN_ROW(service, 'Lawn work')])));
     expect([...keys]).toEqual(['lawn_care']);
+    expect(lawnScope).toBe('one_time');
   });
 
-  test('one-time work that is not a lawn line unlocks nothing', () => {
-    const keys = estimateRecurringKeysForDetails(estimateRow(oneTime([
+  test('one-time work that is not a lawn line unlocks nothing', async () => {
+    const { keys, lawnScope } = await estimateServiceDetailsScope(estimateRow(oneTime([
       { service: 'one_time_pest', label: 'One-time pest treatment', price: 150 },
       { service: 'termite_foam', label: 'Termite foam treatment', price: 900 },
     ])));
     expect(keys.size).toBe(0);
+    expect(lawnScope).toBeNull();
   });
 
-  test('a recurring lawn line still carries lawn_care; recurring keys are unchanged', () => {
-    const keys = estimateRecurringKeysForDetails(estimateRow({
+  test('recurring pest + one-time plugging: lawn_care is the one-time variant; recurring keys are unchanged', async () => {
+    const { keys, lawnScope } = await estimateServiceDetailsScope(estimateRow({
       result: {
         recurring: { services: [{ service: 'pest_control', mo: 60 }] },
         oneTime: { items: [LAWN_ROW('plugging', 'Lawn plugging')] },
       },
     }));
     expect([...keys].sort()).toEqual(['lawn_care', 'pest_control']);
+    expect(lawnScope).toBe('one_time');
   });
 
-  test('a $0 or unpriced one-time lawn row does not count (not on the customer page)', () => {
-    const keys = estimateRecurringKeysForDetails(estimateRow(oneTime([{ service: 'plugging', label: 'Lawn plugging', price: 0 }])));
+  test('an engine-inputs-only estimate reads the replayed one-time rows /data sends (Codex r1 P1)', async () => {
+    // Nothing stored under result/engineResult: the stored breakdown is empty,
+    // but buildPricingBundle replays the engine and the page shows the row.
+    const row = estimateRow({
+      engineInputs: {
+        homeSqFt: 2000, lotSqFt: 10000, measuredTurfSf: 6000,
+        services: { oneTimeLawn: { treatmentType: 'weed', lawnFreq: 6 } },
+      },
+    });
+    const { keys, lawnScope } = await estimateServiceDetailsScope(row);
+    expect([...keys]).toEqual(['lawn_care']);
+    expect(lawnScope).toBe('one_time');
+  });
+
+  test('a $0 or unpriced one-time lawn row does not count (not on the customer page)', async () => {
+    const { keys } = await estimateServiceDetailsScope(estimateRow(oneTime([{ service: 'plugging', label: 'Lawn plugging', price: 0 }])));
     expect(keys.size).toBe(0);
   });
 });
@@ -133,7 +154,7 @@ describe('GET /:token/service-details/:serviceKey/pdf', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/pdf');
     const { buildServiceDetailsContent } = require('../services/estimate-service-details');
-    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }));
+    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time' });
   });
 
   test('still 404s every guide the estimate does not carry', async () => {
@@ -161,6 +182,8 @@ describe('POST /:token/service-details/send', () => {
     expect(await res.json()).toEqual({ ok: true, channel: 'email' });
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect(sendTemplate.mock.calls[0][0].triggerEventId).toMatch(/:lawn_care$/);
+    const { buildServiceDetailsContent } = require('../services/estimate-service-details');
+    expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time' });
   });
 
   test('404s (no send) for a guide the estimate does not carry', async () => {
