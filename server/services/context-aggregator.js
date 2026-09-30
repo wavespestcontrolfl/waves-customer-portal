@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
@@ -658,7 +659,7 @@ class ContextAggregator {
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p))
       // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
       // the invoice lifecycle owns that money — EXCEPT when the linked
       // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('../services/collections/collection-hold');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -469,26 +470,28 @@ router.get('/billing-health', async (req, res, next) => {
     // Failed payments in the last 30 days. Superseded rows (retry
     // collected, or duplicate attempt rows) are resolved — not active
     // failures.
-    const failedRecent = await db('payments')
+    const failedRecent = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0])
+      .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0]))
       .count('* as n').first();
 
     // Payments in retry queue (pending retry)
-    const inRetry = await db('payments')
+    // B10: a dispute-hold deferral (never attempted, Stripe not contacted) is
+    // waiting on the office's release, not in a decline-retry ladder.
+    const inRetry = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
-      .whereNotNull('next_retry_at')
+      .whereNotNull('next_retry_at'))
       .count('* as n').first();
 
     // Escalated (3 retries exhausted)
-    const escalated = await db('payments')
+    const escalated = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .where('retry_count', '>=', 3)
-      .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0])
+      .where('payment_date', '>=', thirtyDaysAgo.toISOString().split('T')[0]))
       .count('* as n').first();
 
     // Charged this month (success)
@@ -552,12 +555,12 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
       .select('id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier');
 
     // In retry queue
-    const inRetry = await db('payments')
+    const inRetry = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .join('customers', 'customers.id', 'payments.customer_id')
       .where('payments.status', 'failed')
       .whereNull('payments.superseded_by_payment_id')
       .where('payments.retry_count', '<', 3)
-      .whereNotNull('payments.next_retry_at')
+      .whereNotNull('payments.next_retry_at'))
       .select(
         'customers.id', 'customers.first_name', 'customers.last_name',
         'payments.id as payment_id', 'payments.amount', 'payments.retry_count',
@@ -565,11 +568,11 @@ router.get('/billing-health/at-risk', async (req, res, next) => {
       );
 
     // Escalated
-    const escalated = await db('payments')
+    const escalated = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .join('customers', 'customers.id', 'payments.customer_id')
       .where('payments.status', 'failed')
       .whereNull('payments.superseded_by_payment_id')
-      .where('payments.retry_count', '>=', 3)
+      .where('payments.retry_count', '>=', 3))
       .select(
         'customers.id', 'customers.first_name', 'customers.last_name',
         'payments.id as payment_id', 'payments.amount', 'payments.failure_reason',

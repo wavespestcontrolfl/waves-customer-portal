@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral } = require('../services/collections/collection-hold');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -1023,11 +1024,13 @@ router.get('/balance', async (req, res, next) => {
     // without superseding (Auto Pay off, customer off the monthly lane —
     // next_retry_at cleared, retry_count still 0) no collector is coming
     // for it any more, and it is visible debt like any other disarmed row.
-    const isNeverAttemptedDeferral = (p) => {
+    // collection_hold (B10) deferrals: the shared predicate every failed-payment consumer uses.
+    const isNeverAttemptedDeferral = (p) => isNeverAttemptedHoldDeferral(p) || isNeverAttemptedLockDeferral(p);
+    const isNeverAttemptedLockDeferral = (p) => {
       if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return !!(m && ['lock_contention', 'collection_hold'].includes(m.deferred_reason)); // collection_hold (B10): dues deferred under a dispute hold are not a payable balance
+        return !!(m && m.deferred_reason === 'lock_contention');
       } catch {
         return false;
       }
