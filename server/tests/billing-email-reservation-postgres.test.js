@@ -622,6 +622,8 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(rows.find((row) => row.id === sibling.id).metadata.resolved).toBeUndefined();
   });
   test('customer-level dunning: an accepted-but-unstamped email is repaired from the stored row, only when bound to THIS reservation', async () => {
+    // relative to the clock the code reads (reminderProgress' 90-day window), so the test means the same any day
+    const acceptedAt = new Date(Date.now() - 5000);
     const customerId = randomUUID();
     const scheduleId = randomUUID();
     const eventKey = `customer-dunning:${scheduleId}:1:d60_reminder`;
@@ -635,7 +637,7 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       {
         template_key: 'invoice.followup_combined_60_day', trigger_event_id: key.replace('customer-dunning:', 'customer_dunning:'),
         idempotency_key: key.replace('customer-dunning:', 'customer_dunning_email:'), payload_snapshot: { collections_ledger_id: mine.id },
-        sent_at: new Date('2026-10-06T14:16:05Z'), ...over,
+        sent_at: acceptedAt, ...over,
       },
     );
     await mockDatabase('email_messages').insert([
@@ -647,7 +649,7 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect([...repaired]).toEqual([mine.id]);
     const rows = await mockDatabase('collections_contact_ledger').whereIn('id', [mine.id, unbound.id]);
     expect(rows.find((r) => r.id === mine.id).metadata.delivered).toBe(true);
-    expect(new Date(rows.find((r) => r.id === mine.id).occurred_at).toISOString()).toBe('2026-10-06T14:16:05.000Z');
+    expect(new Date(rows.find((r) => r.id === mine.id).occurred_at).toISOString()).toBe(acceptedAt.toISOString());
     expect(rows.find((r) => r.id === unbound.id).metadata.delivered).toBeUndefined();
     expect(tail).toContain(scheduleId);
     // the real progress read sees the repaired leg as delivered and the other as owed

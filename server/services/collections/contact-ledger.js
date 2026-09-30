@@ -144,12 +144,20 @@ function reservationSnapshot(metadata) {
 // A retry can quote different debt than the failed attempt that created the
 // reservation. `refresh` ({ invoiceIds, metadata }: what this attempt sends)
 // is written in the same claim, so the row records what the retry quoted.
-async function claimAttempt(entry, refresh = null, { database = db } = {}) {
+// The claim decision before any write (pure, so a read-only caller can ask it too):
+// `reopen` = a confirmed failed attempt whose failure flag the claim must clear.
+function claimVerdict(entry) {
   if (!entry?.id) return { allowed: false, held: true };
   if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
   if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
   if (!entry.reused) return { allowed: true };
   if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
+  return { allowed: true, reopen: true };
+}
+
+async function claimAttempt(entry, refresh = null, { database = db } = {}) {
+  const verdict = claimVerdict(entry);
+  if (!verdict.reopen) return verdict;
   const changed = await database('collections_contact_ledger').where({ id: entry.id })
     .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
       JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
@@ -195,4 +203,4 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt };
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, claimVerdict };

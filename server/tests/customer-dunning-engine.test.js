@@ -81,8 +81,10 @@ jest.mock('../services/billing-email-reservation', () => ({ repairAcceptedBillin
 // In-memory collections_contact_ledger.
 const mockLedger = [];
 jest.mock('../services/collections/contact-ledger', () => {
+  const { claimVerdict } = jest.requireActual('../services/collections/contact-ledger');
   const merge = (row, extra) => { row.metadata = { ...(row.metadata || {}), ...extra }; };
   return {
+    claimVerdict,
     recordContact: jest.fn(async ({ customerId, channel, purpose, invoiceIds = [], source, metadata = null, occurredAt = new Date(), idempotencyKey = null }) => {
       const existing = idempotencyKey && mockLedger.find((r) => r.idempotency_key === idempotencyKey);
       if (existing) return { id: existing.id, metadata: { ...existing.metadata }, reused: true, occurred_at: existing.occurred_at };
@@ -185,6 +187,18 @@ const smsTemplates = require('../routes/admin-sms-templates');
 const ContactLedger = require('../services/collections/contact-ledger');
 
 const NOW = new Date('2026-10-06T14:16:00Z');
+// The fixtures are dated against NOW while the code under test reads the real clock (reminderProgress' 90-day
+// window, claim freshness, the batch claimAt). Freeze Date at NOW so the suite means the same on any day
+// (AGENTS.md: date-sensitive tests do not depend on the wall clock). Only Date is faked: timers, setImmediate and
+// microtasks stay real (`toFake: ['Date']` alone leaves setImmediate hanging under this jest, hence the list).
+beforeAll(() => {
+  jest.useFakeTimers({
+    now: NOW,
+    doNotFake: ['setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'nextTick',
+      'queueMicrotask', 'performance', 'hrtime', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback'],
+  });
+});
+afterAll(() => { jest.useRealTimers(); });
 const DAY = 24 * 60 * 60 * 1000;
 const ago = (d) => new Date(NOW.getTime() - d * DAY);
 const CUSTOMER_ID = 'cust-0000-synthetic';
@@ -1172,12 +1186,129 @@ describe('a definite non-send recorded by the email library is recovered too (R4
   });
 });
 
+describe('the cadence is driven by the members of the set that was sent (R5-1)', () => {
+  // An older invoice awaiting microdeposit verification stays status 'active' but the resolved set excludes it.
+  const withExcludedOlder = () => {
+    memberSeqRows = [...rowsFor(['inv-old'], 100, 3), ...rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3)];
+    live = makeSet(['inv-a', 'inv-b', 'inv-c']);
+    live.excluded.md = ['inv-old'];
+  };
+
+  test('a fresh send advances from the SENT set\'s rows: the excluded older invoice does not schedule the next stage early', async () => {
+    withExcludedOlder();
+    expect((await run()).outcome).toBe('advanced');
+    const { activeRows } = Schedule.advance.mock.calls[0][1];
+    expect(activeRows.map((r) => r.invoice_id).sort()).toEqual(['inv-a', 'inv-b', 'inv-c']);
+    // the real cadence over those rows: the next touch comes from the 60-day-old invoice, not the 100-day-old one
+    const real = jest.requireActual('../services/customer-dunning/schedule');
+    const fromSent = real.nextTouchFor({ step_index: 4 }, activeRows, NOW);
+    const fromAll = real.nextTouchFor({ step_index: 4 }, memberSeqRows, NOW);
+    expect(fromSent.getTime()).toBeGreaterThan(fromAll.getTime());
+  });
+
+  test('a touch settled from the ledger (recover-first) narrows to the invoices its reservation named', async () => {
+    withExcludedOlder();
+    mockLedger.push({
+      id: 'pre-e', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-e',
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    }, {
+      id: 'pre-s', customer_id: CUSTOMER_ID, channel: 'sms', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-s',
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    expect((await run()).outcome).toBe('advanced');
+    expect(Schedule.advance.mock.calls[0][1].activeRows.map((r) => r.invoice_id)).not.toContain('inv-old');
+  });
+
+  test('"the next stage has arrived" (which settles a half-delivered touch) is judged from the named invoices too, not the excluded older one', async () => {
+    withExcludedOlder();
+    mockLedger.push({
+      id: 'pre-e', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-e',
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    // the text leg is still owed and the named invoices are at Day 60: it is SENT, not settled early on the 100-day-old invoice
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('shadow models an ambiguous reservation before logging a send (R5-2)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const stepKey = 's-open';
+  const reserve = (channel, metadata = {}) => mockLedger.push({
+    id: `res-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(0.1),
+    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: `k-${channel}`,
+    metadata: { notificationEventKey: `customer-dunning:${stepKey}:1:d60_reminder`, selectedChannels: ['email', 'sms'], ...metadata },
+  });
+  const open = [{ id: stepKey, customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }];
+  const shadow = async () => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const database = shadowDb(open);
+    await Runner.shadowRun(NOW, { database });
+    return database;
+  };
+  const untouched = (database) => {
+    expect(database.writes).toEqual([]);
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  };
+
+  test('email-only: a reservation with no delivery evidence that is not send_failed is would-HOLD REMINDER_OUTCOME_UNCONFIRMED, as live', async () => {
+    prefs = { invoice_channels: ['email'] };
+    reserve('email');
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
+    expect(lines()).not.toMatch(/would send/);
+    // the live path holds for exactly this reason
+    ContactLedger.recordContact.mockClear();
+    setup();
+    prefs = { invoice_channels: ['email'] };
+    mockLedger.length = 0;
+    mockLedger.push({
+      id: 'res-live', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'],
+      idempotency_key: `billing-reminder:${require('crypto').createHash('sha256').update(`${CUSTOMER_ID}:customer-dunning:${SCHEDULE_ID}:1:d60_reminder`).digest('hex')}:email`,
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, selectedChannels: ['email'] },
+    });
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'REMINDER_OUTCOME_UNCONFIRMED' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a partial: the claimable channel goes, the ambiguous one is named', async () => {
+    reserve('email');
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi members=3 total_cents=\d+ unclaimable=email/);
+  });
+
+  test('a reservation the live path would reclaim (send_failed) or a new one is sendable; nothing is claimed in shadow', async () => {
+    reserve('email', { send_failed: true });
+    untouched(await shadow());
+    expect(lines()).toMatch(/SHADOW would send .*schedule=s-open/);
+    expect(lines()).not.toMatch(/unclaimable=/);
+  });
+
+  test('the ledger\'s claim decision is one function: claimAttempt and the shadow ask the same verdict', () => {
+    const { claimVerdict } = jest.requireActual('../services/collections/contact-ledger');
+    expect(claimVerdict({ id: 'x', reused: true, metadata: {} })).toEqual({ allowed: false, held: true });
+    expect(claimVerdict({ id: 'x', reused: true, metadata: { send_failed: true } })).toEqual({ allowed: true, reopen: true });
+    expect(claimVerdict({ id: 'x', reused: false, metadata: {} })).toEqual({ allowed: true });
+    expect(claimVerdict({ id: 'x', reused: true, metadata: { delivered: true } })).toEqual({ allowed: false, delivered: true });
+    expect(claimVerdict({ id: 'x', reused: true, metadata: { resolved: true } })).toEqual({ allowed: false, resolved: true });
+  });
+});
+
 describe('a delivery older than the progress window is still a delivery, and completes what it NAMED (R2-2 / A2)', () => {
   const crypto = require('crypto');
   const finalKey = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
   const seedOldFinal = (over = {}) => mockLedger.push({
     id: 'old-final', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer',
-    occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: ['inv-a', 'inv-b'],
+    occurred_at: ago(100), invoice_ids: ['inv-a', 'inv-b'],
     idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${finalKey}`).digest('hex')}:email`,
     metadata: { notificationEventKey: finalKey, delivered: true, selectedChannels: ['email'] },
     ...over,
@@ -1186,7 +1317,7 @@ describe('a delivery older than the progress window is still a delivery, and com
 
   test('final accepted (naming A and B), crash, resumed 100 days later, today\'s set is A, B AND C: completes A and B with the ORIGINAL time; C is untouched and no second notice goes out', async () => {
     finalNotice();
-    const old = new Date(Date.now() - 100 * DAY);
+    const old = ago(100);
     seedOldFinal({ occurred_at: old });
     const out = await run(); // live = { A, B, C }
     expect(out.outcome).toBe('completed');
@@ -1235,7 +1366,7 @@ describe('a delivery older than the progress window is still a delivery, and com
   test('sendReminderChannels reports restored legs with what their reservation recorded (additive; per-invoice callers ignore it)', async () => {
     const { sendReminderChannels } = require('../services/billing-reminder-delivery');
     const key = 'customer-dunning:s:1:d60_reminder';
-    const at = new Date(Date.now() - 100 * DAY);
+    const at = ago(100);
     mockLedger.push({
       id: 'r1', customer_id: CUSTOMER_ID, channel: 'email', source: 'x', occurred_at: at, invoice_ids: ['inv-a', 'inv-b'],
       idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email`,

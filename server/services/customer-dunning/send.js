@@ -95,7 +95,11 @@ async function sendTextLeg(ctx, channel, ledger) {
       original_message_type: 'invoice_followup',
       notificationEventKey: ctx.eventKey,
       billingDeliveryCategory: 'invoice',
-      billingDeliveryLeg: channel,
+      // The consent validator treats this marker as "the recipient's explicit billing
+      // choice selected this leg" and refuses a default-channel or operator send that
+      // carries it (BILLING_PREFERENCES_CHANGED, retried forever). Set it exactly as the
+      // per-invoice ladder does: only for a non-operator send on an explicit selection.
+      ...(ctx.explicit === true && !ctx.operatorInitiated ? { billingDeliveryLeg: channel } : {}),
       customer_dunning_schedule_id: ctx.schedule.id,
       rendered_amount: totalDue(set),
       collections_ledger_id: ledger.id,

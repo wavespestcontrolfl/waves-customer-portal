@@ -36,6 +36,7 @@ const Schedule = require('./schedule');
 const Render = require('./render');
 const Boundary = require('./boundary');
 const { makeSender } = require('./send');
+const { claimVerdict } = require('../collections/contact-ledger');
 
 const { STEPS } = Schedule;
 const FINAL_STEP_IDS = ['d60_reminder', 'd90_final_notice'];
@@ -121,13 +122,26 @@ function namedForFinal(run, facts) {
   return { ids: [...ids], unreadable };
 }
 
+/**
+ * The rows that drive the cadence are the members of the set a touch went out on,
+ * never every active sequence: an invoice the set excluded (a microdeposit-pending
+ * one) stays `active` and would otherwise pull the next touch weeks early. `sent` is
+ * the resolved set of a fresh send; a touch settled from the ledger has only the
+ * invoices its reservation named. Unknown = every row (nothing to narrow by).
+ */
+function cadenceRows(rows, run, facts = null) {
+  if (run.sentSet) return Schedule.rowsInSet(rows, run.sentSet);
+  const named = new Set((facts ? namedForFinal(run, facts).ids : []).map(String));
+  return named.size ? rows.filter((r) => named.has(String(r.invoice_id))) : rows;
+}
+
 async function memberRows(run) {
   if (!run.rows) run.rows = await Schedule.activeMemberRows(run.schedule.customer_id, { database: run.database });
   return run.rows;
 }
 
-async function nextStageArrived(run) {
-  const oldest = oldestActive(await memberRows(run));
+async function nextStageArrived(run, event) {
+  const oldest = oldestActive(cadenceRows(await memberRows(run), run, { event, delivered: event.delivered }));
   const anchor = oldest ? Followups.sequenceAnchor(oldest) : null;
   return Schedule.stageFor(anchor, run.now, run.schedule.step_index) > Number(run.schedule.step_index);
 }
@@ -187,7 +201,7 @@ async function finishDelivered(run, facts) {
     // voided during the send must not keep the cadence (fresh read, never the
     // rows cached before the send).
     run.rows = null;
-    ok = await Schedule.advance(run.schedule, { ...base, activeRows: await memberRows(run) });
+    ok = await Schedule.advance(run.schedule, { ...base, activeRows: cadenceRows(await memberRows(run), run, facts) });
   }
   if (!ok) return outcome('stale');
   if (facts.deliveredNow?.length) await recordInteraction(run, facts.delivered);
@@ -212,7 +226,7 @@ async function decideRecovery(run) {
   if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
   run.priorEvent = event; // a partial delivery from an earlier tick, kept in case the post-send read fails
   // Delivered before: settle from the ledger. No render, no set read.
-  if (event.complete || await nextStageArrived(run)) {
+  if (event.complete || await nextStageArrived(run, event)) {
     return decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } });
   }
   return null;
@@ -333,6 +347,7 @@ const setChanged = (result) => Object.values(result.results || {})
 function attemptSend(run, set) {
   const memberIds = set.members.map((m) => m.invoice_id);
   run.memberIds = memberIds;
+  run.sentSet = set; // the set this touch goes out on: what its cadence is driven by
   run.snapshotMeta = snapshotMetadata(run, set);
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
@@ -511,6 +526,7 @@ async function decideShadowPolicy(run, set) {
   const delivered = event?.delivered || new Set();
   const pending = pendingReminderChannels(run.sendChannels, delivered, event?.resolved || new Set());
   run.policyDenied = [];
+  run.unclaimable = [];
   if (!pending.length) return null;
   const memberIds = set.members.map((m) => m.invoice_id);
   const verdicts = await reminderPolicyVerdicts({
@@ -523,8 +539,24 @@ async function decideShadowPolicy(run, set) {
     const waivable = delivered.size > 0 && denied.every((channel) => verdictDurablyDenied(verdicts[pending.indexOf(channel)]));
     return waivable ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
   }
-  run.policyDenied = denied; // a partial send: the allowed channels go, these do not
+  // A reservation another attempt left neither delivered, resolved nor failed (a worker
+  // that died between the reservation and the handoff) is ambiguous: the live claim
+  // refuses it (REMINDER_OUTCOME_UNCONFIRMED). Judged read-only by the ledger's own claim decision.
+  const allowed = pending.filter((channel) => !denied.includes(channel));
+  const unclaimable = allowed.filter((channel) => !claimVerdict(standingReservation(event, channel)).allowed);
+  if (unclaimable.length === allowed.length) return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
+  run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
+  run.unclaimable = unclaimable;
   return null;
+}
+
+// The ledger row a channel's keyed reservation already has for this step, shaped as recordContact returns a reused one.
+function standingReservation(event, channel) {
+  const row = (event?.entries || []).find((entry) => entry.channel === channel);
+  if (!row) return { id: 'new', reused: false, metadata: {} };
+  let metadata = row.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+  return { id: row.id, reused: true, metadata: metadata || {} };
 }
 
 /**
@@ -542,12 +574,16 @@ async function judgeShadowSchedule(schedule, set, { now, database, due = null })
   if (!stop) {
     line('send', {
       ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
-      ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}), ...(due ? { due: iso(due) } : {}),
+      ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}),
+      ...(run.unclaimable?.length ? { unclaimable: run.unclaimable.join('+') } : {}), ...(due ? { due: iso(due) } : {}),
     });
     return 'send';
   }
   const verb = { hold: 'hold', autopay_hold: 'hold', pause: 'pause', close: 'close', settle: 'settle' }[stop.kind];
-  line(verb, { ...fields, reason: stop.reason, ...(stop.denied?.length ? { denied: stop.denied.join('+') } : {}) });
+  line(verb, {
+    ...fields, reason: stop.reason, ...(stop.denied?.length ? { denied: stop.denied.join('+') } : {}),
+    ...(stop.unclaimable?.length ? { unclaimable: stop.unclaimable.join('+') } : {}),
+  });
   return verb;
 }
 
