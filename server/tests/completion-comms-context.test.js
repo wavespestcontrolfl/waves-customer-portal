@@ -247,10 +247,15 @@ describe('buildCompletionCommsContext', () => {
         { created_at: mk(1), direction: 'inbound', lead_synopsis: 'Heard noises again in the attic' },
         { created_at: mk(4), direction: 'outbound', lead_synopsis: 'Confirmed the visit window' },
         { created_at: mk(7), direction: null, lead_synopsis: 'Discussed the attic hatch' },
+        // Linked by caller ID before classification, then marked spam.
+        { created_at: mk(8), direction: 'inbound', processing_status: 'spam', lead_synopsis: 'Extended warranty robocall' },
       ],
       sms_log: [
         { created_at: mk(2), direction: 'outbound', message_body: 'Confirming your exclusion visit window' },
         { created_at: mk(3), direction: 'inbound', message_body: 'Scratching is worse after midnight' },
+        // The code comes before its anchor, and the anchor sits past the
+        // 260-character cut: redaction has to run on the whole message.
+        { created_at: mk(9), direction: 'inbound', message_body: `4821 ${'and the side yard is muddy '.repeat(12)}is the gate code` },
       ],
       emails: [
         { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
@@ -264,8 +269,15 @@ describe('buildCompletionCommsContext', () => {
     // The filters run in the queries, before each channel's cap, so Waves'
     // own texts and mail can never crowd the customer's words out.
     expect(whereArgs.sms_log).toContainEqual(['direction', 'inbound']);
+    // The canonical call reader's exclusions: no sandbox call, no call
+    // classified spam or wrong number.
+    expect(whereArgs['call_log:raw'].map(([sql]) => sql).join(' ')).toContain("COALESCE(??, '') <> ?");
+    expect(whereArgs.call_log.some(([arg]) => typeof arg === 'function')).toBe(true);
+    expect(ctx.text).not.toContain('warranty robocall');
+    expect(ctx.text).not.toContain('4821');
+    expect(ctx.text).toMatch(/Customer text .*: \[redacted\] and the side yard is muddy/);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
-    const lines = ctx.text.split('\n');
+    const lines = ctx.text.split('\n').filter((line) => !line.includes('side yard is muddy'));
     expect(lines).toEqual([
       expect.stringMatching(/^Call .* \(the customer called; AI summary, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),

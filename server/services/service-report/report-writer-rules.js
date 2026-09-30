@@ -206,6 +206,19 @@ const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
 const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b)/i;
 const SAFE_WORD_RE = /\b(?:safe|safer|safest|safely|unsafe|non-?toxic|harmless)\b/i;
 const CHEMICAL_RE = /\bchemicals?\b/i;
+// Forward-looking timeframes (rule 11): "7–14 days", "over the next two
+// weeks", "within 24 hours", "for a few days". A past window ("in the seven
+// days before the visit", "two weeks ago") is a fact and passes.
+const DURATION_NUMBER = '(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty|thirty|sixty|ninety)';
+const DURATION_UNIT = '(?:days?|weeks?|months?|hours?|hrs?|minutes?|mins?)';
+const TIMEFRAME_RE = new RegExp(
+  `\\b\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}\\b`
+  + `|\\b(?:within|in|over|during|for|after|up\\s+to|about|around|roughly|approximately|takes?|lasts?)\\s+(?:the\\s+)?(?:next\\s+|coming\\s+|first\\s+)?${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
+  + `|\\bnext\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`,
+  'i',
+);
+// Money and entitlement (rule 9).
+const PRICE_RE = /\$\s?\d|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -222,6 +235,8 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (SAFE_WORD_RE.test(copy)) return 'safe_word';
   if (CHEMICAL_RE.test(copy)) return 'chemical';
   if (REENTRY_RE.test(copy)) return 'reentry';
+  if (TIMEFRAME_RE.test(copy)) return 'timeframe';
+  if (PRICE_RE.test(copy)) return 'price';
   const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean);

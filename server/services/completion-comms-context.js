@@ -33,6 +33,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const ContextAggregator = require('./context-aggregator');
+
+const { redactAccessCodes } = ContextAggregator;
 
 const RECURRING_CAP_DAYS = 120;
 const ONE_TIME_CAP_DAYS = 180;
@@ -214,9 +218,22 @@ async function buildCompletionCommsContext({
     knex('call_log')
       .where({ customer_id: customerId })
       .where('created_at', '>=', floor)
-      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
+      // customerWordsOnly: the canonical call reader's exclusions
+      // (context-aggregator getRecentCalls). Caller-ID linkage happens before
+      // classification, so sandbox, spam and wrong-number calls can carry
+      // this customer's id; their summaries are never the customer's words.
+      .modify((q) => {
+        if (customerWordsOnly) {
+          whereNotSandboxCall(q);
+          q.where((w) => w.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']));
+        }
+      })
+      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes',
+        ...(customerWordsOnly ? ['processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status'] : []))
       .orderBy('created_at', 'desc')
-      .limit(6)
+      // Over-fetch under customerWordsOnly: extraction-classified misdials
+      // are dropped in JS below and must not shrink the pick.
+      .limit(customerWordsOnly ? 10 : 6)
       .catch((err) => {
         logger.warn(`[comms-context] call context unavailable: ${err.message}`);
         return [];
@@ -255,9 +272,16 @@ async function buildCompletionCommsContext({
       }),
   ]);
 
+  // customerWordsOnly: access codes are scrubbed from each whole source field
+  // BEFORE compaction; a code whose anchor sits past the cut ("4821 … is the
+  // gate code") would otherwise survive as an unlabelled number.
+  const source = (text) => (customerWordsOnly ? redactAccessCodes(String(text || '')) : text);
+  const callRows = customerWordsOnly
+    ? calls.filter((call) => !ContextAggregator.isExcludedCall(call)).slice(0, 6)
+    : calls;
   const entries = [];
-  for (const call of calls) {
-    const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
+  for (const call of callRows) {
+    const summary = compactText(source(call.lead_synopsis || call.notes || call.transcription));
     if (summary) {
       const who = call.direction === 'inbound' ? 'the customer called'
         : call.direction === 'outbound' ? 'Waves called the customer' : 'caller unknown';
@@ -271,7 +295,7 @@ async function buildCompletionCommsContext({
   }
   for (const msg of sms) {
     if (customerWordsOnly && msg.direction !== 'inbound') continue;
-    const summary = compactText(msg.message_body, 260);
+    const summary = compactText(source(msg.message_body), 260);
     if (summary) {
       entries.push({
         ts: contextTs(msg.created_at),
@@ -283,8 +307,8 @@ async function buildCompletionCommsContext({
   }
   for (const email of emails) {
     if (customerWordsOnly && wavesSentEmail(email)) continue;
-    const summary = compactText(email.snippet || email.body_text, 260);
-    const subject = compactText(email.subject, 120);
+    const summary = compactText(source(email.snippet || email.body_text), 260);
+    const subject = compactText(source(email.subject), 120);
     if (summary || subject) {
       entries.push({
         ts: contextTs(email.received_at),

@@ -145,6 +145,14 @@ describe('writerRulesRejection', () => {
     ['You can re-enter the treated rooms after it has dried.', 'reentry'],
     ['Keep pets and kids away from the treated band for a while.', 'reentry'],
     ['Stay out of the garage until the spray has dried.', 'reentry'],
+    ['Some activity can continue for a few days.', 'timeframe'],
+    ['Activity may take 7–14 days to drop off.', 'timeframe'],
+    ['Webbing should thin out over about two weeks.', 'timeframe'],
+    ['We will follow up in 7 days.', 'timeframe'],
+    ['This re-service is free of charge.', 'price'],
+    ['The visit is included in your plan.', 'price'],
+    ['Each extra check is $95.', 'price'],
+    ['The work is covered by your warranty.', 'price'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -152,6 +160,14 @@ describe('writerRulesRejection', () => {
   test('a three-letter catalog active and a parenthesized alias are screened', () => {
     expect(writerRulesRejection('We placed Bti larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis israelensis (Bti)'] })).toBe('active_ingredient');
     expect(writerRulesRejection('We placed a larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis israelensis (Bti)'] })).toBeNull();
+  });
+
+  test('past windows and physical words are not timeframes or prices', () => {
+    expect(writerRulesRejection('About 1.4 inches of rain fell in the seven days before the visit.')).toBeNull();
+    expect(writerRulesRejection('The customer first saw ants two weeks ago.')).toBeNull();
+    expect(writerRulesRejection('We will recheck station 7 at your next monitoring visit.')).toBeNull();
+    expect(writerRulesRejection('The station behind the garage is covered by mulch.')).toBeNull();
+    expect(writerRulesRejection('The gutters were free of standing water.')).toBeNull();
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {

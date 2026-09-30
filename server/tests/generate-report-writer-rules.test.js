@@ -141,6 +141,23 @@ test('gate on: a cached draft is never served for a different product set', asyn
   expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
 });
 
+test('gate on: the last-resort copy leaves out recorded items the rules forbid', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider.mockImplementation(async () => ({ ok: false, reason: 'openai_503' }));
+  const res = mkRes();
+  await handler(mkReq({
+    serviceNotes: 'Perimeter band (fallback case).',
+    actionsCompleted: ['Exterior perimeter treatment', 'Web removal'],
+    recommendations: ['Follow up in 7 days', 'Trim the shrubs off the wall'],
+  }), res);
+  expect(res.statusCode).toBe(200);
+  const { report, deterministic } = res.json.mock.calls[0][0];
+  expect(deterministic).toBe(true);
+  expect(report).toContain('Trim the shrubs off the wall');
+  expect(report).not.toContain('7 days');
+  expect(report).not.toMatch(/linear ft/);
+});
+
 test('gate off: the same amount is not screened by the rules', async () => {
   const withAmount = CLEAN.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds');
   mockProvider.mockImplementation(async () => ({ ok: true, text: withAmount }));

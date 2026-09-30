@@ -24803,19 +24803,26 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           retryable: true,
         });
       }
+      // Under the writer rules the last-resort copy echoes only recorded
+      // items the rules allow: an item with a timeframe, price, amount or
+      // other forbidden term ("follow up in 7 days") is left out rather than
+      // published.
+      const rulesItems = (items) => (writerRulesOn
+        ? items.filter((item) => !writerRulesScreen(String(item || '')))
+        : items);
       const report = buildDeterministicReportCopy({
         serviceType: fallbackServiceType,
-        areas: promptAreas,
-        actions: [...promptActions, ...typedFallbackActions],
+        areas: rulesItems(promptAreas),
+        actions: rulesItems([...promptActions, ...typedFallbackActions]),
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
-        observations: [...promptObs, ...typedFallbackObservations],
-        recommendations: [...promptRecs, ...typedFallbackNextSteps],
+        observations: rulesItems([...promptObs, ...typedFallbackObservations]),
+        recommendations: rulesItems([...promptRecs, ...typedFallbackNextSteps]),
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
-        customerConcern: promptConcern,
+        customerConcern: rulesItems([promptConcern])[0] || '',
         // The writer rules drop the recorded footage ("with 120 linear ft
         // recorded") from the last-resort copy too.
         applicationRecords: writerRulesOn
