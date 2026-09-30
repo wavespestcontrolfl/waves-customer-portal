@@ -1,0 +1,567 @@
+'use strict';
+
+/**
+ * customer_dunning_schedules — the state machine of one customer's overdue
+ * reminder cadence (dunning consolidation §4-§7). PR 2: complete and directly
+ * tested, but nothing on the cron or a route calls it yet (the live wiring is
+ * PR 3); only shadow.js/runner.shadowRun reads through here, and it never
+ * calls a writer.
+ *
+ * Every function takes `database` (default: the pool) and uses ONLY that
+ * handle, so a test — or a future caller holding a transaction — controls
+ * where it runs. Every UPDATE stamps updated_at by hand (invoice-followups.js
+ * convention) and is guarded on the state it read, so a concurrent writer
+ * turns it into a no-op rather than an overwrite.
+ *
+ * Lock order everywhere: advisory key (lockKey) -> schedule row -> sequence
+ * rows. The engine never locks invoice rows.
+ */
+
+const db = require('../../models/db');
+const logger = require('../logger');
+const config = require('../../config/invoice-followups');
+const Followups = require('../invoice-followups');
+const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
+const { OPEN_STATUSES, CLAIM_TTL_MS, lockKey } = require('./constants');
+const { promotionSeed, seedRefusal, oldestActive, firstLiveStep } = require('./seed');
+const { resolveDunnableSet } = require('./balance-set');
+
+const TABLE = 'customer_dunning_schedules';
+const STEPS = config.stepsThrough90;
+const FINAL_INDEX = STEPS.length - 1;
+// The same terminal set runPending's batch select excludes.
+const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
+// D10: a step held this long gets ONE staff alert (and keeps retrying).
+const HELD_ALERT_DAYS = 7;
+// Hold reasons the office must resolve by hand: alerted at once, once.
+const OFFICE_HOLD_REASONS = Object.freeze(['member_paused', 'member_autopay_hold', 'credit_covers_anchor', 'over_cap']);
+const HOUR_MS = 60 * 60 * 1000;
+
+const isFinalIndex = (index) => Number(index) >= FINAL_INDEX;
+
+// ── staff alerts (best effort; never throws) ─────────────────────────────
+async function alertStaff({ title, body, dedupeKey, customerId }) {
+  try {
+    await require('../notification-service').notifyAdmin('alert', title, body, {
+      link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices',
+      dedupeKey,
+      metadata: { customer_id: customerId || null },
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`[customer-dunning] staff alert failed (${dedupeKey}): ${err.message}`);
+    return false;
+  }
+}
+
+// ── cadence ──────────────────────────────────────────────────────────────
+
+/**
+ * The latest step whose date on `anchor` has arrived, never below `fromIndex`
+ * and never beyond the final step. A step that was never sent because the
+ * cron skipped a day is passed over here (logged by the caller), never sent
+ * late; the final step is never passed over — it is the cap.
+ */
+function stageFor(anchor, now, fromIndex = 0) {
+  let stage = Math.min(Math.max(Number(fromIndex) || 0, 0), FINAL_INDEX);
+  if (!anchor) return stage;
+  for (let i = stage + 1; i <= FINAL_INDEX; i += 1) {
+    const dueAt = Followups.computeNextTouchAt(anchor, i);
+    if (dueAt && dueAt.getTime() <= now.getTime()) stage = i;
+  }
+  return stage;
+}
+
+// ── member rows ──────────────────────────────────────────────────────────
+
+const memberRowsQuery = (database, customerId) => database('invoice_followup_sequences as s')
+  .join('invoices as i', 'i.id', 's.invoice_id')
+  .where({ 's.customer_id': customerId, 's.status': 'active' })
+  .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+  .orderBy('i.created_at', 'asc')
+  .select(
+    's.*',
+    'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
+    'i.created_at as invoice_created_at', 'i.status as invoice_status',
+  );
+
+/** The customer's ACTIVE per-invoice sequences on open invoices, runPending row shape. */
+async function activeMemberRows(customerId, { database = db, forUpdate = false } = {}) {
+  const query = memberRowsQuery(database, customerId);
+  if (forUpdate) query.forUpdate('s');
+  return query;
+}
+
+/** Narrow rows to the ones the resolved set counts as active members. */
+function rowsInSet(rows, set) {
+  const ids = new Set((set?.members || []).filter((m) => m.seqStatus === 'active').map((m) => String(m.invoice_id)));
+  return rows.filter((r) => ids.has(String(r.invoice_id)));
+}
+
+// ── ownership + locks ────────────────────────────────────────────────────
+const takeLock = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey(customerId)]);
+
+async function openScheduleFor(customerId, { database = db } = {}) {
+  return database(TABLE).where({ customer_id: customerId }).whereIn('status', OPEN_STATUSES).first();
+}
+
+const claimIsFresh = (row, now) => !!row.touch_claimed_at
+  && new Date(row.touch_claimed_at).getTime() > now.getTime() - CLAIM_TTL_MS;
+
+// ── promotion ────────────────────────────────────────────────────────────
+
+async function promotionCandidates({ database = db } = {}) {
+  const rows = await database('invoice_followup_sequences as s')
+    .join('invoices as i', 'i.id', 's.invoice_id')
+    .where('s.status', 'active')
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereNotExists(function hasOpenSchedule() {
+      this.select(database.raw('1')).from(`${TABLE} as c`)
+        .whereRaw('c.customer_id = s.customer_id').whereIn('c.status', OPEN_STATUSES);
+    })
+    .groupBy('s.customer_id')
+    .havingRaw('count(*) >= 2')
+    .orderBy('s.customer_id')
+    .select('s.customer_id');
+  const allow = dunningCustomerScheduleAllowlist();
+  const ids = rows.map((r) => String(r.customer_id));
+  return allow ? ids.filter((id) => allow.has(id)) : ids;
+}
+
+const snapshotOf = (rows) => rows.map((r) => ({
+  seq_id: r.id, invoice_id: String(r.invoice_id), step_index: r.step_index,
+  next_touch_at: r.next_touch_at || null, last_touch_at: r.last_touch_at || null,
+}));
+
+/**
+ * Should this customer be promoted, and to what? Pure decision over rows the
+ * caller already holds (shared by promote() and the shadow run so they can
+ * never disagree). `rows` = all the customer's active member rows.
+ */
+function promotionDecision(set, rows, now) {
+  if (set.kind !== 'multi') return { promote: false, reason: set.kind === 'hold' ? set.reason : `set_${set.kind}` };
+  const active = rowsInSet(rows, set);
+  // Quiet members (completed / no row) are named but never count toward promotion.
+  if (active.length < 2) return { promote: false, reason: 'fewer_than_two_active_members' };
+  const seed = promotionSeed(active, now);
+  if (!seed) return { promote: false, reason: seedRefusal(active, now) || 'no_seed' };
+  return { promote: true, seed, active, absorbed: active.filter((r) => String(r.id) !== String(seed.oldest_seq_id)) };
+}
+
+async function nextEpisode(trx, customerId) {
+  const row = await trx(TABLE).where({ customer_id: customerId }).max('episode as max').first();
+  return Number(row?.max || 0) + 1;
+}
+
+async function insertSchedule(trx, customerId, decision, now) {
+  const { seed, active } = decision;
+  const [row] = await trx(TABLE).insert({
+    customer_id: customerId,
+    episode: await nextEpisode(trx, customerId),
+    status: 'active',
+    step_index: seed.step_index,
+    next_touch_at: seed.next_touch_at,
+    last_touch_at: seed.last_touch_at,
+    touches_sent: seed.touches_sent,
+    seeded_from: JSON.stringify(snapshotOf(active)),
+    created_at: now,
+    updated_at: now,
+  }).returning('*');
+  return row;
+}
+
+async function promoteInTransaction(trx, customerId, now) {
+  await takeLock(trx, customerId);
+  if (await openScheduleFor(customerId, { database: trx })) return { promoted: false, reason: 'already_open' };
+  const rows = await activeMemberRows(customerId, { database: trx, forUpdate: true });
+  if (rows.some((r) => claimIsFresh(r, now))) return { promoted: false, reason: 'member_claim_fresh' };
+  const set = await resolveDunnableSet(customerId, { database: trx, now });
+  const decision = promotionDecision(set, rows, now);
+  if (!decision.promote) return { promoted: false, reason: decision.reason };
+  const schedule = await insertSchedule(trx, customerId, decision, now);
+  return { promoted: true, schedule, seed: decision.seed };
+}
+
+/**
+ * Promote ONE customer under the advisory lock. Never sends: `next_touch_at`
+ * is always a future run's anchor (seed.js). A concurrent promotion loses on
+ * the open unique index (23505), which is caught and reported — nothing else
+ * was written in the losing transaction, so there is nothing to undo.
+ */
+async function promoteCustomer(customerId, now = new Date(), { database = db } = {}) {
+  try {
+    return await database.transaction((trx) => promoteInTransaction(trx, customerId, now));
+  } catch (err) {
+    if (err.code === '23505') {
+      logger.info(`[customer-dunning] promotion of customer ${customerId} lost the race to a concurrent promotion`);
+      return { promoted: false, reason: 'concurrent_promotion' };
+    }
+    throw err;
+  }
+}
+
+async function promote(now = new Date(), { database = db } = {}) {
+  const promoted = [];
+  for (const customerId of await promotionCandidates({ database })) {
+    try {
+      const out = await promoteCustomer(customerId, now, { database });
+      if (out.promoted) {
+        promoted.push(out.schedule.id);
+        logger.info(`[customer-dunning] promoted customer ${customerId} to schedule ${out.schedule.id} at ${STEPS[out.seed.step_index].id} (next ${out.seed.next_touch_at.toISOString()})`);
+      } else {
+        logger.info(`[customer-dunning] customer ${customerId} not promoted: ${out.reason}`);
+      }
+    } catch (err) {
+      logger.error(`[customer-dunning] promotion failed for customer ${customerId}: ${err.message}`);
+    }
+  }
+  return { promoted };
+}
+
+// ── claim / release claim ────────────────────────────────────────────────
+
+const claimReadable = (row, { expectedStepIndex, force, now }) => {
+  if (!row || !['active', 'held'].includes(row.status)) return false;
+  if (expectedStepIndex != null && Number(row.step_index) !== Number(expectedStepIndex)) return false;
+  if (!force && (!row.next_touch_at || new Date(row.next_touch_at).getTime() > now.getTime())) return false;
+  return !claimIsFresh(row, now);
+};
+
+async function stampMemberClaims(trx, customerId, claimStamp, now) {
+  const rows = await activeMemberRows(customerId, { database: trx, forUpdate: true });
+  const free = rows.filter((r) => !claimIsFresh(r, now)).map((r) => r.id);
+  if (free.length) {
+    await trx('invoice_followup_sequences').whereIn('id', free)
+      .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+  }
+  return free;
+}
+
+/**
+ * CLAIM (§5 step 1): one short transaction, no external work. Stamps the
+ * schedule and the customer's free ACTIVE member rows so InvoiceService.update's
+ * existing fence (a fresh touch_claimed_at on the sequence row) applies for the
+ * whole send. Returns { schedule, claimStamp, memberSeqIds } or null.
+ */
+async function claim(scheduleId, now = new Date(), { database = db, force = false, expectedStepIndex = null } = {}) {
+  const claimStamp = new Date(now.getTime());
+  return database.transaction(async (trx) => {
+    const peek = await trx(TABLE).where({ id: scheduleId }).first('customer_id');
+    if (!peek) return null;
+    await takeLock(trx, peek.customer_id);
+    const schedule = await trx(TABLE).where({ id: scheduleId }).forUpdate().first();
+    if (!claimReadable(schedule, { expectedStepIndex, force, now })) return null;
+    await trx(TABLE).where({ id: scheduleId }).update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+    const memberSeqIds = await stampMemberClaims(trx, schedule.customer_id, claimStamp, now);
+    return { schedule: { ...schedule, touch_claimed_at: claimStamp }, claimStamp, memberSeqIds };
+  });
+}
+
+/** Clear OUR stamps only (a successor may hold the row after a TTL expiry). */
+async function releaseClaim(claimed, { database = db } = {}) {
+  if (!claimed) return;
+  const { schedule, claimStamp, memberSeqIds } = claimed;
+  try {
+    await database(TABLE).where({ id: schedule.id, touch_claimed_at: claimStamp })
+      .update({ touch_claimed_at: null, updated_at: database.fn.now() });
+    if (memberSeqIds?.length) {
+      await database('invoice_followup_sequences').whereIn('id', memberSeqIds).where({ touch_claimed_at: claimStamp })
+        .update({ touch_claimed_at: null, updated_at: database.fn.now() });
+    }
+  } catch (err) {
+    logger.warn(`[customer-dunning] could not clear touch claim for schedule ${schedule.id}: ${err.message}`);
+  }
+}
+
+// ── release of surviving members (§7) ────────────────────────────────────
+
+// Where a released member row lands: its first non-stale step at/after the
+// later of its own and the schedule's index, dated no earlier than the next
+// run. null = past even the final step (never stale-completed silently).
+function landingFrom(row, fromIndex, now) {
+  const anchor = Followups.sequenceAnchor(row);
+  const { index, dueAt, pastFinal } = firstLiveStep(anchor, fromIndex, now);
+  if (pastFinal) return null;
+  const nextAt = !dueAt || dueAt.getTime() <= now.getTime()
+    ? Followups.firstEligibleFireAt(Followups.anchorTo10amNY(now, 1, config.sendWindow.hour))
+    : dueAt;
+  return { stepIndex: index, nextAt };
+}
+
+async function releaseOneMember(trx, row, scheduleStep, now) {
+  const landing = landingFrom(row, Math.max(Number(row.step_index) || 0, Number(scheduleStep) || 0), now);
+  const guard = { id: row.id, status: 'active', step_index: row.step_index };
+  if (!landing) {
+    await trx('invoice_followup_sequences').where(guard).update({
+      status: 'paused', paused_reason: 'released_past_final_step', next_touch_at: null, updated_at: trx.fn.now(),
+    });
+    return { rowId: row.id, invoiceId: String(row.invoice_id), pausedPastFinal: true };
+  }
+  await trx('invoice_followup_sequences').where(guard).update({
+    step_index: landing.stepIndex, next_touch_at: landing.nextAt, updated_at: trx.fn.now(),
+  });
+  return { rowId: row.id, invoiceId: String(row.invoice_id), stepIndex: landing.stepIndex, nextAt: landing.nextAt };
+}
+
+/**
+ * Every member row still ACTIVE goes back to its own per-invoice ladder. No
+ * step is repeated (landing starts at max(row step, schedule step)); a row
+ * already past its final step is paused for a person, never completed quietly.
+ */
+async function releaseMembers(trx, schedule, now) {
+  const rows = await activeMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
+  const landed = [];
+  for (const row of rows) landed.push(await releaseOneMember(trx, row, schedule.step_index, now));
+  return landed;
+}
+
+// ── close / release ──────────────────────────────────────────────────────
+
+const RELEASED_REASONS = new Set(['released_gate_off', 'released_prereq_off', 'released_admin', 'customer_missing']);
+const terminalStatusFor = (reason) => (RELEASED_REASONS.has(reason) ? 'released' : 'completed');
+
+async function alertPastFinal(schedule, landed) {
+  for (const l of landed.filter((x) => x.pausedPastFinal)) {
+    await alertStaff({
+      title: 'Overdue invoice past its last reminder',
+      body: `Invoice ${l.invoiceId} came off a customer reminder schedule already past its final reminder step. It was paused, not completed; the office should follow up by hand.`,
+      dedupeKey: `customer-dunning-past-final:${schedule.id}:${l.invoiceId}`,
+      customerId: schedule.customer_id,
+    });
+  }
+}
+
+/**
+ * Close a schedule (guarded on it still being open) and release surviving
+ * members in ONE transaction. Returns { closed, landed }.
+ */
+async function close(schedule, reason, now = new Date(), { database = db, extra = {} } = {}) {
+  const out = await database.transaction(async (trx) => {
+    await takeLock(trx, schedule.customer_id);
+    const changed = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).update({
+      status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
+      next_touch_at: null, updated_at: trx.fn.now(), ...extra,
+    });
+    if (!changed) return { closed: false, landed: [] };
+    return { closed: true, landed: await releaseMembers(trx, schedule, now) };
+  });
+  await alertPastFinal(schedule, out.landed);
+  logger.info(`[customer-dunning] schedule ${schedule.id} closed (${reason}); ${out.landed.length} member row(s) released`);
+  return out;
+}
+
+const release = (schedule, reason, now, opts) => close(schedule, reason, now, opts);
+
+// ── advance ──────────────────────────────────────────────────────────────
+
+function nextTouchFor(schedule, activeRows, now) {
+  const oldest = oldestActive(activeRows);
+  const cadence = oldest ? Followups.computeNextTouchAt(Followups.sequenceAnchor(oldest), Number(schedule.step_index) + 1) : null;
+  const floor = Followups.heldTouchFloor(now);
+  return cadence && cadence.getTime() > floor.getTime() ? cadence : floor;
+}
+
+const guardedOpen = (trx, schedule, claimStamp) => trx(TABLE)
+  .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp })
+  .whereIn('status', ['active', 'held']);
+
+/**
+ * ADVANCE (§5 step 11): one UPDATE guarded by id, status, step_index and OUR
+ * claim. The next date is recomputed from the CURRENT oldest active member
+ * (D4/§5.12), never earlier than heldTouchFloor(); step_index never decreases.
+ * The final step goes through completeFinal instead.
+ */
+async function advance(schedule, { claimStamp, deliveredAt, activeRows = [], now = new Date(), database = db }) {
+  const changed = await guardedOpen(database, schedule, claimStamp).update({
+    touches_sent: Number(schedule.touches_sent) + 1,
+    step_index: Number(schedule.step_index) + 1,
+    last_touch_at: deliveredAt || now,
+    next_touch_at: nextTouchFor(schedule, activeRows, now),
+    status: 'active',
+    held_reason: null, held_since: null, hold_alerted_at: null,
+    link_digest: null, link_url: null,
+    updated_at: database.fn.now(),
+  });
+  return Number(changed) === 1;
+}
+
+/**
+ * FINAL NOTICE DELIVERED (§5 step 11): in ONE transaction the schedule
+ * completes, exactly the invoices the notice NAMED complete, and the
+ * survivors (a microdeposit-pending or paused-then-resumed invoice the notice
+ * did not name) go back to their own ladder.
+ */
+async function completeFinal(schedule, { claimStamp, deliveredAt, namedInvoiceIds = [], now = new Date(), database = db }) {
+  const out = await database.transaction(async (trx) => {
+    await takeLock(trx, schedule.customer_id);
+    const changed = await guardedOpen(trx, schedule, claimStamp).update({
+      status: 'completed', closed_reason: 'final_notice_delivered',
+      final_notice_at: deliveredAt || now, closed_at: now, next_touch_at: null,
+      touches_sent: Number(schedule.touches_sent) + 1, last_touch_at: deliveredAt || now,
+      held_reason: null, updated_at: trx.fn.now(),
+    });
+    if (Number(changed) !== 1) return { completed: false, landed: [] };
+    if (namedInvoiceIds.length) {
+      await trx('invoice_followup_sequences')
+        .where({ customer_id: schedule.customer_id, status: 'active' })
+        .whereIn('invoice_id', namedInvoiceIds)
+        .update({ status: 'completed', next_touch_at: null, updated_at: trx.fn.now() });
+    }
+    return { completed: true, landed: await releaseMembers(trx, schedule, now) };
+  });
+  await alertPastFinal(schedule, out.landed);
+  return out;
+}
+
+// ── disposition (§5 step 10): the ONE path for every non-advance return ──
+
+const TRANSIENT = (r) => r?.retryable === true || r?.held === true || r?.deliveryHeld === true
+  || r?.deferred === true || r?.deliveryOutcome === 'uncertain' || r?.code === 'COLLECTIONS_POLICY';
+
+function firstCode(results) {
+  for (const r of Object.values(results || {})) {
+    const code = r?.code || r?.reason || r?.error;
+    if (code) return String(code).slice(0, 80);
+  }
+  return 'not_delivered';
+}
+
+/**
+ * Classify what a send attempt amounted to. `facts` = { complete, results,
+ * delivered (Set of channels delivered now or restored), deliveredNow[] }.
+ *   advance -> every leg settled and something was delivered
+ *   told    -> something delivered, a leg still pending (B-7)
+ *   held    -> nothing delivered, any transient result
+ *   paused  -> nothing delivered and every leg terminal
+ * COLLECTIONS_POLICY is always treated as transient here: the reminder
+ * engine's return does not say whether a denial is durable, and a held step
+ * retries daily and alerts staff after HELD_ALERT_DAYS.
+ */
+function dispositionOf(facts) {
+  const delivered = facts.delivered || new Set();
+  if (delivered.size > 0) return { kind: facts.complete ? 'advance' : 'told' };
+  const results = Object.values(facts.results || {});
+  if (facts.complete) return { kind: 'paused', reason: 'all_channels_terminal' };
+  if (!results.length || results.some(TRANSIENT)) return { kind: 'held', reason: firstCode(facts.results) };
+  return { kind: 'paused', reason: firstCode(facts.results) };
+}
+
+const heldSince = (schedule, now) => schedule.held_since || now;
+
+/** TOLD: a leg reached the customer; the pending leg retries at the next tick. */
+async function markTold(schedule, { claimStamp, deliveredAt, now = new Date(), database = db }) {
+  const changed = await guardedOpen(database, schedule, claimStamp).update({
+    last_touch_at: deliveredAt || now, status: 'active', next_touch_at: Followups.heldTouchFloor(now),
+    held_reason: null, held_since: null, hold_alerted_at: null, updated_at: database.fn.now(),
+  });
+  return Number(changed) === 1;
+}
+
+async function alertHeld(schedule, reason, now, database) {
+  const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
+  const since = new Date(heldSince(schedule, now));
+  const long = now.getTime() - since.getTime() >= HELD_ALERT_DAYS * 24 * HOUR_MS;
+  const office = OFFICE_HOLD_REASONS.includes(reason);
+  if (schedule.hold_alerted_at || (!long && !office)) return false;
+  const sent = await alertStaff({
+    title: office ? 'Customer reminders on hold' : 'Customer reminder stuck',
+    body: office
+      ? `The customer's overdue reminders are held (${reason}); the office should resume or release the schedule. Step ${stepId}.`
+      : `A customer's overdue reminder (${stepId}) has been held ${HELD_ALERT_DAYS}+ days (${reason}) and keeps retrying daily.`,
+    dedupeKey: `customer-dunning-held:${schedule.id}:${schedule.episode}:${office ? reason : stepId}`,
+    customerId: schedule.customer_id,
+  });
+  if (sent) {
+    await database(TABLE).where({ id: schedule.id }).update({ hold_alerted_at: now, updated_at: database.fn.now() });
+  }
+  return sent;
+}
+
+/** HELD: retry at the next run; never stale-skipped (A-7, A-15). */
+async function markHeld(schedule, reason, { claimStamp, now = new Date(), database = db }) {
+  const changed = await guardedOpen(database, schedule, claimStamp).update({
+    status: 'held', held_reason: String(reason).slice(0, 80), held_since: heldSince(schedule, now),
+    next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now(),
+  });
+  if (Number(changed) === 1) await alertHeld(schedule, String(reason), now, database);
+  return Number(changed) === 1;
+}
+
+/** PAUSED: terminal for this step (or the customer); staff alert always. */
+async function markPaused(schedule, reason, { claimStamp, now = new Date(), database = db }) {
+  const changed = await database(TABLE).where({ id: schedule.id, touch_claimed_at: claimStamp })
+    .whereIn('status', OPEN_STATUSES).update({
+      status: 'paused', paused_reason: String(reason), next_touch_at: null, updated_at: database.fn.now(),
+    });
+  if (Number(changed) !== 1) return false;
+  const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
+  await alertStaff({
+    title: isFinalIndex(schedule.step_index) ? 'Final notice not delivered' : 'Customer reminders paused',
+    body: `${isFinalIndex(schedule.step_index) ? 'The final notice was not delivered. ' : ''}The customer's overdue reminders (${stepId}) were paused: ${reason}. The office should contact the customer or resume the schedule.`,
+    dedupeKey: `customer-dunning-paused:${schedule.id}:${schedule.episode}:${stepId}:${reason}`,
+    customerId: schedule.customer_id,
+  });
+  return true;
+}
+
+/** AUTOPAY HOLD: the customer is on autopay; the failure hook releases it later. */
+async function markAutopayHold(schedule, { claimStamp, database = db }) {
+  const changed = await guardedOpen(database, schedule, claimStamp).update({
+    status: 'autopay_hold', next_touch_at: null, updated_at: database.fn.now(),
+  });
+  return Number(changed) === 1;
+}
+
+/** Stage catch-up write (no interaction row; nothing customer-facing happened). */
+async function writeStage(schedule, stage, { claimStamp, database = db }) {
+  const changed = await guardedOpen(database, schedule, claimStamp)
+    .update({ step_index: stage, link_digest: null, link_url: null, updated_at: database.fn.now() });
+  return Number(changed) === 1;
+}
+
+/** Run `fn(trx)` in a READ ONLY transaction, always rolled back (shadow run). */
+async function inReadOnlyTransaction(database, fn) {
+  const trx = await database.transaction();
+  try {
+    await trx.raw('SET TRANSACTION READ ONLY');
+    return await fn(trx);
+  } finally {
+    await trx.rollback();
+  }
+}
+
+module.exports = {
+  TABLE,
+  STEPS,
+  HELD_ALERT_DAYS,
+  isFinalIndex,
+  stageFor,
+  activeMemberRows,
+  rowsInSet,
+  openScheduleFor,
+  promotionCandidates,
+  promotionDecision,
+  promoteCustomer,
+  promote,
+  claim,
+  releaseClaim,
+  landingFrom,
+  releaseMembers,
+  close,
+  release,
+  nextTouchFor,
+  advance,
+  completeFinal,
+  dispositionOf,
+  markTold,
+  markHeld,
+  markPaused,
+  markAutopayHold,
+  writeStage,
+  alertStaff,
+  inReadOnlyTransaction,
+};
