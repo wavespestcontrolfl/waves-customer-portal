@@ -794,7 +794,8 @@ const NotificationService = {
     )
       .whereNull('read_at')
       .where('created_at', '<=', before);
-    if (customerId) q = q.where('link', `/admin/communications?thread=${customerId}`);
+    // The thread link, bare or with the alerted message (&message=<sid>, sms_reply).
+    if (customerId) q = q.whereRaw("split_part(link, '&message=', 1) = ?", [`/admin/communications?thread=${customerId}`]);
     if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
     return q.update({ read_at: new Date() });
   },

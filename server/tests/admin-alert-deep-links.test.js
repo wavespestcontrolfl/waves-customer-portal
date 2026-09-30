@@ -34,10 +34,15 @@ describe('call alerts open the call', () => {
 });
 
 describe('text alerts open the conversation', () => {
-  test('a known sender keeps the exact thread link the read-state code matches', () => {
+  test('a known sender keeps the thread link the read-state code matches', () => {
     // notification-service markInboundSmsReadAdmin and inbound-sms-read match
-    // inbound_sms rows by exactly this string.
-    expect(build('sms_reply', { threadId: 'cust-1', twilioSid: 'SM1' })).toBe('/admin/communications?thread=cust-1');
+    // inbound_sms rows by this string (with or without &message=).
+    expect(build('sms_reply', { threadId: 'cust-1' })).toBe('/admin/communications?thread=cust-1');
+  });
+
+  test('a known sender with a message id appends it, so the page can scroll to that message', () => {
+    // The matchers compare the part before &message= (inbound-sms-thread-link-match.test.js).
+    expect(build('sms_reply', { threadId: 'cust-1', twilioSid: 'SM1' })).toBe('/admin/communications?thread=cust-1&message=SM1');
   });
 
   test('an unknown sender names the message, never the phone number', () => {

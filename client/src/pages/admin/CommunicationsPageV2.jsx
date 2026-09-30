@@ -600,6 +600,7 @@ function SmsLogItemV2({ msg: m, onReply }) {
 function ConversationViewV2({
   thread,
   messages,
+  highlightMessageId,
   onReply,
   onBack,
   onOpenProfile,
@@ -695,6 +696,7 @@ function ConversationViewV2({
               <div
                 className={cn(
                   "max-w-[75%] px-3.5 py-2.5 rounded-md border-hairline",
+                  m.id === highlightMessageId && "ring-2 ring-zinc-900",
                   isOut
                     ? "bg-zinc-900 text-white border-zinc-900 rounded-br-xs"
                     : "bg-zinc-50 text-zinc-900 border-zinc-200 rounded-bl-xs",
@@ -2856,26 +2858,36 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       })
       .catch(() => {}); // the list is still there
   }, [active, customer, loading, threads]);
-  // Open the thread once it is among the loaded ones, and bring its newest
-  // message (the one the alert was about) into view.
-  const scrollToNewestRef = useRef(false);
+  // Open the thread once it is among the loaded ones, and bring the message
+  // the alert was about (?message=<sid>) into view and briefly mark it; with
+  // no sid, or one not in the thread, the newest message.
+  const scrollTargetRef = useRef(null);
+  const [highlightMessageId, setHighlightMessageId] = useState(null);
   useEffect(() => {
     if (!deepLinkThreadKey) return;
     const match = threads.find((t) => smsThreadKey(t.contactPhone) === deepLinkThreadKey);
     if (!match) return;
     setDeepLinkThreadKey(null);
     const openedThread = { ...match };
-    scrollToNewestRef.current = true;
+    const sid = new URLSearchParams(window.location.search).get("message");
+    const alerted = sid ? openedThread.messages.find((m) => m.twilioSid === sid) : null;
+    scrollTargetRef.current = (alerted || openedThread.messages[0])?.id || null;
+    if (alerted) setHighlightMessageId(alerted.id);
     setActiveThread(openedThread);
     setSmsView("conversation");
     selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
     markMessagesRead(openedThread);
   }, [deepLinkThreadKey, threads, markMessagesRead]);
   useEffect(() => {
-    if (!scrollToNewestRef.current || smsView !== "conversation" || !activeThread) return;
-    scrollToNewestRef.current = false;
-    document.getElementById(`sms-message-${activeThread.messages[0]?.id}`)?.scrollIntoView?.({ block: "end" });
+    if (!scrollTargetRef.current || smsView !== "conversation" || !activeThread) return;
+    document.getElementById(`sms-message-${scrollTargetRef.current}`)?.scrollIntoView?.({ block: "center" });
+    scrollTargetRef.current = null;
   }, [smsView, activeThread]);
+  useEffect(() => {
+    if (!highlightMessageId) return undefined;
+    const timer = setTimeout(() => setHighlightMessageId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [highlightMessageId]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -3739,6 +3751,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <ConversationViewV2
             thread={activeThread}
             messages={activeThread.messages.slice().reverse()}
+            highlightMessageId={highlightMessageId}
             onReply={handleThreadReply}
             onBack={() => {
               setSmsView("threads");

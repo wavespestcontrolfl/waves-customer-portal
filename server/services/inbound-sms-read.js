@@ -160,7 +160,7 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
     const custs = await customerIdsInScope(ids, convs);
     if (custs.length) {
       await db('notifications').where({ category: 'inbound_sms' })
-        .whereIn('link', custs.map((cid) => `/admin/communications?thread=${cid}`))
+        .whereRaw("split_part(link, '&message=', 1) = ANY(?)", [custs.map((cid) => `/admin/communications?thread=${cid}`)])
         .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
         .update({ metadata: db.raw("metadata - 'backlog_reset'") });
     }

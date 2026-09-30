@@ -976,3 +976,41 @@ it("stays on the list when a deep link names a conversation that is not there", 
   setup(); await tick();
   expect(openedConversation()).not.toBeInTheDocument();
 });
+
+it("scrolls to and marks the message the alert was about, not the newest one, when a later message has arrived", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const alerted = inboundFrom("m-alerted", "The gate is stuck", "+19415550155", { customerId: "cust-x", customerName: "X Person", twilioSid: "SMalerted", createdAt: "2024-07-01T12:00:00Z" });
+  const later = inboundFrom("m-later", "Never mind, fixed", "+19415550155", { customerId: "cust-x", customerName: "X Person", twilioSid: "SMlater", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor(() => [later, alerted]);
+  window.history.replaceState({}, "", "/?thread=cust-x&message=SMalerted");
+  const { container } = setup(); await tick();
+  expect(openedConversation()).toBeInTheDocument();
+  expect(scrolled).toEqual(["sms-message-m-alerted"]);
+  expect(container.querySelector("#sms-message-m-alerted .ring-2")).not.toBeNull();
+  expect(container.querySelector("#sms-message-m-later .ring-2")).toBeNull();
+  await tick(3500); // the mark is brief
+  expect(container.querySelector("#sms-message-m-alerted .ring-2")).toBeNull();
+});
+
+it("falls back to the newest message when the alerted message id is not in the thread", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const older = inboundFrom("m-old", "Older text", "+19415550156", { customerId: "cust-y", customerName: "Y Person", twilioSid: "SMold", createdAt: "2024-07-01T12:00:00Z" });
+  const newest = inboundFrom("m-new", "Newest text", "+19415550156", { customerId: "cust-y", customerName: "Y Person", twilioSid: "SMnew", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor(() => [newest, older]);
+  window.history.replaceState({}, "", "/?thread=cust-y&message=SMgone");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-m-new"]);
+});
+
+it("scrolls an unknown sender's deep link to the alerted message too", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const first = inboundFrom("s-first", "Hello?", "+19415550157", { twilioSid: "SMfirst", createdAt: "2024-07-01T12:00:00Z" });
+  const second = inboundFrom("s-second", "Anyone there?", "+19415550157", { twilioSid: "SMsecond", createdAt: "2024-07-01T12:05:00Z" });
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMfirst" ? [second, first] : []));
+  window.history.replaceState({}, "", "/?message=SMfirst");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-s-first"]);
+});

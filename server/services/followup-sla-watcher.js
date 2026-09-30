@@ -546,7 +546,7 @@ async function runInner({ now = new Date() } = {}) {
   let changed = 0;
   const latest = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body');
+    .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at', 'title', 'body', 'link');
   const meta = (latest && (typeof latest.metadata === 'string' ? JSON.parse(latest.metadata) : latest.metadata)) || {};
   const shown = latest && !meta.emptied ? (meta.missed_commitment_ids || []).map(String) : [];
   // A promise held over this way still drops off when later activity
@@ -607,9 +607,11 @@ async function runInner({ now = new Date() } = {}) {
     const patch = ids.length
       ? { title, body, link, metadata: JSON.stringify({ ...meta, missed_commitment_ids: ids }) }
       : { read_at: latest.read_at || now, metadata: JSON.stringify({ ...meta, emptied: true }) };
-    // Same items, same words: nothing to write (an emptied patch carries no
-    // title, so it never matches).
-    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length) return;
+    // Same items, same words, same link: nothing to write (an emptied patch
+    // carries no title, so it never matches). A post from before the link
+    // followed the list size is rewritten here, quietly.
+    if (patch.title === latest.title && patch.body === latest.body && ids.length === shown.length
+      && patch.link === latest.link) return;
     await trx('notifications').where({ id: latest.id }).update(patch);
   });
   return { skipped: false, scanned: rows.length, candidates: candidates.length, missed: onList.length, alerted, changed, unverified: unverified.size };

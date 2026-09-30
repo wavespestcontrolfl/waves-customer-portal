@@ -1966,7 +1966,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at', 'messages.twilio_sid',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -2109,7 +2109,7 @@ router.get('/log', async (req, res, next) => {
         replyToMessageId: m.response_reply_to_message_id,
       });
       return {
-        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, twilioSid: m.twilio_sid || null, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         responseMessageType,
         responseStatus,

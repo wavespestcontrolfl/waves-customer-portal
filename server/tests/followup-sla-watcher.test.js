@@ -221,6 +221,29 @@ test('a listed promise whose details changed is rewritten in place, read state k
   expect(updates[0].patch.read_at).toBeUndefined();
 });
 
+test('a standing single-miss post from before the link change is rewritten quietly when only its link differs', async () => {
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  // Learn the title/body the tick writes for this list, so only the link can differ.
+  const learned = (await (async () => {
+    const u = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'x', body: 'x' } });
+    await runFollowUpSlaWatcher({ now: NOW });
+    return u;
+  })())[0].patch;
+  const stored = (link) => ({ ...posted(['a']), read_at: NOW, title: learned.title, body: learned.body, link });
+
+  const updates = mockDb({ standingRow: stored('/admin/communications#tab=owed') });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(updates).toHaveLength(1);
+  expect(updates[0].patch.link).toBe('/admin/communications#tab=calls&call=call-a');
+  expect(updates[0].patch.read_at).toBeUndefined();
+
+  // Already carrying the right link: nothing to write.
+  const quiet = mockDb({ standingRow: stored(learned.link) });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(quiet).toHaveLength(0);
+});
+
 test('a new miss joining the list re-posts it and retires the older post', async () => {
   const updates = mockDb({ standingRow: posted(['a']) });
   listOpenCommitments.mockResolvedValue([row('a'), row('b', { call_log_id: 'call-b' })]);

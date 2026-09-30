@@ -300,12 +300,15 @@ const TRIGGER_REGISTRY = {
       body: redactSensitiveText(p.message || '').slice(0, 140),
       // threadId is the customer id (see twilio-webhook). CommunicationsPageV2
       // reads ?thread=<customerId> and opens that customer's SMS conversation.
-      // An unknown sender has no customer: the Twilio MessageSid (never the
-      // phone number, which this feed masks) names the message and the page
-      // opens its conversation via ?message=. inbound-sms-read.js recognises
-      // both unlinked shapes by this prefix.
+      // The MessageSid (never the phone number, which this feed masks) names
+      // the message the alert is about, so the page scrolls to THAT message
+      // even when newer ones arrive before the tap. A known sender keeps the
+      // thread link and appends &message=<sid> (markInboundSmsReadAdmin and
+      // inbound-sms-read match the part before &message=); an unknown sender
+      // has no customer, so ?message= alone opens the conversation
+      // (inbound-sms-read recognises both unlinked shapes by this prefix).
       link: p.threadId
-        ? `/admin/communications?thread=${p.threadId}`
+        ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
         : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
     }),
   },

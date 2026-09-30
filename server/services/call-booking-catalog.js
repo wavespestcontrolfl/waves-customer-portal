@@ -771,12 +771,13 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       {
         try {
           const NotificationService = require('./notification-service');
-          const kept = skipped.filter((k) => k.id && /^\d{4}-\d{2}-\d{2}$/.test(String(k.day))).sort((a, b) => String(a.day).localeCompare(String(b.day)))[0];
+          // A 'changed' entry's day is only the planned one (the row moved, vanished or lost the CAS): never a link target.
+          const kept = skipped.filter((k) => k.reason !== 'changed' && k.id && /^\d{4}-\d{2}-\d{2}$/.test(String(k.day))).sort((a, b) => String(a.day).localeCompare(String(b.day)))[0];
           await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Call-booked follow-up visit kept its date',
             `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
-            // The earliest follow-up that kept its date, on its own day.
+            // The earliest follow-up proven to still sit on its day (slot booked or added meanwhile).
             { link: kept ? `/admin/dispatch?tab=schedule&date=${kept.day}&appointment=${encodeURIComponent(kept.id)}` : '/admin/dispatch?tab=schedule',
               metadata: { parentServiceId, skipped } },
           );
