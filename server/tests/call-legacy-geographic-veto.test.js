@@ -102,6 +102,20 @@ describe('legacyGeographicVeto', () => {
     })).toBeNull();
   });
 
+  test('a positive AV verdict cannot clear V1 DeSoto locality evidence (Codex r6 P1)', () => {
+    // V2 shadow: AV validated V2's served address, V1 extracted Arcadia —
+    // the legacy branch books V1's address, so the DeSoto evidence vetoes.
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Sarasota County', normalized: { city: 'Venice', postal_code: '34285' } },
+      v2Extraction: { property: { service_address: { city: 'Venice', postal_code: '34285' } } },
+      extracted: { city: 'Arcadia', zip: '34266' },
+    })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Sarasota County' },
+      extracted: { city: 'Venice', zip: '34266' },
+    })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+  });
+
   test('served south-Hillsborough towns stay bookable in the legacy path', () => {
     expect(legacyGeographicVeto({
       addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hillsborough County' },
@@ -175,6 +189,16 @@ describe('legacy booking branch wiring', () => {
     const callAt = source.indexOf('legacyGeoVeto = legacyGeographicVeto({');
     const catchBlock = source.slice(callAt - 700, callAt);
     expect(catchBlock).toContain('onFileGeo = { lookupFailed: true };');
+  });
+
+  test('the fenced booking transaction re-runs the veto on the locked customer row (Codex r6 P2)', () => {
+    const fenceAt = source.indexOf('const freshCallCustomer = await trx(\'customers\').where({ id: customer.id }).first();');
+    expect(fenceAt).toBeGreaterThan(-1);
+    const after = source.slice(fenceAt, fenceAt + 2500);
+    expect(after).toContain('const fencedGeoVeto = legacyGeographicVeto({');
+    expect(after).toContain('onFile: freshCallCustomer');
+    expect(after).toMatch(/if \(fencedGeoVeto\) \{\s*throw new Error/);
+    expect(after.indexOf('fencedGeoVeto')).toBeLessThan(after.indexOf('customer = freshCallCustomer;'));
   });
 
   test('the geographic veto sits ahead of the booking branch and is not keyed on any V2 mode', () => {

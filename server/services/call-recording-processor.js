@@ -1280,10 +1280,12 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // 2026-09-30). This survives every routing mode. Callers pass only a VALID
 // V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
 // object is untrusted and must not suppress a valid V1 booking. Evidence:
-//   1. a positive Address Validation verdict (inServiceArea === true) is final.
-//   2. any DeSoto evidence — county named DeSoto, an Arcadia-area city, or a
-//      DeSoto ZIP — vetoes, and is checked BEFORE any served-town exemption
-//      so a disagreeing field (Riverview + 34266) cannot launder it.
+//   1. any DeSoto locality evidence — a DeSoto city, a DeSoto ZIP, or an
+//      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
+//      positive AV verdict (which may describe a different, V2 address) and
+//      of any served-town exemption (Riverview + 34266 cannot launder it).
+//   2. a positive Address Validation verdict (inServiceArea === true) then
+//      clears the rest, including a model-stated county NAME of DeSoto.
 //   3. an AV out_of_service_area / inServiceArea false verdict, or a county
 //      outside the served set, vetoes — except a Hillsborough county whose
 //      city is a served south-Hillsborough town (config/locations.js), which
@@ -1319,10 +1321,17 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
     coordsInDesoto = Number.isFinite(lat) && Number.isFinite(lng)
       && isInDesotoExclusion(lat, lng) && !zips.some((z) => zipToCity(z));
   }
-  if (av && av.inServiceArea === true) return null;
+  // A DeSoto city / ZIP / on-file pin vetoes BEFORE a positive AV verdict:
+  // in V2 shadow the AV may describe V2's served address while the legacy
+  // branch books V1's DeSoto one (the bridge refuses a disagreeing V2
+  // street), so an AV "in area" cannot clear locality evidence it may not
+  // describe. It still outranks a model-stated county NAME below.
   const countyKey = normalizeCounty(statedCounty);
-  if (countyKey === 'desoto' || cities.some(isDesotoLocality)
-    || zips.some(isDesotoZip) || coordsInDesoto) {
+  if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || coordsInDesoto) {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  if (av && av.inServiceArea === true) return null;
+  if (countyKey === 'desoto') {
     return { reason: 'desoto_locality', county: 'DeSoto' };
   }
   const servedHillsboroughTown = cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));
@@ -16111,6 +16120,19 @@ const CallRecordingProcessor = {
                   // (codex #4991 r2).
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
+                  }
+                  // Geographic veto re-runs on the fenced row (Codex #5403
+                  // r6): when the call stated no locality, the pre-fence
+                  // on-file read was the only service-area check, and an
+                  // address edit since then must not book a DeSoto visit.
+                  const fencedGeoVeto = legacyGeographicVeto({
+                    addressValidation: effectiveAddressValidation,
+                    v2Extraction: v2CanonicalExtraction,
+                    extracted,
+                    onFile: freshCallCustomer,
+                  });
+                  if (fencedGeoVeto) {
+                    throw new Error(`service-area check failed on the fenced customer row (${fencedGeoVeto.reason}) — booking held for office review`);
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
