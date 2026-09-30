@@ -482,7 +482,11 @@ describe('spoken street must resemble the on-file street for the locality assist
     expect(streetResemblesOnFile('Monteverdi', 'Monteverdi Way')).toBe(true);
     expect(streetResemblesOnFile('Monteverdi Wy', 'Monteverdi Way')).toBe(true);
     expect(streetResemblesOnFile('Monteverdi Way', 'Monteverdi Way')).toBe(true);
-    expect(streetResemblesOnFile('Monteverdy', 'Monteverdi Way')).toBe(true);
+    expect(streetResemblesOnFile('Monteverdy', 'Monteverdi Way')).toBe(false);
+    expect(streetResemblesOnFile('Maple', 'Marple Way')).toBe(false);
+    expect(streetResemblesOnFile('Oak', 'Oak Hill Drive')).toBe(false);
+    expect(streetResemblesOnFile('Oak Hill', 'Oak Hill Drive')).toBe(true);
+    expect(streetResemblesOnFile('Oak Hill', 'Oak Hill Drive North')).toBe(true);
     expect(streetResemblesOnFile('Monteverdi Drive', 'Monteverdi Way')).toBe(false);
     expect(streetResemblesOnFile('Sunset', 'Monteverdi Way')).toBe(false);
     expect(streetResemblesOnFile('Monteverdi Way Extension', 'Monteverdi Way')).toBe(false);
@@ -501,7 +505,7 @@ describe('spoken street must resemble the on-file street for the locality assist
     expect(validate).toHaveBeenCalledWith({ addressLines: ['7417 Sunset Drive'], administrativeArea: 'FL' });
   });
 
-  test('the same street spoken loosely still gets it', async () => {
+  test('the same street spoken without its type still gets it', async () => {
     gateOn();
     const validate = jest.fn(async () => ({ status: 'validated_accept' }));
     const known = { addressLine1: '7417 Monteverdi Way', addressCity: 'Exampleton', addressState: 'FL', addressZip: '34299' };

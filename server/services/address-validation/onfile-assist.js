@@ -79,32 +79,30 @@ const CANON = {
 };
 const canon = (t) => CANON[t] || t;
 
-function editDistanceAtMost1(a, b) {
-  if (a === b) return true;
-  if (Math.abs(a.length - b.length) > 1) return false;
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
-  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
-  const [long, short] = a.length > b.length ? [a, b] : [b, a];
-  return long.slice(i + 1) === short.slice(i);
-}
-
-const tokenMatches = (spoken, onFile) => spoken === onFile || (spoken.length >= 5 && onFile.length >= 5 && editDistanceAtMost1(spoken, onFile));
+// Trailing words that name a street TYPE or a direction, never a different street.
+const STREET_TYPE_WORDS = new Set([
+  'street', 'avenue', 'drive', 'road', 'lane', 'court', 'boulevard', 'circle', 'place', 'trail', 'way', 'parkway',
+  'terrace', 'loop', 'run', 'path', 'cove', 'pass', 'point', 'walk', 'bend', 'crossing', 'trace', 'row',
+  'north', 'south', 'east', 'west', 'ne', 'nw', 'se', 'sw',
+]);
 
 /**
- * Does the spoken street name plausibly name the on-file street? The spoken
- * name may leave off the on-file suffix / direction ("Monteverdi" for
- * "Monteverdi Way") but must otherwise agree token for token (a one-letter
- * slip is tolerated in words of five letters or more). A bare ordinal ("4th")
- * does not resemble "4th Avenue East": numbered grids repeat the number across
- * streets and avenues.
+ * Does the spoken street name name the on-file street? Exact, token for token
+ * ("Monteverdi Wy" = "Monteverdi Way", abbreviations read as their long form):
+ * the spoken name may leave off trailing street-TYPE or direction words the
+ * on-file street carries ("Monteverdi" for "Monteverdi Way"), and nothing else.
+ * No fuzzy matching: a one-letter difference is often a different street, and
+ * a spoken "Oak" does not name "Oak Hill Drive". A bare ordinal ("4th") does
+ * not name "4th Avenue East": numbered grids repeat the number across streets
+ * and avenues.
  */
 function streetResemblesOnFile(spokenName, onFileName) {
   const spoken = tokensOf(spokenName).map(canon);
   const onFile = tokensOf(onFileName).map(canon);
   if (!spoken.length || spoken.length > onFile.length) return false;
   if (spoken.length === 1 && /^\d/.test(spoken[0]) && onFile.length > 1) return false;
-  return spoken.every((t, i) => tokenMatches(t, onFile[i]));
+  return spoken.every((t, i) => t === onFile[i])
+    && onFile.slice(spoken.length).every((t) => STREET_TYPE_WORDS.has(t));
 }
 
 // Words a caller says around an address that carry no geography.
