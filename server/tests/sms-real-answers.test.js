@@ -3131,6 +3131,15 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["We can schedule a free Waves Assessment.", false, []],
+  ["A free Waves Assessment visit is on us, no charge.", false, []],
+  ["Your free inspection is Tuesday.", false, []],
+  ["Your free pest inspection is scheduled for Thursday.", false, []],
+  ["We offer a free estimate and a free quote.", false, []],
+  ["Free Waves Assessment, and a free pest re-service link is on the way.", true, ['pest']],
+  ["We can send a free pest re-service link.", true, ['pest']],
+  ["We can do a free follow-up visit.", true, []],
+  ["A free callback visit for the ants.", true, ['pest']],
   ["We can send a tech for a free visit Tuesday.", true, []],
   ["Feel free to pick a time; your free pest re-service link is on the way.", true, ['pest']],
   ["Your already scheduled free pest re-service falls on Thursday.", false, []],
@@ -3146,6 +3155,27 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["We can't offer a free lawn re-service but a complimentary pest re-service, yes.", true, ['pest']],
   ["We do not offer a free re-service, a complimentary visit, and your visit is free; link is coming.", true, []]
     ];
+    // Codex round-25 P1 (PR #5336): the Waves Assessment is a legitimately free consultation for prospects — a
+    // different product from the free re-service; a reply offering it must not need re-service eligibility, a
+    // lane snapshot or a send_reservice_link action.
+    test('a reply offering the free Waves Assessment / an already-scheduled inspection converges for a prospect (no re-service requirements)', async () => {
+      const { validateReserviceOffer, isReserviceOfferPromise, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      for (const reply of ['We can schedule a free Waves Assessment this week.', 'Your free inspection is Tuesday at 9.', 'We offer a free estimate and a free quote.']) {
+        expect(isReserviceOfferPromise(reply)).toBe(false);
+        expect(validateReserviceOffer({ reply, factsBlock: notEligible, intendedActions: [], inboundMessage: 'do you do free inspections?' })).toMatchObject({ ok: true });
+      }
+      // the send-time check is not triggered either (no eligibility read, no link action needed)
+      const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+      loadWith({ lanes: [] });
+      await expect(agentDecisionSendBlockReason({
+        decision: { id: 'd1', customer_id: 'lead-1', suggested_message: 'x', input_snapshot: JSON.stringify({ intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2_cf' },
+        outgoingBody: 'We can schedule a free Waves Assessment this week.',
+      })).resolves.toBeNull();
+      // ...while a free re-service to the same not-eligible customer is still rejected
+      expect(validateReserviceOffer({ reply: 'We can send your free pest re-service link.', factsBlock: notEligible, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'ants' }).ok).toBe(false);
+    });
+
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
       const { RESERVICE_OFFER_SPAN_RES } = require('../services/sms-shadow-drafter');
       expect(RESERVICE_OFFER_SPAN_RES).toHaveLength(2);

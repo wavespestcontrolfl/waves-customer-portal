@@ -874,7 +874,21 @@ function reserviceNegatorGoverns([ns, ne], [os, oe], text) {
 const RESERVICE_OFFER_SPAN_RES = [FREE_RESERVICE_OFFER_RE_SOURCE, RESERVICE_COVERAGE_RE_SOURCE]
   .map((build) => new RegExp(build('{0,60}?'), 'gi'));
 const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
-function reserviceOfferSpans(text) {
+// Codex round-25 P1 (PR #5336): a DIFFERENT PRODUCT is not a re-service offer. The Waves Assessment is the
+// legitimately free first-visit consultation offered to prospects (inspection-public.js), and a possessive
+// inspection/assessment that is already scheduled ("Your free inspection is Tuesday") is an existing booking —
+// counting either as a promise would demand re-service eligibility + a lane snapshot + a send_reservice_link
+// action from a reply to a lead. They are blanked (same length, so span indices hold) before the offer
+// detectors run. Kept COVERED: a generic technician "free pest inspection / free inspection of your lawn /
+// complimentary assessment visit" stays an offer (Codex round-10 P2 — a free return visit in disguise), as do
+// "free re-service / retreat / follow-up visit / callback".
+const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
+  '\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
+  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))',
+  'gi',
+);
+function reserviceOfferSpans(rawText) {
+  const text = rawText.replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
   return RESERVICE_OFFER_SPAN_RES
     .flatMap((rx) => [...text.matchAll(rx)].filter((m) => m[0]).map((m) => [m.index, m.index + m[0].length]));
 }
