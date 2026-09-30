@@ -504,7 +504,7 @@ const DRY_RE = /\bdr(?:y|ies|ied|ying)\b|\bto\s+set\b|\b(?:cure[sd]?|curing|bond
 const DRY_CONDITIONAL_RE = /\b(?:once|after|when|as\s+long\s+as|provided|if|since)\b[^.]{0,40}\b(?:dr(?:y|ies|ied|ying)|bond(?:s|ed)?|cure[sd]?)\b/;
 const REENTRY_TOPIC_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.]{0,25}\b(?:off|out|away|inside|indoors)\b|\b(?:off|away\s+from)\s+(?:of\s+)?(?:the\s+|your\s+|those\s+|any\s+)?(?:lawn|grass|yard|turf|treated|area|areas|surface|surfaces|patio|deck|lanai|garden|sod)\b|\b(?:walk|play|sit|lie|run|step|stand)(?:ing)?\s+(?:on|in|across|through|over)\b|\bgood\s+to\s+go\b|\bwait(?:ing)?\b[^.]{0,20}\b(?:until|till|before|for\s+(?:it|them|the\s+(?:lawn|treatment|application|product|spray|area|grass|yard|surface|surfaces)))\b|\bhold\s+off\b|\bsit\s+tight\b|\b(?:can|could|may|will|should)\s+be\s+(?:used|walked|played|entered|accessed|mowed|watered|enjoyed)\b|\b(?:use|using)\s+(?:the\s+|your\s+)?(?:lawn|yard|grass|patio|deck|lanai|garden|pool|area|outdoors?)\b|\bavoid(?:ing)?\b[^.]{0,20}\b(?:area|areas|lawn|grass|yard|turf|treated|surfaces?|sod|patio|deck|lanai|garden|it)\b/;
 // "go back out", "let them out", "be back outside": a re-entry movement (staff scheduling is excluded by the caller)
-const REENTRY_MOVE_RE = /\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting|head|heads|heading)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|outdoors)\b|\bon\s+(?:it|the\s+(?:lawn|grass|yard|treated))\b/;
+const REENTRY_MOVE_RE = /\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting|head|heads|heading)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|outdoors|in\s+the\s+(?:yard|lawn|grass|garden|backyard))\b|(?<!\bus\s+(?:to\s+)?)\b(?:go|goes|going|gone|come|comes|coming|let|lets|letting)\s+(?:\w+\s+){0,2}?out\b(?!\s+of\b)|\bon\s+(?:it|the\s+(?:lawn|grass|yard|treated))\b/;
 const BEING_RE = /\b(?:pets?|dogs?|cats?|pups?|puppies|kittens?|animals?|kids?|children|child|toddlers?|babies|baby|people|persons?|family|families|everyone|everybody|anybody|nobody|folks|anyone|humans?|grandkids?|guests?|visitors?|neighbou?rs?|horses?|birds?|chickens?)\b/;
 const ACTIVITY_RE = /\b(?:water(?:ing|ed)?|mow(?:ing|ed)?|irrigat\w*|sprinklers?|swim(?:ming)?|walk(?:ing)?|play(?:ing)?|garden(?:ing)?|weed(?:ing)?|edging|trim(?:ming)?)\b/;
 const PERMISSION_RE = /\b(?:can|could|may|might|able|allowed|allow|permitted|ok|okay|alright|fine|safe|good|clear|cleared|free|ready|welcome|all\s+set|no\s+problem|not\s+a\s+(?:problem|concern|issue|worry)|no\s+need|no\s+worries|isn'?t\s+a\s+(?:problem|concern|issue))\b/;
@@ -526,6 +526,12 @@ const WAIT_ALLOWED_RE = /\bwait(?:ing)?\s+(?:for|to\s+hear|on)\s+(?:us|our|my|a|
 const UNTIL_TIME_RE = /\b(?:until|till|til|through)\s+(?:tomorrow|tonight|morning|evening|noon|later|then|the\s+(?:morning|evening|next\s+day|weekend)|this\s+(?:evening|afternoon|weekend)|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?)\b/;
 // Staff / scheduling language.
 const STAFF_SUBJECT_RE = /\b(?:we|we'll|we're|we've|we'd|i|i'll|i'm|i've|our\s+(?:team|tech(?:nician)?s?|crew|office|dispatcher)|(?:the|a|your)\s+(?:tech(?:nician)?|team|crew|office|teammate|dispatcher|specialist)|tech(?:nician)?s?|teammates?|someone|somebody|dispatch|manager|owner|supervisor|coordinator|representative|rep|staff|specialist|scheduler|customer\s+service|support|adam)\b/;
+// Staff named INSIDE a post-treatment time anchor ("after we leave", "once we're done", "when the tech finishes")
+// is a time reference, not the subject who moves, so it never makes a clause staff-led: "they can go out
+// after we leave" is a re-entry permission. ("before we arrive" is not stripped: that is pre-visit access.)
+const STAFF_TIME_ANCHOR_RE = /\b(?:after|once|when|whenever|as\s+soon\s+as|until|till|following)\s+(?:we|i|the\s+(?:tech(?:nician)?|team|crew)|our\s+\w+)(?:'ve|'re|'m|\s+(?:are|have|has|is|get|got))?\s+(?:leave|leaves|left|finish|finishes|finished|done|through|spray|sprays|sprayed|treat|treats|treated|wrap|wraps|wrapped|complete|completes|completed|apply|applies|applied|go|gone|head|headed|out)\b/g;
+const withoutTimeAnchors = (clause) => clause.replace(STAFF_TIME_ANCHOR_RE, ' ');
+const staffSubjectIn = (clause) => STAFF_SUBJECT_RE.test(withoutTimeAnchors(clause));
 const SCHEDULING_VERB_RE = /\b(?:be|arrive|arrives|arriving|come|comes|coming|stop|stops|stopping|swing|swings|swinging|head|heads|reach|reaches|call|calls|text|texts|email|emails|follow|follows|circle|circles|hear|respond|reply|get\s+back|getting\s+back|return|returns|show\s+up|drop\s+by|dispatch|send|visit|schedule|reschedule|contact|touch\s+base|check\s+(?:in|back|on))\b/;
 // the scheduling noun IS the subject: "your next visit is in 3 weeks", "the arrival window is 2 hours"
 const SCHEDULING_SUBJECT_RE = /\b(?:appointments?|visits?|windows?|arrivals?|follow-?ups?|callbacks?|inspections?|estimates?|quotes?|next\s+service|tech(?:nician)?)\s+(?:\w+\s+){0,2}?(?:is|are|was|will\s+be|starts?|runs?|lasts?|takes?|comes?|arrives?)\b/;
@@ -561,7 +567,7 @@ function clausesOf(text) {
       out.push({ clause, staffCarry, sentence, question });
       // a staff subject carries onto the NEXT clause of the same sentence only
       // while this clause is itself clean scheduling.
-      staffCarry = STAFF_SUBJECT_RE.test(clause) && !LABEL_CONTEXT_RE.test(clause) && SCHEDULING_VERB_RE.test(clause);
+      staffCarry = staffSubjectIn(clause) && !LABEL_CONTEXT_RE.test(clause) && SCHEDULING_VERB_RE.test(clause);
     }
   }
   return out;
@@ -572,7 +578,7 @@ function isSchedulingClause(clause, { staffCarry, clock, sentence = clause }) {
   if (LABEL_CONTEXT_RE.test(clause)) return false;
   if (BUSINESS_RE.test(clause)) return true;
   // staff subject, then a scheduling verb, then the quantity ("we'll be back out in a couple of days")
-  if ((STAFF_SUBJECT_RE.test(clause) || staffCarry) && SCHEDULING_VERB_RE.test(clause)) return true;
+  if ((staffSubjectIn(clause) || staffCarry) && SCHEDULING_VERB_RE.test(clause)) return true;
   // "your next visit is in 3 weeks", "the arrival window is 2 hours"
   if (SCHEDULING_SUBJECT_RE.test(clause)) return true;
   // a clock time beside a scheduling word ("between 8 and 10 AM", "Thursday at 2 PM"), but never "until/by N"
@@ -587,7 +593,7 @@ function isSchedulingClause(clause, { staffCarry, clock, sentence = clause }) {
 const PRE_VISIT_PHRASE_RE = /\bfor\s+(?:the|our|your)\s+(?:visit|appointment|service|treatment\s+visit)\b|\bwhile\s+(?:we|i|the\s+\w+|our\s+\w+)\s+(?:is|are|will\s+be|'re)\s+(?:there|here|on\s+site|on\s+the\s+property|working|servicing)\b|\bso\s+(?:we|i|the\s+\w+|our\s+\w+)\s+(?:can|could|will)\s+(?:get|reach|access|walk|enter|work)\b|\bgate\s+(?:is\s+|stays\s+|left\s+)?unlocked\b|\bunlock(?:ed)?\s+the\s+gate\b/;
 const POST_TREATMENT_SIGNAL_RE = /\b(?:after\w*|until|till|til|once|then|again|later|tonight|tomorrow|rest\s+of|remainder|following|dr(?:y|ies|ied|ying)|treated|applied|application|wet|damp|overnight|all\s+(?:day|night)|hours?|days?|minutes?)\b/;
 function isPreVisitAccess(sentence) {
-  return (ACCESS_RE.test(sentence) || PRE_VISIT_PHRASE_RE.test(sentence)) && !POST_TREATMENT_SIGNAL_RE.test(sentence) && !hasDuration(sentence) && !hasClockTime(sentence);
+  return (ACCESS_RE.test(withoutTimeAnchors(sentence)) || PRE_VISIT_PHRASE_RE.test(sentence)) && !POST_TREATMENT_SIGNAL_RE.test(sentence) && !hasDuration(sentence) && !hasClockTime(sentence);
 }
 
 const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|would\s+not|can'?t|cannot|shouldn'?t|should\s+not)\s+(?:\w+\s+){0,2}?(?:affect|hurt|harm|matter|damage|ruin|undo|change|impact|wash|remove|rinse|dilute|bother|be\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b|\b(?:don'?t\s+worry|no\s+need\s+to\s+worry|nothing\s+to\s+worry|not\s+to\s+worry|(?:isn'?t|is\s+not|not)\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b/;
@@ -600,7 +606,7 @@ function clauseFacts({ clause, staffCarry, sentence, question, replyContext, rep
   const duration = LABEL_CONTEXT_NO_RAIN_RE.test(clause) ? hasDuration(clause) : hasShortDuration(clause);
   return {
     c: clause, sentence, question, replyContext, replyDryCondition, being,
-    staffLed: (STAFF_SUBJECT_RE.test(clause) || staffCarry) && !being,
+    staffLed: (staffSubjectIn(clause) || staffCarry) && !being,
     duration,
     clock: hasClockTime(clause),
     rain: RAIN_WORD_RE.test(clause),
@@ -617,7 +623,7 @@ const DAY_CLEARANCE_RE = /\b(?:tonight|tomorrow|today|this\s+(?:evening|afternoo
 const BARE_UNIT_RE = /\b(?:hours|minutes|mins|hrs|overnight)\b/;
 const BARE_LONG_UNIT_RE = /\b(?:days|nights|weeks)\b/;
 const BOOKED_DAY_QUALIFIER_RE = /\b(?:by|until|till|after|once|when|now|already|later|then|soon)\b/;
-const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(x.c) && !x.preVisit;
+const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(withoutTimeAnchors(x.c)) && !x.preVisit;
 
 // A clause is a label claim when ANY rule holds, evaluated in order. A clause
 // with a duration or a clock time is decided by scheduling alone (first rule,

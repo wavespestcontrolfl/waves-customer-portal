@@ -832,6 +832,26 @@ describe('r7: pre-visit access guidance is scheduling logistics; post-treatment 
   });
 });
 
+describe('r8: a pronoun subject going back out after a staff time anchor is a re-entry permission', () => {
+  const claims = (t) => labelFactsLib.replyClaimsUngroundedLabelTiming(t, '');
+  test('they / he / she / everyone / the family / you all / y\'all, with a post-treatment anchor, are held', () => {
+    for (const t of [
+      'They can go out after we leave.', 'He can come back outside once we\'re done.', 'She can be back out later.', 'Everyone can go outside this afternoon.',
+      'You all can go out after we spray.', 'Y\'all can go out when it\'s dry.', 'The family can be in the yard once the tech finishes.',
+      'Let them go out after we finish.', 'You can go outside when we are done.', 'They can come out after we leave.', 'They can go back out as soon as we finish.',
+      'Them can go in the yard when we finish.',
+    ]) expect([t, claims(t)]).toEqual([t, true]);
+  });
+  test('when the STAFF is the one moving, or the wording is pre-visit access, it still passes', () => {
+    for (const t of [
+      'We can come back out Thursday.', 'The tech will be outside your home.', 'We will come out Thursday.', 'We\'ll come back out after we spray.',
+      'Someone will come out to look at it.', 'Let us know if you\'d like us to come out.', 'Would you like us to come out?', 'The tech will be in the yard Thursday.',
+      'The tech will call you after we finish.', 'We\'ll text you 30 minutes before we arrive.', 'You\'ll get a text once we are on our way.',
+      'Please keep your dogs inside before we arrive.', 'Please make sure the dogs are inside when we arrive Thursday.', 'If you go out of town, let us know.',
+    ]) expect([t, claims(t)]).toEqual([t, false]);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
