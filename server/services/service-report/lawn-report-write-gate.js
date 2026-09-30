@@ -61,29 +61,8 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       logger.warn(`[lawn-report-gate] ${blockers.length} blocker contradiction(s) on service_record ${service.id}: ${blockers.map((b) => b.code).join(', ')}`);
     }
 
-    // First writer wins for the watering instruction and its banner, and they
-    // are PRESERVED whatever the gate says: the write below replaces the whole
-    // lawnReportV2 object, so a retry during a gate rollback must carry the
-    // frozen keys over or it would erase the customer's snapshot. The gate
-    // controls creation and rendering only, never deletion. Read fresh, right
-    // before the write; a failed read aborts the write (outer catch) rather
-    // than risk overwriting a snapshot it could not see.
-    const existing = await knex('service_records').where({ id: service.id }).first('structured_notes')
-      .then((row) => parseJsonObject(row && row.structured_notes).lawnReportV2);
-    const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
-    const wateringInstruction = asObject(existing && existing.wateringInstruction) || instructionOut.instruction || null;
-    const banner = asObject(existing && existing.banner) || reportV2.banner || null;
-
     const frozen = {
       smsSummary: reportV2.smsSummary || null,
-      // The watering banner (GATE_LAWN_WATERING_RULE), frozen beside smsSummary
-      // so a later read shows what the customer was first told. Key omitted
-      // when there is no banner (gate off = frozen object unchanged).
-      ...(banner ? { banner } : {}),
-      // The COMPLETE instruction (minutes, labels, provenance), so later reads
-      // replay it instead of rereading the customer's current irrigation
-      // entries. First writer wins (see above).
-      ...(wateringInstruction ? { wateringInstruction } : {}),
       todaysResult: fix.todaysResult || null,
       statusHeadline: reportV2.snapshot?.statusHeadline || null,
       generatedAt: new Date().toISOString(),
@@ -104,7 +83,35 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       ),
     });
 
-    return { smsSummary: frozen.smsSummary, frozen, warnings, persisted: true };
+    // The watering instruction and its banner (GATE_LAWN_WATERING_RULE) freeze
+    // under their OWN top-level key, first writer wins, in a statement of their
+    // own. They cannot live inside lawnReportV2: the write above replaces that
+    // whole object, which would erase a snapshot a concurrent or earlier run
+    // had just frozen. The guarded UPDATE takes the row lock, so of two racing
+    // writers the second re-checks the guard after the first commits and
+    // writes nothing; a retry (or a gate rollback and re-run) changes nothing
+    // either. Gate off builds no instruction, so nothing is written, and
+    // nothing here ever deletes an existing snapshot.
+    let wateringFreeze = null;
+    // Only a real claim is a snapshot: a state-null instruction, or one built
+    // while the visit's products could not be read, is never frozen (the next
+    // render regenerates it from what the products really are).
+    if (instructionOut.instruction && instructionOut.instruction.state && !instructionOut.productsLoadFailed) {
+      await knex('service_records')
+        .where({ id: service.id })
+        .whereRaw("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL")
+        .update({
+          structured_notes: knex.raw(
+            "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instructionOut.instruction, banner: reportV2.banner || null, frozenAt: frozen.generatedAt } })],
+          ),
+        });
+      // Whichever writer won, the caller needs the persisted value.
+      wateringFreeze = await knex('service_records').where({ id: service.id }).first('structured_notes')
+        .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
+    }
+
+    return { smsSummary: frozen.smsSummary, frozen, wateringFreeze, warnings, persisted: true };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;

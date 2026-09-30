@@ -12235,6 +12235,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // fold the frozen synthesis back in so the later sending/sent writes (which
         // spread recordStructuredNotes) don't clobber it.
         if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
+        // Same for the watering-instruction freeze (its own key, first writer wins).
+        if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
       } catch { /* best-effort — render-time reconciliation still applies */ }
     }
 

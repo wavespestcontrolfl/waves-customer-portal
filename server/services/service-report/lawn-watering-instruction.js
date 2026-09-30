@@ -23,8 +23,11 @@
 //   2. one turf head type on file      -> owner head table (spray 15, rotor 40
 //      minutes per quarter inch)
 //   3. both head types / nothing on file -> both generic figures
-//   4. heads on file but unknown (drip only, unrecognised) -> "one full cycle"
-//   5. customer explicitly says no system -> inches with a hose-end sprinkler
+//   4. a head type on file but unusable (drip only, unrecognised) -> "one full
+//      cycle"
+// No flag ever means "no system": irrigation_system false is a legacy default
+// and every other reader treats it as "do not count the schedule", so it (and
+// true) are ignored here.
 // Generic copy prints minutes only, never "about a quarter inch": at the UF
 // rates the runtime uses those minutes are really 0.33-0.38 inch.
 //
@@ -57,6 +60,7 @@ const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
 
 // ── Time helpers ─────────────────────────────────────────────────────────
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function toDate(value) {
   if (value == null || value === '') return null;
   const d = value instanceof Date ? value : new Date(value);
@@ -73,6 +77,8 @@ function wallParts(date, tz) {
   if (hour === 24) hour = 0; // Intl quirk: midnight reports as 24
   return {
     day: `${get('year')}-${get('month')}-${get('day')}`,
+    month: parseInt(get('month'), 10),
+    dayOfMonth: parseInt(get('day'), 10),
     weekday: get('weekday'),
     hour,
     minute: parseInt(get('minute'), 10),
@@ -126,7 +132,11 @@ function withinPhrase(hours) {
 function formatWhen(date, anchor, tz) {
   const at = wallParts(date, tz);
   const clock = clockLabel(at.hour, at.minute);
-  if (wallParts(anchor, tz).day === at.day) return `${clock} ${at.hour >= 17 ? 'tonight' : 'today'}`;
+  const from = wallParts(anchor, tz);
+  if (from.day === at.day) return `${clock} ${at.hour >= 17 ? 'tonight' : 'today'}`;
+  // A weekday alone is ambiguous once the target is six or more days out.
+  const days = Math.round((Date.parse(`${at.day}T00:00:00Z`) - Date.parse(`${from.day}T00:00:00Z`)) / 86400000);
+  if (days >= 6) return `${at.weekday}, ${MONTHS[at.month - 1]} ${at.dayOfMonth} at ${clock}`;
   return `${at.weekday} ${clock}`;
 }
 
@@ -158,21 +168,9 @@ function scaledMinutes(perQuarterInch, inches) {
   return Math.max(5, Math.round((perQuarterInch * (inches / BASE_INCHES)) / 5) * 5);
 }
 
-function fmtInches(n) {
-  if (Math.abs(n - 0.25) < 0.01) return '¼';
-  if (Math.abs(n - 0.5) < 0.01) return '½';
-  if (Math.abs(n - 0.75) < 0.01) return '¾';
-  return String(Math.round(n * 100) / 100).replace(/\.?0+$/, '');
-}
-
 function minutesFor(runtime, inches) {
   const empty = { spray: null, rotor: null, unknown: false, measured: null };
   const rt = runtime && typeof runtime === 'object' && runtime.unconfirmed !== true ? runtime : null;
-
-  // Customer said, explicitly, that there is no system. Never inferred.
-  if (rt && rt.systemOn === false) {
-    return { minutes: empty, basis: 'no_system', verb: 'apply', clause: `about ${fmtInches(inches)} inch of water with a hose-end sprinkler` };
-  }
 
   const rateInput = rt ? {
     explicitInchesPerWeek: rt.explicitInchesPerWeek,
@@ -203,15 +201,14 @@ function minutesFor(runtime, inches) {
   if (known.length === 2) {
     return { minutes: { ...empty, spray, rotor }, basis: 'mixed_heads', clause: `spray zones about ${spray} minutes and rotor zones about ${rotor} minutes` };
   }
-  // Something IS on file about the system (heads, run minutes, days, the
-  // toggle) but it does not name a usable turf head: one full cycle.
-  const onFile = heads.length > 0
-    || normalizeRuntimeInputs(rateInput || {}).runMinutes != null
-    || (rt && rt.systemOn === true);
+  // A head type IS on file but names no usable turf head (drip only,
+  // unrecognised): one full cycle. Anything else on file (a toggle, run
+  // minutes) is not a head type.
+  const onFile = heads.length > 0;
   if (onFile) {
     return { minutes: { ...empty, unknown: true }, basis: 'unknown_heads', clause: FULL_CYCLE };
   }
-  // Nothing on file: never assume no sprinklers. Both generic figures.
+  // No head type on file: never assume no sprinklers. Both generic figures.
   return { minutes: { ...empty, spray, rotor }, basis: 'generic', clause: `spray heads about ${spray} minutes a zone and rotors about ${rotor} minutes` };
 }
 
@@ -239,7 +236,7 @@ function emptyInstruction() {
  * @param {Date|string|null} input.completedAt
  * @param {string} [input.tz]         defaults to America/New_York
  * @param {object|null} [input.runtime] { runMinutes, wateringDays, headTypes,
- *                                    explicitInchesPerWeek, systemOn, unconfirmed }
+ *                                    explicitInchesPerWeek, unconfirmed }
  * @param {null} [input.forecast]     reserved (forecast-aware water-in is a later PR)
  * @param {boolean} [input.hasWeekPlan] a weekly plan callout renders below the banner
  * @returns {object}
@@ -310,7 +307,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
       out.expiresAt = out.waterInBy;
       out.lines = [
         `Skip your turf watering until ${holdLabel}, then water in.`,
-        `After that, ${waterInDetail.verb || 'run'} ${waterInDetail.clause} within ${withinPhrase(waterInDetail.byHours)}.`,
+        `After that, run ${waterInDetail.clause} within ${withinPhrase(waterInDetail.byHours)}.`,
         ANY_DAY_LINE,
       ];
     } else {
@@ -329,7 +326,7 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
   out.waterInByLabel = formatWhen(by, at, tz);
   out.lines = [
     `Water in today’s treatment by ${formatWhen(by, at, tz)}.`,
-    `${waterInDetail.verb === 'apply' ? 'Apply' : 'Run'} ${waterInDetail.clause}.`,
+    `Run ${waterInDetail.clause}.`,
     ANY_DAY_LINE,
   ];
   return out;

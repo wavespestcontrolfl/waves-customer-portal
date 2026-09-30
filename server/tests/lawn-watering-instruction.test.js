@@ -20,7 +20,7 @@ function expectCleanCopy(instruction) {
     expect(findBannedCustomerCopy(line)).toEqual([]);
     expect(reentrySafetyClaimFinding(line)).toBeFalsy();
     // No probabilities, no county language, no drying / keep-off phrasing.
-    expect(line).not.toMatch(/%|percent|chance|ordinance|county|blackout|\bdry\b|\bwait\b|keep\b.*\boff\b|stay off/i);
+    expect(line).not.toMatch(/%|percent|chance|ordinance|county|blackout|hose|\bdry\b|\bwait\b|keep\b.*\boff\b|stay off/i);
   }
   expect(instruction.lines.length).toBeLessThanOrEqual(3);
 }
@@ -245,21 +245,27 @@ describe('minutes ladder (a sprinkler system is never assumed absent)', () => {
     expect(r.minutes).toEqual({ spray: 15, rotor: 40, unknown: false, measured: null });
   });
 
-  test('heads on file but unknown (drip only, unrecognized, or a system with no head type): one full cycle', () => {
-    for (const runtime of [{ headTypes: ['drip'] }, { headTypes: ['mystery'] }, { systemOn: true }, { runMinutes: 20 }]) {
+  test('a head type on file but unusable (drip only, unrecognized): one full cycle', () => {
+    for (const runtime of [{ headTypes: ['drip'] }, { headTypes: ['mystery'] }, { headTypes: ['spray', 'mystery'] }]) {
       const r = waterIn(runtime);
       expect(r.minutes).toEqual({ spray: null, rotor: null, unknown: true, measured: null });
       expect(r.lines[1]).toBe('Run one full cycle on each turf zone.');
     }
   });
 
-  test('a customer who explicitly says there is no system gets inches, never an inference', () => {
-    const r = waterIn({ systemOn: false });
-    expect(r.lines[1]).toBe('Apply about ¼ inch of water with a hose-end sprinkler.');
-    expect(r.minutes).toEqual({ spray: null, rotor: null, unknown: false, measured: null });
-    expectCleanCopy(r);
-    // Only an explicit false: null / undefined never mean "no system".
-    expect(waterIn({ systemOn: null }).minutes.spray).toBe(15);
+  test('no flag ever means "no system": irrigation_system false / true / null never change the copy', () => {
+    // A pre-toggle row (the column used to default to false) with a head type on file: the head ladder.
+    for (const systemOn of [false, true, null, undefined]) {
+      const withRotor = waterIn({ systemOn, headTypes: ['rotor'] });
+      expect(withRotor.lines[1]).toBe('Run each zone about 40 minutes.');
+      expect(withRotor.minutes).toEqual({ spray: null, rotor: 40, unknown: false, measured: null });
+      // No head type on file: the generic both-figures line, whatever the flag says.
+      const bare = waterIn({ systemOn });
+      expect(bare.lines[1]).toBe('Run spray heads about 15 minutes a zone and rotors about 40 minutes.');
+      expect(bare.minutes).toEqual({ spray: 15, rotor: 40, unknown: false, measured: null });
+    }
+    // Run minutes with no head type are not a head type either.
+    expect(waterIn({ runMinutes: 20 }).lines[1]).toBe('Run spray heads about 15 minutes a zone and rotors about 40 minutes.');
   });
 
   test('other depths scale linearly, rounded to 5', () => {
@@ -272,9 +278,9 @@ describe('minutes ladder (a sprinkler system is never assumed absent)', () => {
     const r = build([HOLD(24), WATER_IN()], { runtime: { headTypes: ['spray', 'rotor'] } });
     expect(r.lines[1]).toBe('After that, run spray zones about 15 minutes and rotor zones about 40 minutes within 24 hours.');
     expectCleanCopy(r);
-    const none = build([HOLD(24), WATER_IN()], { runtime: { systemOn: false } });
-    expect(none.lines[1]).toBe('After that, apply about ¼ inch of water with a hose-end sprinkler within 24 hours.');
-    expectCleanCopy(none);
+    const flagOff = build([HOLD(24), WATER_IN()], { runtime: { systemOn: false, headTypes: ['rotor'] } });
+    expect(flagOff.lines[1]).toBe('After that, run each zone about 40 minutes within 24 hours.');
+    expectCleanCopy(flagOff);
   });
 });
 
@@ -285,7 +291,7 @@ describe('every rendered line passes the customer-copy guards', () => {
   ];
   const runtimes = [
     null, { headTypes: ['spray'] }, { headTypes: ['rotor'] }, { headTypes: ['spray', 'rotor'] },
-    { headTypes: ['drip'] }, { systemOn: false },
+    { headTypes: ['drip'] }, { systemOn: false }, { systemOn: false, headTypes: ['rotor'] },
     { explicitInchesPerWeek: 1.5, runMinutes: 30, wateringDays: ['Mon', 'Thu'], headTypes: ['spray'] },
   ];
   test.each(rulesets.map((r, i) => [i, r]))('ruleset %i x every runtime x plan/no plan', (_i, rules) => {
@@ -419,5 +425,23 @@ describe('hold until the treatment has dried (no invented duration)', () => {
         }
       }
     }
+  });
+});
+
+describe('a hold far enough out names its date', () => {
+  test('144 h or more prints weekday, month and day; nearer targets keep the short form', () => {
+    expect(build([HOLD(168)]).lines[0]).toBe('Skip your turf watering until Wed, Oct 7 at 3 PM.');
+    expect(build([HOLD(144)]).lines[0]).toBe('Skip your turf watering until Tue, Oct 6 at 3 PM.');
+    expect(build([HOLD(120)]).lines[0]).toBe('Skip your turf watering until Mon 3 PM.');
+    expect(build([HOLD(48)]).lines[0]).toBe('Skip your turf watering until Fri 3 PM.');
+    const mixed = build([HOLD(168), WATER_IN()]);
+    expect(mixed.lines[0]).toBe('Skip your turf watering until Wed, Oct 7 at 3 PM, then water in.');
+    expectCleanCopy(mixed);
+    expectCleanCopy(build([HOLD(168)]));
+  });
+
+  test('the date follows the ET calendar across month and year ends', () => {
+    const r = buildWateringInstruction({ rules: [HOLD(168)], completedAt: '2026-12-29T18:40:00Z' });
+    expect(r.lines[0]).toBe('Skip your turf watering until Tue, Jan 5 at 2 PM.');
   });
 });

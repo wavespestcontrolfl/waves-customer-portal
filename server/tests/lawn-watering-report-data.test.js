@@ -6,9 +6,11 @@ const { buildReportV1Data } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 
+const FAIL = Symbol('table read fails');
 function makeKnex(fixtures) {
   const knex = (table) => {
-    let rows = [...(fixtures[table] || [])];
+    const failing = fixtures[table] === FAIL;
+    let rows = failing ? [] : [...(fixtures[table] || [])];
     const sortKeys = [];
     const q = {};
     const applySort = () => {
@@ -71,7 +73,7 @@ function makeKnex(fixtures) {
       orderBy(col, dir = 'asc') { sortKeys.push({ col, dir }); applySort(); return q; },
       first() { return Promise.resolve(rows[0] || null); },
       columnInfo: () => Promise.resolve({}),
-      catch: () => Promise.resolve(rows),
+      catch: (fn) => (failing ? Promise.resolve(fn(new Error('read failed'))) : Promise.resolve(rows)),
       then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
     });
     return q;
@@ -182,7 +184,7 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
 
   describe('later reads replay the frozen instruction', () => {
     const PREFS = (headTypes) => [{ customer_id: 'cust-lawn-w1', irrigation_system_type: headTypes, irrigation_system: true }];
-    const withFrozen = (service, instruction) => ({ ...service, structured_notes: JSON.stringify({ lawnReportV2: { wateringInstruction: instruction } }) });
+    const withFrozen = (service, instruction) => ({ ...service, structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instruction } }) });
     const pick = (data) => JSON.stringify({ banner: data.reportV2.banner, aftercare: data.reportV2.aftercare, customerAction: data.reportV2.snapshot.customerAction });
 
     test('a head-type / run-minutes edit after completion does not change a frozen report', async () => {
@@ -222,6 +224,24 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(back.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
     });
 
+    test('a snapshot frozen at the earlier lawnReportV2 location is still replayed', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const out = {};
+      const first = await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex(fixtures(PREFS(['rotor']))), { wateringInstructionOut: out });
+      const legacy = { ...serviceWith(WATER_IN), structured_notes: JSON.stringify({ lawnReportV2: { wateringInstruction: JSON.parse(JSON.stringify(out.instruction)) } }) };
+      const replay = await buildReportV1Data(legacy, 'token-w1', makeKnex(fixtures(PREFS(['spray']))));
+      expect(replay.reportV2.banner).toEqual(first.reportV2.banner);
+    });
+
+    test('a pre-toggle preferences row (irrigation_system false) still gets the head-type minutes, never "no system"', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const render = async (prefs) => (await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex(fixtures([{ customer_id: 'cust-lawn-w1', ...prefs }])))).reportV2.banner.lines;
+      expect((await render({ irrigation_system: false, irrigation_system_type: ['rotor'] }))[1]).toBe('Run each zone about 40 minutes.');
+      const bare = await render({ irrigation_system: false });
+      expect(bare[1]).toBe('Run spray heads about 15 minutes a zone and rotors about 40 minutes.');
+      expect(bare.join(' ')).not.toMatch(/hose/i);
+    });
+
     test('the frozen instruction also fills the afterHold overlay the same way', () => {
       const { applyAfterHoldOverlay } = require('../services/service-report/report-data');
       const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
@@ -231,13 +251,29 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(JSON.stringify(applyAfterHoldOverlay(wc, frozen))).toBe(JSON.stringify(applyAfterHoldOverlay(wc, fresh)));
     });
 
-    test('a malformed frozen object is ignored and regenerated; a frozen null-state instruction is a frozen no-claim', async () => {
+    test('a malformed or state-null frozen object is never replayed: the instruction is regenerated', async () => {
       process.env.GATE_LAWN_WATERING_RULE = 'true';
       const service = serviceWith(HOLD);
       const bad = await buildReportV1Data(withFrozen(service, { state: 'bogus', lines: 'x' }), 'token-w1', makeKnex(fixtures()));
       expect(bad.reportV2.banner.state).toBe('hold');
       const nullState = await buildReportV1Data(withFrozen(service, { state: null, lines: [], minutes: {} }), 'token-w1', makeKnex(fixtures()));
-      expect(nullState.reportV2.banner).toBeUndefined();
+      expect(nullState.reportV2.banner.state).toBe('hold');
+    });
+
+    test('a product read that fails at completion is reported, builds no claim, and freezes nothing; the next render sees the hold', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const out = {};
+      const failed = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex({ ...fixtures(), service_products: FAIL }), { wateringInstructionOut: out });
+      expect(out.productsLoadFailed).toBe(true);
+      expect(out.instruction.state).toBeNull();
+      expect(failed.reportV2.banner).toBeUndefined();
+      // The write gate freezes only a real claim from a clean product read.
+      // (lawn-report-write-gate-watering.test.js pins that decision.) With nothing
+      // frozen, the next render regenerates from the products now present.
+      const next = {};
+      const later = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: next });
+      expect(next.productsLoadFailed).toBe(false);
+      expect(later.reportV2.banner.state).toBe('hold');
     });
 
     test('gate off ignores a frozen instruction entirely', async () => {
@@ -247,6 +283,41 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(data.reportV2.banner).toBeUndefined();
       expect(data.reportV2.aftercare.evidenceSource).toBeUndefined();
       expect(out.instruction).toBeUndefined();
+    });
+  });
+
+  describe('cache signature', () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const CATALOG = (hours) => ({ id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', post_application_watering: { mode: 'hold', hold_hours: hours, source: 'owner' } });
+    // A visit completed before the rule was frozen with its product facts: the rule comes from the live catalog.
+    const record = (notes = {}) => {
+      const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: (({ wateringRule, ...rest }) => rest)(facts(null)) } });
+      return { id: 'svc-lawn-w1', customer_id: 'cust-lawn-w1', structured_notes: JSON.stringify(notes), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
+    };
+    const signatureFor = async (row, hours) => {
+      const knex = makeKnex({ ...fixtures(), products_catalog: [CATALOG(hours)], service_records: [row] });
+      return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+    };
+    const FROZEN = { lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null } } };
+
+    test('an unfrozen visit re-keys when the live catalog rule it renders from changes', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const a = await signatureFor(record(), 24);
+      expect(await signatureFor(record(), 24)).toBe(a);
+      expect(await signatureFor(record(), 48)).not.toBe(a);
+    });
+
+    test('a frozen visit keeps the constant stamp: a catalog edit does not re-key it', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      expect(await signatureFor(record(FROZEN), 24)).toBe(await signatureFor(record(FROZEN), 48));
+      // ...and it differs from the unfrozen key (the stamp carries a hash there).
+      expect(await signatureFor(record(FROZEN), 24)).not.toBe(await signatureFor(record(), 24));
+    });
+
+    test('gate off: no stamp at all, so the signature ignores the rule', async () => {
+      delete process.env.GATE_LAWN_WATERING_RULE;
+      expect(await signatureFor(record(), 24)).toBe(await signatureFor(record(), 48));
+      expect(await signatureFor(record(FROZEN), 24)).toBe(await signatureFor(record(), 24));
     });
   });
 });

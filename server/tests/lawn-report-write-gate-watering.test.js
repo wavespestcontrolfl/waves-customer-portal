@@ -1,5 +1,6 @@
-// The lawn write gate freezes the COMPLETE watering instruction beside
-// smsSummary, first writer wins (GATE_LAWN_WATERING_RULE). Synthetic data only.
+// The lawn write gate freezes the COMPLETE watering instruction (and banner)
+// under structured_notes.lawnWateringFreeze, first writer wins, in a guarded
+// statement of its own (GATE_LAWN_WATERING_RULE). Synthetic data only.
 
 jest.mock('../services/service-report/pdf-queue', () => ({
   loadServiceRecordForPdf: jest.fn(async (id) => ({ id, service_line: 'lawn', structured_notes: '{}' })),
@@ -14,16 +15,28 @@ const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn
 
 const INSTRUCTION = (minutes) => ({ state: 'water_in', lines: ['Water in today’s treatment by Thu 2 PM.', `Run each zone about ${minutes} minutes.`], minutes: { measured: null }, ruleSource: 'default' });
 
-function fakeKnex(structuredNotes) {
-  const updates = [];
-  const knex = () => ({
-    where: () => ({
-      first: async () => ({ structured_notes: structuredNotes }),
-      update: async (patch) => { updates.push(patch); },
-    }),
-  });
+// A fake that records every statement. It applies the guarded freeze the way
+// Postgres does (see the -postgres test for the real thing): the freeze
+// statement lands only while lawnWateringFreeze is absent.
+function fakeKnex(initialNotes = {}) {
+  const state = { notes: JSON.parse(JSON.stringify(initialNotes)), statements: [] };
+  const knex = () => {
+    const q = { guard: null };
+    q.where = () => q;
+    q.whereRaw = (sql) => { q.guard = sql; return q; };
+    q.first = async () => ({ structured_notes: JSON.stringify(state.notes) });
+    q.update = async ({ structured_notes: raw }) => {
+      const patch = JSON.parse(raw.bindings[0]);
+      const isFreeze = Object.prototype.hasOwnProperty.call(patch, 'lawnWateringFreeze');
+      state.statements.push({ sql: raw.sql, guard: q.guard, keys: Object.keys(patch), isFreeze });
+      if (isFreeze && state.notes.lawnWateringFreeze) return 0;
+      Object.assign(state.notes, patch);
+      return 1;
+    };
+    return q;
+  };
   knex.raw = (sql, bindings) => ({ sql, bindings });
-  return { knex, updates };
+  return { knex, state };
 }
 
 function reportOnce(instruction) {
@@ -32,63 +45,93 @@ function reportOnce(instruction) {
     return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' }, ...(instruction ? { banner: { state: instruction.state, lines: instruction.lines } } : {}) } };
   });
 }
-const frozenOf = (updates) => JSON.parse(updates[0].structured_notes.bindings[0]).lawnReportV2;
+const run = (knex) => finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
 
-test('freezes the complete instruction beside the banner and smsSummary', async () => {
+test('the freeze is its own guarded statement; lawnReportV2 keeps its pinned write and never carries the instruction', async () => {
   reportOnce(INSTRUCTION(40));
-  const { knex, updates } = fakeKnex('{}');
-  const result = await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
+  const { knex, state } = fakeKnex({});
+  const result = await run(knex);
   expect(result.persisted).toBe(true);
-  expect(frozenOf(updates)).toMatchObject({ smsSummary: 'sms', banner: { state: 'water_in' }, wateringInstruction: INSTRUCTION(40) });
+  const [main, freeze] = state.statements;
+  expect(main.sql).toBe("COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb");
+  expect(main.keys).toEqual(['lawnReportV2']);
+  expect(state.notes.lawnReportV2).toMatchObject({ smsSummary: 'sms', statusHeadline: 'h' });
+  expect(state.notes.lawnReportV2).not.toHaveProperty('wateringInstruction');
+  expect(state.notes.lawnReportV2).not.toHaveProperty('banner');
+  expect(freeze.isFreeze).toBe(true);
+  expect(freeze.guard).toBe("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL");
+  expect(state.notes.lawnWateringFreeze).toMatchObject({ wateringInstruction: INSTRUCTION(40), banner: { state: 'water_in' } });
+  expect(result.wateringFreeze).toEqual(state.notes.lawnWateringFreeze);
 });
 
-test('first writer wins: an instruction already frozen is carried over, never replaced', async () => {
-  reportOnce(INSTRUCTION(15)); // a later run built from edited sprinkler entries
-  const { knex, updates } = fakeKnex(JSON.stringify({ lawnReportV2: { wateringInstruction: INSTRUCTION(40) } }));
-  await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
-  expect(frozenOf(updates).wateringInstruction).toEqual(INSTRUCTION(40));
+test('two writers with different instructions: the first persists whichever order they run in', async () => {
+  for (const order of [[40, 15], [15, 40]]) {
+    const { knex, state } = fakeKnex({});
+    const results = [];
+    for (const minutes of order) {
+      reportOnce(INSTRUCTION(minutes));
+      results.push(await run(knex));
+    }
+    expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(order[0]));
+    // Both callers are handed what actually persisted, not what they built.
+    for (const r of results) expect(r.wateringFreeze.wateringInstruction).toEqual(INSTRUCTION(order[0]));
+  }
 });
 
-test('gate off, nothing frozen yet: no instruction or banner key is created', async () => {
+test('a retry after the first freeze changes nothing', async () => {
+  const { knex, state } = fakeKnex({});
+  reportOnce(INSTRUCTION(40)); await run(knex);
+  const before = JSON.stringify(state.notes.lawnWateringFreeze);
+  reportOnce(INSTRUCTION(15)); await run(knex);
+  expect(JSON.stringify(state.notes.lawnWateringFreeze)).toBe(before);
+});
+
+test('gate off: the freeze statement is never issued, and an existing snapshot is untouched byte for byte', async () => {
+  const existing = { wateringInstruction: INSTRUCTION(40), banner: { state: 'water_in', lines: INSTRUCTION(40).lines }, frozenAt: '2026-09-30T18:41:00.000Z' };
+  const { knex, state } = fakeKnex({ lawnReportV2: { smsSummary: 'old' }, lawnWateringFreeze: existing });
   reportOnce(null);
-  const { knex, updates } = fakeKnex('{}');
-  await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
-  const frozen = frozenOf(updates);
-  expect(frozen).not.toHaveProperty('wateringInstruction');
-  expect(frozen).not.toHaveProperty('banner');
+  const result = await run(knex);
+  expect(state.statements.map((s) => s.keys)).toEqual([['lawnReportV2']]);
+  expect(JSON.stringify(state.notes.lawnWateringFreeze)).toBe(JSON.stringify(existing));
+  expect(result.wateringFreeze).toBeNull();
+  // Nothing frozen yet + gate off: no freeze key is created.
+  const fresh = fakeKnex({});
+  reportOnce(null);
+  await run(fresh.knex);
+  expect(fresh.state.notes).not.toHaveProperty('lawnWateringFreeze');
 });
 
-test('gate off + an existing frozen snapshot + a retry write: the frozen keys survive byte for byte', async () => {
-  const existing = { banner: { state: 'water_in', lines: INSTRUCTION(40).lines, expiresAt: '2026-10-01T18:00:00.000Z' }, wateringInstruction: INSTRUCTION(40) };
-  const notes = JSON.stringify({ lawnReportV2: { smsSummary: 'old', ...existing } });
-  reportOnce(null); // gate rolled back: the build produces no instruction and no banner
-  const { knex, updates } = fakeKnex(notes);
-  await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
-  const frozen = frozenOf(updates);
-  expect(JSON.stringify(frozen.wateringInstruction)).toBe(JSON.stringify(existing.wateringInstruction));
-  expect(JSON.stringify(frozen.banner)).toBe(JSON.stringify(existing.banner));
-  // The keys the gate does own are refreshed as before.
-  expect(frozen.smsSummary).toBe('sms');
+test('a no-claim (state null) instruction, or one built while the products could not be read, is never frozen', async () => {
+  for (const [, instruction, productsLoadFailed] of [
+    ['state null', { ...INSTRUCTION(40), state: null, lines: [] }, false],
+    ['products read failed', INSTRUCTION(40), true],
+  ]) {
+    buildReportV1Data.mockImplementationOnce(async (_r, _t, _k, opts) => {
+      opts.wateringInstructionOut.instruction = instruction;
+      opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed;
+      return { reportV2: { smsSummary: 'sms', snapshot: { statusHeadline: 'h' } } };
+    });
+    const { knex, state } = fakeKnex({});
+    const result = await run(knex);
+    expect(result.persisted).toBe(true);
+    expect(state.statements.map((x) => x.keys)).toEqual([['lawnReportV2']]);
+    expect(state.notes).not.toHaveProperty('lawnWateringFreeze');
+    expect(result.wateringFreeze).toBeNull();
+  }
+  // A later clean run with a real claim does freeze.
+  reportOnce(INSTRUCTION(40));
+  const { knex, state } = fakeKnex({});
+  await run(knex);
+  expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
 });
 
-test('gate back on after a rollback: the write keeps the ORIGINAL instruction, not the regenerated one', async () => {
-  const notes = JSON.stringify({ lawnReportV2: { banner: { state: 'water_in', lines: INSTRUCTION(40).lines }, wateringInstruction: INSTRUCTION(40) } });
+test('gate back on after a rollback: the original instruction is what persists', async () => {
+  const existing = { wateringInstruction: INSTRUCTION(40), banner: null };
+  const { knex, state } = fakeKnex({ lawnWateringFreeze: existing });
   reportOnce(INSTRUCTION(15));
-  const { knex, updates } = fakeKnex(notes);
-  await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
-  const frozen = frozenOf(updates);
-  expect(frozen.wateringInstruction).toEqual(INSTRUCTION(40));
-  expect(frozen.banner.lines[1]).toBe('Run each zone about 40 minutes.');
-});
-
-test('a failed read of the record aborts the write instead of risking the snapshot', async () => {
-  reportOnce(INSTRUCTION(15));
-  const updates = [];
-  const knex = () => ({ where: () => ({ first: async () => { throw new Error('db blip'); }, update: async (p) => { updates.push(p); } }) });
-  knex.raw = (sql, bindings) => ({ sql, bindings });
-  const result = await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
-  expect(result.persisted).toBe(false);
-  expect(updates).toEqual([]);
+  const result = await run(knex);
+  expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
+  expect(result.wateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
 });
 
 describe('the completion path freezes independently of completion-text delivery', () => {
@@ -111,15 +154,16 @@ describe('the completion path freezes independently of completion-text delivery'
     expect(source.indexOf('const queueServiceReportEmailIfEligible')).toBeLessThan(call);
     expect(call).toBeLessThan(source.indexOf('await queueServiceReportEmailIfEligible();'));
     // Its fold-in of the frozen keys stays with it.
-    expect(source.slice(call, call + 900)).toContain('recordStructuredNotes.lawnReportV2 = gate.frozen');
+    expect(source.slice(call, call + 1200)).toContain('recordStructuredNotes.lawnReportV2 = gate.frozen');
+    expect(source.slice(call, call + 1200)).toContain('recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze');
   });
 
   test('the gate itself takes no delivery-channel input', async () => {
     reportOnce(INSTRUCTION(40));
-    const { knex, updates } = fakeKnex('{}');
+    const { knex, state } = fakeKnex({});
     // An email-only customer: no phone, no text — the gate is called with the record alone.
     const result = await finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn', cust_phone: null }, knex });
     expect(result.persisted).toBe(true);
-    expect(frozenOf(updates).wateringInstruction).toEqual(INSTRUCTION(40));
+    expect(state.notes.lawnWateringFreeze.wateringInstruction).toEqual(INSTRUCTION(40));
   });
 });

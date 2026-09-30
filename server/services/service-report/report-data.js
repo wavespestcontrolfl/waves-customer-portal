@@ -59,7 +59,7 @@ const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
-const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
+const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const {
@@ -2547,6 +2547,26 @@ class PinnedAssessmentUnavailable extends Error {
 // overlay; PDFs rendered before the watering instruction existed must re-key.
 const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
 
+// ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
+// pairs the render would use. Reads the record itself, so a partial row from a
+// cache-lookup caller stamps the same as the full one. A failed read stamps
+// random (fail-open to a re-render, like the prefs read above).
+async function lawnWateringRuleStamp(service, knex) {
+  if (!service?.id) return ':wr=1';
+  try {
+    const row = await knex('service_records').where({ id: service.id }).first('structured_notes', 'service_data');
+    if (readFrozenWateringInstruction(parseJsonObject(row?.structured_notes))) return ':wr=1';
+    const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
+    const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+      frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
+    });
+    const pairs = (products || []).map((p) => `${canonicalProductId(p.product_id) || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}`).sort();
+    return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
+  } catch {
+    return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+}
+
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
@@ -2600,7 +2620,10 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   }
   // The watering instruction is a render input once its gate is on (gate off
   // leaves the signature byte-identical to before).
-  if (featureGates.lawnWateringRuleLive()) irrigationStamp += ':wr=1';
+  // A visit with no frozen instruction renders from the LIVE catalog rules, so
+  // those rules ride the stamp: an owner correcting a product's rule re-keys the
+  // cached PDF. A frozen visit replays its snapshot and keeps the constant.
+  if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3552,7 +3575,6 @@ async function buildReportWateringInstruction({ products, service, completionTim
         wateringDays: prefs.watering_days,
         headTypes: prefs.irrigation_system_type,
         explicitInchesPerWeek: numberOrNull(prefs.irrigation_inches_per_week),
-        systemOn: prefs.irrigation_system,
       };
     }
   }
@@ -3569,17 +3591,19 @@ async function buildReportWateringInstruction({ products, service, completionTim
 }
 
 // The instruction frozen at completion (lawn-report-write-gate.js, under
-// structured_notes.lawnReportV2.wateringInstruction). Later reads replay it, so
+// structured_notes.lawnWateringFreeze.wateringInstruction; the older
+// lawnReportV2.wateringInstruction location is still read). Later reads replay it, so
 // a sprinkler-head or run-minutes edit after the visit never rewrites the
 // minutes an old report told the customer. Shape-checked; anything else is
 // ignored and the instruction is regenerated.
 const FROZEN_INSTRUCTION_STATES = ['hold', 'water_in', 'hold_then_water_in', 'none'];
 function readFrozenWateringInstruction(structured) {
-  const frozen = structured?.lawnReportV2?.wateringInstruction;
+  const frozen = structured?.lawnWateringFreeze?.wateringInstruction || structured?.lawnReportV2?.wateringInstruction;
   if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
   const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
   const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
-  return stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+  // A state-null instruction is a no-claim, never a snapshot: it is regenerated.
+  return frozen.state !== null && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
 }
 
 // Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
@@ -5154,7 +5178,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             || await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex });
         } catch { wateringInstruction = null; }
         // Out-param for the write gate, which freezes the complete instruction.
-        if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') opts.wateringInstructionOut.instruction = wateringInstruction;
+        if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
+          opts.wateringInstructionOut.instruction = wateringInstruction;
+          // A failed product read means the rules were unknown, not absent.
+          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed;
+        }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);

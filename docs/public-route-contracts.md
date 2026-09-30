@@ -1424,8 +1424,8 @@ nothing (with nothing else forcing a hold or water-in the state is no claim and
 the existing fail-closed aftercare stays). The rule itself
 (`wateringRule` / `post_application_watering`) never appears on
 `applications[].product` or anywhere else in the public payload. The complete
-instruction is frozen at completion under `structured_notes.lawnReportV2`
-(first writer wins) and later reads replay it, so an edit to the customer's
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
 sprinkler entries after the visit never changes the minutes or times an existing
 report showed; a record with no frozen instruction regenerates it. The gate is
 part of the lawn PDF cache signature.
