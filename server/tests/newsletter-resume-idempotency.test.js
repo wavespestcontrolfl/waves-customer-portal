@@ -48,7 +48,10 @@ const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliv
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate']
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate',
+   // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
+   // chain link here, same as every other query-shape method above.
+   'withMaterialized']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.whereIn = jest.fn((...args) => {
     if (onWhereIn) onWhereIn(...args);
@@ -566,14 +569,17 @@ describe('resumeCampaign — preconditions', () => {
     });
   });
 
-  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, retryable (codex round 17 P2)', async () => {
+  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, not explicitly opted out, retryable (codex round 17 P2; #5165)', async () => {
     const q = chain({ first: { id: 'd-1' } });
     db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return q; });
     await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
     expect(q.join).toHaveBeenCalledWith('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id');
     expect(q.where).toHaveBeenCalledWith({ 'newsletter_subscribers.status': 'active' });
     expect(q.whereIn).toHaveBeenCalledWith('newsletter_send_deliveries.status', ['queued', 'failed', 'sending']);
-    expect(q.whereNotExists).toHaveBeenCalledTimes(2); // global suppression + archived customer
+    // global suppression + archived customer + explicit marketing opt-out
+    // + non-mailable same-mailbox sibling + duplicate-ACTIVE-mailbox
+    // canonical-row check (owner ruling 2026-09-29, #5165; codex P2 :224)
+    expect(q.whereNotExists).toHaveBeenCalledTimes(5);
   });
 
   test('the correction-eligibility read and the resume precheck relink archived links BEFORE judging outstanding rows (codex round 18 P2)', async () => {

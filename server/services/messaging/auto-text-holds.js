@@ -15,6 +15,14 @@
  *   asked_not_to_be_contacted — asked not to be contacted on any call,
  *                               including the one setting the text off (a
  *                               reprocess can correct it after a deferral)
+ *   said_no_texts             — explicitly said no to texts on any call
+ *                               (consent.sms_declined, schema 1.19.0+), the
+ *                               same "no texts" the booking-link text honours
+ *                               (owner 2026-09-30). Only an explicit decline
+ *                               holds: calls extracted before the field
+ *                               existed never recorded one either way, and
+ *                               treating that as a "no" would silence these
+ *                               texts for nearly every past caller
  *   not_a_prospect            — a call with this number, the one setting
  *                               the text off included, showed a salesperson,
  *                               robocall, wrong number or job applicant — or
@@ -131,6 +139,24 @@ async function autoTextHoldReason(phone, {
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
+
+  // An explicit "no texts" on any call with this number, the one setting
+  // this text off included. Only a VALID V2 extraction counts: whether the
+  // caller truly declined texts is model judgment, trusted only from a
+  // schema-validated row (the booking-link lane's own posture).
+  // Also a call where the caller SPOKE this number ("call me at Y, don't
+  // text me") from another line: a later missed call or voicemail from Y
+  // must still see that decline (the booking-link lane's
+  // smsDeclinedOnEarlierCall matches caller.phone_e164 for the same reason).
+  const saidNoTexts = await dbi('call_log')
+    .modify((q) => whereNotSandboxCall(q))
+    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits))
+      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
+    .where('v2_extraction_status', 'valid')
+    .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
+    .first('id');
+  if (saidNoTexts) return 'said_no_texts';
 
   // Only a VALID V2 extraction's nature counts (a schema-failed one can
   // persist a normalized but wrong call_nature); the legacy labels are what

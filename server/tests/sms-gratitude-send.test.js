@@ -11,6 +11,7 @@ const mockState = {
   openRequest: false,
   openCallCommitment: false,
   openSmsCommitment: false,
+  openEmailCommitment: false,
   openTriage: false,
   openOperatorItem: false,
   intentMode: 'auto_send',
@@ -86,6 +87,7 @@ jest.mock('../models/db', () => {
       if (table === 'service_requests') return mockState.openRequest ? { id: 'request-1' } : null;
       if (table === 'call_commitments as cc') return mockState.openCallCommitment ? { id: 'call-commitment-1' } : null;
       if (table === 'call_commitments as cc_sms') return mockState.openSmsCommitment ? { id: 'sms-commitment-1' } : null;
+      if (table === 'call_commitments as cc_email') return mockState.openEmailCommitment ? { id: 'email-commitment-1' } : null;
       if (table === 'triage_items as ti') return mockState.openTriage ? { id: 'triage-1' } : null;
       if (table === 'operator_inbox_items as oi') return mockState.openOperatorItem ? { id: 'operator-item-1' } : null;
       if (table === 'agent_decisions as ad') {
@@ -136,7 +138,7 @@ jest.mock('../models/db', () => {
   // one statement, answered from the same fixture flags.
   db.first = jest.fn(async () => ({
     pending_work: [
-      mockState.openRequest, mockState.openCallCommitment, mockState.openSmsCommitment,
+      mockState.openRequest, mockState.openCallCommitment, mockState.openSmsCommitment, mockState.openEmailCommitment,
       mockState.openTriage, mockState.openOperatorItem, mockState.pendingDecision,
     ].some(Boolean),
     thread_advanced: mockState.threadAdvanced,
@@ -164,6 +166,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v11',
+  REAL_ANSWERS_VERSION_FAMILY: 'house_voice_v12_real_answers',
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
   // call, gratitude sends included — see sms-auto-send-open-times.test.js's
@@ -225,6 +228,7 @@ function resetFixture() {
   mockState.openRequest = false;
   mockState.openCallCommitment = false;
   mockState.openSmsCommitment = false;
+  mockState.openEmailCommitment = false;
   mockState.openTriage = false;
   mockState.openOperatorItem = false;
   mockState.intentMode = 'auto_send';
@@ -418,6 +422,10 @@ test('new inbound/human answer, duplicate claim, and every operational work queu
   expect((await attempt()).sent).toBe(false);
   mockState.aliasFirsts = 0;
   mockState.openSmsCommitment = false;
+  mockState.openEmailCommitment = true;
+  expect((await attempt()).sent).toBe(false);
+  mockState.aliasFirsts = 0;
+  mockState.openEmailCommitment = false;
   mockState.openTriage = true;
   expect((await attempt()).sent).toBe(false);
   mockState.aliasFirsts = 0;
@@ -790,6 +798,7 @@ test.each([
   ['service request', () => { mockState.openRequest = true; }, 'service_requests'],
   ['call commitment', () => { mockState.openCallCommitment = true; }, 'call_commitments as cc'],
   ['SMS commitment', () => { mockState.openSmsCommitment = true; }, 'call_commitments as cc_sms'],
+  ['email commitment', () => { mockState.openEmailCommitment = true; }, 'call_commitments as cc_email'],
   ['triage item', () => { mockState.openTriage = true; }, 'triage_items as ti'],
   ['operator inbox item', () => { mockState.openOperatorItem = true; }, 'operator_inbox_items as oi'],
   ['review decision', () => { mockState.pendingDecision = true; }, 'agent_decisions as ad'],
