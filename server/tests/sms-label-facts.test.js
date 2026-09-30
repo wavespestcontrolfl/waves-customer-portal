@@ -1805,6 +1805,48 @@ describe('r27: English by proportion - code-switched inbounds are unverified', (
   });
 });
 
+describe('r28: only the TECHNICIAN sanctions "safe once dry"', () => {
+  const { SLA_PHRASES } = require('../services/sms-followup-sla');
+  const sanction = labelFactsLib.sanctionSafeOnceDry;
+  const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
+  const guard = (reply, kinds = asked) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', kinds);
+  test('a technician confirmation (with or without an SLA deadline) sanctions the idiom', () => {
+    for (const confirmer of ['your technician', 'the technician', 'our technician', 'your tech', 'the tech']) {
+      for (const suffix of ['', ...SLA_PHRASES.map((p) => ` ${p}`), ' at the visit']) {
+        const reply = `It is safe once dry, and ${confirmer} will confirm the timing${suffix}.`;
+        expect([reply, sanction(reply) !== reply, guard(reply)]).toEqual([reply, true, false]);
+      }
+    }
+    expect(sanction('It is safe once dry, and the technician confirms timing.')).not.toBe('It is safe once dry, and the technician confirms timing.');
+  });
+  test('an office / team / we confirmation does NOT sanction it: "safe once dry" + office confirms is held, at draft and send time', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    for (const confirmer of ['our office', 'the office', 'your office', 'our team', 'the team', 'we']) {
+      for (const suffix of ['', ...SLA_PHRASES.map((p) => ` ${p}`)]) {
+        const reply = `It is safe once dry, and ${confirmer} will confirm the timing${suffix}.`;
+        expect([reply, sanction(reply) !== reply, guard(reply), guard(reply, [])]).toEqual([reply, false, true, true]);
+        await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: reply, inbound: 'Can the dogs go out now?', conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+      }
+    }
+    // through the drafter's publication check too (a technician passes, the office does not)
+    const drafter = require('../services/sms-shadow-drafter');
+    process.env[GATE] = 'true';
+    const facts = buildFactsBlock(context, { now: NOW });
+    const ok = (reply) => drafter.validateComplianceCopy({ reply, factsBlock: facts, inboundMessage: 'Can the dogs go out now?' }).ok;
+    expect(ok('It is safe once dry, and your technician will confirm the timing.')).toBe(true);
+    expect(ok('It is safe once dry, and our office will confirm the timing.')).toBe(false);
+    expect(ok('It is safe once dry, and our office will confirm the timing within the hour.')).toBe(false);
+  });
+  test('the office / team / we remain valid ORDINARY hand-offs (with SLA phrases) when "safe once dry" is not in the sentence', () => {
+    for (const confirmer of ['our office', 'the office', 'our team', 'we']) {
+      for (const suffix of ['', ...SLA_PHRASES.map((p) => ` ${p}`)]) {
+        const reply = confirmer === 'we' ? `We will confirm the timing${suffix}.` : `${confirmer.charAt(0).toUpperCase()}${confirmer.slice(1)} will confirm the timing${suffix}.`;
+        expect([reply, guard(reply)]).toEqual([reply, false]);
+      }
+    }
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

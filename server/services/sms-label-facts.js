@@ -896,13 +896,15 @@ function nonEnglishTimingWords(text) {
 // idiom: it carries no timing modifier, so it is swapped for a neutral token
 // before the guard reads the reply (unless it names a time: "safe once dry in 30 minutes").
 const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-\u2013\u2014,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
+// Only the TECHNICIAN sanctions the idiom (owner rule: "safe once dry" + the technician confirming timing): an office / team / "we"
+// confirmation is an ordinary hand-off and never makes "safe once dry" pass.
 // The confirmation must be the AFFIRMATIVE sanctioned clause ("your technician
 // will confirm the timing"), ending its sentence or trailing only "at the
 // visit" / "for your yard". A negated or hedged form ("cannot confirm timing",
 // "may not", "unsure") is not the idiom, and neither is any negation or hedge
 // in the sentence that carries the idiom or the clause.
 // (the real-answers prompt's follow-up deadline - the exact SLA_PHRASES of sms-followup-sla - may trail the confirmation)
-const CONFIRM_TIMING_RE = new RegExp(`(?<![\\w'-])(?:(?:your|the|our)\\s+(?:technician|tech|office|team)|we)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?(?:\\s+(?:${require('./sms-followup-sla').SLA_PHRASES.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?\\s*(?:[.!]|$)`, 'i');
+const CONFIRM_TIMING_RE = new RegExp(`(?<![\\w'-])(?:your|the|our)\\s+(?:technician|tech)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?(?:\\s+(?:${require('./sms-followup-sla').SLA_PHRASES.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?\\s*(?:[.!]|$)`, 'i');
 const NEGATION_HEDGE_RE = /\b(?:not|no|never|nothing|nobody|cannot|without|unable|unsure|uncertain|unclear|unknown|may|might|maybe|perhaps|possibly|probably|hopefully|depends?|depending|but|however|unless|although|though|except|neither|nor|hardly|barely)\b|\bcan\s+not\b|n't\b/i;
 function sanctionSafeOnceDry(text) {
   const t = String(text || '');
@@ -991,7 +993,7 @@ const wordSet = (list) => new Set(list.split(/\s+/));
 // (a) an authorized copy (stripLabelSentences left its marker)
 const isCopyMarker = (sentence) => /^labelsentence(?:reentry|rainfast)$/.test(sentence);
 // (b) the sanctioned "safe once dry" (sanctionSafeOnceDry left its token), optionally with the technician confirming timing
-const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
+const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:your|the|our)\s+(?:technician|tech)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
 const isSanctionedSentence = (sentence) => SANCTIONED_SENTENCE_RE.test(sentence);
 // (c) the COMPANY FACTS rain line, for a rain question (pre-marked before the sentences are split)
 const COMPANY_RAIN_LINE_TEXT_RE = /treatment needs to dry and bond/i;
