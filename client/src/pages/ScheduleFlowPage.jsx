@@ -38,7 +38,7 @@ import { estimateCard } from '../components/estimate/cardStyles';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
-import SchedulePicker from '../components/booking/SchedulePicker';
+import SchedulePicker, { sameSlot } from '../components/booking/SchedulePicker';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -163,6 +163,20 @@ function shortDayLabel(dateStr) {
   } catch {
     return dateStr;
   }
+}
+
+// The fresh row for a held pick in a new availability's days (slotId when
+// both carry one, else date + start time), stamped the way a tap stamps it —
+// or null when that time is no longer offered.
+function findSlotInDays(days, held) {
+  for (const day of days || []) {
+    if (day.date !== held.date) continue;
+    const hit = (day.slots || []).find((sl) => (sl.slotId && held.slotId
+      ? sl.slotId === held.slotId
+      : sl.start_time === held.start_time));
+    if (hit) return { ...hit, date: day.date, fullDate: day.fullDate };
+  }
+  return null;
 }
 
 function formatTimeLabel(hhmm) {
@@ -1169,7 +1183,49 @@ function InspectionAddressGate({ data, token, onResolved, onAddressResolved }) {
   );
 }
 
-function InspectionHero({ data, details, onDetails, onChangeAddress }) {
+// Inspection only: the time a lead tapped in the new-lead email, shown right
+// under the greeting with its own Book button. The picker's inline Book sits
+// below the search card, the best-times strip and the day grid — two to three
+// phone screens down — and a lead who arrived with Saturday 2 PM already
+// picked searched instead and never booked (2026-09-30). Renders only while
+// that emailed pick is still the selection; a commit error that cleared it
+// (SLOT_TAKEN) keeps the card up with the error, so the reason is never
+// rendered only at the bottom of the page.
+function EmailPickCard({ slot, movedNotice, error, submitting, onBook, onPickAnother }) {
+  if (!slot && !error) return null;
+  return (
+    <Card data-inspection-email-pick="">
+      <div data-gt="eyebrow" style={DOC_EYEBROW}>Your time</div>
+      {slot ? (
+        <>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: FONTS.heading, color: S.text }}>{slot.fullDate || formatDateLabel(slot.date)}</div>
+          <div style={{ marginTop: 4, fontSize: 15, color: S.body }}>Arrival {arrivalWindowLabel(slot.start_time)}</div>
+          {movedNotice ? <div data-glass="soft" style={{ ...SOFT_NOTE, marginTop: 12 }}>{movedNotice}</div> : null}
+          <button
+            type="button"
+            data-glass-accent=""
+            className="wpk-action-btn"
+            onClick={onBook}
+            disabled={submitting}
+            style={{ width: '100%', marginTop: 14 }}
+          >
+            {submitting ? 'Booking…' : `Book ${shortDayLabel(slot.date)} ${arrivalWindowLabel(slot.start_time)}`}
+          </button>
+        </>
+      ) : null}
+      {error ? <div className="wpk-error" role="alert" style={{ marginTop: 12 }}>{error}</div> : null}
+      <button
+        type="button"
+        onClick={onPickAnother}
+        style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 0, padding: 0, font: 'inherit', fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, textDecoration: 'underline', cursor: 'pointer' }}
+      >
+        {slot ? 'Pick a different time' : 'Pick another time'}
+      </button>
+    </Card>
+  );
+}
+
+function InspectionHero({ data, details, onDetails, onChangeAddress, topCard = null }) {
   const lead = data?.lead || {};
   return (
     <>
@@ -1182,6 +1238,7 @@ function InspectionHero({ data, details, onDetails, onChangeAddress }) {
           {data?.durationMinutes ? `About ${data.durationMinutes} minutes. ` : ''}We arrive in a 2-hour window.
         </div>
       </div>
+      {topCard}
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 16, fontWeight: 600, color: S.text }}>
@@ -1415,6 +1472,12 @@ export default function ScheduleFlowPage({ flow }) {
   const [searchParams] = useSearchParams();
   const [outOfArea, setOutOfArea] = useState(null);
   const [slotMovedNotice, setSlotMovedNotice] = useState(null);
+  // The ?slot= preselect's own pick (EmailPickCard). Cleared the moment the
+  // customer taps any other time; a search that keeps the pick keeps it.
+  const [emailPick, setEmailPick] = useState(null);
+  // Set when the commit ran from EmailPickCard, so its error shows there.
+  const [bookedFromTop, setBookedFromTop] = useState(false);
+  const pickerRef = useRef(null);
   // The address text the gate resolved (never persisted until commit) —
   // carried into the commit payload alongside the picked slot.
   const [resolvedAddress, setResolvedAddress] = useState('');
@@ -1463,13 +1526,28 @@ export default function ScheduleFlowPage({ flow }) {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Keep the pick across an availability swap (AI search, "Show all open
+  // times", address merge) when that exact time is still offered — re-stamped
+  // from the fresh row — and drop it only when it's gone. A search used to
+  // clear the pick unconditionally, so a lead who searched for the very time
+  // already picked had to find and tap it again.
+  // The emailed pick (EmailPickCard) follows the same rule on its own.
+  const selectedSlotRef = useRef(null);
+  selectedSlotRef.current = selectedSlot;
+  const emailPickRef = useRef(null);
+  emailPickRef.current = emailPick;
   useEffect(() => {
     const days = data?.availability?.days || [];
+    const held = selectedSlotRef.current;
+    const kept = held ? findSlotInDays(days, held) : null;
+    if (held && !kept) setSelectedSlot(null);
+    else if (kept) setSelectedSlot(kept);
+    if (emailPickRef.current) setEmailPick(findSlotInDays(days, emailPickRef.current));
     if (!days.length) {
       setSelectedDate(null);
       return;
     }
-    setSelectedDate((prev) => (days.some((d) => d.date === prev) ? prev : days[0].date));
+    setSelectedDate((prev) => (kept ? kept.date : days.some((d) => d.date === prev) ? prev : days[0].date));
   }, [data]);
 
   // Re-service: keep the lane selection valid whenever eligibility changes —
@@ -1500,8 +1578,10 @@ export default function ScheduleFlowPage({ flow }) {
     const day = days.find((d) => d.date === wantDate);
     const slot = day?.slots?.find((s) => s.start_time === wantTime);
     if (slot) {
+      const stamped = { ...slot, date: day.date, fullDate: day.fullDate };
       setSelectedDate(day.date);
-      setSelectedSlot({ ...slot, date: day.date, fullDate: day.fullDate });
+      setSelectedSlot(stamped);
+      setEmailPick(stamped);
       return;
     }
     // The first opening AT OR AFTER the requested time (Codex #4737 r17
@@ -1511,8 +1591,10 @@ export default function ScheduleFlowPage({ flow }) {
     const later = openings.find(({ day: d, slot: sl }) => d.date > wantDate || (d.date === wantDate && sl.start_time >= wantTime));
     const pick = later || openings[0];
     if (pick) {
+      const stamped = { ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate };
       setSelectedDate(pick.day.date);
-      setSelectedSlot({ ...pick.slot, date: pick.day.date, fullDate: pick.day.fullDate });
+      setSelectedSlot(stamped);
+      setEmailPick(stamped);
       setSlotMovedNotice(later
         ? 'That time just filled. We moved you to the next open time.'
         : "That time just filled, and there's nothing later this week. Here's the earliest open time.");
@@ -1604,8 +1686,9 @@ export default function ScheduleFlowPage({ flow }) {
       return { summary: null };
     }
     if (body.availability) {
+      // The pick survives when the results still offer it (see the
+      // availability effect above); otherwise that effect clears it.
       setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
-      setSelectedSlot(null);
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1617,7 +1700,6 @@ export default function ScheduleFlowPage({ flow }) {
   // full-window response is applied: on failure the filtered calendar is
   // still what's on screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
-    setSelectedSlot(null);
     const signal = loadAbortRef.current?.signal;
     try {
       await refreshInspectionAvailability({ signal });
@@ -1627,11 +1709,16 @@ export default function ScheduleFlowPage({ flow }) {
     } catch { /* keep the filtered calendar + reset link */ }
   };
 
-  const confirm = async () => {
-    if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
+  // `slot` overrides the selection: EmailPickCard books its own emailed time
+  // even after the customer browsed another day (which clears the selection).
+  const confirm = async ({ fromTop = false, slot = null } = {}) => {
+    const slotToBook = slot || selectedSlot;
+    if (!slotToBook || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
+    if (slot) setSelectedSlot(slot);
+    setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
-    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
+    const payload = cfg.payload({ slot: slotToBook, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -1772,6 +1859,16 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        topCard={flow === 'inspection' ? (
+          <EmailPickCard
+            slot={emailPick}
+            movedNotice={slotMovedNotice}
+            error={bookedFromTop ? submitError : null}
+            submitting={submitting}
+            onBook={() => confirm({ fromTop: true, slot: emailPick })}
+            onPickAnother={() => pickerRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
+          />
+        ) : null}
         selectedPests={selectedPests}
         onTogglePest={(key) => setPestsByLane((prev) => {
           const current = prev[selectedLane] || [];
@@ -1791,6 +1888,9 @@ export default function ScheduleFlowPage({ flow }) {
           loadAbortRef.current = new AbortController();
           setAiFiltered(false);
           setSelectedSlot(null);
+          // The emailed time was offered for the old address.
+          setEmailPick(null);
+          setBookedFromTop(false);
           mergeData({ needs_address: true });
         }}
       />
@@ -1803,6 +1903,7 @@ export default function ScheduleFlowPage({ flow }) {
         {flow === 'reservice' && data?.location_review_required
           ? null
           : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />}
+        <div ref={pickerRef} />
         <SchedulePicker
           availability={data?.availability}
           // Every other flow hides "Our best times for you" once an AI
@@ -1826,7 +1927,17 @@ export default function ScheduleFlowPage({ flow }) {
             setSubmitError(null);
           }}
           selectedSlot={selectedSlot}
-          onSelectSlot={(slot) => { setSelectedSlot(slot); setSubmitError(null); }}
+          onSelectSlot={(slot) => {
+            setSelectedSlot(slot);
+            setSubmitError(null);
+            // Another time replaces the emailed one — its top card (and its
+            // "we moved you" note) no longer describe what Book will book.
+            if (emailPick && !sameSlot(slot, emailPick)) {
+              setEmailPick(null);
+              setSlotMovedNotice(null);
+              setBookedFromTop(false);
+            }
+          }}
           submitError={submitError}
           pickedAction
           pickedExtra={(slot) => (
@@ -1835,12 +1946,13 @@ export default function ScheduleFlowPage({ flow }) {
                 type="button"
                 data-glass-accent=""
                 className="wpk-action-btn"
-                onClick={confirm}
+                onClick={() => confirm()}
                 disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
               >
                 {cfg.actionLabel({ submitting, lane: selectedLane, slot })}
               </button>
-              {cfg.pickedNote(data, slot, { slotMovedNotice })}
+              {/* The emailed pick's note already sits in EmailPickCard. */}
+              {cfg.pickedNote(data, slot, { slotMovedNotice: emailPick ? null : slotMovedNotice })}
             </>
           )}
           empty={(

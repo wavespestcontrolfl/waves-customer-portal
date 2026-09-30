@@ -281,16 +281,23 @@ export function PickerTimesPanel({
             const detail = slotDetail ? slotDetail(stamped, day) : null;
             return (
               <div key={slot.slotId || `${day.date}|${slot.start_time}`} className={`wpk-slot${picked ? ' wpk-slot-picked' : ''}`}>
+                {/* The picked time stays a chip (navy ring + check), never the
+                    gold accent: beside a gold Book button, two identical gold
+                    buttons read as one choice, and a second tap on the time
+                    used to un-pick it and hide Book (a lead on 2026-09-30
+                    never reached the commit). A second tap is now a no-op;
+                    picking another time is how a customer changes it. */}
                 <button
                   type="button"
-                  {...(picked ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                  data-glass="chip"
                   className="wpk-time-btn"
                   data-schedule-slot=""
                   aria-pressed={picked}
                   aria-label={`Choose ${slot.start_label} on ${day.fullDate}${slot.nearby ? ', technician already in your neighborhood' : ''}`}
-                  onClick={() => onSelect(picked ? null : stamped)}
+                  onClick={() => { if (!picked) onSelect(stamped); }}
                 >
                   <span className="wpk-time-main">
+                    {picked ? <span className="wpk-time-check" aria-hidden="true">✓</span> : null}
                     {slot.start_label}
                     {slot.nearby ? <span className="wpk-nearby-pill">Tech nearby</span> : null}
                   </span>
@@ -378,7 +385,12 @@ export function SchedulePickerStyles() {
       }
       .wpk-time-main { display: inline-flex; align-items: center; gap: 8px; }
       .wpk-time-detail { font-size: 14px; font-weight: 500; color: ${S.muted}; }
-      .wpk-slot-picked .wpk-time-btn { border-color: ${COLORS.glassNavy}; }
+      .wpk-slot-picked .wpk-time-btn { border-color: ${COLORS.glassNavy}; color: ${COLORS.glassNavy}; box-shadow: inset 0 0 0 1px ${COLORS.glassNavy}; }
+      .wpk-time-check { font-weight: 800; }
+      /* The glass theme forces every [data-glass] border with !important;
+         the picked chip's navy ring must survive it or the pick only reads
+         by its check mark. */
+      html[data-glass-theme] .wpk-slot-picked .wpk-time-btn[data-glass] { border: 2px solid ${COLORS.glassNavy} !important; }
       .wpk-slot-picked .wpk-time-detail { color: inherit; opacity: .85; }
       .wpk-nearby-pill {
         font-size: 14px; font-weight: 700; color: ${COLORS.green}; background: ${COLORS.greenLight};
