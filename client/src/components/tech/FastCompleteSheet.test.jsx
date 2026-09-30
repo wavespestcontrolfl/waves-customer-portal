@@ -576,6 +576,19 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByTestId('fast-complete-text-body').textContent).toBe(sent);
   });
 
+  test('recap gate on: the recorded channel decides the wording (app vs text)', async () => {
+    const body = 'Your re-service is done. Details: x.test/r/1';
+    const request = makeRequest({ completeResponse: { success: true, customerText: { sent: true, channel: 'push', body, reason: null } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, request);
+    expect(await screen.findByText("Sent to the customer's app:")).toBeTruthy();
+    expect(screen.queryByText('Text sent to the customer:')).toBeNull();
+    expect(screen.getByTestId('fast-complete-text-body').textContent).toBe(body);
+    cleanup();
+    const sms = makeRequest({ completeResponse: { success: true, customerText: { sent: true, channel: 'sms', body, reason: null } } });
+    await completeRe({ ...SERVICE, recapEnabled: true }, sms);
+    expect(await screen.findByText('Text sent to the customer:')).toBeTruthy();
+  }, 20000);
+
   test('recap gate on: says why no text went (no phone, opted out, gate off)', async () => {
     for (const reason of ['no phone number on file', "the customer can't be texted (opted out or blocked)", 'the customer text is turned off for this visit']) {
       const request = makeRequest({ completeResponse: { success: true, customerText: { sent: false, body: null, reason } } });

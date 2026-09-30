@@ -11,7 +11,8 @@
 // - <where>  from areas_serviced (Inside / Outside / Garage).
 // - <pests>  from the product rows' targets (the pests the tech picked).
 // - The "keep kids and pets off" line only when a recorded product row went
-//   down as a liquid / spray (not bait, granular, or a station check).
+//   down wet (a spray, drench, fog or the like; not bait, granular, a station
+//   check or trunk injection).
 // - A clause whose fact is missing is dropped whole; nothing is invented.
 //
 // Pure: no DB, no clock. complete-scheduled-service.js gathers the saved facts
@@ -20,18 +21,26 @@
 'use strict';
 
 const ActivityIndicators = require('./service-report/activity-indicators');
+const { isSprayApplicationMethod } = require('./service-report/service-line-configs');
 
 const MODE = 'reservice_fixed';
 // Registered as this text's template key (sms_log / notes); the message type
 // stays the completion family's so channel routing is the completion text's.
 const TEMPLATE_KEY = 'reservice_fixed_recap';
-const SAFETY_LINE = 'Keep kids and pets off treated areas until dry.';
+// The compliance idiom (AGENTS.md): conditional on dry, technician confirms
+// the timing, never a fixed figure and never "safe".
+const SAFETY_LINE = 'Keep kids and pets off treated areas until dry; your technician confirms the timing.';
 
-// Application methods whose product goes down wet. Bait, granular, station
-// and trunk-injection rows leave nothing to keep kids and pets off.
-const LIQUID_METHODS = new Set([
-  'spot_treatment', 'perimeter_spray', 'broadcast_spray', 'foliar_spray', 'fog_ulv', 'pin_stream',
-]);
+// A product row went down wet when its method is spray-class by the report
+// module's own classifier (everything but bait, station and trunk injection:
+// sprays, soil drench, fog, pin stream, and any method added later) and is not
+// a dry granular broadcast. An empty method says nothing, so it counts as dry.
+const DRY_APPLICATION_METHODS = new Set(['granular_broadcast']);
+
+function isWetMethod(method) {
+  const key = String(method == null ? '' : method).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return isSprayApplicationMethod(key) && !DRY_APPLICATION_METHODS.has(key);
+}
 
 const MAX_PEST_CHARS = 40;
 const MAX_PESTS = 6;
@@ -79,7 +88,7 @@ function pestsOf(products) {
 
 function hasLiquidApplication(products) {
   return (Array.isArray(products) ? products : [])
-    .some((product) => LIQUID_METHODS.has(text(product?.application_method ?? product?.applicationMethod).toLowerCase()));
+    .some((product) => isWetMethod(product?.application_method ?? product?.applicationMethod));
 }
 
 /**
@@ -118,6 +127,15 @@ function reserviceFixedRecapHonored({ requestedMode, fastCompleteGate, recapGate
     && serviceKey === 'pest_re_service';
 }
 
+// The body the provider is handed, and so the body audited and shown to the
+// tech: sendCustomerMessage removes the https:// scheme and normalizes
+// typographic punctuation for customer SMS (the same two helpers, here).
+function providerBody(body) {
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  return normalizeGsmPunctuation(stripSmsUrlScheme(body));
+}
+
 const asArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -131,14 +149,22 @@ const asArray = (value) => {
 // committed: the visit's street (stamped visit address, else the customer's),
 // the record's areas, and its product rows. `db` is a knex handle.
 async function loadReserviceFixedRecapFacts(db, { svc, recordId, reportUrl }) {
-  const { resolveVisitAddress } = require('./service-report/report-identity-snapshot');
+  const { resolveVisitAddress, readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
   const [customer, record, productRows] = await Promise.all([
     db('customers').where({ id: svc.customer_id }).first('address_line1', 'address_line2', 'city', 'state', 'zip'),
-    db('service_records').where({ id: recordId }).first('areas_serviced'),
+    db('service_records').where({ id: recordId }).first('areas_serviced', 'service_data'),
     db('service_products').where({ service_record_id: recordId }).select('*'),
   ]);
+  // The street the linked report shows: the address frozen on the record at
+  // completion (reportIdentitySnapshot), so the text and its report agree even
+  // if the customer's address changes later. Only a record with no snapshot
+  // falls back to the current visit / customer rows.
+  const snapshotAddress = readReportIdentitySnapshot({ service_data: record?.service_data })?.address;
+  const address = snapshotAddress && typeof snapshotAddress === 'object'
+    ? snapshotAddress.line1
+    : resolveVisitAddress({ visit: svc, customer: customer || {} }).line1;
   return {
-    address: resolveVisitAddress({ visit: svc, customer: customer || {} }).line1,
+    address,
     areas: asArray(record?.areas_serviced),
     products: (productRows || []).map((row) => ({
       application_method: row.application_method,
@@ -151,12 +177,16 @@ async function loadReserviceFixedRecapFacts(db, { svc, recordId, reportUrl }) {
 // What the tech sees after Complete: the exact text that went, or why none did
 // (`reason` is a lowercase fragment: the sheet writes "No text sent: <reason>").
 // `status` is the record's completionSmsStatus.
-function customerTextOutcome({ honored, status, body, error }) {
-  if (!honored) return { sent: false, body: null, reason: 'the customer text is turned off for this visit' };
-  if (status === 'sent') return { sent: true, body: body || null, reason: null };
+function customerTextOutcome({ honored, status, body, error, channel }) {
+  const via = channel === 'push' ? { channel: 'push' } : { channel: 'sms' };
+  // A stored sent / held text is the truth even when this request is no
+  // longer honored (a gate flipped between a first attempt that sent and a
+  // resumed retry): the tech must not be told nothing went out.
+  if (status === 'sent') return { sent: true, ...via, body: body || null, reason: null };
   if (status === 'deferred') {
-    return { sent: false, queued: true, body: body || null, reason: 'held until the morning send window, then it goes out' };
+    return { sent: false, queued: true, ...via, body: body || null, reason: 'held until the morning send window, then it goes out' };
   }
+  if (!honored) return { sent: false, body: null, reason: 'the customer text is turned off for this visit' };
   const reasons = {
     no_phone: 'no phone number on file',
     blocked: "the customer can't be texted (opted out or blocked)",
@@ -171,7 +201,8 @@ module.exports = {
   MODE,
   TEMPLATE_KEY,
   SAFETY_LINE,
-  LIQUID_METHODS,
+  isWetMethod,
+  providerBody,
   buildReserviceFixedRecap,
   reserviceFixedRecapHonored,
   loadReserviceFixedRecapFacts,

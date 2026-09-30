@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, reserviceFixedRecapHonored,
+  MODE, TEMPLATE_KEY, SAFETY_LINE, buildReserviceFixedRecap, isWetMethod, providerBody, reserviceFixedRecapHonored,
   loadReserviceFixedRecapFacts, customerTextOutcome,
 } = require('../services/reservice-fixed-recap');
 
@@ -50,7 +50,7 @@ describe('buildReserviceFixedRecap', () => {
 
   test('the scope example', () => {
     expect(build({ areas: ['Inside', 'Outside'] })).toBe(
-      'Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for ants. Keep kids and pets off treated areas until dry. Details: https://example.test/r/abc',
+      'Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for ants. Keep kids and pets off treated areas until dry; your technician confirms the timing. Details: https://example.test/r/abc',
     );
   });
 
@@ -143,7 +143,7 @@ describe('reserviceFixedRecapHonored', () => {
 
 describe('customerTextOutcome (what the tech sees after Complete)', () => {
   test('sent: the exact body', () => {
-    expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X' })).toEqual({ sent: true, body: 'X', reason: null });
+    expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X' })).toEqual({ sent: true, channel: 'sms', body: 'X', reason: null });
   });
   test('deferred by the send window: queued, with its body', () => {
     expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ sent: false, queued: true, body: 'X' });
@@ -217,7 +217,7 @@ describe('complete-scheduled-service wiring', () => {
     expect(report).toBeGreaterThan(fixed);
     const block = src.slice(fixed, report);
     expect(block).toContain("sentSmsType = 'service_complete'");
-    expect(block).toContain('sentSmsBody = reserviceFixedBody');
+    expect(block).toContain('sentSmsBody = ReserviceFixedRecap.providerBody(reserviceFixedBody)');
     // Not the AI recap, the sign-off helper, or a review suffix.
     expect(block).not.toMatch(/smsRecap|reviewSuffix|renderTemplate/);
     // The builder itself never signs.
@@ -242,5 +242,101 @@ describe('complete-scheduled-service wiring', () => {
   test('the sent body is stored where the office reads it', () => {
     expect(src).toContain('completionSmsBody: sentSmsBody,');
     expect(src).toContain('completionSmsRecapMode: ReserviceFixedRecap.MODE');
+  });
+});
+
+describe('review fixes (#5363 r1)', () => {
+  test('a stored sent text is reported even when the retry is no longer honored (gate flipped mid-resume)', () => {
+    expect(customerTextOutcome({ honored: false, status: 'sent', body: 'X' })).toEqual({ sent: true, channel: 'sms', body: 'X', reason: null });
+    expect(customerTextOutcome({ honored: false, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, body: 'X' });
+    expect(customerTextOutcome({ honored: false, status: undefined })).toMatchObject({ sent: false, reason: 'the customer text is turned off for this visit' });
+  });
+  test('the quiet-hours replay row records the fixed template key', () => {
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    const at = source.indexOf("entry_point: 'dispatch_completion_deferred'");
+    expect(at).toBeGreaterThan(-1);
+    expect(source.slice(at, at + 800)).toContain('template_key: ReserviceFixedRecap.TEMPLATE_KEY');
+  });
+});
+
+describe('review fixes (#5363 r1, second set)', () => {
+  const { lintComms } = require('../services/comms-lint');
+  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+  const ActivityIndicators = require('../services/service-report/activity-indicators');
+
+  test('the safety line is the approved conditional idiom', () => {
+    expect(SAFETY_LINE).toBe('Keep kids and pets off treated areas until dry; your technician confirms the timing.');
+  });
+
+  test('the full built text passes the compliance gate, the banned-copy screen and the SMS lint as the provider gets it', () => {
+    const cases = [
+      build({ areas: ['Inside', 'Outside'] }),
+      build({ areas: ['Garage'], products: [{ application_method: 'soil_drench', targets: ['Ants', 'Roaches', 'Spiders'] }] }),
+      build({ areas: [], products: [] }),
+    ];
+    for (const raw of cases) {
+      expect(reentrySafetyClaimFinding(raw)).toBeNull();
+      expect(ActivityIndicators.findBannedCustomerCopy(raw)).toEqual([]);
+      const sent = providerBody(raw);
+      expect(lintComms(sent, { channel: 'sms', audience: 'customer' })).toMatchObject({ pass: true, failures: [] });
+    }
+  });
+
+  describe('wet methods come from the canonical spray classifier', () => {
+    test.each([['soil_drench'], ['spot_treatment'], ['perimeter_spray'], ['broadcast_spray'], ['foliar_spray'], ['fog_ulv'], ['pin_stream'], ['Soil Drench']])('%s is wet', (m) => {
+      expect(isWetMethod(m)).toBe(true);
+      expect(build({ products: [{ application_method: m, targets: ['Ants'] }] })).toContain(SAFETY_LINE);
+    });
+    test.each([['bait_placement'], ['station_check'], ['trunk_injection'], ['granular_broadcast'], [''], [null], [undefined]])('%s is dry', (m) => {
+      expect(isWetMethod(m)).toBe(false);
+      expect(build({ products: [{ application_method: m, targets: ['Ants'] }] })).not.toContain('Keep kids');
+    });
+  });
+
+  test('the provider-normalized body drops the https scheme and normalizes typography', () => {
+    const raw = build({ address: '12 O\u2019Neil Dr', reportUrl: 'https://portal.example.test/report/abc' });
+    const sent = providerBody(raw);
+    expect(sent).toContain('Details: portal.example.test/report/abc');
+    expect(sent).not.toContain('https://');
+    expect(sent).toContain("12 O'Neil Dr");
+    expect(providerBody(sent)).toBe(sent);
+  });
+
+  test('the sent body shown to the tech is the provider body, and the outcome carries the recorded channel', () => {
+    expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X', channel: 'push' })).toMatchObject({ sent: true, channel: 'push' });
+    expect(customerTextOutcome({ honored: true, status: 'sent', body: 'X', channel: 'mms' })).toMatchObject({ channel: 'sms' });
+    expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, channel: 'sms' });
+    const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(src).toContain('channel: finalRecordNotes.sentSmsChannel || null,');
+  });
+
+  describe('the address is the frozen completion snapshot when there is one', () => {
+    const fakeDb = (tables) => (name) => {
+      const rows = tables[name];
+      const chain = { where: () => chain, first: async () => (Array.isArray(rows) ? rows[0] : rows), select: async () => rows };
+      return chain;
+    };
+    const tables = (service_data) => ({
+      customers: { address_line1: '9 New Home St' },
+      service_records: { areas_serviced: [], service_data },
+      service_products: [],
+    });
+
+    test('snapshot street wins over a moved customer address and a re-stamped visit', async () => {
+      const service_data = JSON.stringify({ reportIdentitySnapshot: { version: 1, address: { line1: '1 Frozen Ct', city: 'Parrish' } } });
+      const facts = await loadReserviceFixedRecapFacts(fakeDb(tables(service_data)), { svc: { customer_id: 1, service_address_line1: '77 Restamped Ave' }, recordId: 7, reportUrl: LINK });
+      expect(facts.address).toBe('1 Frozen Ct');
+    });
+
+    test('a snapshot with no street gives no street, never the current one', async () => {
+      const service_data = { reportIdentitySnapshot: { version: 1, address: { line1: null } } };
+      const facts = await loadReserviceFixedRecapFacts(fakeDb(tables(service_data)), { svc: { customer_id: 1 }, recordId: 7, reportUrl: LINK });
+      expect(facts.address).toBeNull();
+    });
+
+    test('no snapshot falls back to the current rows', async () => {
+      const facts = await loadReserviceFixedRecapFacts(fakeDb(tables(null)), { svc: { customer_id: 1 }, recordId: 7, reportUrl: LINK });
+      expect(facts.address).toBe('9 New Home St');
+    });
   });
 });

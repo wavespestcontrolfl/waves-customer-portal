@@ -12490,7 +12490,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // the customer's completion-text preference are the same); the
           // template key and notes name the fixed text.
           sentSmsType = 'service_complete';
-          sentSmsBody = reserviceFixedBody;
+          // The body the provider is handed (scheme stripped, GSM punctuation
+          // normalized, as sendCustomerMessage does), so what is audited, stored
+          // and shown to the tech is what the customer gets.
+          sentSmsBody = ReserviceFixedRecap.providerBody(reserviceFixedBody);
           completionSmsWasTruncated = false;
         } else if (completionUsesReportLane({
           reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
@@ -12823,7 +12826,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   replay_purpose: 'service_completion',
                   // The frozen body above came from this template row; the
                   // morning replay records it on the sent sms_log row.
-                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
+                  ...(reserviceFixedBody
+                    ? { template_key: ReserviceFixedRecap.TEMPLATE_KEY }
+                    : (sentSmsType ? { template_key: sentSmsType } : {})),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
@@ -13586,6 +13591,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           honored: reserviceFixedRecap,
           status: completionSmsStatus,
           body: finalRecordNotes.completionSmsBody || finalRecordNotes.sentSmsBody || null,
+          channel: finalRecordNotes.sentSmsChannel || null,
           error: finalRecordNotes.completionSmsError || null,
         }),
       } : {}),

@@ -2757,16 +2757,24 @@ checks unchanged; message type stays the completion family's, template key
 `reservice_fixed_recap`):
 
 > Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for
-> ants. Keep kids and pets off treated areas until dry. Details: <report link>
+> ants. Keep kids and pets off treated areas until dry; your technician confirms the timing. Details: <report link>
 
 - Address: the visit's stamped street, else the customer's.
 - Where: from `areas_serviced` (inside, outside, "inside and outside", the
   garage, joined naturally). Pests: the product rows' saved targets, deduplicated
   and lowercased; a name that is too long, has symbols or trips the banned
   customer-copy screen is dropped.
-- "Keep kids and pets off treated areas until dry." only when a saved product
-  row was applied wet (spot treatment, perimeter or broadcast spray, foliar,
-  fog, pin stream). Bait, granular, station and trunk-injection rows leave it out.
+- "Keep kids and pets off treated areas until dry; your technician confirms the
+  timing." (the AGENTS.md compliance idiom) only when a saved product row went
+  down wet: spray-class by the report module's own classifier
+  (`isSprayApplicationMethod`, so soil drench, fog and pin stream count) and not
+  a dry granular broadcast. Bait, station and trunk-injection rows leave it out.
+- The street comes from the completion's frozen `reportIdentitySnapshot` (the
+  same source the linked report uses), falling back to the current rows only
+  when the record has no snapshot. The stored and displayed body is the
+  provider-normalized one (https scheme stripped, GSM punctuation), and
+  `customerText` carries the recorded channel, so an app push reads "Sent to the
+  customer's app" rather than "Text sent".
 - A clause whose fact is missing is dropped whole: no pests gives "We treated
   inside."; no areas and no pests gives "Your re-service at X is done. Details:
   <link>" plus the safety line where it applies.
@@ -2774,7 +2782,9 @@ checks unchanged; message type stays the completion family's, template key
   review suffix on this path: exactly one text. It is not built with
   `completion-recap.js smsRecap`, so no "- Waves" sign-off (the no-signature
   ruling). The sent body is stored on `structured_notes.completionSmsBody`
-  (with `completionSmsRecapMode`), where the closeout status already reads it.
+  (with `completionSmsRecapMode`); `completionSmsStatus` carries the outcome.
+  A held (quiet-hours) replay row records the same `reservice_fixed_recap`
+  template key as an in-window send.
 
 After Complete the `/complete` response carries `customerText` (only when the
 sheet asked): `{ sent, body }` with the exact text, `{ queued, body }` when the
