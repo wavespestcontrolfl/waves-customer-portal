@@ -132,15 +132,15 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, resolveDecisionVersion } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION, V2_DECISION_VERSION_UNCLEAR_SERVICE } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
-// The route_decisions version stamped THIS pass: the base version plus a tag
-// for every dark-gated decision behavior that is live (see call-routing-gates
-// resolveDecisionVersion). Gate off = the plain base version, as before.
+// The route_decisions version stamped THIS pass: the tagged version while the
+// dark-gated unclear-service behavior is live (see call-routing-gates). Gate
+// off = the plain base version, as before.
 function currentDecisionVersion(enabled = isEnabled) {
-  return resolveDecisionVersion(unclearServiceAssessmentActive(enabled) ? ['u'] : []);
+  return unclearServiceAssessmentActive(enabled) ? V2_DECISION_VERSION_UNCLEAR_SERVICE : V2_DECISION_VERSION;
 }
 
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its

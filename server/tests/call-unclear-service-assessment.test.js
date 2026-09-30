@@ -13,7 +13,7 @@ const {
   currentDecisionVersion, unclearServiceAssessmentActive,
 } = CallRecordingProcessor._test;
 const { resolveCallBookingPrice, resolveCallFollowUpPlan } = require('../services/call-booking-catalog');
-const { buildRouteDecision, resolveDecisionVersion, V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { buildRouteDecision, V2_DECISION_VERSION, V2_DECISION_VERSION_UNCLEAR_SERVICE, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 const ON_FILE = Object.freeze({ hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202' });
@@ -333,9 +333,8 @@ describe('gate wiring', () => {
 
   test('the base decision version is NOT consumed while the gate is dark (codex r1 P1)', () => {
     expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
-    expect(resolveDecisionVersion([])).toBe('v2-1.50.0');
     // gate on: a distinct, listed, column-sized (varchar 30) version
-    const live = resolveDecisionVersion(['u']);
+    const live = V2_DECISION_VERSION_UNCLEAR_SERVICE;
     expect(live).toBe('v2-1.50.0+u');
     expect(live.length).toBeLessThanOrEqual(30);
     expect(V2_DECISION_VERSIONS).toContain(live);
@@ -346,7 +345,7 @@ describe('gate wiring', () => {
   test('buildRouteDecision stamps the base version by default and the live one when handed it', () => {
     const args = { callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' };
     expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
-    expect(buildRouteDecision({ ...args, decisionVersion: resolveDecisionVersion(['u']) }).decision_version).toBe('v2-1.50.0+u');
+    expect(buildRouteDecision({ ...args, decisionVersion: V2_DECISION_VERSION_UNCLEAR_SERVICE }).decision_version).toBe('v2-1.50.0+u');
   });
 });
 
