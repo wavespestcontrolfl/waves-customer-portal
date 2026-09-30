@@ -191,6 +191,9 @@ describe('writerRulesRejection', () => {
     ['Waves Home Services treated the lanai.', 'company_name'],
     ['No pest activity was observed today.', 'unscoped_absence'],
     ['The technician found no active pests during the visit.', 'unscoped_absence'],
+    ['None were observed during the visit.', 'unscoped_absence'],
+    ['The technician saw none today.', 'unscoped_absence'],
+    ['Nothing was found.', 'unscoped_absence'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -219,6 +222,8 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Waves Pest Control treated the perimeter.')).toBeNull();
     expect(writerRulesRejection('No activity was seen at the lanai today.')).toBeNull();
     expect(writerRulesRejection('No visible pest activity was noted within the assessed areas today.')).toBeNull();
+    expect(writerRulesRejection('You mentioned ants near the dishwasher; none were seen there today.')).toBeNull();
+    expect(writerRulesRejection('None of the 10 stations had feeding.')).toBeNull();
     expect(writerRulesRejection('The activity rating was light.')).toBeNull();
   });
 

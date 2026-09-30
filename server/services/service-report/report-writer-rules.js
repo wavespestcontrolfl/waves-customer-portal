@@ -131,6 +131,11 @@ const PROMPT_REWRITES = Object.freeze([
     'Leave preparation and aftercare instructions to the report\'s own sections.',
   ],
   ['Relay approved site precautions and next steps.', 'Leave site precautions to the report\'s own sections; name a recorded next step without a date.'],
+  // Recurring pest module: aftercare belongs to the report's own sections.
+  [
+    'Explain a response, limitation, aftercare instruction, or conducive condition only from supplied approved context.',
+    'Explain a response, limitation, or conducive condition only from supplied approved context; leave aftercare instructions to the report\'s own sections.',
+  ],
   // Remaining-service main adapter: one line per section, and the owner
   // rules now name what the report prints on its own.
   ['Return exactly these titles and plain-text paragraphs:', 'Return exactly these titles, each followed by exactly one line of plain text:'],
@@ -263,9 +268,19 @@ function forwardMention(copy, pattern, extraCue = null) {
 // Forward words only: "you texted us on Monday" is a past fact.
 const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
 // A property-wide absence (rule 4): "no pest activity was observed today",
-// "found no active pests during the visit". An absence tied to a place
-// ("no activity at the lanai", "within the assessed areas") passes.
-const UNSCOPED_ABSENCE_RE = /\bno\s+(?:(?:visible|active|live|signs?\s+of)\s+)?(?:pest\s+)?(?:activity|pests|insects|bugs|termites|rodents|mosquitoes|ants|roaches)\b(?![^.!?]*\b(?:at|in|on|near|along|around|under|inside|outside|by|within|behind|across)\s)/i;
+// "found no active pests during the visit", "none were observed", "nothing
+// was found". An absence tied to a place or set ("no activity at the lanai",
+// "within the assessed areas", "none of the stations") passes.
+// Judged per sentence: the place can come before or after ("You mentioned
+// ants near the dishwasher; none were seen there today").
+const ABSENCE_RE = /\b(?:no\s+(?:(?:visible|active|live|signs?\s+of)\s+)?(?:pest\s+)?(?:activity|pests|insects|bugs|termites|rodents|mosquitoes|ants|roaches)|none|nothing)\b/gi;
+const PLACE_RE = /\b(?:at|in|on|of|near|along|around|under|inside|outside|by|within|behind|across|there|here)\b/i;
+function unscopedAbsence(copy) {
+  return copy.split(/(?<=[.!?])\s+/).some((sentence) => {
+    const rest = sentence.replace(ABSENCE_RE, ' ');
+    return rest !== sentence && !PLACE_RE.test(rest);
+  });
+}
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
 const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
@@ -284,7 +299,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [SAFE_WORD_RE, 'safe_word'],
   [CHEMICAL_RE, 'chemical'],
   [OWNER_PHRASE_RE, 'owner_phrase'],
-  [UNSCOPED_ABSENCE_RE, 'unscoped_absence'],
+  [unscopedAbsence, 'unscoped_absence'],
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [PRICE_RE, 'price'],

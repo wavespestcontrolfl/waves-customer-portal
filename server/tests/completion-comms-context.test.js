@@ -293,6 +293,12 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(4), direction: 'inbound', message_body: 'A12B' },
           { created_at: mk(5), direction: 'inbound', message_body: 'Blue42 works for the side gate' },
           { created_at: mk(6), direction: 'inbound', message_body: 'This is my 2nd text about the ants' },
+          // Codes with keypad symbols.
+          { created_at: mk(7), direction: 'inbound', message_body: 'AB-12' },
+          { created_at: mk(7.5), direction: 'inbound', message_body: 'A#12 then push open' },
+          // Tapbacks quote a Waves text: loud (a normal row) and quiet.
+          { created_at: mk(8), direction: 'inbound', message_body: 'Liked “Your visit is confirmed for Friday between 8 and 10”' },
+          { created_at: mk(8.5), direction: 'inbound', message_type: 'sms_reaction', message_body: 'Loved “We will retreat for free”' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
@@ -305,6 +311,10 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('A12B');
     expect(ctx.text).not.toContain('Blue42');
     expect(ctx.text).toContain('This is my 2nd text about the ants');
+    expect(ctx.text).not.toContain('AB-12');
+    expect(ctx.text).not.toContain('A#12');
+    expect(ctx.text).not.toContain('Your visit is confirmed');
+    expect(ctx.text).not.toContain('retreat for free');
   });
 
   test('customer words: each line is dated in Eastern time', async () => {

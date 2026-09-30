@@ -37,6 +37,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { stripQuotedAndSignature } = require('./email/email-strip');
 const ContextAggregator = require('./context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
+const { isSmsReaction } = require('./sms-intent');
 
 const { redactAccessCodes } = ContextAggregator;
 
@@ -292,16 +293,22 @@ async function buildCompletionCommsContext({
 // mentioned…" copy.
 
 // Every customer-words line is scrubbed the same way: the canonical redactor,
-// then anything credential-shaped masked outright: three or more digits, an
-// all-caps word, or a token mixing letters and digits ("A12B", "Blue42";
-// ordinals like "2nd" pass). The context that anchors a bare code ("4821", "BLUE") is
+// then every credential-shaped token masked outright. A token (a run of
+// non-space characters, surrounding punctuation aside) is credential-shaped
+// when it carries a digit, unless it is a one- or two-digit count or an
+// ordinal ("4821", "A12B", "AB-12", "A#12", "$120", "9:30"), or when its
+// letters are all capitals ("BLUE", "AB-CD"; "A/C" passes). The context that anchors a bare code ("4821", "BLUE") is
 // often gone here (the Waves question is left out, a quote is stripped, a
 // summary drops the noun), and these lines become "You mentioned…" copy.
+function credentialShaped(token) {
+  if (/\d/.test(token)) return !/^\d{1,2}$/.test(token) && !/^\d+(?:st|nd|rd|th)$/i.test(token);
+  return /^[A-Z][A-Z#*-]{2,}$/.test(token);
+}
 function scrub(text) {
-  return redactAccessCodes(String(text || ''))
-    .replace(/\b(?!\d+(?:st|nd|rd|th)\b)(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z\d]{2,}\b/g, '[redacted]')
-    .replace(/\d{3,}/g, '[redacted]')
-    .replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+  return redactAccessCodes(String(text || '')).replace(/\S+/g, (word) => {
+    const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
+    return credentialShaped(token) ? `${lead}[redacted]${trail}` : word;
+  });
 }
 // The communication's calendar day in Eastern time (an 8 PM text is still
 // that day in Florida).
@@ -360,10 +367,13 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
       .where({ customer_id: customerId }))
       .where('created_at', '>=', floor)
       .where('direction', 'inbound')
-      .select('created_at', 'direction', 'message_body')
+      .select('created_at', 'direction', 'message_body', 'message_type')
       .orderBy('created_at', 'desc')
-      .limit(8),
-    keep: (row) => row.direction === 'inbound',
+      // Over-fetch: tapbacks are dropped below before eight are kept.
+      .limit(24),
+    // A tapback ("Liked \"Your visit is confirmed…\"") quotes a Waves text,
+    // quiet or loud, and is never the customer's own words.
+    keep: (row) => row.direction === 'inbound' && row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body),
     max: 8,
     line: (row) => {
       const summary = compactText(scrub(row.message_body), 260);
