@@ -158,25 +158,40 @@ async function assertConfirmationAllowed(subscriber, dbh = db) {
  * send then fails for a TRANSIENT reason (ownership busy, unverifiable veto
  * lookup, provider error) the row would look delivered: nothing retries, the
  * DOI TTL runs against a mail that never left, and the purge sweep deletes the
- * row. Clear the stamp so the row reads "not sent" again (a repeat signup
+ * row. Undo the pre-stamp so the row reads "not sent" again (a repeat signup
  * re-sends, the stale-pending lifecycle stays honest) — the discipline the
  * call pipeline and the email fanout already follow. A PERMANENT veto
  * (suppressed / do-not-contact) is left stamped: it must not be retried, and
- * the purge sweep retires the row. Conditional on the exact attempted
- * email+token+pending so a correction that rotated the row keeps its own
- * stamp. Best-effort; never throws.
+ * the purge sweep retires the row.
+ *
+ * Never null a stamp that records a REAL delivery. A pending resubscribe
+ * re-mails the SAME token, so the stamp it overwrote (`restoreTo`, from
+ * subscribeOrResubscribe's priorConfirmationSentAt) may be the delivery of a
+ * link the recipient already holds; nulling it would exempt that link from
+ * the DOI expiry and the purge sweep for good. So: restore that value when
+ * there is one, null only when this attempt was the first ever. And the undo is
+ * a compare-and-set on the exact pre-stamp THIS attempt wrote
+ * (subscriber.confirmation_sent_at): a concurrent attempt that re-stamped the
+ * row (its send may have succeeded) makes this a no-op. Also scoped to the
+ * attempted email+token+pending so a correction that rotated the row keeps its
+ * own stamp. Best-effort; never throws.
  */
-async function releaseUnsentConfirmationStamp(subscriber, err, dbh = db) {
+async function releaseUnsentConfirmationStamp(subscriber, err, { restoreTo = null, dbh = db } = {}) {
   try {
-    if (!subscriber || !subscriber.id) return false;
+    if (!subscriber || !subscriber.id || !subscriber.confirmation_sent_at) return false;
     if (err && err.code === 'confirmation_vetoed' && PERMANENT_VETO_REASONS.has(err.reason)) return false;
     const updated = await dbh('newsletter_subscribers')
-      .where({ id: subscriber.id, confirmation_token: subscriber.confirmation_token, status: 'pending' })
+      .where({
+        id: subscriber.id,
+        confirmation_token: subscriber.confirmation_token,
+        status: 'pending',
+        confirmation_sent_at: subscriber.confirmation_sent_at,
+      })
       .whereRaw('LOWER(email) = ?', [String(subscriber.email || '').trim().toLowerCase()])
-      .update({ confirmation_sent_at: null, updated_at: new Date() });
+      .update({ confirmation_sent_at: restoreTo || null, updated_at: new Date() });
     return updated > 0;
   } catch (clearErr) {
-    logger.warn(`[newsletter-confirm] confirmation_sent_at clear failed for subscriber id=${subscriber && subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+    logger.warn(`[newsletter-confirm] confirmation_sent_at release failed for subscriber id=${subscriber && subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
     return false;
   }
 }
@@ -240,6 +255,15 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
 
   const handoff = async (trx) => {
     await assertConfirmationAllowed(subscriber, trx);
+    // KNOWN LIMIT (owner ruling on PR #5390: document, no pipeline fence): the
+    // address, suppression and ownership races are fenced by the locks above,
+    // but a call-log do-not-contact request committed by ANOTHER call between
+    // the read in assertConfirmationAllowed and the provider request is not.
+    // Nothing fences call_log extraction writes (call-recording-processor
+    // persists them at ~7 standalone sites before the call has a customer
+    // link), and the other outbound vetoes (auto-text holds, first-touch
+    // resume) read-then-send the same way. The read above is the last await
+    // before sendOne, so the window is that gap only.
     // Confirmation emails are transactional — they must arrive even for
     // recipients who've previously unsubscribed from newsletter broadcasts.
     // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.

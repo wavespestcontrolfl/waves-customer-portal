@@ -4029,7 +4029,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             logger.error(`[public-quote] confirmation email failed for subscriber id=${result.subscriber?.id}: ${e.message}`);
             // Stamp was set before the send: clear it after a transient failure
             // (permanent vetoes stay stamped and are not retried).
-            await releaseUnsentConfirmationStamp(result.subscriber, e);
+            await releaseUnsentConfirmationStamp(result.subscriber, e, { restoreTo: result.priorConfirmationSentAt });
           }
           logger.info(`[public-quote] newsletter confirmation queued for lead ${lead.id} subscriber id=${result.subscriber?.id}`);
         } else if (result.action === 'already_active') {

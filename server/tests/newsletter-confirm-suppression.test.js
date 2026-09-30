@@ -294,7 +294,7 @@ describe('pre-stamp release after a failed send (public callers)', () => {
   }
   const stampClears = () => mockUpdates.filter((u) => u.table === 'newsletter_subscribers' && u.patch.confirmation_sent_at === null);
 
-  beforeEach(() => { mockSubscribe.mockResolvedValue({ action: 'confirmation_resent', subscriber: SUB }); });
+  beforeEach(() => { mockSubscribe.mockResolvedValue({ action: 'confirmation_resent', subscriber: { ...SUB, confirmation_sent_at: new Date('2026-09-29T12:00:00.000Z') } }); });
 
   test('a transient ownership_busy veto clears the pre-stamp; the response stays uniform', async () => {
     ownershipBusy = true;
@@ -314,14 +314,15 @@ describe('pre-stamp release after a failed send (public callers)', () => {
   test('permanent vetoes (suppressed, do-not-contact) leave the row stamped: no retry', async () => {
     // Direct (the route's per-IP limiter caps posts per minute in one file).
     tables.email_suppressions = [{ id: 's1', suppression_type: 'do_not_email' }];
-    const suppressed = await sendConfirmationEmail(SUB).catch((e) => e);
-    expect(await releaseUnsentConfirmationStamp(SUB, suppressed)).toBe(false);
+    const stamped = { ...SUB, confirmation_sent_at: new Date() };
+    const suppressed = await sendConfirmationEmail(stamped).catch((e) => e);
+    expect(await releaseUnsentConfirmationStamp(stamped, suppressed)).toBe(false);
     tables.email_suppressions = [];
     mockDnc.mockResolvedValue(true);
     tables.customers = [{ id: 'c1' }];
     const dnc = await sendConfirmationEmail(SUB).catch((e) => e);
     expect(dnc.reason).toBe('do_not_contact');
-    expect(await releaseUnsentConfirmationStamp(SUB, dnc)).toBe(false);
+    expect(await releaseUnsentConfirmationStamp(stamped, dnc)).toBe(false);
     expect(mockUpdates.filter((u) => u.patch.confirmation_sent_at === null)).toHaveLength(0);
   });
 
@@ -330,19 +331,37 @@ describe('pre-stamp release after a failed send (public callers)', () => {
     expect(stampClears()).toHaveLength(0);
   });
 
-  test('release is scoped to the attempted email + token + pending and never throws', async () => {
-    const ok = await releaseUnsentConfirmationStamp(SUB, new ConfirmationVetoedError('ownership_busy'));
+  const STAMP = new Date('2026-09-29T12:00:00.000Z');
+  const PRIOR = new Date('2026-09-20T12:00:00.000Z');
+  const STAMPED = { ...SUB, confirmation_sent_at: STAMP };
+
+  test('release is a compare-and-set on the exact pre-stamp, scoped to email + token + pending, and never throws', async () => {
+    const ok = await releaseUnsentConfirmationStamp(STAMPED, new ConfirmationVetoedError('ownership_busy'));
     expect(ok).toBe(true);
     const u = mockUpdates.find((x) => x.table === 'newsletter_subscribers');
-    expect(u.wheres).toContainEqual({ id: 'sub-1', confirmation_token: 'tok-1', status: 'pending' });
+    expect(u.wheres).toContainEqual({ id: 'sub-1', confirmation_token: 'tok-1', status: 'pending', confirmation_sent_at: STAMP });
+    expect(u.patch.confirmation_sent_at).toBeNull();
     db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(releaseUnsentConfirmationStamp(SUB, new Error('sendgrid'))).resolves.toBe(false);
+    await expect(releaseUnsentConfirmationStamp(STAMPED, new Error('sendgrid'))).resolves.toBe(false);
   });
 
-  test('public-quote clears the stamp too (source pin)', () => {
+  test('a prior real delivery is RESTORED, never nulled', async () => {
+    await releaseUnsentConfirmationStamp(STAMPED, new Error('sendgrid down'), { restoreTo: PRIOR });
+    const u = mockUpdates.find((x) => x.table === 'newsletter_subscribers');
+    expect(u.patch.confirmation_sent_at).toBe(PRIOR);
+  });
+
+  test('a subscriber without a recorded pre-stamp is left alone', async () => {
+    expect(await releaseUnsentConfirmationStamp(SUB, new Error('x'))).toBe(false);
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('both public routes hand the prior stamp to the release (source pin; the limiter caps posts per minute)', () => {
     const fs = require('fs');
-    const src = fs.readFileSync(require('path').join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(src).toMatch(/confirmation email failed for subscriber id[^\n]*\n[^\n]*\n[^\n]*\n\s*await releaseUnsentConfirmationStamp\(result\.subscriber, e\)/);
+    for (const f of ['public-newsletter.js', 'public-quote.js']) {
+      const src = fs.readFileSync(require('path').join(__dirname, '..', 'routes', f), 'utf8');
+      expect(src).toContain('await releaseUnsentConfirmationStamp(result.subscriber, e, { restoreTo: result.priorConfirmationSentAt })');
+    }
   });
 });
 

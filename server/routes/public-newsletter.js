@@ -459,7 +459,7 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
         // The stamp was set before the send; a transient failure must not
         // leave the row looking delivered (permanent vetoes stay stamped).
         // The response below stays uniform either way.
-        await releaseUnsentConfirmationStamp(result.subscriber, e);
+        await releaseUnsentConfirmationStamp(result.subscriber, e, { restoreTo: result.priorConfirmationSentAt });
       }
     }
     res.json({ success: true, pending: true });
