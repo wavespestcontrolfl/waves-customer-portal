@@ -1538,7 +1538,7 @@
       "line": "tree_shrub",
       "key": null,
       "label": "Tree & Shrub Care",
-      "inspection_first": false,
+      "inspection_first": true,
       "referral": null
     },
     "urgency": "low",
@@ -1568,7 +1568,42 @@
         "claim": "Peak months [3, 4, 5, 9, 10]",
         "note": "From the owner brief; IN599 documents year-round breeding (about 30 days per generation) but no monthly peak."
       }
-    ]
+    ],
+    "condition": {
+      "hosts": [
+        "shrubs"
+      ],
+      "signs": [],
+      "symptoms": [
+        "New ficus leaves roll or fold tightly along the midrib into a curled gall",
+        "Sunken purplish-red spots on the tender new leaves"
+      ],
+      "required_signature": {
+        "text": "No photo confirms Cuban laurel thrips. A technician unrolls curled ficus leaves and looks for the thrips inside.",
+        "elements": [
+          "New ficus leaves roll or fold tightly along the midrib into a curled gall"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "ficus-whitefly",
+          "difference": "Ficus whitefly causes yellowing and leaf drop with pale nymphs on flat leaf undersides; Cuban laurel thrips cause tightly curled, purple-spotted new leaves.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chilli-thrips",
+          "difference": "Chilli thrips scorch and bronze new growth without rolling it into tight galls; Cuban laurel thrips roll leaves into a tube with dark thrips inside.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "Damaged leaves stay curled; new growth comes in clean once thrips numbers drop."
+    }
   },
   {
     "slug": "magnolia-white-scale",
@@ -1875,7 +1910,7 @@
       "line": "tree_shrub",
       "key": null,
       "label": "Tree & Shrub Care",
-      "inspection_first": false,
+      "inspection_first": true,
       "referral": null
     },
     "urgency": "low",
@@ -1900,6 +1935,41 @@
     "risk": "low",
     "action": "monitor",
     "season_basis": "observed",
-    "verification": []
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "citrus"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Bronzed or russeted, rough-looking rind on citrus fruit",
+        "Damage on young fruit can look like rough, sharkskin-like russeting"
+      ],
+      "required_signature": {
+        "text": "No photo confirms citrus rust mite. A technician checks the fruit surface under a hand lens.",
+        "elements": [
+          "Bronzed or russeted, rough-looking rind on citrus fruit"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "spider-mites",
+          "difference": "Spider mites stipple and web leaves; citrus rust mites mark the fruit rind (and sometimes leaves) with bronzing or russeting and no webbing.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "florida-wax-scale",
+          "difference": "Wax scale forms raised, waxy pinkish bumps on twigs and leaves; rust mite damage is a flat bronzed or rough discoloration of the rind.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "Russeted rind stays marked, but it is cosmetic and new fruit can stay clean."
+    }
   }
 ]

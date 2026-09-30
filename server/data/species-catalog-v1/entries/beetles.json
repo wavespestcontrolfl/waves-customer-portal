@@ -1941,6 +1941,41 @@
         "claim": "Toothpick-like frass and entry-hole details",
         "note": "From the owner brief. The FR422 page returned HTTP 410 to the fetch tool; a UF/IFAS search result confirms the title (Diagnosis and Management of the Invasive Shot Hole Borers) and the white sugary \"volcano\" sign on avocado, but the frass description was not read from the page."
       }
-    ]
+    ],
+    "condition": {
+      "hosts": [
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Toothpick-like columns of frass pushing out of the bark, or white sugary crust around small holes",
+        "Small round entry holes in the bark, often no bigger than a pinhead"
+      ],
+      "required_signature": {
+        "text": "No photo confirms shot-hole or ambrosia beetles. A technician or arborist checks the entry holes and frass on the tree.",
+        "elements": [
+          "Toothpick-like columns of frass pushing out of the bark, or white sugary crust around small holes"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "powderpost-beetle",
+          "difference": "Powderpost beetles work dry, seasoned wood and leave fine powder; shot-hole borers and ambrosia beetles attack living or stressed trees and leave frass columns.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "drywood-termite-frass",
+          "difference": "Drywood termite pellets are tiny, uniform and pile up under wood; borer frass pushes out of bark as thin, toothpick-like columns or a sugary crust.",
+          "next_observation": "A technician checks this on site.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "Whether the tree recovers depends on how stressed it was; an arborist judges the tree."
+    }
   }
 ]

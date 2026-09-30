@@ -610,7 +610,12 @@ function settleItFor(possibilities, subject) {
 // ── next_step_hint (§6.6) ───────────────────────────────────────────────────
 
 function referralOutcomeCandidateAmong(possibilities) {
-  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && ['no_cure', 'regulated'].includes(p.sig.outcome)) || null;
+  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && (
+    ['no_cure', 'regulated'].includes(p.sig.outcome)
+    // A tree & shrub pest that needs a specialist (shot-hole borers → arborist)
+    // keeps its referral even though its outcome is manageable (Codex #5433 r2).
+    || (p.entry.action === 'specialist' && p.entry.service.line === 'tree_shrub')
+  )) || null;
 }
 /** Contract §6.6: referrals look at the top 2 only, but ANY displayed
  * possibility needing inspection routes `inspection` (herbicide injury
