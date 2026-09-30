@@ -97,20 +97,33 @@ async function resolveBouncieFallback({
     // changed -> discard (fail closed: no map point, no ETA).
     if (!(await mappingStillMatches(techId, imei))) return null;
 
-    pingTechLocation({
-      tech_id: techId,
-      lat,
-      lng,
-      ignition: loc.isRunning,
-      speed_mph: loc.speed ?? loc.speed_mph,
-      reported_at: lastReportedAt,
-      // Compare-and-write (round-37 P2): only while the tech is STILL mapped to the
-      // IMEI this point was fetched from — an in-flight fetch from a device that was
-      // remapped meanwhile must not seed the cache with the old vehicle's fix.
-      requireBouncieImei: imei,
-    }).catch((err) => {
+    // Compare-and-write, AWAITED (Codex round-43 P2): a remap that commits between the mapping
+    // recheck above and this write's row lock makes the guarded statement match no row and
+    // return null — the fetched point is then the OLD vehicle's and is discarded, not published.
+    // Only an explicit null means "mapping no longer matches" (the write is ONE statement, so the
+    // wait is bounded by timeoutMs; a timeout or a thrown write error leaves the mapping
+    // unverified-by-write but already verified by the read above, so the point is still served).
+    const WRITE_PENDING = Symbol('write-pending');
+    let written;
+    try {
+      written = await withTimeout(pingTechLocation({
+        tech_id: techId,
+        lat,
+        lng,
+        ignition: loc.isRunning,
+        speed_mph: loc.speed ?? loc.speed_mph,
+        reported_at: lastReportedAt,
+        // Only while the tech is STILL mapped to the IMEI this point was fetched from.
+        requireBouncieImei: imei,
+      }), timeoutMs, WRITE_PENDING);
+    } catch (err) {
       logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);
-    });
+      written = WRITE_PENDING;
+    }
+    if (written === null) {
+      logger.info(`[${logPrefix}] tech ${techId} was remapped while its old device was being read; discarding the fetched location`);
+      return null;
+    }
 
     return {
       lat,

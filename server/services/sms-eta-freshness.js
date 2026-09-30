@@ -340,16 +340,19 @@ function draftFreshnessReason(factsGeneratedAt, now, entry = null) {
 // with several, the /track/ token in the body selects the entry it names
 // (Codex round-10 P2) — only an unselectable status claim is ambiguous.
 function bindStatusClaim(claim, entries) {
-  if (entries.length === 1) return { entries: [...entries] };
-  // Codex round-34 P2: a PLURAL subject ("Your techs are on the way", "Our team is
-  // en route", "We're on our way") speaks for every stop, so it binds to EVERY
-  // snapshot entry of the claimed kind (en route, or on site for an arrived claim),
-  // link or not — one linked entry must not vouch for the others.
-  if (claim.pluralSubject) {
-    const pool = entries.filter((e) => (claim.arrivedClaim ? e.state === 'on_property' : e.state !== 'on_property'));
-    return { entries: pool.length ? pool : [...entries] };
-  }
-  const linked = entriesForTokens(entries, claim.trackTokens);
+  // Narrow by the CLAIMED state before deciding anything is ambiguous (Codex round-43 P2): an
+  // en-route claim can only be about en-route stops, an arrived claim only about on-property
+  // ones, so one en-route group beside one on-property group leaves exactly one candidate.
+  // No state-compatible entry at all falls back to every entry, so the liveness check that
+  // follows still refuses it with its usual reason.
+  const compatible = entries.filter((e) => (claim.arrivedClaim ? e.state === 'on_property' : e.state !== 'on_property'));
+  const candidates = compatible.length ? compatible : entries;
+  if (candidates.length === 1) return { entries: [...candidates] };
+  // Codex round-34 P2: a PLURAL subject ("Your techs are on the way", "Our team is en route",
+  // "We're on our way") speaks for every stop, so it binds to EVERY candidate of the claimed
+  // kind, link or not — one linked entry must not vouch for the others.
+  if (claim.pluralSubject) return { entries: [...candidates] };
+  const linked = entriesForTokens(candidates, claim.trackTokens);
   return linked.length ? { entries: linked } : { reason: 'eta_claim_ambiguous' };
 }
 

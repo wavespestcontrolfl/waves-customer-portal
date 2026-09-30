@@ -131,7 +131,7 @@ async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false 
 // Refusal is terminal (the visit is provably stale) except an unreadable recheck,
 // which rides the bounded retry rail — never sent unverified.
 function etaProviderPreSendCheck({ decisionId, getBody }) {
-  return async () => {
+  const check = async () => {
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     const reason = await scheduledEtaBlockReason({ decisionId, outgoingBody });
     if (reason == null) return { ok: true };
@@ -143,13 +143,14 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
       ...(retryable ? { retryable: true } : {}),
     };
   };
+  return markRepeatable(check);
 }
 
 // Snapshot-carrying variant for a caller that already holds the decision's live-ETA
 // snapshot in memory (the auto-send executor's claim): same check, same verdicts, no
 // extra row read.
 function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, techNames = [], getBody }) {
-  return async () => {
+  const check = async () => {
     const { etaClaimBlockReason } = require('./sms-eta-freshness');
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
@@ -168,6 +169,16 @@ function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, te
       ...(retryable ? { retryable: true } : {}),
     };
   };
+  return markRepeatable(check);
+}
+
+// A predicate that is a pure, idempotent state read declares itself safe to run AGAIN after
+// the sender's durable attempt marker (twilio.js re-runs `afterMarker` right before the SDK
+// request and undoes the marker on refusal, Codex round-43 P2). Non-flagged predicates keep
+// their documented once-only contract.
+function markRepeatable(check) {
+  check.afterMarker = check;
+  return check;
 }
 
 // Run several provider-boundary predicates in order; the first refusal wins.
@@ -176,13 +187,18 @@ function composeProviderPreSendChecks(...checks) {
   const active = checks.filter((c) => typeof c === 'function');
   if (!active.length) return undefined;
   if (active.length === 1) return active[0];
-  return async (ctx) => {
-    for (const check of active) {
+  const run = (list) => async (ctx) => {
+    for (const check of list) {
       const verdict = await check(ctx);
       if (!verdict || verdict.ok !== true) return verdict;
     }
     return { ok: true };
   };
+  const composed = run(active);
+  // Only the repeatable components re-run after the marker; the others are not re-invoked.
+  const repeatable = active.filter((c) => typeof c.afterMarker === 'function').map((c) => c.afterMarker);
+  if (repeatable.length) composed.afterMarker = run(repeatable);
+  return composed;
 }
 
 /**

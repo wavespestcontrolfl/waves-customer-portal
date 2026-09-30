@@ -1460,10 +1460,31 @@ describe('numeric binding ignores on-site entries; status claims still see them'
   test('only on-site entries: a numeric claim has nothing to bind to', async () => {
     expect(await run('The tech is 12 minutes away.', [onSite])).toBe('eta_claim_unbound');
   });
-  test('status / completed-arrival claims still consider every group: en-route + on-site with no link is ambiguous', async () => {
-    expect(await run('The tech is on the way.', [enRoute, onSite])).toBe('eta_claim_ambiguous');
+  // Round 43 (supersedes the older "every group is ambiguous" expectation): candidates are narrowed by
+  // the CLAIMED state first — one en-route group beside one on-property group leaves exactly one.
+  test('status claims narrow by claimed state: en-route + on-site with no link -> "on the way" binds the en-route group, "has arrived" the on-site group', async () => {
+    expect(await run('The tech is on the way.', [enRoute, onSite])).toBeNull();
+    expect(await run('The technician has arrived.', [enRoute, onSite])).toBeNull();
     expect(await run('The tech is on the way: portal.wavespestcontrol.com/track/tok-a', [enRoute, onSite])).toBeNull();
     expect(await run('The technician has arrived: portal.wavespestcontrol.com/track/tok-b', [enRoute, onSite])).toBeNull();
+  });
+  test('...and each claim is held to ITS group: the en-route group gone while only the on-site one is live blocks "on the way"', async () => {
+    const goneEnRoute = [{ id: 'svc-a', status: 'completed', track_state: 'completed', track_view_token: 'tok-a', track_token_expires_at: FUTURE }, rows[1]];
+    expect(await run('The tech is on the way.', [enRoute, onSite], goneEnRoute)).toBe('eta_claim_no_longer_en_route');
+    const goneOnSite = [rows[0], { id: 'svc-b', status: 'completed', track_state: 'completed', track_view_token: 'tok-b', track_token_expires_at: FUTURE }];
+    expect(await run('The technician has arrived.', [enRoute, onSite], goneOnSite)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('two groups of the SAME claimed state with no link are still ambiguous (singular claim)', async () => {
+    const otherEn = { ...enRoute, scheduledServiceIds: ['svc-c'], trackTokens: ['tok-c'] };
+    const otherOn = { ...onSite, scheduledServiceIds: ['svc-d'], trackTokens: ['tok-d'] };
+    const extra = [{ id: 'svc-c', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-c', track_token_expires_at: FUTURE }, { id: 'svc-d', status: 'on_site', track_state: 'on_property', track_view_token: 'tok-d', track_token_expires_at: FUTURE }];
+    expect(await run('The tech is on the way.', [enRoute, otherEn, onSite], [...rows, extra[0]])).toBe('eta_claim_ambiguous');
+    expect(await run('The technician has arrived.', [enRoute, onSite, otherOn], [...rows, extra[1]])).toBe('eta_claim_ambiguous');
+    // a link still selects among same-state candidates
+    expect(await run('The tech is on the way: portal.wavespestcontrol.com/track/tok-c', [enRoute, otherEn, onSite], [...rows, extra[0]])).toBeNull();
+  });
+  test('no state-compatible group at all keeps the old handling: the liveness check refuses it', async () => {
+    expect(await run('The technician has arrived.', [enRoute, { ...enRoute, scheduledServiceIds: ['svc-c'], trackTokens: ['tok-c'] }], [...rows, { id: 'svc-c', status: 'en_route', track_state: 'en_route' }])).toBe('eta_claim_ambiguous');
   });
 });
 

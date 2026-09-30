@@ -106,3 +106,42 @@ describe('fallback is compare-and-write AND revalidated before the coordinates a
     expect(pingTechLocation).not.toHaveBeenCalled();
   });
 });
+
+// Codex round-43 P2: the guarded write is AWAITED; a remap committing between the mapping recheck and the
+// write's row lock makes it match no row (null) and the fetched point is discarded.
+describe('the guarded fallback write decides whether the fetched point is served', () => {
+  const { pingTechLocation } = require('../services/tech-status');
+  beforeEach(() => pingTechLocation.mockReset());
+  const loc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() });
+
+  test('remap lands AFTER the mapping read but BEFORE the write: the guarded write returns null -> the point is discarded', async () => {
+    mockTechStatus(undefined, 'OLD-DEVICE'); // the recheck read still sees the old mapping
+    pingTechLocation.mockResolvedValue(null); // ...but by the write's row lock the mapping moved
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) });
+    expect(out).toBeNull();
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ requireBouncieImei: 'OLD-DEVICE' }));
+  });
+
+  test('the write landed (a row comes back): the point is served; a mock resolving undefined is not a mismatch', async () => {
+    mockTechStatus(undefined, 'OLD-DEVICE');
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
+    pingTechLocation.mockResolvedValue(undefined);
+    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
+  });
+
+  test('latency is bounded: a write that never settles does not hold the response past timeoutMs', async () => {
+    mockTechStatus(undefined, 'OLD-DEVICE');
+    pingTechLocation.mockReturnValue(new Promise(() => {}));
+    const started = Date.now();
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()), timeoutMs: 40 });
+    expect(out.source).toBe('bouncie_api');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test('a thrown write error (DB hiccup) is logged and the point already verified by the mapping read is still served', async () => {
+    mockTechStatus(undefined, 'OLD-DEVICE');
+    pingTechLocation.mockRejectedValue(new Error('db down'));
+    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
+  });
+});
