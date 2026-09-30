@@ -587,13 +587,17 @@ async function sendAppointmentNoShowEmail({
   // parked for reconciliation — the fee may still have been accepted, so
   // neither "was charged" nor "no charge" is safe to claim.
   // 'held' = a collections dispute hold refused the fee before Stripe was
-  // contacted: definite no-charge, so it reads exactly like 'none' — never
-  // the review copy about a receipt.
+  // contacted, but the fee stays collectible later (the office decides after
+  // the dispute). The owner has not ruled it waived, so the copy makes NO
+  // claim about a charge either way: the line is omitted entirely (charge_line
+  // is an optional template field) — never "no charge", never a fee/receipt.
   const chargeLine = feeOutcome === 'charged'
     ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
     : feeOutcome === 'review'
       ? 'If a missed-visit fee applies under your booking terms, it will appear on an emailed receipt.'
-      : 'There’s no charge for the attempted visit.';
+      : feeOutcome === 'held'
+        ? ''
+        : 'There’s no charge for the attempted visit.';
   return sendTemplate({
     customerId,
     scheduledServiceId,
