@@ -4759,7 +4759,7 @@ postgres('visit summary recipient recovery', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body.startsWith(`${plainBody()} Your receipt: `)).toBe(true);
       expect((await invoiceRow(invoiceId)).receipt_sent_at).not.toBeNull();
-      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: `receipt:${invoiceId}` });
+      expect((await summaryEffect())).toMatchObject({ status: 'sent', provider_id: expect.stringMatching(new RegExp(`^receipt:${invoiceId}:\\d+$`)) });
       // The receipt queue's text leg: already covered (its email leg is separate).
       expect(await require('../services/invoice').sendReceipt(invoiceId)).toEqual({ sent: false, reason: 'already-sent' });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -5081,6 +5081,115 @@ postgres('visit summary recipient recovery', () => {
         await mockPg('customers').where({ id: fixture.customerId }).update({ auto_apply_account_credit: false, account_credits: 500 });
         await deliver();
         expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/ Pay your invoice: /);
+      });
+    });
+
+    // The cover is a committed claim: claim, send, settle. The queue's claim and
+    // the receipt drain see it from the claim on, whatever the provider does.
+    describe('the committed cover', () => {
+      const runQueues = async (Queue, Invoice) => {
+        await Queue.processDueReceiptDeliveryJobs();
+        await Invoice.processScheduledSends();
+      };
+
+      test.each([
+        ['receipt', { status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_gap' } }],
+        ['pay link', { scheduled: true }],
+      ])('an ambiguous provider failure leaves no gap for the %s worker to text into, during the request or after it', async (name, options) => {
+        const invoiceId = await stop(options);
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 60000) });
+        const Queue = require('../services/receipt-delivery-queue');
+        const Invoice = require('../services/invoice');
+        if (name === 'receipt') await Queue.enqueueReceiptDelivery({ invoiceId, source: 'card_on_file', stripePaymentIntentId: 'pi_fixture_gap' });
+        const receiptEmail = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockResolvedValue({ ok: true });
+        jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+        const sendSms = jest.spyOn(Invoice, 'sendViaSMS');
+        const standaloneTexts = [];
+        let duringRequest;
+        const summarySender = handoffSender(async () => {
+          // The workers start while the request is under way; the customer row the
+          // handoff holds keeps their money steps waiting until it ends.
+          duringRequest = runQueues(Queue, Invoice);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          throw providerFailure(503);
+        });
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (input.purpose === 'payment_receipt') { standaloneTexts.push(input.body); return { sent: true }; }
+          return summarySender(input);
+        });
+        // The gap: after the failed request, before anything settles the invoice side.
+        const finalize = VisitGroups.finalizeVisitNotification;
+        jest.spyOn(VisitGroups, 'finalizeVisitNotification').mockImplementation(async (...args) => {
+          if (args[1] === 'completion_sms' && args[2] === 'unknown_delivery') await runQueues(Queue, Invoice);
+          return finalize(...args);
+        });
+        await deliver();
+        await duringRequest;
+        await runQueues(Queue, Invoice);
+        expect(standaloneTexts).toHaveLength(0);
+        expect(sendSms).not.toHaveBeenCalled();
+        expect(sendCustomerMessage.mock.calls.filter(([input]) => input.purpose === 'service_completion')).toHaveLength(1);
+        expect(await summaryEffect()).toMatchObject({ status: 'unknown_delivery' });
+        if (name === 'receipt') {
+          expect((await invoiceRow(invoiceId)).receipt_sent_at).not.toBeNull();
+          expect(receiptEmail).toHaveBeenCalledTimes(1);
+        } else {
+          expect((await invoiceRow(invoiceId)).sms_sent_at).not.toBeNull();
+        }
+      });
+
+      test('a cover committed for a claim that died before the provider request goes back once the lease runs out', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: MARKER, sms_sent_at: new Date(), scheduled_send_at: new Date() });
+        await priorClaim('completion_sms', { status: 'unknown_delivery', last_error: `${VisitGroups.HANDOFF_PENDING}:${randomUUID()}`, provider_id: `pay_link:${invoiceId}` });
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_UNAVAILABLE' });
+        await deliver();
+        const restored = await invoiceRow(invoiceId);
+        expect(restored).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+        expect((await summaryEffect()).provider_id).toBeNull();
+      });
+
+      test('a cover whose claim reached the provider request stays, as the outcome cannot be told', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: MARKER, sms_sent_at: new Date(), scheduled_send_at: new Date() });
+        await priorClaim('completion_sms', { status: 'unknown_delivery', last_error: null, provider_id: `pay_link:${invoiceId}` });
+        await deliver();
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: MARKER });
+        expect((await summaryEffect()).provider_id).toBe(`pay_link:${invoiceId}`);
+      });
+    });
+
+    describe('the cover survives the queue\'s email retries', () => {
+      const failEmailOnce = () => jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail')
+        .mockResolvedValueOnce({ ok: false, error: 'SendGrid outage', code: 'billing_prefs_unavailable' })
+        .mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+
+      test('a failed email leaves the provenance and the leg covered, and the retry sends only the email and converts the lead once', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        await deliver();
+        const Invoice = require('../services/invoice');
+        const sendSms = jest.spyOn(Invoice, 'sendViaSMS');
+        const convert = jest.spyOn(require('../services/lead-estimate-link'), 'convertLeadFromEvent').mockResolvedValue(null);
+        failEmailOnce();
+        await Invoice.processScheduledSends();
+        const retrying = await invoiceRow(invoiceId);
+        expect(retrying.scheduled_send_error.startsWith(MARKER)).toBe(true);
+        expect(retrying.sms_sent_at).not.toBeNull();
+        expect(convert).not.toHaveBeenCalled();
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+        await Invoice.processScheduledSends();
+        expect(sendSms).not.toHaveBeenCalled();
+        expect(convert).toHaveBeenCalledTimes(1);
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'sent' });
+      });
+
+      test('the takeback still finds the cover after an email retry annotated it', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: `${MARKER}: email: SendGrid outage`, sms_sent_at: new Date(), scheduled_send_at: new Date(), scheduled_send_attempts: 1 });
+        await priorClaim('completion_sms', { status: 'suppressed', provider_id: `pay_link:${invoiceId}` });
+        await deliver();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: null, sms_sent_at: null });
       });
     });
   });

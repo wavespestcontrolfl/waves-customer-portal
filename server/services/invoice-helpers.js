@@ -155,6 +155,12 @@ const SUMMARY_TEXT_HOLD_ERROR = 'SUMMARY_TEXT_HOLD — waiting for the visit sum
 // invoice must still be waiting then.
 const SUMMARY_TEXT_HOLD_MS = 20 * 60 * 1000;
 
+// The accepted-Text marker (invoice.js BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, matched
+// everywhere by prefix) as written for a Text leg the combined-visit summary text covers.
+// The suffix is the cover's provenance: the takeback and first-delivery lead conversion
+// read it, so every writer of the marker on a retry path keeps it.
+const SUMMARY_TEXT_COVERED_ERROR = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED:visit_summary';
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 // The stale-claim review hold, read back from the park above: a row parked
@@ -288,6 +294,7 @@ module.exports = {
   STALE_SEND_PARK_ERROR,
   SUMMARY_TEXT_HOLD_ERROR,
   SUMMARY_TEXT_HOLD_MS,
+  SUMMARY_TEXT_COVERED_ERROR,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,

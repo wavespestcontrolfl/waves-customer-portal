@@ -387,15 +387,14 @@ async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
 // Read at the handoff under the held customer row (payer writers commit under
 // it), so a payer or billing hold that lands after the plan cannot slip a link
 // to the homeowner. Anything the plan would not have chosen is stale, and the
-// plain summary goes instead. At the dispatch handoff `lock` also takes the
-// rows the invoice's other senders claim FOR UPDATE, held to the end of the
-// handoff transaction: the send queue's claim (customer row shared, then the
-// invoice row) waits behind it, so it cannot claim, or find an expired wait,
-// between this check and the cover stamped at provider start; a receipt job is
-// skipped while its row is held (the drain takes rows SKIP LOCKED) and one
-// already running is stale here. Job row before invoice row, as the receipt
-// worker takes them.
-async function summaryBillingLinkLive(trx, link, visitId, { lock = false, recipientPhone } = {}) {
+// plain summary goes instead. At the claim handoff `lock` also takes the rows
+// the invoice's other senders claim FOR UPDATE, held to the commit that also
+// writes the cover: the send queue's claim (customer row shared, then the
+// invoice row) waits behind it, a receipt job is skipped while its row is held
+// (the drain takes rows SKIP LOCKED), and one already running is stale here.
+// Job row before invoice row, as the receipt worker takes them. `covered` is
+// the cover this attempt already committed: the dispatch handoff expects it.
+async function summaryBillingLinkLive(trx, link, visitId, { lock = false, recipientPhone, covered = null } = {}) {
   if (lock && link.kind === 'receipt') {
     const job = await trx('receipt_delivery_jobs').where({ invoice_id: link.invoiceId }).forUpdate().first('status');
     if (job?.status === 'running') return false;
@@ -405,10 +404,29 @@ async function summaryBillingLinkLive(trx, link, visitId, { lock = false, recipi
   const invoice = await query.first();
   const visit = await trx('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
-  if (link.kind === 'receipt' ? invoice.status !== 'paid' || invoice.receipt_sent_at : !summaryPayLinkQueued(invoice)) return false;
+  const { SUMMARY_TEXT_COVERED_ERROR } = require('./invoice-helpers');
+  if (link.kind === 'receipt') {
+    if (invoice.status !== 'paid') return false;
+    if (covered ? new Date(invoice.receipt_sent_at).getTime() !== covered.at.getTime() : invoice.receipt_sent_at) return false;
+  } else if (covered
+    ? !(invoice.status === 'scheduled' && String(invoice.scheduled_send_error || '').startsWith(SUMMARY_TEXT_COVERED_ERROR))
+    : !summaryPayLinkQueued(invoice)) return false;
   // The plan's own question again, on the rows held now: a billing choice, a
   // receipt toggle, a template switch or account credit that changed since.
   return summaryLinkSendable(trx, invoice, link.kind, recipientPhone);
+}
+
+// The cover a claim commits with its dispatch mark, and how the effect records it.
+const summaryCoverRef = (cover) => (cover.kind === 'receipt' ? `receipt:${cover.invoiceId}:${cover.at.getTime()}` : `pay_link:${cover.invoiceId}`);
+const SUMMARY_COVER_REF_RE = /^(pay_link|receipt):([0-9a-f-]{36})(?::(\d+))?$/;
+
+// Takes back exactly the cover a summary text attempt wrote: the queued pay
+// link's marker, or the receipt stamp with its own timestamp. Only for a text
+// that provably never went out.
+async function takeBackSummaryCover(cover, packetId) {
+  const InvoiceService = require('./invoice');
+  if (cover.kind === 'receipt') return InvoiceService.takeBackReceiptSummaryCover(cover.invoiceId, cover.at);
+  return InvoiceService.settleSummaryTextHold(cover.invoiceId, packetId, { textCovered: false });
 }
 
 async function summaryBillingLinkText(link) {
@@ -426,6 +444,13 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
   if (claim?.state !== 'owner') return;
   const recipient = getServiceContactSmsRecipient(customer);
   let dispatched = false;
+  let cover = null;
+  const takeBackCover = async () => {
+    if (!cover) return;
+    const taken = cover;
+    cover = null;
+    await takeBackSummaryCover(taken, packetId);
+  };
   try {
     if (!requested || !recipient?.phone) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'suppressed', new Date(), claim.token);
@@ -434,7 +459,7 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
     const plainBody = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
     let link = billingLink;
     let linkStale = false;
-    let receiptStampAt = null;
+    // The cover this attempt committed with its dispatch mark (see authorized).
     const send = async () => {
       // A link that cannot be minted, or that changed by the handoff, falls
       // back to the plain summary below (the invoice's own sender covers it).
@@ -465,50 +490,45 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
               && currentPrefs.service_completed !== false
               && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone);
             if (!allowed) return false;
-            if (link && !(await summaryBillingLinkLive(trx, link, visit.id, { lock: phase === 'dispatch', recipientPhone: recipient.phone }))) {
+            if (link && !(await summaryBillingLinkLive(trx, link, visit.id, { lock: phase === 'claim', recipientPhone: recipient.phone, covered: cover }))) {
               linkStale = true;
               return false;
             }
-            // The link this claim attaches is recorded before any provider
-            // request (and cleared for a plain attempt), so an ambiguous
-            // outcome still knows a link was attached.
-            if (phase === 'claim') {
-              await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms', claim_token: claim.token })
-                .update({ provider_id: link ? `${link.kind}:${link.invoiceId}` : null });
+            if (phase !== 'claim') return true;
+            // The claim commits, with its dispatch mark and under the locks the
+            // check above took, the cover on the invoice's Text leg and the link
+            // it attaches: claim, then send, then settle. The queue's claim and
+            // the receipt drain from here on see it, whatever the provider does.
+            // A cover the text never needed is taken back (a definite refusal, or
+            // a claim that recovery proves never reached the provider).
+            if (link) {
+              const at = new Date();
+              const written = link.kind === 'receipt'
+                ? await InvoiceService.markReceiptCoveredBySummaryText(link.invoiceId, { database: trx, at })
+                : await InvoiceService.settleSummaryTextHold(link.invoiceId, packetId, { textCovered: true, database: trx, releaseWait: false });
+              if (!written) {
+                linkStale = true;
+                return false;
+              }
+              cover = { kind: link.kind, invoiceId: link.invoiceId, at };
             }
+            await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms', claim_token: claim.token })
+              .update({ provider_id: cover ? summaryCoverRef(cover) : null });
             return true;
           },
-          dispatch: (trx, onProviderStart) => handoff(trx, async () => {
-            // The queued invoice's Text leg is covered in the same transaction
-            // as the provider request, under the invoice lock taken above: a
-            // definite failure rolls it back, and the queue can never claim
-            // the invoice without seeing it. Before the provider-start mark, so
-            // a failure here is provably unsent.
-            if (link?.kind === 'pay_link' && !(await InvoiceService.settleSummaryTextHold(link.invoiceId, packetId, { textCovered: true, database: trx }))) {
-              throw new Error('Visit summary pay-link invoice is no longer queued');
-            }
-            if (link?.kind === 'receipt') {
-              // The receipt job's Text leg stands down the same way: stamped
-              // in this transaction, under the invoice and job locks.
-              receiptStampAt = new Date();
-              if (!(await InvoiceService.markReceiptCoveredBySummaryText(link.invoiceId, { database: trx, at: receiptStampAt }))) {
-                throw new Error('Visit summary receipt was already texted');
-              }
-            }
-            await onProviderStart();
-            dispatched = true;
-          }) }),
+          dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
       });
     };
     let result = await send();
     if (linkStale && !result.sent) {
+      await takeBackCover();
       link = null;
       dispatched = false;
-      receiptStampAt = null;
       result = await send();
     }
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       dispatched = false; // The provider boundary can also prove it held before sending.
+      await takeBackCover();
       // The queued text is the plain summary: the invoice's own sender covers
       // the pay link at the window open, exactly as before.
       await deferSummarySms({ visit, member, customer, recipient, body: plainBody, claim, nextAllowedAt: result.nextAllowedAt });
@@ -527,16 +547,39 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
     }
     const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
     const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
-    // A receipt cover written for a text the provider definitively refused.
-    if (receiptStampAt && outcome !== 'sent') await InvoiceService.takeBackReceiptSummaryCover(link.invoiceId, receiptStampAt);
+    // A cover for a text that provably never went out goes back first (a crash
+    // between the two leaves the link recorded for the recovery below).
+    if (outcome !== 'sent') await takeBackCover();
     // The folded link rides the same commit as the sent state: a replay reads
-    // it to finish the invoice side (settleSummaryBillingLink). An ambiguous
-    // outcome keeps the link recorded at the claim.
+    // it to finish the invoice side (settleSummaryBillingLink).
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token,
-      { providerId: outcome === 'sent' && link ? `${link.kind}:${link.invoiceId}` : null });
+      { providerId: outcome === 'sent' && cover ? summaryCoverRef(cover) : null });
   } catch {
+    // Past the provider start the text may have been delivered: the cover stays.
+    if (!dispatched) await takeBackCover().catch(() => {});
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
   }
+}
+
+// A cover a claim committed for a text that provably never went out goes back,
+// on the effect's own rules: a suppressed or queued summary, or a claim whose
+// lease ran out before the provider request (the pre-provider marker still on
+// it, or the claim never marked), is unsent, so the invoice's own text stands
+// again. A mark whose marker is gone may have been delivered and keeps its
+// cover (summaryOutcomeAmbiguous); a live claim is another runner's.
+async function reconcileAbandonedSummaryCover(packetId, visitId, database) {
+  const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_sms' })
+    .first('status', 'provider_id', 'last_error', 'claimed_at');
+  const ref = SUMMARY_COVER_REF_RE.exec(effect?.provider_id || '');
+  if (!ref) return;
+  const stale = new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
+  const unsent = ['suppressed', 'pending', 'failed'].includes(effect.status)
+    || (stale && (effect.status === 'claimed'
+      || (effect.status === 'unknown_delivery' && VisitGroups.isHandoffPending(effect.last_error))));
+  if (!unsent) return;
+  await takeBackSummaryCover({ kind: ref[1], invoiceId: ref[2], at: ref[3] ? new Date(Number(ref[3])) : null }, packetId);
+  await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_sms' })
+    .whereIn('status', ['suppressed', 'pending', 'failed', 'claimed', 'unknown_delivery']).update({ provider_id: null });
 }
 
 // Once the summary text has settled, the invoice side follows it: a text that
@@ -555,7 +598,7 @@ async function settleSummaryBillingLink(packetId, visitId, database) {
   // A queued (quiet-hours) summary is the plain text: the invoice's sender covers the link.
   const ambiguous = summaryOutcomeAmbiguous(effect);
   if (!effect || !(['sent', 'suppressed', 'pending'].includes(effect.status) || ambiguous)) return;
-  const folded = effect.status === 'sent' || ambiguous ? /^(pay_link|receipt):([0-9a-f-]{36})$/.exec(effect.provider_id || '') : null;
+  const folded = effect.status === 'sent' || ambiguous ? SUMMARY_COVER_REF_RE.exec(effect.provider_id || '') : null;
   if (folded?.[1] === 'receipt') return InvoiceService.markReceiptCoveredBySummaryText(folded[2]);
   const invoiceId = folded?.[2] || (await database('invoices').where({ visit_completion_packet_id: packetId }).first('id'))?.id;
   if (invoiceId) await InvoiceService.settleSummaryTextHold(invoiceId, packetId, { textCovered: Boolean(folded), acceptedAt: effect.sent_at || new Date() });
@@ -1180,6 +1223,9 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const context = await summaryDeliveryContext(packetId, token, database);
   const { packet, visit } = context;
   // A failed read of the billing side never costs the customer their summary.
+  await reconcileAbandonedSummaryCover(packet.id, visit.id, database).catch((err) => {
+    require('./logger').warn(`[visit-summary] abandoned summary cover not reconciled for packet ${packet.id}: ${err.message}`);
+  });
   const billingLink = await summaryBillingLinkPlan(context, packet.id).catch((err) => {
     require('./logger').warn(`[visit-summary] billing link check failed for packet ${packet.id}: ${err.message}`);
     return null;

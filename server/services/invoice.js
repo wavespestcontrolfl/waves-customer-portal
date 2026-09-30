@@ -3884,8 +3884,9 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
 }
 
 const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
-// The same marker, written for a Text leg the combined-visit summary text covers.
-const SUMMARY_TEXT_COVERED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}:visit_summary`;
+// The same marker, written for a Text leg the combined-visit summary text covers
+// (its suffix is provenance: every retry writer below keeps it).
+const { SUMMARY_TEXT_COVERED_ERROR } = require("./invoice-helpers");
 
 async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
@@ -7092,7 +7093,7 @@ const InvoiceService = {
               status: "scheduled",
               sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
               scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
-              scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+              scheduled_send_error: alreadyPending ? owned.scheduled_send_error : BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
               scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
               scheduled_request_review: Boolean(effectiveRequestReview),
               scheduled_review_delay_minutes: effectiveRequestReview ? effectiveReviewDelayMinutes : null,
@@ -7204,7 +7205,7 @@ const InvoiceService = {
         if (ownedDeliveryFinalized) {
           await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
             // The visit summary text's cover is this delivery's Text leg, not a prior delivery.
-            || (claim.invoice.sms_sent_at && claim.invoice.scheduled_send_error !== SUMMARY_TEXT_COVERED_ERROR)) });
+            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_COVERED_ERROR))) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7818,9 +7819,14 @@ const InvoiceService = {
         REPLAY_HOLD_CODES.includes(result.sms?.code)
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
         && result.sms?.nextAllowedAt;
-      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
-        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
-        : error;
+      // A Text leg the summary text covers stays covered, with its provenance,
+      // through every retry: losing the marker would text the pay link again.
+      const summaryCovered = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_COVERED_ERROR);
+      const durableSendError = summaryCovered
+        ? (result.email?.error ? `${SUMMARY_TEXT_COVERED_ERROR}: ${error}` : SUMMARY_TEXT_COVERED_ERROR)
+        : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+          ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+          : error;
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
@@ -7940,7 +7946,7 @@ const InvoiceService = {
   // the queue already claimed is left alone, and a replay is a no-op.
   // `database` is the handoff transaction when the stamp is written before the
   // provider request, under the invoice row lock the caller holds.
-  async settleSummaryTextHold(invoiceId, packetId, { textCovered = false, acceptedAt = new Date(), database = db } = {}) {
+  async settleSummaryTextHold(invoiceId, packetId, { textCovered = false, acceptedAt = new Date(), database = db, releaseWait = true } = {}) {
     const { SUMMARY_TEXT_HOLD_ERROR } = require("./invoice-helpers");
     const holdLike = `${SUMMARY_TEXT_HOLD_ERROR.split(" ")[0]}%`;
     const markerLike = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}%`;
@@ -7953,7 +7959,7 @@ const InvoiceService = {
         .where("scheduled_send_error", "like", holdLike)
         .update({ scheduled_send_error: null, scheduled_send_at: database.fn.now(), updated_at: new Date() });
       const reverted = await queued()
-        .where("scheduled_send_error", SUMMARY_TEXT_COVERED_ERROR)
+        .where("scheduled_send_error", "like", `${SUMMARY_TEXT_COVERED_ERROR}%`)
         .update({ scheduled_send_error: null, sms_sent_at: null, scheduled_send_attempts: 0, scheduled_send_at: database.fn.now(), updated_at: new Date() });
       return released + reverted;
     }
@@ -7963,7 +7969,12 @@ const InvoiceService = {
         .orWhere("scheduled_send_error", "like", markerLike))
       .update({
         sms_sent_at: database.raw("COALESCE(sms_sent_at, ?::timestamptz)", [acceptedAt]),
-        scheduled_send_at: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN NOW() ELSE scheduled_send_at END", [holdLike]),
+        // The wait ends with the settlement; a cover written before the provider
+        // request keeps it (releaseWait false), so the queue does not finalize
+        // the invoice ahead of a text that may never have been sent.
+        scheduled_send_at: releaseWait
+          ? database.raw("CASE WHEN scheduled_send_error LIKE ? OR (scheduled_send_error LIKE ? AND scheduled_send_at > NOW()) THEN NOW() ELSE scheduled_send_at END", [holdLike, `${SUMMARY_TEXT_COVERED_ERROR}%`])
+          : database.raw("scheduled_send_at"),
         scheduled_send_attempts: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_attempts ELSE 0 END", [markerLike]),
         scheduled_send_error: database.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_error ELSE ? END", [markerLike, SUMMARY_TEXT_COVERED_ERROR]),
         updated_at: new Date(),
