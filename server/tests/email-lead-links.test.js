@@ -91,3 +91,20 @@ describe('resolveEmailLinks', () => {
     expect(msg).not.toMatch(/a@b\.example/);
   });
 });
+
+describe('GATE_LEAD_EMAIL_LINKS', () => {
+  const saved = process.env.GATE_LEAD_EMAIL_LINKS;
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LEAD_EMAIL_LINKS; else process.env.GATE_LEAD_EMAIL_LINKS = saved; });
+
+  test('dark unless exactly "true", and read at call time', () => {
+    const gates = require('../config/feature-gates');
+    delete process.env.GATE_LEAD_EMAIL_LINKS;
+    expect(gates.leadEmailLinksLive()).toBe(false);
+    process.env.GATE_LEAD_EMAIL_LINKS = '1';
+    expect(gates.leadEmailLinksLive()).toBe(false);
+    process.env.GATE_LEAD_EMAIL_LINKS = 'true';
+    expect(gates.leadEmailLinksLive()).toBe(true);
+    process.env.GATE_LEAD_EMAIL_LINKS = 'false';
+    expect(gates.leadEmailLinksLive()).toBe(false);
+  });
+});
