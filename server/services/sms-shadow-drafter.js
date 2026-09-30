@@ -1332,7 +1332,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, isModalNonAssertive, recognizedMatchIsHypothetical, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, isModalNonAssertive, recognizedMatchIsHypothetical, subclauseRanges, isNonAssertivePaymentClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -2271,6 +2271,7 @@ function validateAnaphoricClaim(claim, text, env) {
 const INVOICE_COLLECTIBLE_STATUSES = new Set(require('./invoice-helpers').OWN_COLLECTIBLE_INVOICE_STATUSES);
 const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
 function validateInvoiceStatusClaim(claim, text, amounts, env) {
+  claim.matchedInvoice = null;
   const list = env.context?.billing?.invoiceStatuses;
   if (!Array.isArray(list)) return true; // invoice state unavailable => fail closed
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
@@ -2306,7 +2307,37 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   // (open / sent / viewed / overdue / partially paid) with an amount due; a paid / void / canceled /
   // uncollectible / refunded / processing invoice contradicts it — whatever OTHER invoices are open.
   if (claim.family === 'unpaid') return !(INVOICE_COLLECTIBLE_STATUSES.has(status) && Number(pool[0].amountDue) > 0);
+  claim.matchedInvoice = pool[0];
   return INVOICE_STATUS_FAMILY[status] !== claim.family;
+}
+// Codex round-33 P1: "Invoice #0123 is paid with your card" makes TWO claims — the invoice's status (above) AND how it was
+// paid, a payment claim. The tender must match the row(s) that settled THAT invoice (linked by metadata.invoice_id /
+// alias, or the "Invoice <n> —" description): every settling row must carry the claimed tender, and a tender that
+// cannot be read, rows that cannot be found, or an ambiguous tender wording are all ungrounded.
+function invoiceTenderUngrounded(claim, text, env) {
+  if (claim.family !== 'paid' || !claim.matchedInvoice) return false;
+  // judge the sub-clause(s) asserting the paid status (the whole clause for a receipt-shaped invoice claim); a how-to /
+  // offer sub-clause ("pay by card next time") names no past payment
+  const ranges = subclauseRanges(text);
+  const scoped = Array.isArray(claim.starts) && claim.starts.length
+    ? claim.starts.map((st) => ranges.find((r) => st >= r.start && st <= r.end)?.text || text)
+    : ranges.map((r) => r.text);
+  const claimedTexts = scoped.filter((t) => !isNonAssertivePaymentClause(t) && !PAYMENT_HOWTO_RE.test(t));
+  const claimed = replyClaimedTender(claimedTexts.join(' . '));
+  if (!claimed) return false;
+  if (claimed === TENDER_AMBIGUOUS) return true;
+  const { invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf } = require('./payer-linkage');
+  const inv = claim.matchedInvoice;
+  const num = String(inv.invoiceNumber || '').toUpperCase();
+  const settling = paymentRowsForBinding(env.context).filter((p) => {
+    if (!p || statusFamilyOfRow(p) !== 'paid') return false;
+    const linked = invoiceIdOf(p) || aliasInvoiceIdOf(p);
+    if (linked && String(linked) === String(inv.id)) return true;
+    const dn = descriptionInvoiceNumberOf(p);
+    return !!(num && dn && String(dn).toUpperCase() === num);
+  });
+  if (!settling.length) return true; // nothing settles it on record => the tender is unverifiable
+  return settling.some((p) => paymentTenderLabel(p) !== claimed);
 }
 // Does this clause need the payment validation at all? EXACTLY the two ways clauseUngrounded can reject it:
 // the enumerator found a claim to bind, or it is an UNRECOGNIZED payment assertion (round-22 fail-closed rule).
@@ -2341,6 +2372,7 @@ function clauseUngrounded(clause, env) {
     }
     if (claim.subject === 'invoice') {
       if (validateInvoiceStatusClaim(claim, text, amounts, env)) return true;
+      if (invoiceTenderUngrounded(claim, masked, env)) return true; // masked: the claim's span offsets are in the amount-masked clause
       continue;
     }
     const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
@@ -3464,7 +3496,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Codex round-19 P1: with SEVERAL open invoices the offer is about the invoice the customer's message names
   // (number, then a unique amount) — not always the newest; a reference that can't be tied to exactly one
   // abstains (no Zelle fact). The resolved id is what is persisted below, so the send-time recheck validates it.
-  const zelleTarget = presetFactsBlock ? { invoiceId: null } : require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
+  // Gate off (v11) has no Payment options fact and persists no Zelle snapshot — no target resolution or eligibility read (round 33).
+  const zelleTarget = (presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) ? { invoiceId: null, reason: 'no_open_invoice' } : require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
   const zelleEligible = presetFactsBlock || !zelleTarget.invoiceId
     ? false
     : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: zelleTarget.invoiceId });
@@ -3769,7 +3802,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       : await ContextAggregator.getFullCustomerContext(fromPhone);
     // A question about an OLDER payment (4th or earlier) must reach the model WITH that row in the facts,
     // not only be rejected after the fact (Codex round-18 P2). Reads history only when the window is truncated.
-    await require('./payment-history').surfaceReferencedPayments(context, inboundMessage);
+    // Gate off (v11) drafts from EXACTLY the rows main gave it — no surfaced extras (Codex round-33 P1).
+    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) await require('./payment-history').surfaceReferencedPayments(context, inboundMessage);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -3923,7 +3957,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // customer actually asked about, not just what the drafted reply itself
     // restates.
     // Absence claims read the authoritative history (loaded lazily, only for such a reply).
-    await require('./payment-history').ensureAbsenceHistory(context, parsed.reply);
+    // (gate on only: the gate-off check is main's amount-only rule and needs no history read)
+    if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) await require('./payment-history').ensureAbsenceHistory(context, parsed.reply);
     const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage });
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);

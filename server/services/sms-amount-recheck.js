@@ -64,6 +64,8 @@ function zelleBodyContacts(body) {
 // re-check a body only when it named a phone/email (zelleBodyContacts(...).length),
 // so "Yes, you can use Zelle" (no contact) sailed through unchecked even
 // after ZELLE_RECIPIENT was disabled or the invoice became ineligible.
+// Codex round-33 P2: plain copular forms count as denials too ("We are not accepting Zelle", "We aren't taking Zelle",
+// "we're not set up for Zelle") — checked before the offer regex, so they never read as an offer.
 // Codex round-6 pre-push audit P1 (PR #5331): negation is scoped to the Zelle
 // OFFER itself — a negator DIRECTLY governing Zelle ("we don't take/accept
 // Zelle", "can't use Zelle", "no longer accept payments by Zelle") or Zelle as
@@ -73,10 +75,10 @@ function zelleBodyContacts(body) {
 // old@example.com." (an affirmative instruction) skipped the recipient and
 // invoice-eligibility rechecks at every send seam. classifyZelleClause also
 // never lets negation suppress a clause carrying a transfer contact.
-const ZELLE_NEGATOR = "(?:don'?t|do not|doesn'?t|does not|didn'?t|did not|can'?t|cannot|can not|won'?t|will not|couldn'?t|could not|wouldn'?t|would not|no longer|not currently|not able to|not able|unable to|unable|stopped)";
+const ZELLE_NEGATOR = "(?:don'?t|do not|doesn'?t|does not|didn'?t|did not|can'?t|cannot|can not|won'?t|will not|couldn'?t|could not|wouldn'?t|would not|no longer|not currently|not able to|not able|unable to|unable|stopped|aren'?t|isn'?t|wasn'?t|weren'?t|ain'?t|not)";
 const ZELLE_NEGATION_RE = new RegExp(
   `\\b${ZELLE_NEGATOR}\\s+(?:(?:be\\s+able\\s+to|able\\s+to|currently|right\\s+now|really|anymore)\\s+)*`
-  + '(?:(?:take|taking|accept|accepting|offer|offering|support|supporting|use|using|do|have|allow|process|processing)\\s+)?'
+  + '(?:(?:take|taking|accept|accepting|offer|offering|support|supporting|use|using|do|have|allow|allowing|process|processing|set\\s+up\\s+for|set\\s+up\\s+to\\s+(?:take|accept))\\s+)?'
   + '(?:(?:any|payments?|transfers?|us|our|the|a)\\s+)*(?:(?:via|by|through|with|using)\\s+)?zelle\\b'
   + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:isn'?t|is\\s+not|aren'?t|are\\s+not|is\\s+unavailable|is\\s+no\\s+longer|not\\s+available|unavailable|not\\s+currently|no\\s+longer|not\\s+right\\s+now|not\\s+accepted|not\\s+supported|won'?t\\s+work|doesn'?t\\s+work)\\b"
   // Codex round-30 P2: SUBJECT-FIRST modal denials — "Zelle cannot be used", "Zelle won't be available", "Zelle could not be offered"

@@ -1264,8 +1264,13 @@ describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', 
 });
 
 describe('auto-send fallback publication', () => {
-  async function runDraft(autoSendResult) {
+  async function runDraft(autoSendResult, { gate = false } = {}) {
     jest.resetModules();
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    if (gate) process.env.GATE_SMS_REAL_ANSWERS = 'true'; else delete process.env.GATE_SMS_REAL_ANSWERS;
+    const surfaceReferencedPayments = jest.fn(async (ctx) => ctx);
+    const ensureAbsenceHistory = jest.fn(async (ctx) => ctx);
+    jest.doMock('../services/payment-history', () => ({ surfaceReferencedPayments, ensureAbsenceHistory }));
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
 
@@ -1333,8 +1338,22 @@ describe('auto-send fallback publication', () => {
       smsLogId: 'sms-1',
       intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
     });
-    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode };
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode, surfaceReferencedPayments, ensureAbsenceHistory };
   }
+
+  // Codex round-33 P1: gate off (v11) drafts from exactly the rows main gave it — the referenced-payment surfacing and the
+  // absence-history read are real-answers inputs.
+  test('gate off: no surfaced payment rows and no history read reach the v11 draft', async () => {
+    const off = await runDraft({ sent: false, reason: 'provider_failure', ambiguous: false }, { gate: false });
+    expect(off.surfaceReferencedPayments).not.toHaveBeenCalled();
+    expect(off.ensureAbsenceHistory).not.toHaveBeenCalled();
+  });
+  test('gate on: referenced payments are surfaced before drafting and absence history is read before the check', async () => {
+    const on = await runDraft({ sent: false, reason: 'provider_failure', ambiguous: false }, { gate: true });
+    expect(on.surfaceReferencedPayments).toHaveBeenCalledTimes(1);
+    expect(on.ensureAbsenceHistory).toHaveBeenCalledTimes(1);
+  });
 
   test('provider uncertainty stays shadow; a definitive failure still publishes the human fallback', async () => {
     const priorVerify = process.env.SHADOW_DRAFT_VERIFY;

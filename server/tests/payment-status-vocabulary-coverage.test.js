@@ -1350,3 +1350,38 @@ describe('round-32: interrogative / conditional partial-refund mentions disclose
     expect(rq('We received your $120 payment from Sep 12, but was it partially refunded?', [A])).toBe(true);
   });
 });
+
+// Codex round-33 P1: an invoice-subject sentence that names a tender makes a SECOND claim (how it was paid) bound to the
+// row(s) that settled THAT invoice.
+describe('round-33: "Invoice #0123 is paid with your card" validates the tender against the settling payment row', () => {
+  const inv = { id: 'inv-1', invoiceNumber: 'WPC-2026-0123', status: 'paid', total: 120, amountDue: 0 };
+  const ctx = (rows) => ({ customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [inv] } });
+  const cash = { id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: null, metadata: { invoice_id: 'inv-1', method: 'cash' } };
+  const card = { id: 'p2', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', metadata: { invoice_id: 'inv-1' } };
+  const byDescription = { id: 'p3', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', description: 'Invoice WPC-2026-0123 — pest control' };
+  const ask = 'Is invoice 0123 paid?';
+  const ungrounded = (reply, rows) => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage: ask });
+
+  test('cash-settled invoice + "with your card" is ungrounded; matching tender is grounded', () => {
+    expect(ungrounded('Invoice #0123 is paid with your card.', [cash])).toBe(true);
+    expect(ungrounded('Invoice #0123 was paid by card.', [cash])).toBe(true);
+    expect(ungrounded('Invoice #0123 is paid with your card.', [card])).toBe(false);
+    expect(ungrounded('Invoice #0123 is paid in cash.', [cash])).toBe(false);
+    expect(ungrounded('Invoice #0123 is paid in cash.', [card])).toBe(true);
+  });
+  test('the settling row is found through the "Invoice <n> —" description as well', () => {
+    expect(ungrounded('Invoice #0123 is paid with your card.', [byDescription])).toBe(false);
+    expect(ungrounded('Invoice #0123 is paid by Zelle.', [byDescription])).toBe(true);
+  });
+  test('no settling row on record, an unreadable tender, or a mixed settlement is unverifiable => ungrounded', () => {
+    expect(ungrounded('Invoice #0123 is paid with your card.', [])).toBe(true);
+    expect(ungrounded('Invoice #0123 is paid with your card.', [{ ...card, id: 'x', metadata: { invoice_id: 'other' } }])).toBe(true);
+    expect(ungrounded('Invoice #0123 is paid with your card.', [{ ...card, payment_method_type: null }])).toBe(true);
+    expect(ungrounded('Invoice #0123 is paid with your card.', [card, cash])).toBe(true);
+    expect(ungrounded('Invoice #0123 is paid with your card or cash.', [card])).toBe(true); // ambiguous tender wording
+  });
+  test('a tender-free invoice status and a how-to-pay sub-clause are unchanged', () => {
+    expect(ungrounded('Invoice #0123 is paid.', [cash])).toBe(false);
+    expect(ungrounded('Invoice #0123 is paid, and you can pay by card next time.', [cash])).toBe(false);
+  });
+});

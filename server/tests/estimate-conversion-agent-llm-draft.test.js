@@ -267,7 +267,21 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
   // Codex round-20 P2: same as draftShadowReply — the referenced OLDER payment is surfaced into the facts
   // BEFORE the grounded draft is generated.
+  test('gate off: the v11 draft gets exactly main\'s rows — nothing is surfaced (Codex round-33 P1)', async () => {
+    const paymentHistory = require('../services/payment-history');
+    const context = { summary: 'ctx', flags: [], billing: { recentPayments: [] } };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(context);
+    const spy = jest.spyOn(paymentHistory, 'surfaceReferencedPayments').mockImplementation(async (ctx) => ctx);
+    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v11' });
+    try {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Did you get my $120 payment from June 12?', decision: { intent: 'general_customer_sms_needs_review', confidence: 0.9 }, estimate: null });
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
   test('surfaces the payment the customer asked about into the context before generateGroundedDraft', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
     const paymentHistory = require('../services/payment-history');
     const older = { id: 'p-old', amount: 120, status: 'paid', payment_date: '2026-06-12' };
     const context = { summary: 'ctx', flags: [], billing: { recentPayments: [] } };

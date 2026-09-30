@@ -1001,3 +1001,22 @@ describe('subject-first modal Zelle denials (round 30)', () => {
     }
   });
 });
+
+// Codex round-33 P2: plain copular denials are denials (checked before the offer rule), never offers.
+describe('copular Zelle denials classify as denials, not offers', () => {
+  const { hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, classifyZelleClause } = require('../services/sms-amount-recheck');
+  test.each([
+    'We are not accepting Zelle.', "We aren't taking Zelle.", "We're not accepting Zelle right now.", 'Zelle is not an option.', "Zelle isn't an option.",
+    "We're not set up for Zelle.", 'We take card, not Zelle.', 'We are not currently taking Zelle payments.',
+  ])('%s', (t) => {
+    expect(hasNegativeZelleAvailabilityClaim(t)).toBe(true);
+    expect(hasAffirmativeZelleMention(t)).toBe(false);
+    expect(classifyZelleClause(t)).toBeNull();
+  });
+  test.each([
+    'You can use Zelle.', 'We accept Zelle.', 'Do not hesitate to Zelle us.', 'Not only can you use Zelle, you can also pay by card.',
+    "We aren't accepting Zelle at pay@example.com.", // a transfer contact is always a live instruction
+  ])('an offer stays an offer: %s', (t) => {
+    expect(hasAffirmativeZelleMention(t)).toBe(true);
+  });
+});
