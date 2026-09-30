@@ -4,7 +4,10 @@ const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
-const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
+// Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served. The three
+// served counties plus the south-Hillsborough towns (config/locations.js
+// SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
+const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
 
 // A reachable number, not a withheld-caller-ID placeholder. Twilio delivers
 // blocked/unavailable caller ID as text ("anonymous", "unknown", "restricted",

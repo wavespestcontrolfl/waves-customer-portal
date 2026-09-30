@@ -104,7 +104,9 @@ describe('deriveStatus (Google AV → provider-neutral status)', () => {
 
   test('county normalization handles "X County" and case', () => {
     expect(deriveStatus(result(), 'manatee').status).toBe(STATUSES.VALIDATED_ACCEPT);
-    expect(deriveStatus(result(), 'DESOTO COUNTY').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(result(), 'CHARLOTTE COUNTY').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    // DeSoto is NOT served (owner ruling 2026-09-30).
+    expect(deriveStatus(result(), 'DESOTO COUNTY').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });
 });
 
