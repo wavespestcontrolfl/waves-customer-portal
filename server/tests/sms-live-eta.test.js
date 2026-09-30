@@ -1808,6 +1808,9 @@ describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity
   test('bodyMentionsVisitStatus: broad status vocabulary, minus conditionals / corrections / windows', () => {
     const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
     for (const t of ['The technician arrived.', 'Your tech is en-route.', 'The crew is outside.', 'The tech has pulled up.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    // Round-25 P2: the noun "arrival" is not a status claim; verbal forms still are.
+    for (const t of ['Please review the arrival instructions.', 'Arrival instructions are attached.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+    for (const t of ['He is arriving now.', 'Your tech arrives soon.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
     for (const t of ['Thanks, 5 stars!', "I'll text you once he's on the way.", "The tech hasn't arrived yet.", 'Your arrival window is 2 hours.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
   });
   test('the snapshot carries each group destination through', () => {

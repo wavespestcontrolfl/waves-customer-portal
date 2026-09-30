@@ -1731,3 +1731,37 @@ describe('visit must be scheduled today (ET) for every claim kind', () => {
     expect(await run('The tech is on the way.', [enRoute({ scheduled_date: today }), enRoute({ id: 'svc-2', track_view_token: 'tok-2', scheduled_date: yesterday })], two)).toBe('eta_claim_visit_not_today');
   });
 });
+
+// CI regression (PR #5334, admin-communications-sms "within the hour is ordinary
+// English"): an approved follow-up SLA phrase is not an unverifiable timed claim
+// when the draft carries NO live ETA context; it is still held to one when it does.
+describe('"within the hour" (approved SLA phrase) with no live context', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const noSnap = (body) => etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW, dbh: fakeDb([]) });
+
+  test.each([
+    'Your technician is nearby and should arrive within the hour.',
+    'Sorry about that — someone will follow up within the hour.',
+    'The tech should be there within the hour.',
+  ])('%p sends with no snapshot and no link', async (body) => {
+    expect(await noSnap(body)).toBeNull();
+  });
+  test.each([
+    'The tech will arrive in 2 hours.', 'The tech should arrive within 2 hours.', 'The tech will arrive in an hour.', 'The tech will arrive in 3 days.',
+  ])('other hour/day durations are still unverifiable without a snapshot: %p', async (body) => {
+    expect(await noSnap(body)).toBe('eta_claim_no_snapshot');
+  });
+  test('with a live snapshot the SLA-phrase arrival claim is still held to it (unbound, not waved through)', async () => {
+    const snapshot = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+    expect(await etaClaimBlockReason({
+      liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: 'Your technician is nearby and should arrive within the hour.', now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }]),
+    })).toBe('eta_claim_unbound');
+  });
+  test('a body carrying a /track/ link is a live context: the phrase is held (no snapshot -> fails closed)', async () => {
+    expect(await noSnap('The tech should arrive within the hour: portal.wavespestcontrol.com/track/tok-1')).not.toBeNull();
+  });
+});

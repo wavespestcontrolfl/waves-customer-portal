@@ -223,7 +223,11 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
   // live ETA context exists to hold the body to.
   // Round-17 P2: on EVERY path (counted days/weeks/months, like hours) — with no
   // snapshot the timed claim then fails closed as eta_claim_no_snapshot.
-  const unreadHours = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
+  // An approved follow-up SLA phrase ("within the hour") is ordinary English, so
+  // with NO live snapshot/link to hold the body to it is not an unverifiable
+  // timed claim (the existing send seams never judge a body by that wording
+  // alone — sms-followup-sla). With a live context it is still held to it.
+  const unreadHours = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true, ignoreSlaPhrases: !liveContext });
   // Codex round-11 P2: a number word that could not be converted to digits
   // ("a thousand minutes") is a timed claim on every path.
   const unreadNumbers = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unconvertedNumbersOnly: true });

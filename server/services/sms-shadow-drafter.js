@@ -1045,10 +1045,25 @@ function hasTechSubjectBefore(str, spans, index) {
   const [start] = spans.find(([from, to]) => index >= from && index < to) || [0];
   return TECH_SUBJECT_RE.test(str.slice(start, index));
 }
-function unreadDurationInArrivalSentence(str, wordRe) {
+// Is the figure at [index, index+length) inside one of the approved follow-up SLA
+// phrases ("within the hour", ...)? Those are ordinary English (sms-followup-sla:
+// "a reviewed reply can truthfully say a technician arrives within the hour"), so
+// with NO live ETA to hold the body to they are not an unverifiable timed claim.
+function insideSlaPhrase(str, index, length) {
+  const lowered = str.toLowerCase();
+  return followupSla.SLA_PHRASES.some((p) => {
+    const phrase = p.toLowerCase();
+    for (let at = lowered.indexOf(phrase); at !== -1; at = lowered.indexOf(phrase, at + 1)) {
+      if (index >= at && index + length <= at + phrase.length) return true;
+    }
+    return false;
+  });
+}
+function unreadDurationInArrivalSentence(str, wordRe, { ignoreSlaPhrases = false } = {}) {
   const spans = sentenceSpans(str);
   const re = new RegExp(wordRe.source, wordRe.flags);
   for (const m of str.matchAll(re)) {
+    if (ignoreSlaPhrases && insideSlaPhrase(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
     if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, spans, m.index)) continue;
     const sentence = sentenceAt(str, spans, m.index);
@@ -1061,8 +1076,8 @@ function unreadDurationInArrivalSentence(str, wordRe) {
 // duration (Codex round-13 P2: "in 2 days" is a timed arrival claim like
 // any other; a bare "day" — "have a great day" — is not).
 const UNREAD_LONG_DURATION_RE = /\b(?:hours?|hrs?)\b|\b(?:\d+(?:\.\d+)?|an?|a\s+(?:couple|few)(?:\s+of)?|several)[\s-]+(?:days?|weeks?|months?)\b/gi;
-function bodyHasUnnormalizedHourWord(text) {
-  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), UNREAD_LONG_DURATION_RE);
+function bodyHasUnnormalizedHourWord(text, opts) {
+  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), UNREAD_LONG_DURATION_RE, opts);
 }
 // Codex round-11 P2 (PR #5334): a number word the converter could not turn
 // into digits next to a time unit is rejected outright, live ETA or not.
@@ -1164,7 +1179,9 @@ function bodyMentionsArrival(text) {
 // negated correction ("hasn't arrived"), and a scheduling window.
 const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
 const VISIT_STATUS_RE = new RegExp(
-  '\\b(?:arriv\\w*|en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)'
+  // Verbal "arrive" forms only (round-25 P2): the noun in "arrival instructions"
+  // is not a status claim; timed "arrival in 10 minutes" is caught by the minutes classifiers.
+  '\\b(?:arriv(?:e|es|ed|ing)|en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)'
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
@@ -1203,10 +1220,10 @@ const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
-function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false } = {}) {
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false } = {}) {
   if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
   if (completedArrivalOnly) return bodyClaimsCompletedArrival(text);
-  if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text);
+  if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text, { ignoreSlaPhrases });
   if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
   const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
