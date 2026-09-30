@@ -101,6 +101,7 @@
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
+ *   GATE_CALL_WHOLE_STRUCTURE_NO_UNIT=true (call booker: a WDO inspection or termite pre-treat on a unit-less duplex/building address is not held for the missing unit; condo/apartment interior work still is)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
@@ -910,11 +911,13 @@ const gates = {
   // text → explicit opt-in in EVERY env.
   reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
 
-  // Review asks link STRAIGHT to the Google review form (via the tracked
-  // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
-  // for the direct-link rollout: off = every ask body resolves {review_url}
-  // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
-  // itself stays live either way (old links, fallback for unknown locations).
+  // Review ask texts/emails link STRAIGHT to the tracked /api/rate/:token/go
+  // redirect (which 302s to the Google review form) instead of the /rate/<token>
+  // thank-you page. Off = every ask body resolves {review_url} to /rate/<token>.
+  // This gate decides ONLY that link target: /go itself always runs the tracked
+  // flow (click stamp, cadence stop, referral invite), and the /rate page's Open
+  // Google button always points at /go (the 1-10 rating is retired, so there is
+  // no old flow to roll back to).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
   // Day-0 review-ask contextual topic (recurring customers only): stores a
@@ -1610,6 +1613,13 @@ const gates = {
   // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
   // stay. Creates real appointments — owner-flip only.
   callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Whole-structure calls (WDO inspection, termite pre-treat / perimeter
+  // treatment) are not held because the address lacks a unit number: Google's
+  // "missing subpremise" on a duplex or building-level job is waived, and ONLY
+  // that (every other address check, commercial and condo/apartment interior
+  // work keep today's hold). Explicit service allowlist in
+  // call-triage-flags.js. Owner ruling 2026-09-30. Off → byte-identical.
+  callWholeStructureNoUnit: process.env.GATE_CALL_WHOLE_STRUCTURE_NO_UNIT === 'true',
   // Agent-commitment booking authorization: when OUR agent explicitly
   // committed to the confirmed slot on the call ("we'll confirm it for noon
   // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
@@ -4066,6 +4076,17 @@ function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
 }
 
+// ADMIN_BODY_GUARD_ALL read at CALL time — ships LIVE: on unless set to
+// exactly 'off', 'false' or '0' (case-insensitive), so an unset env is the
+// live state and the env is a pure kill switch (owner ruling 2026-09-30, rule
+// 14). The canonical reader for notification-service's admin brevity guard:
+// on, an over-length admin BODY of ANY category is cut to one sentence with the
+// full text kept in `detail` (the bell's "Show full text"); off, only
+// ops_digest is cut, byte-identical to before.
+function adminBodyGuardAllLive() {
+  return !['off', 'false', '0'].includes(String(process.env.ADMIN_BODY_GUARD_ALL ?? '').trim().toLowerCase());
+}
+
 // PROMISE_EVIDENCE_CLOSE read at CALL time — DEFAULT ON (owner ruling
 // 2026-09-28, "close it, show proof"); off only when set to 'off', 'false'
 // or '0' (case-insensitive). On, call-commitments' fulfillment refresh closes
@@ -4217,4 +4238,5 @@ module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914

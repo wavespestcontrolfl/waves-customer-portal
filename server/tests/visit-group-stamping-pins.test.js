@@ -90,4 +90,15 @@ describe('every booking path stamps or deliberately skips', () => {
     // Exactly one seam call in the file.
     expect((src.match(/maybeGroupRow\(/g) || []).length).toBe(1);
   });
+
+  test('the same-stop regroup sweep decides through maybeGroupRow only, and runs nightly', () => {
+    const src = read('services/visit-regroup.js').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    // One preview verdict + one apply write, both through the canonical path;
+    // eligibility is never re-implemented and createOrJoinVisit is never called directly.
+    expect((src.match(/maybeGroupRow\(/g) || []).length).toBe(2);
+    expect(src).toMatch(/maybeGroupRow\(cand\.id, \{ database, preview: true,/);
+    expect(src).not.toMatch(/createOrJoinVisit|canJoin|windowsOverlap/);
+    const sched = read('services/scheduler.js');
+    expect(sched).toMatch(/cron\.schedule\('25 2 \* \* \*'[\s\S]{0,200}isEnabled\('visitGroups'\)[\s\S]{0,300}visit-regroup-same-stop[\s\S]{0,200}regroupUngroupedSameStopRows\(\{ dryRun: false \}\)/);
+  });
 });

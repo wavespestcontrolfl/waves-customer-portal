@@ -31,6 +31,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const ClickGuard = require('./review-click-guard');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
@@ -57,6 +58,10 @@ async function buildReviewRequestLink(customerId) {
   const customer = await db('customers').where({ id: customerId }).first('id', 'has_left_google_review');
   if (customer?.has_left_google_review) {
     return { url: null, line: '', reason: 'This customer is already marked as having left a review' };
+  }
+  // Already tapped a tracked review link since their newest completed visit.
+  if (await ClickGuard.touchSuppressedByClick(customerId, { newestVisitFallback: true })) {
+    return { url: null, line: '', reason: ClickGuard.REVIEW_LINK_CLICKED_REASON };
   }
 
   // A composer mint is an unscheduled ask like /trigger — it must pass the

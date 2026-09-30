@@ -77,7 +77,7 @@
       "what_it_means": "A uniform pale yellow-green lawn, worse on older blades, can suggest low nitrogen, but early disease or a root problem can look similar. A photo cannot confirm it; a technician checks the pattern and times any nutrition within the local fertilizer rules.",
       "fact": "Florida's sandy soils hold nitrogen poorly, so it can wash below the root zone with heavy rain well before a lawn shows visible signs of running low."
     },
-    "tech_notes": "Rule out rust and disease first; nitrogen timing is restricted by the local fertilizer blackout (Jun 1 - Sep 30) for nitrogen and phosphorus.",
+    "tech_notes": "Rule out rust and disease first. Nitrogen and phosphorus timing follows the property's local fertilizer ordinance, which varies by county and city.",
     "links": {
       "site_page": null,
       "guides": []
@@ -89,8 +89,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "84639f6292fd4c6249d2f6fa50cbd26f8c1c1450a1add1f918e97f918bc010c1"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "0dec75b0962b66766bdbaa10654795ea5e524728d626224f6c68f8659e77ad35"
     },
     "condition": {
       "hosts": [

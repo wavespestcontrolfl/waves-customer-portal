@@ -65,18 +65,10 @@ describe('token format gate', () => {
     expect(mockSubmitRating).not.toHaveBeenCalled();
   });
 
-  test('unknown token on POST returns the SAME body as a malformed one', async () => {
-    mockSubmitRating.mockRejectedValueOnce(new Error('Review request not found'));
+  test('POST is retired: a well-formed token gets 410 Gone, never reaching submitRating (no token-existence oracle either way)', async () => {
     const res = await call('POST', `/api/review/${VALID}`, { rating: 9 });
-    expect(res.status).toBe(404);
-    expect(res.json).toEqual({ error: 'Review link not found or expired' });
-  });
-
-  test('expired token on POST is also the generic 404, not a 410', async () => {
-    mockSubmitRating.mockRejectedValueOnce(new Error('Review link expired'));
-    const res = await call('POST', `/api/review/${VALID}`, { rating: 9 });
-    expect(res.status).toBe(404);
-    expect(res.json).toEqual({ error: 'Review link not found or expired' });
+    expect(res.status).toBe(410);
+    expect(mockSubmitRating).not.toHaveBeenCalled();
   });
 
   test('well-formed token reaches the service and the payload passes through', async () => {

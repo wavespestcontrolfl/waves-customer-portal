@@ -62,8 +62,9 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     }
   });
 
-  test('the summary has exactly three engaged sources: inbound texts, short-link clicks, recorded page views', () => {
+  test('the summary has exactly three engaged sources: inbound texts, short-link clicks, recorded page views (outside-link clicks are listed, never engaged)', () => {
     expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'page views']);
+    expect(SOURCES.map((s) => s.name)).toContain('outside link clicks');
     expect(source('texts').engaged.where).toBeTruthy(); // inbound only
     // every other source may only feed the informational open / provider-click fields
     for (const src of SOURCES.filter((s) => !s.engaged)) expect(Object.keys(src)).not.toContain('engaged');
@@ -187,11 +188,31 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       // the ranking time for that stamp is SQL that carries the same rule, so a collapsed click cannot rank the row
       const fn = source(name).ts.find((x) => typeof x === 'function');
       const { sql, bindings } = fn({ customerId: 'c1' });
-      expect(sql).toMatch(/NOT EXISTS/);
+      expect(sql).toMatch(/NOT \(EXISTS/); // the whole collapse predicate is parenthesized: callers negate it
       expect(sql).toMatch(/INTERVAL '2 minutes'/);
       expect(sql).toMatch(/scx\.is_bot = false/);
-      expect(bindings).toEqual(['c1', 'c1']);
+      // a prep email's outside links go through /go: an email-surface click there collapses it too
+      expect(sql).toMatch(/FROM outbound_link_clicks olx/);
+      expect(sql).toMatch(/olx\.surface = 'email'/);
+      expect(bindings).toEqual(['c1', 'c1', 'c1']);
     }
+  });
+
+  test('the collapse predicate is one parenthesized OR, so a negation cannot bind to only its first EXISTS', () => {
+    const { sql } = source('emails').ts.find((x) => typeof x === 'function')({ customerId: 'c1' });
+    const m = sql.match(/NOT (\(EXISTS[\s\S]*\))\s+THEN/);
+    expect(m).toBeTruthy();
+    const body = m[1];
+    // outer parens wrap both EXISTS terms: depth 0 is reached only at the very end
+    let depth = 0;
+    let closedEarly = false;
+    [...body].forEach((ch, i) => {
+      if (ch === '(') depth += 1;
+      if (ch === ')') depth -= 1;
+      if (depth === 0 && i < body.length - 1) closedEarly = true;
+    });
+    expect(closedEarly).toBe(false);
+    expect(body).toMatch(/OR EXISTS \(SELECT 1 FROM outbound_link_clicks/);
   });
 
   test('every email event names the recipient the send row recorded, masked', () => {
@@ -262,11 +283,10 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     expect(map({ from_phone: '+19415550100', metadata: '{not json' })).toMatchObject({ channel: 'sms', kind: 'sent' });
   });
 
-  test('the speculative sibling-PR sources are not in this PR', () => {
-    expect(SOURCES.map((s) => s.name)).not.toContain('outside link clicks');
+  test('no speculative table probing and no separate portal-visit source (tab views ride customer_page_views)', () => {
     expect(SOURCES.map((s) => s.name)).not.toContain('portal visits');
     const src = require('fs').readFileSync(require.resolve('../services/customer-activity-timeline'), 'utf8');
-    expect(src).not.toMatch(/outbound_link|last_seen_at|to_regclass|pg_attribute/);
+    expect(src).not.toMatch(/to_regclass|pg_attribute/);
     // and no guessing which sends were the customer's own (round-2 billing-contact rule removed)
     expect(src).not.toMatch(/billing contact|emailNorm|normEmail|BOT_UA/i);
     expect(timeline).not.toHaveProperty('needsPresent');
@@ -357,6 +377,39 @@ describe('getCustomerActivity guards', () => {
     expect(more.events).toHaveLength(2);
     expect(more.hasMore).toBe(true);
     expect(more.nextCursor).toBe(more.events[1].at);
+  });
+
+  test('outside link clicks: listed, never engaged (the account is not proof of who clicked), no summary MAX', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const olc = source('outside link clicks');
+    expect(olc.toEvents({ id: 'o', clicked_at: t, surface: 'page', target_url: 'https://www.chewy.com/dp/1?tag=x', template_key: 'prep.flea' })[0])
+      .toMatchObject({
+        kind: 'outlink_clicked', engaged: false, title: 'Outside link clicked (may be a service contact, not counted)',
+        channel: 'page', source: 'outlink', ref: { type: 'outbound_link_click', id: 'o' },
+      });
+    expect(isEngagedKind('outlink_clicked')).toBe(false);
+    expect(Object.keys(olc)).not.toContain('engaged');
+  });
+
+  test('outside link clicks: hostname-only detail, prep template, email surface maps to the email channel', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const olc = source('outside link clicks');
+    expect(olc.toEvents({ id: 'o', clicked_at: t, surface: 'email', target_url: 'https://www.chewy.com/dp/123?tag=secret&x=1', template_key: 'prep.flea' })[0])
+      .toMatchObject({ channel: 'email', detail: 'chewy.com · prep flea', engaged: false });
+    const page = olc.toEvents({ id: 'p', clicked_at: t, surface: 'page', target_url: 'https://amazon.com/x?y=1', template_key: null })[0];
+    expect(page).toMatchObject({ channel: 'page', detail: 'amazon.com' });
+    expect(olc.toEvents({ id: 'q', clicked_at: t, surface: null, target_url: 'not a url' })[0]).toMatchObject({ channel: 'page', detail: null });
+    // the full URL, path and query never reach the feed
+    expect(JSON.stringify([page])).not.toMatch(/\/x|y=1/);
+  });
+
+  test('summary.lastSeenAt is the customer row last_seen_at (informational), null when never seen, absent on cursor pages', async () => {
+    const seen = new Date('2026-09-10T15:00:00Z');
+    const r = await getCustomerActivity('c1', {}, fakeDb({ customer: { id: 'c1', email: 'a@example.test', last_seen_at: seen } }));
+    expect(r.summary.lastSeenAt).toBe(seen.toISOString());
+    expect(r.summary.lastEngagedAt).toBeNull(); // never folded into engagement
+    expect((await getCustomerActivity('c1', {}, fakeDb())).summary.lastSeenAt).toBeNull();
+    expect((await getCustomerActivity('c1', { before: '2026-09-01T00:00:00Z' }, fakeDb())).summary).toBeNull();
   });
 
   test('summary is computed on the first page only', async () => {
