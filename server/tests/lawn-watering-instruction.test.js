@@ -302,3 +302,122 @@ describe('every rendered line passes the customer-copy guards', () => {
     }
   });
 });
+
+describe('water-in deadlines never round to or before completion', () => {
+  const byHours = (hours, rules = [WATER_IN({ water_in_by_hours: hours })]) => build(rules, { runtime: { headTypes: ['rotor'] } });
+
+  test.each([
+    [0.25, '2026-09-30T18:55:00.000Z', 'Water in today’s treatment by 2:55 PM today.'],
+    [1, '2026-09-30T19:40:00.000Z', 'Water in today’s treatment by 3:40 PM today.'],
+    [1.5, '2026-09-30T20:10:00.000Z', 'Water in today’s treatment by 4:10 PM today.'],
+    [2, '2026-09-30T20:00:00.000Z', 'Water in today’s treatment by 4 PM today.'],
+    [24, '2026-10-01T18:00:00.000Z', 'Water in today’s treatment by Thu 2 PM.'],
+  ])('%s h rule completed 2:40 PM ET', (hours, expectedBy, line) => {
+    const r = byHours(hours);
+    expect(r.waterInBy).toBe(expectedBy);
+    expect(new Date(r.waterInBy).getTime()).toBeGreaterThan(new Date(COMPLETED).getTime());
+    expect(r.lines[0]).toBe(line);
+    expect(r.expiresAt).toBe(expectedBy);
+    expectCleanCopy(r);
+  });
+
+  test('a rule so short that even the minute rounds to completion uses the exact instant', () => {
+    const r = byHours(0.0001);
+    expect(new Date(r.waterInBy).getTime()).toBeGreaterThan(new Date(COMPLETED).getTime());
+  });
+
+  test('hold then water-in: the same guard applies from the hold end, and the copy names minutes for a short window', () => {
+    const r = build([HOLD(24), WATER_IN({ water_in_by_hours: 0.25 })], { runtime: { headTypes: ['rotor'] } });
+    expect(r.waterInBy).toBe('2026-10-01T19:15:00.000Z');
+    expect(r.waterInByLabel).toBe('Thu 3:15 PM');
+    expect(r.lines[1]).toBe('After that, run each zone about 40 minutes within 15 minutes.');
+    expectCleanCopy(r);
+    expect(build([HOLD(24), WATER_IN({ water_in_by_hours: 1.5 })]).lines[1]).toMatch(/within 90 minutes\.$/);
+    expect(build([HOLD(24), WATER_IN({ water_in_by_hours: 1 })]).lines[1]).toMatch(/within 1 hour\.$/);
+  });
+
+  test('deadlineAfter helper', () => {
+    const base = new Date(COMPLETED);
+    expect(_private.deadlineAfter(base, 24).toISOString()).toBe('2026-10-01T18:00:00.000Z');
+    expect(_private.deadlineAfter(base, 0.25).toISOString()).toBe('2026-09-30T18:55:00.000Z');
+  });
+});
+
+describe('hold until the treatment has dried (no invented duration)', () => {
+  const DRY = { mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' };
+  const noDryFigure = (r) => {
+    for (const line of r.lines) {
+      expect(line).not.toMatch(/\d[^.]*\b(dry|dried|drying)\b|\b(dry|dried|drying)\b[^.]*\d/i);
+    }
+  };
+
+  test('alone: hold, no clock time, expires at the end of the visit day', () => {
+    const r = build([DRY], { hasWeekPlan: true });
+    expect(r.state).toBe('hold');
+    expect(r.holdUntil).toBeNull();
+    expect(r.holdUntilLabel).toBe('today’s treatment has dried');
+    expect(r.holdUntilPlanLabel).toBe('the spray has dried');
+    expect(r.lines).toEqual([
+      'Skip your turf watering until today’s treatment has dried.',
+      'That gives today’s treatment time to work.',
+      'Then follow this week’s plan below.',
+    ]);
+    expect(r.expiresAt).toBe('2026-10-01T03:59:59.000Z'); // 11:59:59 PM ET, Sep 30
+    expect(r.waterInBy).toBeNull();
+    expect(r.ruleSource).toBe('label');
+    expectCleanCopy(r);
+    noDryFigure(r);
+  });
+
+  test('end of the visit day follows the ET calendar across a 25-hour DST day', () => {
+    const r = buildWateringInstruction({ rules: [DRY], completedAt: '2026-11-01T15:00:00Z' }); // Sun Nov 1, 10 AM EST after fall back
+    expect(r.expiresAt).toBe('2026-11-02T04:59:59.000Z');
+    expect(_private.endOfDay(new Date('2026-11-01T05:30:00Z'), 'America/New_York').toISOString()).toBe('2026-11-02T04:59:59.000Z');
+  });
+
+  test('a timed hold on the same visit outranks it: the concrete clock time is printed', () => {
+    const r = build([DRY, HOLD(24)]);
+    expect(r.state).toBe('hold');
+    expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
+    expect(r.holdUntilLabel).toBe('Thu 3 PM');
+    expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM.');
+    expect(r.expiresAt).toBe('2026-10-01T19:00:00.000Z');
+  });
+
+  test('until-dry + water-in: hold then water-in; the 6 h floor moves only the deadline maths, never the copy', () => {
+    const r = build([DRY, WATER_IN()], { runtime: { headTypes: ['rotor'] } });
+    expect(r.state).toBe('hold_then_water_in');
+    expect(r.holdUntil).toBeNull();
+    expect(r.lines).toEqual([
+      'Skip your turf watering until today’s treatment has dried, then water in.',
+      'After that, run each zone about 40 minutes within 24 hours.',
+      'Run it even if it is not your usual day.',
+    ]);
+    // completion + 6 h + 24 h = Thu 8:40 PM ET, floored to the hour.
+    expect(r.waterInBy).toBe('2026-10-02T00:00:00.000Z');
+    expect(r.waterInByLabel).toBe('Thu 8 PM');
+    expect(r.expiresAt).toBe(r.waterInBy);
+    expect(r.lines.join(' ')).not.toMatch(/\b6\b|six/i);
+    expectCleanCopy(r);
+    noDryFigure(r);
+  });
+
+  test('until-dry + timed hold + water-in: the timed hold end is the base', () => {
+    const r = build([DRY, HOLD(24), WATER_IN()]);
+    expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
+    expect(r.waterInBy).toBe('2026-10-02T19:00:00.000Z');
+    expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, then water in.');
+  });
+
+  test('every ruleset x runtime x plan stays clean and never prints a figure beside dry/dried', () => {
+    for (const rules of [[DRY], [DRY, WATER_IN()], [DRY, WATER_IN({ water_in_by_hours: 0.25 })], [DRY, HOLD(24)]]) {
+      for (const runtime of [null, { headTypes: ['spray', 'rotor'] }, { systemOn: false }]) {
+        for (const hasWeekPlan of [true, false]) {
+          const r = build(rules, { runtime, hasWeekPlan });
+          expectCleanCopy(r);
+          noDryFigure(r);
+        }
+      }
+    }
+  });
+});

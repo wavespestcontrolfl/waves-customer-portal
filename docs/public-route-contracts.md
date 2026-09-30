@@ -1407,8 +1407,9 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 `{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
 `hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
-`waterInBy` and `expiresAt` are ISO instants or `null`; the key is absent when
-there is no claim); `reportV2.aftercare` gains `evidenceSource:
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has `holdUntil: null` and no printed duration, and expires at the
+end of the visit day in Eastern time; the key is absent when there is no claim); `reportV2.aftercare` gains `evidenceSource:
 'product_instruction'`, `wateringHold` (hold states), `creditableWaterIn`
 (water-in only; a mixed visit is a hold), `holdTask` (the banner's first line
 verbatim), `ruleSource`, `holdUntil` and `waterInBy`; and

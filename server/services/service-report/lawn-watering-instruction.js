@@ -48,6 +48,12 @@ const PLAN_LINE = 'Then follow this week’s plan below.';
 const ANY_DAY_LINE = 'Run it even if it is not your usual day.';
 const NONE_LINE_1 = 'No watering change from today’s treatment.';
 const NONE_LINE_2 = 'Follow this week’s plan below.';
+// An "until dry" hold has no printed duration (fixed drying figures are
+// prohibited customer copy). This floor is used ONLY as the base for the
+// water-in deadline maths and is never printed.
+const DRY_HOLD_FLOOR_HOURS = 6;
+const DRY_LABEL = 'today’s treatment has dried';
+const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
 
 // ── Time helpers ─────────────────────────────────────────────────────────
@@ -60,7 +66,7 @@ function toDate(value) {
 function wallParts(date, tz) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', hour12: false, weekday: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short',
   }).formatToParts(date);
   const get = (t) => parts.find((p) => p.type === t)?.value;
   let hour = parseInt(get('hour'), 10);
@@ -69,6 +75,7 @@ function wallParts(date, tz) {
     day: `${get('year')}-${get('month')}-${get('day')}`,
     weekday: get('weekday'),
     hour,
+    minute: parseInt(get('minute'), 10),
   };
 }
 
@@ -82,8 +89,35 @@ function floorToHour(date) {
   return new Date(Math.floor(date.getTime() / HOUR_MS) * HOUR_MS);
 }
 
-function clockLabel(hour) {
-  return `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`;
+function clockLabel(hour, minute = 0) {
+  return `${hour % 12 || 12}${minute ? `:${String(minute).padStart(2, '0')}` : ''} ${hour < 12 ? 'AM' : 'PM'}`;
+}
+
+// A water-in DEADLINE: rounds DOWN (rounding up would hand the customer more
+// time than the rule allows), but only to the hour when the window is at least
+// two hours. A short window keeps minute precision, and a deadline is never at
+// or before its base (a 15-minute rule completed at 2:40 PM must not read
+// "by 2 PM"): if flooring would land there, the exact instant is used.
+function deadlineAfter(base, hours) {
+  const exact = new Date(base.getTime() + hours * HOUR_MS);
+  const floored = hours >= 2 ? floorToHour(exact) : new Date(Math.floor(exact.getTime() / 60000) * 60000);
+  return floored.getTime() > base.getTime() ? floored : exact;
+}
+
+// The end of the visit's ET day (23:59:59). Walks hour boundaries, so a 23- or
+// 25-hour DST day is handled.
+function endOfDay(anchor, tz) {
+  const day = wallParts(anchor, tz).day;
+  let t = ceilToHour(anchor);
+  for (let i = 0; i < 26 && wallParts(t, tz).day === day; i += 1) t = new Date(t.getTime() + HOUR_MS);
+  return new Date(t.getTime() - 1000);
+}
+
+// "within 24 hours" / "within 90 minutes".
+function withinPhrase(hours) {
+  if (Number.isInteger(hours)) return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  const minutes = Math.max(1, Math.round(hours * 60));
+  return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
 }
 
 // "8 PM tonight" / "10 AM today" on the visit's own day, else "Wed 4 PM".
@@ -91,7 +125,7 @@ function clockLabel(hour) {
 // link reads the same forever.
 function formatWhen(date, anchor, tz) {
   const at = wallParts(date, tz);
-  const clock = clockLabel(at.hour);
+  const clock = clockLabel(at.hour, at.minute);
   if (wallParts(anchor, tz).day === at.day) return `${clock} ${at.hour >= 17 ? 'tonight' : 'today'}`;
   return `${at.weekday} ${clock}`;
 }
@@ -187,6 +221,8 @@ function emptyInstruction() {
     state: null,
     holdUntil: null,
     holdUntilLabel: null,
+    holdUntilPlanLabel: null,
+    expiresAt: null,
     waterInBy: null,
     waterInByLabel: null,
     minutes: { spray: null, rotor: null, unknown: false, measured: null },
@@ -249,34 +285,47 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
   }
 
   if (holds.length) {
-    const holdHours = Math.max(...holds.map((r) => finitePositive(r.hold_hours, 24)));
-    const holdEnd = ceilToHour(new Date(at.getTime() + holdHours * HOUR_MS));
-    out.holdUntil = holdEnd.toISOString();
-    const holdLabel = formatWhen(holdEnd, at, tz);
-    out.holdUntilLabel = holdLabel;
+    // A hold rule with hold_until 'dry' has no clock time; a timed hold (the
+    // longer, concrete one) outranks it on the same visit.
+    const timedHolds = holds.filter((r) => r.hold_until !== 'dry');
+    let holdEnd = null;
+    if (timedHolds.length) {
+      const holdHours = Math.max(...timedHolds.map((r) => finitePositive(r.hold_hours, 24)));
+      holdEnd = ceilToHour(new Date(at.getTime() + holdHours * HOUR_MS));
+      out.holdUntil = holdEnd.toISOString();
+      out.holdUntilLabel = formatWhen(holdEnd, at, tz);
+      out.holdUntilPlanLabel = out.holdUntilLabel;
+    } else {
+      out.holdUntilLabel = DRY_LABEL;
+      out.holdUntilPlanLabel = DRY_PLAN_LABEL;
+    }
+    const holdLabel = out.holdUntilLabel;
     if (waterInDetail) {
       out.state = 'hold_then_water_in';
-      const thenBy = new Date(holdEnd.getTime() + waterInDetail.byHours * HOUR_MS);
+      // Until-dry: counted from completion + the floor, for the deadline only.
+      const base = holdEnd || new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS);
+      const thenBy = deadlineAfter(base, waterInDetail.byHours);
       out.waterInBy = thenBy.toISOString();
       out.waterInByLabel = formatWhen(thenBy, at, tz);
+      out.expiresAt = out.waterInBy;
       out.lines = [
         `Skip your turf watering until ${holdLabel}, then water in.`,
-        `After that, ${waterInDetail.verb || 'run'} ${waterInDetail.clause} within ${waterInDetail.byHours} ${waterInDetail.byHours === 1 ? 'hour' : 'hours'}.`,
+        `After that, ${waterInDetail.verb || 'run'} ${waterInDetail.clause} within ${withinPhrase(waterInDetail.byHours)}.`,
         ANY_DAY_LINE,
       ];
     } else {
       out.state = 'hold';
+      out.expiresAt = (holdEnd || endOfDay(at, tz)).toISOString();
       out.lines = [`Skip your turf watering until ${holdLabel}.`, HOLD_SECOND_LINE];
       if (hasWeekPlan) out.lines.push(PLAN_LINE);
     }
     return out;
   }
 
-  // Deadlines round DOWN: rounding up would hand the customer up to an hour
-  // more than the rule allows.
-  const by = floorToHour(new Date(at.getTime() + waterInDetail.byHours * HOUR_MS));
+  const by = deadlineAfter(at, waterInDetail.byHours);
   out.state = 'water_in';
   out.waterInBy = by.toISOString();
+  out.expiresAt = out.waterInBy;
   out.waterInByLabel = formatWhen(by, at, tz);
   out.lines = [
     `Water in today’s treatment by ${formatWhen(by, at, tz)}.`,
@@ -289,5 +338,5 @@ function buildWateringInstruction({ rules, completedAt, tz = DEFAULT_TZ, runtime
 module.exports = {
   buildWateringInstruction,
   GENERIC_MINUTES_PER_QUARTER_INCH,
-  _private: { ceilToHour, floorToHour, formatWhen, minutesFor },
+  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, endOfDay },
 };

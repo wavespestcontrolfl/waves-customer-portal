@@ -3589,7 +3589,8 @@ function applyAfterHoldOverlay(waterContext, instruction) {
   const plan = waterContext?.weekPlan;
   if (!plan || !Object.prototype.hasOwnProperty.call(plan, 'afterHold')) return waterContext;
   const { afterHold, ...rest } = plan;
-  const label = instruction?.holdUntilLabel;
+  // An until-dry hold reads "the spray has dried" in the plan sentence (no clock time).
+  const label = instruction?.holdUntilPlanLabel || instruction?.holdUntilLabel;
   const detail = typeof afterHold?.detail === 'string' && label ? afterHold.detail.split(HOLD_UNTIL_TOKEN).join(label) : null;
   const filled = detail && !detail.includes(HOLD_UNTIL_TOKEN) ? { ...afterHold, detail } : null;
   return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
@@ -3604,7 +3605,7 @@ function buildWateringBanner(instruction) {
     lines: instruction.lines,
     holdUntil: instruction.holdUntil,
     waterInBy: instruction.waterInBy,
-    expiresAt: instruction.state === 'none' ? null : (instruction.waterInBy || instruction.holdUntil || null),
+    expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || instruction.waterInBy || instruction.holdUntil || null),
     ruleSource: instruction.ruleSource,
   };
 }

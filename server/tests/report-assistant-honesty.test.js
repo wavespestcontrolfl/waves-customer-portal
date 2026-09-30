@@ -653,4 +653,15 @@ describe('assistant answers a product watering hold with the banner text then th
     const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith({ ...RAW_PLAN, visitInPlanWeek: false, afterHold: AFTER_HOLD }) });
     expect(answer).not.toMatch(/Not before/);
   });
+
+  test('an until-dry hold (holdUntil null) answers with its banner text then the overlay', () => {
+    const line1 = 'Skip your turf watering until today’s treatment has dried.';
+    const aftercare = { ...HOLD_AFTERCARE, watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, holdUntil: null };
+    const overlay = { title: RAW_PLAN.title, detail: `${RAW_PLAN.detail} Not before the spray has dried: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.` };
+    const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith({ ...RAW_PLAN, afterHold: overlay }, aftercare) });
+    expect(answer).toBe(`${aftercare.watering} ${overlay.title}. ${overlay.detail}`);
+    expect(answer).not.toMatch(/undefined|null|\{holdUntil\}/);
+    // No plan at all: the hold task still answers.
+    expect(answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith(null, aftercare) })).toContain(line1);
+  });
 });

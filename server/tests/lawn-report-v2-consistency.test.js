@@ -919,4 +919,27 @@ describe('watering instruction drives the aftercare through the existing verdict
     const plain = { weekPlan: { title: 'x' } };
     expect(applyAfterHoldOverlay(plain, hold)).toBe(plain);
   });
+
+  test('an until-dry hold (holdUntil null) still resolves to hold with the banner line as the hero task', () => {
+    const { buildWateringBanner, applyAfterHoldOverlay } = require('../services/service-report/report-data');
+    const dry = { mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' };
+    const { instruction, report } = build([dry]);
+    expect(instruction.state).toBe('hold');
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: true, creditableWaterIn: false, holdUntil: null });
+    expect(report.aftercare.holdTask).toBe('Skip your turf watering until today’s treatment has dried.');
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ verdict: 'hold', customerTask: report.aftercare.holdTask });
+    expect(report.snapshot.customerAction).toBe(report.aftercare.holdTask);
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
+    for (const text of [report.aftercare.watering, report.snapshot.customerAction, report.water.explanation]) {
+      expect(banned(text)).toEqual([]);
+      expect(reentrySafetyClaimFinding(text)).toBeFalsy();
+    }
+    // Banner: no clock time, expires at the end of the visit day (ET).
+    expect(buildWateringBanner(instruction)).toEqual({
+      state: 'hold', lines: instruction.lines, holdUntil: null, waterInBy: null, expiresAt: '2026-10-01T03:59:59.000Z', ruleSource: 'label',
+    });
+    // The plan sentence names the dry state, never a time.
+    const tokenPlan = { ...RUN_PLAN, afterHold: { title: RUN_PLAN.afterHold.title, detail: 'Not before {holdUntil}: skip that run.' } };
+    expect(applyAfterHoldOverlay({ weekPlan: tokenPlan }, instruction).weekPlan.afterHold.detail).toBe('Not before the spray has dried: skip that run.');
+  });
 });
