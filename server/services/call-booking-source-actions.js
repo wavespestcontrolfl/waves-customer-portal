@@ -28,23 +28,12 @@ const CALL_OUTBOUND_REVIEW_SOURCE_ACTION = 'ai_call_outbound_review';
 // (lead close, review-card resolve, card funnel, customer visibility).
 const VOICE_AGENT_BOOKING_SOURCE_ACTION = 'voice_agent';
 
-// A confirmed booking on a web-form lead's own typed address that Google
-// could only confirm to the STREET (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL,
-// owner ruling 2026-09-30). Booked PENDING so the visit itself carries the
-// hold: it clears only when the office confirms the address (the pending ->
-// confirmed status route), corrects it (appointment address edit, then
-// confirm) or cancels. transitionJobStatus and the rebooker refuse every other
-// move of it (isStreetLevelAddressHold), because #3361's lazy activation would
-// otherwise confirm it the moment anything touched the row. <= 30 chars.
-const CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION = 'call_street_level_review';
-
 // Pending rows a logged-in customer must NOT see, self-confirm, or self-
 // reschedule before the office reviews them.
 const DISPATCH_OWNED_PENDING_SOURCE_ACTIONS = [
   CALL_FOLLOWUP_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
-  CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION,
 ];
 
 // Rows whose PENDING state means "awaiting the office's confirm decision":
@@ -57,7 +46,6 @@ const DISPATCH_OWNED_PENDING_SOURCE_ACTIONS = [
 const OFFICE_REVIEW_PENDING_SOURCE_ACTIONS = [
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
-  CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION,
 ];
 
 /**
@@ -81,27 +69,11 @@ const OFFICE_REVIEW_PENDING_SOURCE_ACTIONS = [
 function isPendingOutboundReviewBooking(svc) {
   return !!svc
     && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-    && svc.source_action !== CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION
-    && svc.status === 'pending'
-    && !svc.customer_confirmed;
-}
-
-/**
- * True while a street-level web-form booking still holds for the office's
- * address confirmation: this marker, still 'pending', not yet confirmed.
- * Deliberately NOT part of isPendingOutboundReviewBooking (tech-track's
- * dispatch-implies-confirm would otherwise confirm it when a tech heads out).
- */
-function isStreetLevelAddressHold(svc) {
-  return !!svc
-    && svc.source_action === CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION
     && svc.status === 'pending'
     && !svc.customer_confirmed;
 }
 
 module.exports = {
-  CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION,
-  isStreetLevelAddressHold,
   CALL_FOLLOWUP_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   VOICE_AGENT_BOOKING_SOURCE_ACTION,

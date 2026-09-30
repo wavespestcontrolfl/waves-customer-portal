@@ -703,12 +703,6 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
     }
-    // A street-level web-form booking still holding for the office's address
-    // confirmation is never activated lazily (a reprocess reuse, a touch): only
-    // the office confirm lifts the hold.
-    if (require('./call-booking-source-actions').isStreetLevelAddressHold(row)) {
-      return false;
-    }
     // Rejected rows are not activated — a cancelled/skipped legacy review
     // booking was the office declining it. Completed/no_show rows DO
     // activate: transitionJobStatus defers its own activation to this

@@ -129,6 +129,7 @@
  *   GATE_VISIT_PREP_PLANT_READ=true (sibling of GATE_VISIT_PREP_PEST_READ — automatic lawn / tree & shrub read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPlantReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live, same as the pest read. Triggered from the SAME single place, services/visit-prep.js's createVisitPrepSubmission, as its own independent fire-and-forget call — never disturbs the pest-read or tech-alert hooks there. A submission whose stop is a strict lawn-only or tree & shrub-only service (visit-prep-plant-applicability.js isLawnOnlyServiceType/isTreeShrubOnlyServiceType — never WDO, termite, or a Waves Assessment) runs the merged photo-id-v2 lawn/plant engine (identifyPlantV2, photo-id-v2/plant-engine.js — L3, no customer route yet) and stores the workup on the submission's own `read_result` jsonb column (no second table; the pest read's `read_ref` is untouched). A combined Lawn & Pest stop (one combined service_type such as "Lawn Care + Pest Control", or separate pest and lawn / tree & shrub members) gets BOTH reads under ONE claim (services/visit-prep-combo-read.js, read key 'combo:<subject>') only while BOTH this gate and GATE_VISIT_PREP_PEST_READ are live (owner ruling 2026-09-30); with one dark the one live engine reads that stop alone; the combo read counts 2 against the daily cap (two vision calls). Anything else resolves straight to read_status='unsupported', no engine call. Shares the pest read's SAME VISIT_PREP_READ_DAILY_CAP (default 40) and the same advisory lock key — deliberately ONE cap across both engines, not a second one; a capped or failed read never blocks the submission. See docs in services/visit-prep-plant-read.js.)
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
+ *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3477,6 +3478,18 @@ const gates = {
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
   lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
 
+  // Call-address on-file assist (owner-approved review items 3 and 4,
+  // 2026-09-30): the caller's on-file address rescues a spoken one when the
+  // HOUSE NUMBER matches — the on-file street joins street recovery as an
+  // extra candidate (a misheard street), and the on-file city + ZIP join a
+  // street-only lookup (Google resolving "7417 Monteverdi" to New Jersey).
+  // Also reads a non-FL result on a street-only request as missing_component,
+  // not out_of_service_area. Ships DARK: off unless exactly 'true'. This entry
+  // is for logGateStatus only: services/address-validation/onfile-assist.js
+  // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
+  // callAddressOnFileAssistLive().
+  callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3487,6 +3500,9 @@ const gates = {
   // Admin customer Activity timeline (read-only). For logGateStatus only; the
   // route reads customerActivityTimelineLive() at call time.
   customerActivityTimeline: process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true',
+  // Prospect email on the customer Activity timeline. logGateStatus only;
+  // the timeline reads leadEmailLinksLive() at call time.
+  leadEmailLinks: process.env.GATE_LEAD_EMAIL_LINKS === 'true',
   // Retire the dormant legacy balance-reminder cron (dunning unification,
   // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
   // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
@@ -3813,10 +3829,20 @@ function plantIdRefereeLive() {
 // `=== 'true'`, ships DARK (owner ruling 2026-09-30). The one canonical reader
 // for call-recording-processor.js's on-file verdict path: on, a web-form lead's
 // on-file address Google confirms only to the street may still satisfy the
-// on-file address rule (with an address read-back card). Off, byte-identical
+// on-file address rule (the booking is held pending for the office). Off, byte-identical
 // to before — the verdict path never looks at street-level matches.
 function callLeadFormAddressStreetLevelLive() {
   return process.env.GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL === 'true';
+}
+
+// GATE_CALL_ADDRESS_ONFILE_ASSIST read at CALL time — strict `=== 'true'`, off
+// by default. The one canonical reader for
+// server/services/address-validation/onfile-assist.js. Off, the call pipeline
+// is byte-identical: no extra street candidate, no on-file locality line, no
+// out-of-state reclassification. The gates-map entry above is for
+// logGateStatus only.
+function callAddressOnFileAssistLive() {
+  return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
 }
 
 // GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
@@ -3847,6 +3873,14 @@ function ibCancelAppointmentLive() {
 // `{ enabled: false }`. Read-only: no customer message, no write.
 function customerActivityTimelineLive() {
   return process.env.GATE_CUSTOMER_ACTIVITY_TIMELINE === 'true';
+}
+
+// GATE_LEAD_EMAIL_LINKS read at CALL time — strict `=== 'true'`, dark by
+// default. Read-only: widens which email_messages rows the Customer Activity
+// timeline lists (mail sent to the customer's lead / estimate before they
+// converted). Nothing is sent or written.
+function leadEmailLinksLive() {
+  return process.env.GATE_LEAD_EMAIL_LINKS === 'true';
 }
 
 // GATE_VISIT_PREP_TECH_ALERTS read at CALL time — strict `=== 'true'`, same
@@ -4001,7 +4035,9 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
+module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
+module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 // gates 1775330914

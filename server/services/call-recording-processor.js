@@ -115,6 +115,7 @@ const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsF
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -141,7 +142,7 @@ const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-c
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
+const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1564,7 +1565,7 @@ const DIRECTIONAL_ABBREV = {
   north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
 };
 function streetNameKey(line) {
-  const bare = String(line || '').trim().replace(/^\d+[a-z]?\s+(?=\S)/i, '');
+  const bare = String(line || '').trim().replace(/^\d+(?:-\d+|[a-z])?\s+(?=\S)/i, '');
   return normalizeStreetLine(bare).toLowerCase().replace(/[.,#]/g, ' ').split(/\s+/).filter(Boolean)
     .map((t) => DIRECTIONAL_ABBREV[t] || t).join('').replace(/[^a-z0-9]/g, '');
 }
@@ -1576,7 +1577,8 @@ const alnum = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 function houseNumberOf(line) {
   const token = String(line || '').trim().split(/\s+/)[0] || '';
   // Digits with at most one letter suffix (or a hyphenated range); an ordinal like "14th" opens a street name, not an address.
-  return /^\d+(?:-\d+|[a-z])?$/i.test(token) ? alnum(token) : '';
+  // The hyphen stays: "12-14" is a range, not "1214".
+  return /^\d+(?:-\d+|[a-z])?$/i.test(token) ? token.toLowerCase() : '';
 }
 // leads.extracted_data.stage values the web forms stamp. A form typed onto a
 // lead a call created (the voicemail text-back and phone-match attaches keep
@@ -1665,8 +1667,15 @@ function streetLevelMatch(knownCaller, verdict) {
   if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
   const googleHouse = houseNumberOf(n.street_line_1);
   if (googleHouse && googleHouse !== house) return null;   // Google rewrote the house number
-  // Google's own ZIP must match — and be present when it is the area witness.
-  if (n.postal_code ? zip5Of(n.postal_code) !== zip : !countyConfirmed) return null;
+  // Google's own ZIP must match. With no ZIP from Google the route must still
+  // be bound to the submitted locality: a county-confirmed route needs Google's
+  // city to equal the on-file city (a common street name in another served
+  // city must not vouch for this address); without a county there is no proof.
+  if (n.postal_code) {
+    if (zip5Of(n.postal_code) !== zip) return null;
+  } else if (!countyConfirmed || !alnum(n.city) || alnum(n.city) !== alnum(knownCaller.addressCity)) {
+    return null;
+  }
   if (normalizeState(n.state) !== SERVICE_STATE) return null;
   return {
     granularity: 'ROUTE',
@@ -1690,11 +1699,11 @@ function applyStreetLevelFormVerdict(knownCaller, verdict) {
   knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
   return knownCaller;
 }
-// The visit-level hold for a street-level web-form booking: null unless the
-// booking really dispatches to that on-file address. The hold is the visit
-// itself (status pending, source_action call_street_level_review) plus ONE
-// admin bell per visit — no call-scoped triage card, whose lifecycle the call
-// keeps resolving, moving or losing.
+// The pending-review details for a street-level web-form booking: null unless
+// the booking really dispatches to that on-file address. Such a booking lands
+// on the existing office-review pending path (the voice agent's pending
+// bookings: source_action voice_agent, an outbound_booking_review card,
+// activation on office confirm), plus ONE admin bell per visit.
 function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
   if (routingResult?.usesOnFileAddress !== true || !knownCaller?.onFileStreetLevel) return null;
   return {
@@ -2008,7 +2017,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // decision and the successor-inheritance gate can never drift apart. The
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
-const { CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION, isStreetLevelAddressHold } = require('./call-booking-source-actions');
+const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -4975,10 +4984,10 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // confirm hook — agrees on what an assessment is.
 async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
   if (!leadId) return false;
-  // A street-level web-form booking holds pending for the office's address
-  // confirmation; the lead converts when the office confirms the visit
-  // (runOfficeConfirmActivation), like every pending office-review booking.
-  if (booking && isStreetLevelAddressHold(booking)) return false;
+  // A pending office-review booking is not a closed deal: the lead converts
+  // when the office confirms the visit (runOutboundReviewConfirmHook), like
+  // every pending office-review booking.
+  if (booking && isPendingOutboundReviewBooking(booking)) return false;
   try {
     return await trx.transaction(async (inner) => {
       const keepOpenForAssessment = !!booking
@@ -9145,6 +9154,34 @@ const CallRecordingProcessor = {
     // Every card this pass files is created after this instant — the
     // canonical re-stamp after Step 3 below is scoped to them.
     const cardsFiledSince = new Date();
+    // GATE_CALL_ADDRESS_ONFILE_ASSIST: the on-file address may only vouch for
+    // the customer this call FINALLY resolves to. knownCaller is the
+    // phone-only pre-lookup; Step 3 (below, after both assist sites) can
+    // retain or reassign the call to someone else on a shared number. So the
+    // assist gets knownCaller only when Step 3's own inputs agree with it: no
+    // link to a different customer, and the name-aware phone resolution
+    // Step 3 runs (same function, same extraction) lands on this customer
+    // without ambiguity. Anything else (or the gate off) gets null, which
+    // makes both assist paths no-ops. Gate off costs no lookup.
+    // Judged against BOTH identities Step 3 may end up with: the V1 record and
+    // the V2 extraction's caller (V2-primary adoption, later in this pass, can
+    // replace the V1 name) — the assist runs before that adoption, so every
+    // candidate identity must resolve to the same customer.
+    const onFileAssistCaller = async (...extractionsNow) => {
+      let bound = knownCaller;
+      for (const extractedNow of extractionsNow) {
+        bound = await bindAssistCaller({
+          knownCaller: bound,
+          callCustomerId: call.customer_id,
+          hasLinkOverride: !!customerLinkOverride,
+          resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
+            resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
+          ),
+        });
+        if (!bound) return null;
+      }
+      return bound;
+    };
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -9252,11 +9289,14 @@ const CallRecordingProcessor = {
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
           try {
-            v2AddressValidation = await validateAddress({
-              addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
-              // The validator preserves an explicit state over this hint.
-              // Contrary model geography also disables the fallback hint.
-              administrativeArea: v2Result.extraction.triage_flags?.includes('out_of_service_area') ? null : SERVICE_STATE,
+            // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
+            // same validateAddress call this site always made. Gate on, a
+            // street-only request may borrow the on-file city + ZIP.
+            v2AddressValidation = await validateWithOnFileAssist({
+              serviceAddress: v2Result.extraction.property?.service_address,
+              knownCaller: await onFileAssistCaller(extracted, flatView(v2Result.extraction)),
+              outOfServiceFlagged: !!v2Result.extraction.triage_flags?.includes('out_of_service_area'),
+              validate: validateAddress,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -9837,8 +9877,8 @@ const CallRecordingProcessor = {
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
-    // The booked visit, when it landed pending under the street-level hold.
-    let streetLevelHeldVisit = null;
+    // True when the booking landed on the office-review pending path (street-level web-form address).
+    let pendingOfficeReview = false;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -10033,7 +10073,15 @@ const CallRecordingProcessor = {
         // Street re-hearings the contact-dictation decoder already produced
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
-        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // Plus (gate on, house number matching, call bound to that customer)
+        // the caller's on-file street, appended AFTER the decoder's so it never
+        // displaces one (recovery evaluates the first five) — still only
+        // adopted when Google confirms exactly one premise.
+        extraStreetCandidates: withOnFileStreetCandidate({
+          spokenStreet: extracted.address_line1,
+          knownCaller: await onFileAssistCaller(extracted, flatView(v2Result?.extraction)),
+          decoderCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        }),
         // "Building resolved, unit missing" is not a garbled street — the
         // recovery module refuses it outright (codex r10 P1), so the
         // ambiguous hold stands and missing_unit_number names the ask
@@ -10491,9 +10539,9 @@ const CallRecordingProcessor = {
             // adopted above (both branches adopt it now).
             // Street-level web-form address (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL):
             // the visit books to the address the lead typed into their form,
-            // which Google confirmed only to the street. The hold is the
-            // visit itself (pending, call_street_level_review) — decided here,
-            // applied at the insert, announced by one admin bell after commit.
+            // which Google confirmed only to the street. It books through the
+            // existing office-review pending path — decided here, applied at the
+            // insert, announced by one admin bell after commit.
             v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
@@ -16685,7 +16733,7 @@ const CallRecordingProcessor = {
                 });
                 // The street-level hold applies only while the on-file proof
                 // binds to the customer this booking finally resolves to.
-                const streetLevelHoldApplies = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
+                const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
                 const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
                   ? {
                     ...extracted,
@@ -17142,12 +17190,13 @@ const CallRecordingProcessor = {
                     customer_request: callBookingCustomerRequest,
                     ...(callBookingCustomerRequest ? { customer_request_source: 'call' } : {}),
                   } : {}),
-                  // A street-level web-form booking is born PENDING (the hold
-                  // is the visit itself): unconfirmed until the office confirms
-                  // its address.
-                  status: streetLevelHoldApplies ? 'pending' : 'confirmed',
-                  customer_confirmed: !streetLevelHoldApplies,
-                  confirmed_at: streetLevelHoldApplies ? null : new Date(),
+                  // A street-level web-form booking lands on the existing
+                  // office-review pending path (the voice agent's pending
+                  // bookings): pending, unconfirmed, until the office confirms
+                  // the address; everything customer-facing waits for that.
+                  status: streetLevelPending ? 'pending' : 'confirmed',
+                  customer_confirmed: !streetLevelPending,
+                  ...(streetLevelPending ? {} : { confirmed_at: new Date() }),
                   notes: [
                     // Customer-visible (GET /api/schedule returns notes verbatim):
                     // keep it customer-safe. The office review cue lives in
@@ -17165,6 +17214,9 @@ const CallRecordingProcessor = {
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
+                    streetLevelPending
+                      ? 'Address from the web form; Google confirmed only the street, not the house number — CONFIRM the address with the customer before dispatch (pending review).'
+                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
@@ -17185,7 +17237,7 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  source_action: streetLevelHoldApplies ? CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
+                  source_action: streetLevelPending ? VOICE_AGENT_BOOKING_SOURCE_ACTION : 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -17272,11 +17324,39 @@ const CallRecordingProcessor = {
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
-                  await require('./inspection-credit').markBookingForInspectionCredit(trx, {
-                    customerId: created.customer_id,
-                    scheduledServiceId: created.id,
-                    source: 'phone_call',
-                  });
+                  // EXCEPT a pending office-review row: not a closed deal until
+                  // the office confirms — runOutboundReviewConfirmHook writes
+                  // the evidence then.
+                  if (!streetLevelPending) {
+                    await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                      customerId: created.customer_id,
+                      scheduledServiceId: created.id,
+                      source: 'phone_call',
+                    });
+                  }
+                  // The confirm queue's card (outbound_booking_review), carrying
+                  // the ORIGINATING lead id so the office confirm converts
+                  // exactly that lead. Same card and payload the voice agent's
+                  // pending bookings file; no card, no booking (the insert
+                  // rolls back), as in that lane.
+                  if (streetLevelPending) {
+                    const [card] = await trx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'outbound_booking_review',
+                        extraction: v2ApprovedExtraction || extracted,
+                        severity: 'advisory',
+                        extraPayload: {
+                          origin: 'call_street_level',
+                          scheduled_service_id: created.id,
+                          lead_id: leadId || null,
+                          keep_open_for_quote: !!callQuotePromised,
+                        },
+                      }))
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore()
+                      .returning('id');
+                    if (!card) throw new Error('a booking review card is already open for this call');
+                  }
                   // A phone-booked appointment is the deal closing — convert the
                   // call's lead to won in the SAME transaction (mirrors the
                   // admin-leads schedule-appointment route), so the conversion
@@ -17424,21 +17504,22 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
-              // Street-level hold: the visit landed pending. One admin bell per
-              // visit (deduped on the visit id, so a reprocess never rings
-              // twice) tells the office what to do; no customer text goes out
-              // (the confirmation section below skips a held visit). Best
-              // effort — the pending status is the hold, the bell is the cue.
-              if (isStreetLevelAddressHold(svc)) {
-                streetLevelHeldVisit = svc;
-                try {
-                  const alert = buildStreetLevelHoldAlert({
-                    hold: v2StreetLevelHold || { address_on_file: [svc.service_address_line1, svc.service_address_city, svc.service_address_state, svc.service_address_zip].filter(Boolean).join(', '), google_street: null, customer_name: null },
-                    visitId: svc.id, callSid, scheduledDate: svc.scheduled_date, windowStart: svc.window_start,
-                  });
-                  await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
-                } catch (notifyErr) {
-                  logger.warn(`[call-proc] street-level address-hold admin bell failed for ${maskSid(callSid)}: ${notifyErr.message}`);
+              // Office-review pending path (street-level web-form address). The
+              // visit itself is pending and the outbound_booking_review card is
+              // filed; the owner also asked for ONE admin bell per visit (no
+              // existing bell fires for a pending call booking), deduped on the
+              // visit id so a reprocess never rings twice. Best effort.
+              if (isPendingOutboundReviewBooking(svc)) {
+                pendingOfficeReview = true;
+                if (v2StreetLevelHold) {
+                  try {
+                    const alert = buildStreetLevelHoldAlert({
+                      hold: v2StreetLevelHold, visitId: svc.id, callSid, scheduledDate: svc.scheduled_date, windowStart: svc.window_start,
+                    });
+                    await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
+                  } catch (notifyErr) {
+                    logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.message}`);
+                  }
                 }
               }
               // Tech-facing "new visit" cards (tech-visit-notifications.js):
@@ -17557,7 +17638,12 @@ const CallRecordingProcessor = {
                   }
                 }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
               };
-              if (!scheduleWasReused) {
+              if (pendingOfficeReview) {
+                // A pending office-review booking arms nothing yet and redeems
+                // no credit: the office confirm (runOutboundReviewConfirmHook)
+                // owns reminders, the lead, the card funnel and the credit.
+                logger.info(`[call-proc] Office-review booking ${svc.id} PENDING — activated on office confirm`);
+              } else if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -17670,12 +17756,7 @@ const CallRecordingProcessor = {
                 // this rail: a failed repair logs, and a re-delivered
                 // replay (or the visit's own next edit) re-runs it.
                 let replaySlotVerified = false;
-                // A street-level held visit gets no confirmation repair of any
-                // kind on a replay: replaySlotVerified stays false, so both
-                // repair branches below stand down until the office confirms.
-                if (isStreetLevelAddressHold(svc)) {
-                  logger.info(`[call-proc] replay of ${svc.id}: street-level address hold — no confirmation repair`);
-                } else try {
+                try {
                   const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');
                   replaySlotVerified = await verifyReminderSlotAfterRegistration(db, {
                     serviceId: svc.id,
@@ -18093,7 +18174,7 @@ const CallRecordingProcessor = {
           // smsRecipient. Sends cleared by explicit sms_consent_given or by
           // the legacy V2-off path go to the resolved customer phone.)
           const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni;
-          if (scheduledServiceId && !streetLevelHeldVisit && !v2SmsBlocked && holdImpliedSmsLeg) {
+          if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
             logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
             // The appointment BOOKED with no confirmation TEXT and the number
@@ -18140,7 +18221,7 @@ const CallRecordingProcessor = {
           // Neither card-request path runs for a dispute-held reuse: no
           // "secure your appointment" link and no auto-secure while the
           // address is unresolved (codex r11 P1).
-          if (scheduledServiceId && !disputeHeldReuse && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -18173,7 +18254,7 @@ const CallRecordingProcessor = {
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
-          } else if (scheduledServiceId && !disputeHeldReuse) {
+          } else if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview) {
             // No call-level SMS clearance (TCPA gate blocked, or the
             // implied-consent leg is held): run ONLY the funnel's
             // non-messaging side — the policy exemption + saved-card
@@ -18213,12 +18294,13 @@ const CallRecordingProcessor = {
           // row EXISTS, and dropping the id made the downstream
           // approved-but-unbooked audit read this as a skipped booking,
           // starving the assessment pre-draft hook.
-          if (scheduledServiceId && streetLevelHeldVisit) {
-            // No customer confirmation (SMS or email) until the office
-            // confirms the address: the office confirm is what arms the
-            // customer-facing legs (runOfficeConfirmActivation).
-            logger.info(`[call-proc] Skipping confirmation for ${callSid}: street-level address hold — nothing goes to the customer until the office confirms`);
-            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsSkippedReason: 'street_level_address_hold' };
+          if (scheduledServiceId && pendingOfficeReview) {
+            // Pending office-review booking — never auto-text or email a
+            // "confirmed" appointment the customer hasn't been re-confirmed
+            // on. Keep scheduledServiceId so the downstream audit doesn't treat
+            // this as a skipped booking.
+            logger.info(`[call-proc] Skipping confirmation for ${callSid}: booking pending office review`);
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
           } else if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
             logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };

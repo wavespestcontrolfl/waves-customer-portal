@@ -264,18 +264,6 @@ const MONTH_RECURRENCE_INTERVALS = {
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 
-// A street-level web-form booking holds pending until the office confirms its
-// address; a reschedule commits the row 'confirmed' and would lift the hold
-// unseen, so it is refused (owner ruling 2026-09-30). Confirm, correct or
-// cancel the visit first.
-function refuseStreetLevelAddressHold(service) {
-  if (require('./call-booking-source-actions').isStreetLevelAddressHold(service)) {
-    throw Object.assign(new Error('Confirm or correct this visit\'s address before rescheduling it — it was booked on a street-level match only.'), {
-      statusCode: 409, code: 'STREET_LEVEL_ADDRESS_HOLD',
-    });
-  }
-}
-
 // Live lifecycle states a staff-initiated reschedule may override via
 // options.allowLive (rain starts while en route, customer calls to push
 // the visit while the tech is on site). Terminal states (completed /
@@ -1178,7 +1166,6 @@ class SmartRebooker {
   async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    refuseStreetLevelAddressHold(service);
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;
@@ -2073,7 +2060,6 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    refuseStreetLevelAddressHold(service);
     // Direct series callers (customer pull-forward, explicit admin series
     // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
     // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)

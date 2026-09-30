@@ -398,17 +398,6 @@ async function transitionJobStatus({
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed', 'customer_id');
-      // A street-level web-form booking holds PENDING until the office
-      // confirms its address (owner ruling 2026-09-30): the only ways out are
-      // the office confirm (-> 'confirmed'), or cancel/skip (outside this
-      // block). Any other move would fall into the lazy activation below and
-      // confirm a visit whose house number Google never verified.
-      if (require('./call-booking-source-actions').isStreetLevelAddressHold(legacyRow)
-        && !['pending', 'confirmed'].includes(String(toStatus || ''))) {
-        throw Object.assign(new Error('Confirm or correct this visit\'s address first — it was booked on a street-level match only.'), {
-          statusCode: 409, code: 'STREET_LEVEL_ADDRESS_HOLD',
-        });
-      }
       legacyOutboundActivationNeeded = legacyOutboundActivation !== 'caller'
         && !!legacyRow
         && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)

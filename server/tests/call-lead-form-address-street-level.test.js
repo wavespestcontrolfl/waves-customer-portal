@@ -412,55 +412,68 @@ describe('county-confirmed and shared-ZIP area proof', () => {
   });
 });
 
-describe('visit hold (owner ruling 2026-09-30)', () => {
+describe('office-review pending path (owner ruling 2026-09-30)', () => {
   const fs = require('fs');
   const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
   const sa = require('../services/call-booking-source-actions');
-  const held = { source_action: 'call_street_level_review', status: 'pending', customer_confirmed: false };
+  const src = () => read('../services/call-recording-processor.js');
 
-  test('the marker is a pending office-review, dispatch-owned source action within varchar(30)', () => {
-    expect(sa.CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION).toBe('call_street_level_review');
-    expect(sa.CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION.length).toBeLessThanOrEqual(30);
-    expect(sa.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).toContain('call_street_level_review');
-    expect(sa.DISPATCH_OWNED_PENDING_SOURCE_ACTIONS).toContain('call_street_level_review');
-  });
-
-  test('isStreetLevelAddressHold: only this marker, still pending, unconfirmed; and it is not a field-confirmable review booking', () => {
-    expect(sa.isStreetLevelAddressHold(held)).toBe(true);
-    for (const patch of [{ status: 'confirmed' }, { status: 'cancelled' }, { customer_confirmed: true }, { source_action: 'voice_agent' }, { source_action: 'ai_call_pipeline' }]) {
-      expect(sa.isStreetLevelAddressHold({ ...held, ...patch })).toBe(false);
+  test('books through the EXISTING pending path: the voice agent\'s source action, no new marker, no custom guards', () => {
+    const s = src();
+    expect(s).toContain("source_action: streetLevelPending ? VOICE_AGENT_BOOKING_SOURCE_ACTION : 'ai_call_pipeline',");
+    expect(s).toContain("status: streetLevelPending ? 'pending' : 'confirmed',");
+    expect(s).toContain('customer_confirmed: !streetLevelPending,');
+    expect(s).toContain('...(streetLevelPending ? {} : { confirmed_at: new Date() }),');
+    expect(s).toContain('const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;');
+    expect(sa.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).toContain(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION);
+    expect(sa.DISPATCH_OWNED_PENDING_SOURCE_ACTIONS).toContain(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION);
+    // Not the source action the legacy hourly sweep auto-activates.
+    expect(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION).not.toBe(sa.CALL_OUTBOUND_REVIEW_SOURCE_ACTION);
+    // No custom marker or guard anywhere.
+    for (const gone of ['call_street_level_review', 'isStreetLevelAddressHold', 'STREET_LEVEL_ADDRESS_HOLD', 'street_level_address_hold']) {
+      for (const f of ['../services/call-recording-processor.js', '../services/call-booking-source-actions.js', '../services/job-status.js', '../services/rebooker.js', '../services/track-transitions.js', '../services/outbound-review-confirm.js']) {
+        expect(read(f)).not.toContain(gone);
+      }
     }
-    expect(sa.isStreetLevelAddressHold(null)).toBe(false);
-    expect(sa.isPendingOutboundReviewBooking(held)).toBe(false);   // tech-track dispatch-implies-confirm never confirms it
-    expect(sa.isPendingOutboundReviewBooking({ ...held, source_action: 'voice_agent' })).toBe(true);
   });
 
-  test('the booking insert holds the visit pending, unconfirmed and marked, only while the on-file proof binds', () => {
-    const src = read('../services/call-recording-processor.js');
-    expect(src).toContain("const streetLevelHoldApplies = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;");
-    expect(src).toContain("status: streetLevelHoldApplies ? 'pending' : 'confirmed',");
-    expect(src).toContain('customer_confirmed: !streetLevelHoldApplies,');
-    expect(src).toContain('confirmed_at: streetLevelHoldApplies ? null : new Date(),');
-    expect(src).toContain("source_action: streetLevelHoldApplies ? CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',");
-    // The default (gate off / no hold) insert is unchanged in effect: confirmed, customer_confirmed, ai_call_pipeline.
-    expect(src).toContain("v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });");
+  test('the same outbound_booking_review card the voice agent files, with the originating lead id, in the booking transaction', () => {
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: v2ApprovedExtraction || extracted,");
+    expect(at).toBeGreaterThan(s.indexOf("const [created] = await trx('scheduled_services')"));
+    const block = s.slice(at, at + 1400);
+    expect(block).toContain('lead_id: leadId || null');
+    expect(block).toContain('scheduled_service_id: created.id');
+    expect(block).toContain("if (!card) throw new Error('a booking review card is already open for this call');");
   });
 
-  test('NO customer text or email at booking for a held visit, and none from a replay repair', () => {
-    const src = read('../services/call-recording-processor.js');
-    // The confirmation section skips both channels before any send branch.
-    const skipAt = src.indexOf("if (scheduledServiceId && streetLevelHeldVisit) {");
-    const sendAt = src.indexOf('} else if (scheduledServiceId) {', skipAt);
+  test('a pending office-review row is not a closed deal: no lead conversion, no inspection-credit evidence, no reminders, no card funnel', () => {
+    const s = src();
+    expect(s).toMatch(/if \(booking && isPendingOutboundReviewBooking\(booking\)\) return false;/);
+    expect(s).toMatch(/if \(!streetLevelPending\) \{\s*await require\('\.\/inspection-credit'\)\.markBookingForInspectionCredit/);
+    expect(s).toContain('PENDING — activated on office confirm');
+    expect(s.indexOf('if (pendingOfficeReview) {')).toBeLessThan(s.indexOf('} else if (!scheduleWasReused) {\n                logger.info(`[call-proc] Scheduled service created'));
+    expect(s).toContain('if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview && !v2SmsBlocked && !holdImpliedSmsLeg) {');
+    expect(s).toContain('} else if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview) {');
+  });
+
+  test('NO customer text or email at booking: the confirmation section skips both channels, exactly as the legacy outbound-review path did', () => {
+    const s = src();
+    const skipAt = s.indexOf('if (scheduledServiceId && pendingOfficeReview) {');
+    const sendAt = s.indexOf('} else if (scheduledServiceId) {', skipAt);
     expect(skipAt).toBeGreaterThan(0);
-    expect(sendAt).toBeGreaterThan(skipAt);
-    expect(src.slice(skipAt, sendAt)).toContain("smsSkippedReason: 'street_level_address_hold'");
-    expect(src.slice(skipAt, sendAt)).not.toMatch(/deliverConfirmationByChannel|smsAttempt/);
-    // The implied-consent hold card is not filed for a held visit either.
-    expect(src).toContain('if (scheduledServiceId && !streetLevelHeldVisit && !v2SmsBlocked && holdImpliedSmsLeg) {');
-    // A replay's confirmation repairs stand down (replaySlotVerified stays false).
-    expect(src).toMatch(/if \(isStreetLevelAddressHold\(svc\)\) \{\s*logger\.info\(`\[call-proc\] replay of \$\{svc\.id\}: street-level address hold — no confirmation repair`\);\s*\} else try \{/);
-    // Lead conversion waits for the office confirm.
-    expect(src).toMatch(/if \(booking && isStreetLevelAddressHold\(booking\)\) return false;/);
+    const body = s.slice(skipAt, sendAt);
+    expect(body).toContain("smsBlockedReason: 'outbound_booking_review'");
+    expect(body).not.toMatch(/deliverConfirmationByChannel|smsAttempt/);
+    // The replay repair (which can email a confirmation) is behind the pending branch too.
+    expect(s.indexOf('if (pendingOfficeReview) {')).toBeLessThan(s.indexOf('Same-key REPLAY of this call\'s OWN still-live booking'));
+  });
+
+  test('the shared helper classifies the booking as pending review, so grouping, tech-track and reschedule rails treat it like the voice agent\'s', () => {
+    const row = { source_action: sa.VOICE_AGENT_BOOKING_SOURCE_ACTION, status: 'pending', customer_confirmed: false };
+    expect(sa.isPendingOutboundReviewBooking(row)).toBe(true);
+    expect(sa.isPendingOutboundReviewBooking({ ...row, status: 'confirmed' })).toBe(false);
+    expect(sa.isPendingOutboundReviewBooking({ ...row, source_action: 'ai_call_pipeline' })).toBe(false);
   });
 
   test('the one admin bell per visit: notifyAdmin, bell:true, deduped on the visit id, says what to do, links to the visit', () => {
@@ -472,36 +485,35 @@ describe('visit hold (owner ruling 2026-09-30)', () => {
     expect(a.body).toMatch(/confirm the visit \(or correct its address, or cancel\)/i);
     expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/schedule?serviceId=visit-9' });
     expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
-    // Same dedupe key on a reprocess of the same visit; a different visit rings separately.
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-10' }).opts.dedupeKey).not.toBe(a.opts.dedupeKey);
-    // Wired through the shared notifyAdmin, after the booking committed.
-    const src = read('../services/call-recording-processor.js');
-    expect(src).toMatch(/notifyAdmin\(alert\.category, alert\.title, alert\.body, alert\.opts\)/);
+    expect(src()).toMatch(/notifyAdmin\(alert\.category, alert\.title, alert\.body, alert\.opts\)/);
+  });
+});
+
+describe('r6 trust fixes', () => {
+  test('a hyphenated range keeps its separator: 12-14 is not 1214', async () => {
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [formRow(address, '34219')] });
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '12-14 Sample Newbuild Trl' }), conn('12-14 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '1214 Sample Newbuild Trl' }), conn('12-14 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '12-14 Sample Newbuild Trl' }), conn('1214 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    gateOn();
+    const g = (street) => routeLevel({ normalized: { street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' } });
+    expect(streetLevelMatch(lead({ address_line1: '12-14 Sample Newbuild Trl' }), g('12-14 Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(lead({ address_line1: '12-14 Sample Newbuild Trl' }), g('1214 Sample Newbuild Trail'))).toBeNull();
   });
 
-  test('only the office confirm, cancel or skip leave the hold: every other transition and any reschedule is refused', () => {
-    const js = read('../services/job-status.js');
-    expect(js).toMatch(/isStreetLevelAddressHold\(legacyRow\)\s*&& !\['pending', 'confirmed'\]\.includes\(String\(toStatus \|\| ''\)\)/);
-    expect(js).toContain("code: 'STREET_LEVEL_ADDRESS_HOLD'");
-    // The guard sits inside the block that cancel/skip bypass.
-    expect(js.indexOf("const legacyRow = await t('scheduled_services')")).toBeLessThan(js.indexOf("code: 'STREET_LEVEL_ADDRESS_HOLD'"));
-    const rb = read('../services/rebooker.js');
-    expect(rb.split('refuseStreetLevelAddressHold(service);').length - 1).toBe(2);   // rescheduleOnce + rescheduleSeries
-    // Tech and geofence starts (markEnRoute, markOnProperty, markComplete) stand down too.
-    const tt = read('../services/track-transitions.js');
-    expect(tt.split("return { ok: false, reason: 'street_level_address_hold' };").length - 1).toBe(3);
-    const oc = read('../services/outbound-review-confirm.js');
-    expect(oc).toMatch(/isStreetLevelAddressHold\(row\)\) \{\s*return false;/);   // no lazy activation of a held row
-  });
-
-  test('the triage-card machinery is gone', () => {
-    const src = read('../services/call-recording-processor.js');
-    for (const gone of ['address_readback_form_street', 'recordStreetLevelReadback', 'buildStreetLevelReadbackWrite', 'buildStreetLevelReadbackItem', 'streetLevelReadbackEligibleRow', 'v2StreetLevelReadbackItem']) {
-      expect(src).not.toContain(gone);
-    }
-    expect(read('../routes/admin-triage.js')).not.toContain('address_readback_form_street');
-    expect(read('../services/call-routing-gates.js')).not.toContain('address_readback_form_street');
+  test('a county-confirmed route with no Google ZIP must match the on-file city', () => {
+    gateOn();
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: null, ...extra });
+    const county = (normalized) => routeLevel({ inServiceArea: true, county: 'Manatee County', normalized });
+    expect(streetLevelMatch(lead(), county(n()))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(lead(), county(n({ city: 'Sarasota' })))).toBeNull();     // same street name, other served city
+    expect(streetLevelMatch(lead(), county(n({ city: null })))).toBeNull();
+    expect(streetLevelMatch(lead({ city: null }), county(n()))).toBeNull();
+    // With Google's ZIP present it must still equal the on-file ZIP.
+    expect(streetLevelMatch(lead(), county(n({ postal_code: '34219', city: 'Somewhere Else' })))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(lead(), county(n({ postal_code: '34203' })))).toBeNull();
   });
 });
 
