@@ -7,12 +7,13 @@ const { closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan, 
 const card = (status = 'open') => ({ id: 't1', status, payload: { street_level_address: true, scheduled_service_id: 'visit-1' }, summary: 'x' });
 
 // A fake conn: scheduled_services lookup, triage card lookup/update, call_log update, review aggregate.
-const makeConn = ({ visit = { id: 'visit-1', source_call_log_id: 'call-1' }, holdCard = card(), openAfter = 0 } = {}) => {
+const makeConn = ({ visit = { id: 'visit-1', source_call_log_id: 'call-1' }, holdCard = card(), openAfter = 0, liveStatus } = {}) => {
   const log = { updates: [], locked: false, raws: [] };
   const conn = (table) => {
     const q = {
-      where(arg) { q._where = arg; return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { q._count = true; return q; },
+      where(arg) { q._where = arg; return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { q._count = true; return q; }, forUpdate() { q._forUpdate = true; return q; },
       first: async () => {
+        if (table === 'scheduled_services' && q._forUpdate) { log.rechecked = true; return liveStatus === null ? null : { status: liveStatus, customer_confirmed: false }; }
         if (table === 'scheduled_services') return visit;
         if (q._count) return { n: openAfter };
         return holdCard;
@@ -29,8 +30,9 @@ const makeConn = ({ visit = { id: 'visit-1', source_call_log_id: 'call-1' }, hol
 describe('closeHoldCardForEndedVisit', () => {
   for (const toStatus of ['cancelled', 'skipped']) {
     test(`a ${toStatus} street-level hold visit resolves its open card and closes the call's review state, under the per-call lock`, async () => {
-      const { conn, log } = makeConn();
+      const { conn, log } = makeConn({ liveStatus: toStatus });
       expect(await closeHoldCardForEndedVisit('visit-1', toStatus, conn)).toBe(true);
+      expect(log.rechecked).toBe(true);
       expect(log.locked).toBe(true);
       const cardUpdate = log.updates.find((u) => u.table === 'triage_items');
       expect(cardUpdate.where).toEqual({ id: 't1' });
@@ -40,7 +42,7 @@ describe('closeHoldCardForEndedVisit', () => {
     });
   }
   test('another open card on the call keeps review_status open', async () => {
-    const { conn, log } = makeConn({ openAfter: 1 });
+    const { conn, log } = makeConn({ openAfter: 1, liveStatus: 'cancelled' });
     await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn);
     expect(log.updates.find((u) => u.table === 'call_log').u).toMatchObject({ review_status: 'open' });
   });
@@ -51,6 +53,16 @@ describe('closeHoldCardForEndedVisit', () => {
       expect(log.updates).toHaveLength(0);
       expect(log.locked).toBe(false);
     }
+  });
+  test('a COMPENSATED cancellation (the tech went live, the prior status was restored) leaves the card open', async () => {
+    for (const restored of ['confirmed', 'en_route', 'pending']) {
+      const { conn, log } = makeConn({ liveStatus: restored });
+      expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', conn)).toBe(false);
+      expect(log.rechecked).toBe(true);
+      expect(log.updates).toHaveLength(0);
+    }
+    const gone = makeConn({ liveStatus: null });
+    expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', gone.conn)).toBe(false);
   });
   test('never throws', async () => {
     expect(await closeHoldCardForEndedVisit('visit-1', 'cancelled', () => { throw new Error('db down'); })).toBe(false);
@@ -154,18 +166,18 @@ describe('r14: owned follow-up, review status after rejection, bell recheck, voi
 
   test('the confirm-address bell reads the visit live right before ringing; a confirmed visit rings nothing, a lookup blip rings', async () => {
     const s = proc();
-    const check = s.indexOf('if (!(await isStreetLevelHoldVisit(svc.id, db, { failClosed: false }))) {');
+    const check = s.indexOf('if (!(await isStreetLevelHoldVisit(visit.id, db))) {');
     const build = s.indexOf('const alert = buildStreetLevelHoldAlert({', check);
     expect(check).toBeGreaterThan(0);
     expect(build).toBeGreaterThan(check);
     // The race: confirmed since the booking committed -> not a hold any more -> no bell.
     const confirmedNow = () => ({ where() { return this; }, whereExists() { return this; }, first: async () => undefined });
-    expect(await isStreetLevelHoldVisit('v1', confirmedNow, { failClosed: false })).toBe(false);
+    expect(await isStreetLevelHoldVisit('v1', confirmedNow)).toBe(false);
     const stillHeld = () => ({ where() { return this; }, whereExists() { return this; }, first: async () => ({ id: 'v1' }) });
-    expect(await isStreetLevelHoldVisit('v1', stillHeld, { failClosed: false })).toBe(true);
+    expect(await isStreetLevelHoldVisit('v1', stillHeld)).toBe(true);
+    // A lookup blip answers "still held": the reminder path holds, the bell path rings.
     const blip = () => { throw new Error('db down'); };
-    expect(await isStreetLevelHoldVisit('v1', blip, { failClosed: false })).toBe(false);   // bell path: ring
-    expect(await isStreetLevelHoldVisit('v1', blip)).toBe(true);                             // reminder path: hold
+    expect(await isStreetLevelHoldVisit('v1', blip)).toBe(true);
   });
 
   test('voice-agent booking dedupe: an unconfirmed street-level hold blocks only a matching start, like any pipeline booking', () => {

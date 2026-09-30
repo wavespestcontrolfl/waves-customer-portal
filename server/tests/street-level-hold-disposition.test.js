@@ -86,7 +86,7 @@ describe('office confirm stamps booked', () => {
   });
   test('runs inside the card-resolve transaction, before the review card is resolved; gate off is a no-op', () => {
     const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
-    const stamp = s.indexOf('await stampBookedDispositionForStreetLevelHold(trx, svc);');
+    const stamp = s.indexOf('await stampBookedDispositionForStreetLevelHold(trx, svc, hold);');
     expect(stamp).toBeGreaterThan(0);
     expect(stamp).toBeLessThan(s.indexOf("status: 'resolved', updated_at: trx.fn.now()", stamp));
     expect(s).toContain("if (!isEnabled('callDispositionV1')) return false;");

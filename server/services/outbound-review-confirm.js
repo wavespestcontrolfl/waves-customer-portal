@@ -395,15 +395,21 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
       await db.transaction(async (trx) => {
         await lockTriageCall(trx, svc.source_call_log_id);
-        await fileOwedFollowUpForStreetLevelHold(trx, svc);
-        await stampBookedDispositionForStreetLevelHold(trx, svc);
+        // Street-level address holds only (one lookup): every other pending office-review
+        // booking resolves its card exactly as before.
+        const hold = await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
+        const isHold = !!hold?.payload?.street_level_address;
+        if (isHold) {
+          await fileOwedFollowUpForStreetLevelHold(trx, svc, hold);
+          await stampBookedDispositionForStreetLevelHold(trx, svc, hold);
+        }
         await trx('triage_items')
           .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', updated_at: trx.fn.now() });
-        // The call's review state closes with its last open card (same aggregate
+        // The hold's call review state closes with its last open card (same aggregate
         // every card writer keeps, under the same per-call lock).
-        await syncCallReviewStatus(trx, svc.source_call_log_id);
+        if (isHold) await syncCallReviewStatus(trx, svc.source_call_log_id);
       });
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
@@ -690,10 +696,10 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
  * current plan. Runs inside the caller's transaction, before the review card
  * is resolved.
  */
-async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
+async function fileOwedFollowUpForStreetLevelHold(trx, svc, knownCard) {
   // The visit's latest street-level card, open or already superseded by a
   // recording replacement: the promised follow-up must not depend on it staying open.
-  const card = await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
+  const card = knownCard || await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
   const payload = card?.payload || null;
   if (!payload?.follow_up_plan) return false;
   const owned = await trx('scheduled_services')
@@ -731,10 +737,10 @@ async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
  * the disposition gate is live and the card is a street-level hold for this
  * visit. Runs before the review card is resolved.
  */
-async function stampBookedDispositionForStreetLevelHold(trx, svc) {
+async function stampBookedDispositionForStreetLevelHold(trx, svc, knownCard) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callDispositionV1')) return false;
-  if (!(await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id }))) return false;
+  if (!(knownCard || await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id }))) return false;
   const stamped = await trx('call_log')
     .where({ id: svc.source_call_log_id, disposition: 'lead_response_flow_triggered' })
     .update({ disposition: 'booked', updated_at: new Date() });

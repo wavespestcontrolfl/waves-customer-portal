@@ -317,7 +317,7 @@ describe('direct creators tell the tech (source order)', () => {
   test('a phone booking announces the fresh primary and a fresh follow-up child, never a reused row', () => {
     const src = read('../services/call-recording-processor.js');
     const at = src.indexOf('scheduledServiceId = svc.id;');
-    const block = src.slice(at, at + 1500);
+    const block = src.slice(at, at + 2600);
     expect(block).toContain("...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),");
     expect(block).toContain('...(followUpCreated && followUpCreated.id ? [followUpCreated] : [])');
     expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");

@@ -941,6 +941,9 @@ async function transitionJobStatus({
     // require: the module's dependency chain reaches back into job-status.
     const { handleFollowupChildCancellation, handleFollowupChildRevival } = require('./typed-followup-obligation');
     if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
+      void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
+        logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
+      });
       // A street-level address hold's review card closes with its visit
       // (cancelled / skipped): the office no longer has an address to confirm.
       // Gated on the card signal inside the helper; a no-op for every other visit.
@@ -949,9 +952,6 @@ async function transitionJobStatus({
           logger.warn(`[job-status] street-level hold close failed for ${jobId}: ${e.message}`);
         });
       }
-      void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
-        logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
-      });
       // Invoice void + inspection-credit reversal seam for every non-live
       // transition (Codex #3178 r25 P1): 'skipped' reached no route branch
       // that ran it, leaving a skipped visit's redeemed credit spendable

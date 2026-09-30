@@ -1835,6 +1835,27 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
     },
   };
 }
+// Rings the one "confirm the address" admin bell for a held visit. Reads the visit
+// LIVE right before ringing: staff may have confirmed (or cancelled) it since the
+// booking committed, and a bell for a confirmed visit is noise (a lookup blip
+// answers "still held", so the bell rings). Best effort, and its failure log carries no error message: a database
+// error can echo the bound body (customer name and address).
+async function ringStreetLevelHoldBell({ hold, visit, callSid }) {
+  try {
+    if (!(await isStreetLevelHoldVisit(visit.id, db))) {
+      logger.info(`[call-proc] street-level confirm-address bell skipped for ${maskSid(callSid)}: visit ${visit.id} is no longer an unconfirmed hold`);
+      return false;
+    }
+    const alert = buildStreetLevelHoldAlert({
+      hold, visitId: visit.id, callSid, scheduledDate: visit.scheduled_date, windowStart: visit.window_start,
+    });
+    await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
+    return true;
+  } catch (notifyErr) {
+    logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.code || notifyErr.name || 'error'}`);
+    return false;
+  }
+}
 // True when this row is a street-level address hold: a pending office-review
 // row whose outbound_booking_review card carries payload.street_level_address.
 // The card is the durable signal (no new source_action, no new column); it is
@@ -18152,38 +18173,13 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
-              // Office-review pending path (street-level web-form address). The
-              // visit itself is pending and the outbound_booking_review card is
-              // filed; the owner also asked for ONE admin bell per visit (no
-              // existing bell fires for a pending call booking), deduped on the
-              // visit id so a reprocess never rings twice. Best effort.
-              // Street-level holds only: every other reused row (legacy outbound-review,
-              // voice agent) keeps its exact prior behavior.
+              // Street-level address holds only (reused legacy / voice-agent rows keep their
+              // prior behavior): the visit is pending with its review card. The review reason is
+              // raised now that the booking really became the hold; one live-checked bell.
               if (await isStreetLevelHoldRow(db, svc)) {
                 pendingOfficeReview = true;
-                // The open review is call-level state too, raised only now that the
-                // booking really became the hold (so a booking that never does can
-                // leave nothing stale on the call or the lead). Like every late
-                // scheduling hold, it reaches review_status and, through the late
-                // refresh below, the lead's ai_triage activity.
                 if (!bridgeNeedsConfirmation.includes('street_level_address_review')) bridgeNeedsConfirmation.push('street_level_address_review');
-                if (v2StreetLevelHold) {
-                  try {
-                    // Read the visit LIVE right before ringing: staff may have confirmed (or
-                    // cancelled) it since the booking committed, and a "confirm the address"
-                    // bell for a confirmed visit is noise. A lookup blip rings (fail open).
-                    if (!(await isStreetLevelHoldVisit(svc.id, db, { failClosed: false }))) {
-                      logger.info(`[call-proc] street-level confirm-address bell skipped for ${maskSid(callSid)}: visit ${svc.id} is no longer an unconfirmed hold`);
-                    } else {
-                    const alert = buildStreetLevelHoldAlert({
-                      hold: v2StreetLevelHold, visitId: svc.id, callSid, scheduledDate: svc.scheduled_date, windowStart: svc.window_start,
-                    });
-                    await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
-                    }
-                  } catch (notifyErr) {
-                    logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.message}`);
-                  }
-                }
+                if (v2StreetLevelHold) await ringStreetLevelHoldBell({ hold: v2StreetLevelHold, visit: svc, callSid });
               }
               // Tech-facing "new visit" cards (tech-visit-notifications.js):
               // a phone booking inserts its assigned rows directly, bypassing
@@ -21921,6 +21917,7 @@ CallRecordingProcessor._test = {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
+  ringStreetLevelHoldBell,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

@@ -138,14 +138,14 @@ describe('office confirm files the deferred follow-up as the owed follow-up card
   });
   test('the hook runs it inside the card-resolve transaction, before the review card is resolved', () => {
     const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
-    const file = s.indexOf('await fileOwedFollowUpForStreetLevelHold(trx, svc);');
+    const file = s.indexOf('await fileOwedFollowUpForStreetLevelHold(trx, svc, hold);');
     expect(file).toBeGreaterThan(0);
     expect(file).toBeLessThan(s.indexOf("status: 'resolved', updated_at: trx.fn.now()", file));
   });
   test('the confirm closes the call-level review state under the same lock, via the shared aggregate', () => {
     const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
     const resolve = s.indexOf("status: 'resolved', updated_at: trx.fn.now()");
-    const sync = s.indexOf('await syncCallReviewStatus(trx, svc.source_call_log_id);', resolve);
+    const sync = s.indexOf('if (isHold) await syncCallReviewStatus(trx, svc.source_call_log_id);', resolve);
     expect(sync).toBeGreaterThan(resolve);
     expect(sync).toBeLessThan(s.indexOf('} catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed', sync));
     expect(s.indexOf('await lockTriageCall(trx, svc.source_call_log_id);')).toBeLessThan(resolve);

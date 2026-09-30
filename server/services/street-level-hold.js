@@ -31,11 +31,10 @@ function heldVisitSubquery(q, visitAlias = 'ss') {
 // THE live predicate: true while the visit is an unconfirmed street-level hold
 // (card present, customer_confirmed false, not cancelled / skipped / rescheduled),
 // read fresh from the database. (findStreetLevelHoldCard below is the different
-// question — "was this ever a hold", status-agnostic.) Fails CLOSED (true) on a
-// lookup error by default, since a reminder must never go out on a blip; a caller
-// where the safe direction is the other way (the confirm-address bell) passes
-// { failClosed: false }.
-async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { failClosed = true } = {}) {
+// question — "was this ever a hold", status-agnostic.) A lookup error answers
+// true ("still held"): the reminder path must hold on a blip, and the bell path
+// rings on a blip.
+async function isStreetLevelHoldVisit(scheduledServiceId, conn = db) {
   if (!scheduledServiceId) return false;
   try {
     const row = await conn('scheduled_services as ss')
@@ -44,8 +43,8 @@ async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { failClose
       .first('ss.id');
     return !!row;
   } catch (err) {
-    logger.warn(`[street-level-hold] hold lookup failed for ${scheduledServiceId}: ${err.message}`);
-    return failClosed;
+    logger.warn(`[street-level-hold] hold lookup failed for ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
+    return true;
   }
 }
 
@@ -85,6 +84,11 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
     const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
     return await conn.transaction(async (trx) => {
       await lockTriageCall(trx, visit.source_call_log_id);
+      // Recheck the visit under the lock: a cancellation can be COMPENSATED (the tech
+      // went live, so cancellation-processor restores the prior status), and the card
+      // must close only while the visit is still in the terminal status that released it.
+      const live = await trx('scheduled_services').where({ id: visitId }).forUpdate().first('status', 'customer_confirmed');
+      if (!live || String(live.status) !== String(toStatus)) return false;
       const resolved = await trx('triage_items')
         .where({ id: card.id })
         .whereIn('status', ['open', 'in_progress'])
