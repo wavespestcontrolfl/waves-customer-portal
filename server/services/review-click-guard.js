@@ -21,6 +21,8 @@
  *   - review-request.js sendSMS            — processScheduled queue, create(), tech resend
  *   - review-request.js processFollowups   — the Day-3 text follow-up
  *   - review-request.js sendInlineEmailCopy — the composer's inline email leg
+ *   - routes/admin-communications.js      — the composer's SMS send seam (a draft minted
+ *                                            before the click is refused, not sent)
  * An untracked click (the bare office URL) is invisible here by nature.
  */
 const db = require('../models/db');

@@ -121,6 +121,7 @@ jest.mock('../services/sms-auto-send', () => ({
 // The inline review claim boundary: the route must verify + claim BEFORE the
 // provider call and abort on any validation miss (fail closed — the tokenized
 // review page carries customer data).
+jest.mock('../services/review-click-guard', () => ({ askSuppressedByClick: jest.fn(async () => false) }));
 jest.mock('../services/review-request', () => ({
   claimInlineForSend: jest.fn(async () => new Date('2026-08-31T03:00:00.000Z')),
   inlineClaimStillHeld: jest.fn(async () => true),
@@ -1383,6 +1384,45 @@ describe('admin communications SMS route', () => {
 
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/last 30 days/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a tracked review click since the draft was added blocks the send at the seam (send-time click guard)', async () => {
+    const ReviewService = require('../services/review-request');
+    const ClickGuard = require('../services/review-click-guard');
+    ClickGuard.askSuppressedByClick.mockResolvedValueOnce(true);
+    db.mockImplementation((table) => {
+      const first = jest.fn();
+      if (table === 'review_requests') {
+        first.mockResolvedValue({
+          id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline',
+          token: 'tok-abc123', service_record_id: null, scheduled_service_id: null, created_at: new Date('2026-09-28T12:00:00Z'),
+        });
+      } else if (table === 'customers') {
+        first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      }
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: '+15551234567',
+          body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+          messageType: 'manual',
+          reviewRequestId: 'rr-1',
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/already tapped a review link/);
+      expect(ClickGuard.askSuppressedByClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'rr-1', triggered_by: 'auto_inline' }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();
     });

@@ -863,9 +863,10 @@ router.post('/sms', async (req, res, next) => {
     if (reviewRequestId) {
       try {
         const ReviewService = require('../services/review-request');
+        const ClickGuard = require('../services/review-click-guard');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'scheduled_service_id', 'created_at');
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
@@ -926,6 +927,9 @@ router.post('/sms', async (req, res, next) => {
             if (!consent.allowed) return { consent };
             const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
             if (!gate.allowed) return { gate };
+            // The send-time click guard every review sender uses: a customer who
+            // tapped a tracked review link since this draft's anchor is not asked again.
+            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -994,6 +998,9 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
+        }
+        if (seam.clicked) {
+          return abortUnsent(409, 'This customer already tapped a review link since this one was added — remove the review link before sending.');
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
