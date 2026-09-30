@@ -13,6 +13,10 @@ const {
   SLOT_OFFER_TTL_MS,
   CAPACITY_OFFER_POLICY,
   BOOK_INSERTION_OFFER_POLICY,
+  BOOK_ARRIVAL_GRACE_OFFER_POLICY,
+  bookOfferPolicy,
+  splitSlotOfferField,
+  slotOfferFieldGrace,
   signSlotOffer,
   verifySlotOffer,
   appendOfferToSlotId,
@@ -306,6 +310,76 @@ describe('isRealCalendarDate — round-trip calendar validation', () => {
     expect(isRealCalendarDate('not-a-date')).toBe(false);
     expect(isRealCalendarDate('')).toBe(false);
     expect(isRealCalendarDate(null)).toBe(false);
+  });
+});
+
+describe('BOOK_ARRIVAL_GRACE_OFFER_POLICY + the graced /book field (GATE_BOOK_ARRIVAL_GRACE, owner-approved 2026-09-29)', () => {
+  const BOOKING = {
+    surface: 'booking', scopeId: '', serviceKey: 'pest_control', locationKey: '27.34,-82.53',
+    date: '2027-05-20', startMinutes: 540, technicianId: 'tech-1', durationMinutes: 60,
+  };
+  const GRACED = { ...BOOKING, policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY };
+
+  test('bookOfferPolicy: the grace tag supersedes the insertion tag; otherwise exactly the old mapping', () => {
+    expect(bookOfferPolicy({ insertion: true, graceLive: true })).toBe(BOOK_ARRIVAL_GRACE_OFFER_POLICY);
+    expect(bookOfferPolicy({ insertion: false, graceLive: true })).toBe(BOOK_ARRIVAL_GRACE_OFFER_POLICY);
+    expect(bookOfferPolicy({ insertion: true, graceLive: false })).toBe(BOOK_INSERTION_OFFER_POLICY);
+    expect(bookOfferPolicy({ insertion: true })).toBe(BOOK_INSERTION_OFFER_POLICY);
+    expect(bookOfferPolicy({ insertion: false, graceLive: false })).toBeUndefined();
+    expect(bookOfferPolicy()).toBeUndefined();
+    expect(BOOK_ARRIVAL_GRACE_OFFER_POLICY).not.toBe(BOOK_INSERTION_OFFER_POLICY);
+  });
+
+  test('a graced field is `<exp>.<grace>.<sig>`, verifies, and reads its grace back', () => {
+    const field = mintSlotOfferField({ ...GRACED, arrivalGrace: 90 });
+    expect(field.split('.')).toHaveLength(3);
+    expect(splitSlotOfferField(field)).toMatchObject({ arrivalGrace: 90 });
+    expect(verifySlotOfferField(GRACED, field)).toBe(true);
+    expect(slotOfferFieldGrace(field)).toBe(90);
+  });
+
+  test('an ungraced field (grace 0 / omitted / negative) is the EXACT `<exp>.<sig>` shape and signature this function always produced', () => {
+    const now = 1_800_000_000_000;
+    const legacy = mintSlotOfferField(BOOKING, now);
+    for (const arrivalGrace of [undefined, 0, -5, NaN, null]) {
+      expect(mintSlotOfferField({ ...BOOKING, arrivalGrace }, now)).toBe(legacy);
+    }
+    expect(legacy.split('.')).toHaveLength(2);
+    expect(slotOfferFieldGrace(legacy)).toBe(0);
+    expect(splitSlotOfferField(legacy)).toMatchObject({ arrivalGrace: 0 });
+  });
+
+  test('the cleartext grace is bound into the HMAC: changing, adding or stripping it fails verification', () => {
+    const [exp, grace, sig] = mintSlotOfferField({ ...GRACED, arrivalGrace: 90 }).split('.');
+    expect(grace).toBe('90');
+    expect(verifySlotOfferField(GRACED, [exp, '91', sig].join('.'))).toBe(false);
+    expect(verifySlotOfferField(GRACED, [exp, '0', sig].join('.'))).toBe(false);
+    expect(verifySlotOfferField(GRACED, [exp, sig].join('.'))).toBe(false); // stripped
+    const ungraced = mintSlotOfferField(GRACED).split('.');
+    expect(verifySlotOfferField(GRACED, [ungraced[0], '90', ungraced[1]].join('.'))).toBe(false); // added
+  });
+
+  test('a caller-supplied payload.arrivalGrace cannot vouch for a field: the field itself decides', () => {
+    const ungraced = mintSlotOfferField(GRACED);
+    expect(verifySlotOfferField({ ...GRACED, arrivalGrace: 90 }, ungraced)).toBe(true);
+    const graced = mintSlotOfferField({ ...GRACED, arrivalGrace: 90 });
+    expect(verifySlotOfferField({ ...GRACED, arrivalGrace: 0 }, graced)).toBe(true);
+  });
+
+  test('the grace policy and the insertion policy never redeem for one another, with or without a grace segment', () => {
+    const graced = mintSlotOfferField({ ...GRACED, arrivalGrace: 90 });
+    expect(verifySlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY }, graced)).toBe(false);
+    expect(verifySlotOfferField(BOOKING, graced)).toBe(false);
+    const insertion = mintSlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY });
+    expect(verifySlotOfferField(GRACED, insertion)).toBe(false);
+  });
+
+  test('malformed fields never parse', () => {
+    for (const bad of [undefined, null, '', 'abc', '123', '123.', '.abc', '1.2.3.4', 'x.y.z', 42, '12.-3.sig']) {
+      expect(splitSlotOfferField(bad)).toBeNull();
+      expect(verifySlotOfferField(GRACED, bad)).toBe(false);
+      expect(slotOfferFieldGrace(bad)).toBe(0);
+    }
   });
 });
 
