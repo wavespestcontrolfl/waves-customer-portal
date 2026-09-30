@@ -166,6 +166,42 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
     expect(await audienceIds([active.id])).toEqual([active.id]);
   });
 
+  // Codex P2 (:224) — "Exclude duplicate active rows for the same mailbox":
+  // rule 2 above only catches a sibling whose status is NOT 'active', so a
+  // pending Google-alias row that races the import and is later CONFIRMED —
+  // both rows now 'active' — passed rule 2 entirely on both sides and both
+  // would have been sent, a duplicate delivery to one inbox. Only the
+  // CANONICAL row (earliest created_at, then id) is sendable.
+  test('two ACTIVE alias rows for one Gmail inbox: exactly one is sendable, the canonical (earliest) one', async () => {
+    const t = tag().replace(/-/g, '');
+    const earlier = await subscriber(`dupealias${t}@gmail.com`, { created_at: new Date(Date.now() - 60000) });
+    const later = await subscriber(`d.u.p.e.a.l.i.a.s${t}+work@gmail.com`, { created_at: new Date() });
+    expect(await audienceIds([earlier.id, later.id])).toEqual([earlier.id]);
+  });
+
+  // The reverse spelling/order: the EARLIER row is the alias spelling, the
+  // LATER row is the plain one — canonical is still whichever is earliest,
+  // never a fixed "plain wins" rule.
+  test('two ACTIVE alias rows, alias spelling created FIRST: the alias (earlier) row is the canonical one', async () => {
+    const t = tag().replace(/-/g, '');
+    const earlierAlias = await subscriber(`d.u.p.e.a.l.i.a.s.b${t}+work@gmail.com`, { created_at: new Date(Date.now() - 60000) });
+    const laterPlain = await subscriber(`dupealiasb${t}@gmail.com`, { created_at: new Date() });
+    expect(await audienceIds([earlierAlias.id, laterPlain.id])).toEqual([earlierAlias.id]);
+  });
+
+  test('an exact-duplicate-free normal active subscriber is unaffected by the new duplicate-active check', async () => {
+    const t = tag().replace(/-/g, '');
+    const solo = await subscriber(`solo${t}@gmail.com`);
+    expect(await audienceIds([solo.id])).toEqual([solo.id]);
+  });
+
+  test('two ACTIVE rows on genuinely DIFFERENT mailboxes are both sendable — the check never cross-matches unrelated addresses', async () => {
+    const t = tag().replace(/-/g, '');
+    const a = await subscriber(`diffmailboxa${t}@gmail.com`);
+    const b = await subscriber(`diffmailboxb${t}@gmail.com`);
+    expect((await audienceIds([a.id, b.id])).sort()).toEqual([a.id, b.id].sort());
+  });
+
   test('resume: a retryable ledger row for a recipient with a non-active same-mailbox sibling is terminalized as skipped, never mailed', async () => {
     const t = tag().replace(/-/g, '');
     const keep = await customer({}, { marketing_offers: true, email_enabled: true });

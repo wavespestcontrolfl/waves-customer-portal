@@ -144,6 +144,19 @@ function excludeArchivedCustomers(query) {
 //      admin-newsletter.js's own comment: "there's no status='bounced' in
 //      the table"; bounces live on bounce_count/last_bounced_at and the
 //      separate email_suppressions ledger (excludeGloballySuppressed).
+//   3. Duplicate ACTIVE rows for the SAME mailbox — codex #5165 P2: rule 2
+//      above only catches a sibling whose status is NOT 'active', so a
+//      pending Google-alias row that races the import and is later
+//      CONFIRMED — both rows now 'active' — passed rule 2 entirely on both
+//      sides and both got sent, a duplicate delivery to one inbox. At send
+//      time, only ONE active row per mailbox is sendable: the CANONICAL
+//      one, deterministically the earliest `created_at` then `id`
+//      (matches the tie-break every other canonical pick in this codebase
+//      uses — customers' twin picker, the reconcile candidate order —
+//      applied here directly on newsletter_subscribers itself, no join to
+//      customers needed, since two active rows sharing a mailbox are
+//      compared on their OWN rows). Every other active row on that mailbox
+//      is excluded.
 //
 // Same mailbox = exact LOWER(TRIM), or Google's mailbox identity (dots and
 // '+tag' ignored, googlemail.com = gmail.com) — the repo's one rule,
@@ -208,6 +221,19 @@ const MAILBOX_KEY_SQL = (fieldExpr) => {
     THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
     ELSE LOWER(${trimmed}) END)`;
 };
+// The ONE sendable row per mailbox among ACTIVE rows: DISTINCT ON collapses
+// each mailbox_key to its single earliest (created_at, id) row — the SAME
+// deterministic tie-break every other canonical pick in this codebase uses
+// (customers' twin picker, the reconcile candidate order), applied here
+// directly on newsletter_subscribers's own columns; genuinely one row per
+// key, so it hash-joins as cheaply as opted_out_profiles.
+const CANONICAL_ACTIVE_MAILBOX_SQL = (qb) => {
+  qb.distinctOn(db.raw(MAILBOX_KEY_SQL('s.email')))
+    .select(db.raw(`${MAILBOX_KEY_SQL('s.email')} as mailbox_key`), 's.id as canonical_id')
+    .from('newsletter_subscribers as s')
+    .where('s.status', 'active')
+    .orderByRaw(`${MAILBOX_KEY_SQL('s.email')}, s.created_at ASC, s.id ASC`);
+};
 function excludeMailboxNotMailable(query) {
   return query
     .withMaterialized('opted_out_profiles', (qb) => {
@@ -223,6 +249,7 @@ function excludeMailboxNotMailable(query) {
         .from('newsletter_subscribers')
         .whereRaw("status IS DISTINCT FROM 'active'");
     })
+    .withMaterialized('canonical_active_mailbox', CANONICAL_ACTIVE_MAILBOX_SQL)
     .whereNotExists(function () {
       this.select(db.raw('1'))
         .from('opted_out_profiles as oo')
@@ -232,6 +259,12 @@ function excludeMailboxNotMailable(query) {
       this.select(db.raw('1'))
         .from('blocked_mailbox_siblings as bm')
         .whereRaw(`bm.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`);
+    })
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('canonical_active_mailbox as cam')
+        .whereRaw(`cam.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`)
+        .whereRaw('cam.canonical_id <> newsletter_subscribers.id');
     });
 }
 

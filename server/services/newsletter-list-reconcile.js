@@ -397,7 +397,18 @@ function safeErrorDescriptor(e) {
 // it cannot be seen by any read here (its email is uncommitted and names a
 // profile this decision has no reason to lock); it commits strictly AFTER
 // this import, exactly as if it had started after it.
-async function decideAddress(trx, customerId) {
+// `expectedMailbox` (optional): the mailbox key a fallback attempt is
+// actually trying to fill (importAddressWithFallback, newsletter-list-
+// reconcile.js). Codex P2 (:817) — "Recheck the expected mailbox inside the
+// import transaction": that caller's own peek is unlocked and can still
+// race against THIS decision's locked read (the address changes again in
+// the exact gap between the peek and here) — this check, immediately after
+// the row is FOR SHARE-locked and before any further work, is the ONLY
+// authoritative one. A mismatch never settles the caller's mailbox: it
+// returns 'mailbox_moved' rather than classifying (and possibly importing)
+// whatever address the profile now actually has — that address is a
+// different candidate's business, never this call's.
+async function decideAddress(trx, customerId, expectedMailbox = null) {
   const peek = await fetchLiveCandidate(trx, customerId);
   if (!peek) return { outcome: 'no_longer_live' };
   const lockedIds = sortedUnique([customerId, ...await profilesSharingAddress(trx, peek.email)]);
@@ -406,6 +417,10 @@ async function decideAddress(trx, customerId) {
   const fresh = await fetchLiveCandidate(trx, customerId, { forShare: true });
   if (!fresh) return { outcome: 'no_longer_live' };
   if (normalizeEmail(fresh.email) !== normalizeEmail(peek.email)) throw new AddressMovedError('address changed');
+  if (expectedMailbox) {
+    const currentMailbox = googleMailboxIdentity(normalizeEmail(fresh.email)) || normalizeEmail(fresh.email);
+    if (currentMailbox !== expectedMailbox) return { outcome: 'mailbox_moved' };
+  }
   // Every OTHER sharing profile's customers row FOR SHARE too (still before
   // the address key — rows before the key, like every writer here): the
   // canonical twin picker below orders on these rows' is_primary_profile /
@@ -446,10 +461,14 @@ async function canonicalProfile(conn, email) {
 // Outcomes: { outcome: 'importable', fresh } | { outcome: 'excluded', reason }
 //   | { outcome: 'row_appeared' } — an ACTIVE row already claims the address
 //   | { outcome: 'no_longer_live' } — archived/re-staged out since the read
-async function withAddressDecision(conn, customerId, then) {
+//   | { outcome: 'mailbox_moved' } — expectedMailbox given and the customer's
+//     CURRENT (locked) address is a different mailbox now (codex P2 :817)
+// `expectedMailbox` passes straight through to decideAddress; omitted for
+// the projection's own calls (nothing to compare against there).
+async function withAddressDecision(conn, customerId, then, expectedMailbox = null) {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await conn.transaction(async (trx) => then(trx, await decideAddress(trx, customerId)));
+      return await conn.transaction(async (trx) => then(trx, await decideAddress(trx, customerId, expectedMailbox)));
     } catch (e) {
       if (!(e instanceof AddressMovedError) || attempt >= MAX_DECISION_ATTEMPTS) throw e;
     }
@@ -622,8 +641,12 @@ async function applyOrphanLink(conn, subscriberId) {
 // the insert + link commit in ONE transaction under the decision's locks —
 // never a separate read then a trusted write. Returns the decision's own
 // outcome, or { outcome: 'imported' }, or { outcome: 'row_appeared' } when
-// the INSERT's own ON CONFLICT fired.
-async function importOneCustomer(conn, customerId) {
+// the INSERT's own ON CONFLICT fired. `expectedMailbox` (optional) passes
+// straight through to withAddressDecision/decideAddress — a caller
+// retrying fallbacks for a specific mailbox (importAddressWithFallback)
+// gives it the mailbox it's trying to fill, so the outcome can never be
+// this profile's own DIFFERENT (moved) address (codex P2 :817).
+async function importOneCustomer(conn, customerId, expectedMailbox = null) {
   return withAddressDecision(conn, customerId, async (trx, decision) => {
     if (decision.outcome !== 'importable') return decision;
     const { fresh, canonical } = decision;
@@ -672,7 +695,7 @@ async function importOneCustomer(conn, customerId) {
     await fillZoneForSubscriber(trx, inserted[0].id);
     const city = (identity.rows?.[0]?.city || '').trim() || 'Unknown';
     return { outcome: 'imported', city };
-  });
+  }, expectedMailbox);
 }
 
 /**
@@ -788,27 +811,31 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     }
   }
 
-  // Codex P2 (:795) — "Retry fallbacks when the selected profile changes
-  // address": a 'no_longer_live' outcome isn't the only way an attempt can
-  // fail to fulfil the projected mailbox — the attempted profile's address
-  // may simply have CHANGED to a DIFFERENT mailbox since the projection
-  // (this run's own candidate read, or a later fallback retry), and
-  // importOneCustomer would then classify — and possibly import — THAT new
-  // address instead, which is a different candidate's business entirely,
-  // never this mailbox's. So this loop judges by MAILBOX, never by outcome
-  // code: before each attempt, a cheap unlocked peek of that profile's
-  // CURRENT address (fetchLiveCandidate, no lock, no transaction —
-  // importOneCustomer's own decision re-reads the real address under lock)
-  // is checked against the SAME mailbox identity the projection used
-  // (googleMailboxIdentity). A profile that moved to a different mailbox is
-  // skipped WITHOUT ever calling importOneCustomer — its new address is
-  // left to its own candidate row, never imported here as a side effect of
-  // THIS mailbox's fallback chain — and the next fallback (in the SAME
-  // canonical order the projection picked them) is tried. Only an attempt
-  // still in the projected mailbox is even attempted, and its outcome
-  // (imported / excluded / row_appeared / a race-driven no_longer_live)
-  // settles the mailbox — counted once, as the FINAL outcome, never once
-  // per attempt.
+  // Codex P2 (:795, :817) — "Retry fallbacks when the selected profile
+  // changes address" / "Recheck the expected mailbox inside the import
+  // transaction": a 'no_longer_live' outcome isn't the only way an attempt
+  // can fail to fulfil the projected mailbox — the attempted profile's
+  // address may simply have CHANGED to a DIFFERENT mailbox since the
+  // projection (this run's own candidate read, or a later fallback retry),
+  // and importOneCustomer would then classify — and possibly import — THAT
+  // new address instead, which is a different candidate's business
+  // entirely, never this mailbox's. So this loop judges by MAILBOX, never
+  // by outcome code, with TWO checks: a cheap unlocked peek of that
+  // profile's CURRENT address (fetchLiveCandidate, no lock, no
+  // transaction) up front, as a pre-filter that skips an obviously-moved
+  // profile without even opening a transaction; and the authoritative one
+  // — importOneCustomer is given the SAME expected mailbox, and
+  // decideAddress re-checks it itself immediately after the row is
+  // FOR SHARE-locked, since the unlocked peek here can still race against
+  // that locked read in the exact gap between the two. Either check finding
+  // a mismatch ('mailbox_moved' from the locked one) skips this attempt
+  // WITHOUT ever importing it — its new address is left to its own
+  // candidate row, never imported here as a side effect of THIS mailbox's
+  // fallback chain — and the next fallback (in the SAME canonical order the
+  // projection picked them) is tried. Only an attempt still in the
+  // projected mailbox is ever imported, and its outcome (imported /
+  // excluded / row_appeared / a race-driven no_longer_live) settles the
+  // mailbox — counted once, as the FINAL outcome, never once per attempt.
   async function importAddressWithFallback(customerId, mailbox, fallbackIds) {
     for (const id of [customerId, ...fallbackIds]) {
       const peek = await fetchLiveCandidate(conn, id);
@@ -816,8 +843,8 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
         const peekMailbox = googleMailboxIdentity(normalizeEmail(peek.email)) || normalizeEmail(peek.email);
         if (peekMailbox !== mailbox) continue;
       }
-      const result = await importOneCustomer(conn, id);
-      if (result.outcome === 'no_longer_live') continue;
+      const result = await importOneCustomer(conn, id, mailbox);
+      if (result.outcome === 'no_longer_live' || result.outcome === 'mailbox_moved') continue;
       return result;
     }
     return { outcome: 'no_longer_live' };

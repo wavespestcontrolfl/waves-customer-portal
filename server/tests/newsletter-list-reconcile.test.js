@@ -893,6 +893,42 @@ test('when the selected profile is re-addressed to an ALIAS SPELLING of the same
   expect(state.subscribers[0].customer_id).toBe('c1');
 });
 
+// Codex P2 (:817) — "Recheck the expected mailbox inside the import
+// transaction": the mutation lands strictly AFTER importAddressWithFallback's
+// OWN pre-filter peek (read #5, which sees the ORIGINAL, still-matching
+// mailbox and does not skip the attempt) but BEFORE decideAddress's own
+// reads (#6 peek, #7 FOR SHARE fresh) — proving the SECOND, authoritative
+// check (under the lock, via `expectedMailbox`) is what actually catches a
+// mismatch the pre-filter alone missed.
+test('when the selected profile moves to a DIFFERENT mailbox strictly AFTER the fallback loop\'s own pre-filter peek, the locked recheck still catches it and the fallback imports the ORIGINAL mailbox', async () => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'lockrace@example.com', is_primary_profile: true, created_at: '2026-01-01', first_name: 'Primary' }),
+      cust({ id: 'c2', email: 'lockrace@example.com', created_at: '2026-02-01', first_name: 'Secondary' }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let reads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Read #5 (the pre-filter peek) runs UNCHANGED — c1's mailbox still
+    // matches there. Move it right after, at read #6 — decideAddress's OWN
+    // first read for this attempt — so the pre-filter's own check could
+    // never have caught it.
+    if (sql.includes('WHERE c.id = ?') && ++reads === 6) state.customers[0].email = 'lockraceelsewhere@example.com';
+    return rawImpl(sql, bindings);
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(write.imported).toBe(1);
+  expect(write.excluded.no_longer_live).toBe(0);
+  expect(state.subscribers).toHaveLength(1);
+  // c2's (original) mailbox — never c1's new address.
+  expect(state.subscribers[0].email).toBe('lockrace@example.com');
+  expect(state.subscribers[0].customer_id).toBe('c2');
+});
+
 test('the dry run keys duplicates by mailbox identity: equivalent Google spellings are projected once', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'john.doe+work@gmail.com' }), cust({ id: 'c2', email: 'johndoe@gmail.com' })],

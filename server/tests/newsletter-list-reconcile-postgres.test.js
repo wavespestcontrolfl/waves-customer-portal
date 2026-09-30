@@ -802,4 +802,52 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       await cleanupCommitted([primary.id, secondary.id], [`johndoe${tag}@gmail.com`, aliasEmail]);
     }
   });
+
+  // Codex P2 (:817) — "Recheck the expected mailbox inside the import
+  // transaction": the unlocked pre-filter peek in importAddressWithFallback
+  // can itself be raced — the address moves in the exact gap between THAT
+  // peek and decideAddress's own locked read, so the pre-filter alone would
+  // let the mismatch through. Here the mutation lands strictly AFTER the
+  // pre-filter's own read (so the pre-filter sees the ORIGINAL, matching
+  // mailbox and does not skip the attempt) but BEFORE decideAddress's own
+  // reads — proving the fix's SECOND, authoritative check (under the
+  // FOR SHARE lock, via `expectedMailbox`) is what actually catches it.
+  test('the selected profile moves to a DIFFERENT mailbox strictly AFTER the fallback loop\'s own pre-filter peek: the locked recheck still catches it, the fallback imports the ORIGINAL mailbox, and the moved profile is never imported here (real Postgres)', async () => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const primary = synthCustomer({ email: `lockrace${tag}@example.invalid`, is_primary_profile: true, first_name: 'Primary' });
+    const secondary = synthCustomer({ email: `lockrace${tag}@example.invalid`, first_name: 'Secondary' });
+    const movedEmail = `lockraceelsewhere${tag}@example.invalid`;
+    await seedCommitted([primary, secondary], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: secondary.id, marketing_offers: true, email_enabled: true },
+    ]);
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Projection: reads #1-4 (peek + FOR SHARE fresh, primary then
+      // secondary). Read #5 is importAddressWithFallback's OWN pre-filter
+      // peek on primary — pausing there traps the run AFTER that peek has
+      // already read (and matched) the ORIGINAL address, but before
+      // decideAddress's own peek (read #6) has run.
+      const { conn: pausedA, reached, release } = pauseNthRawCall(connA, 'WHERE c.id = ?', 5);
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: pausedA }).then((r) => { settled = true; return r; });
+      await reached;
+      expect(settled).toBe(false);
+      await db('customers').where({ id: primary.id }).update({ email: movedEmail });
+      release();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      expect(result.imported).toBe(1);
+      expect(result.excluded.no_longer_live).toBe(0);
+      const rows = await db('newsletter_subscribers').whereRaw('email LIKE ?', [`%${tag}%`]);
+      expect(rows).toHaveLength(1);
+      // secondary's (original) mailbox — never primary's new address, even
+      // though the pre-filter peek itself never caught the move.
+      expect(rows[0].email).toBe(`lockrace${tag}@example.invalid`);
+      expect(rows[0].customer_id).toBe(secondary.id);
+    } finally {
+      await connA.destroy();
+      await cleanupCommitted([primary.id, secondary.id], [`lockrace${tag}@example.invalid`, movedEmail]);
+    }
+  });
 });
