@@ -13259,30 +13259,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
-      // A zero-price re-service conversion voids this visit's invoices below
-      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
-      // while the issued-invoice closeout locks the invoice FIRST and the
-      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
-      // closeout serializes on the scheduled-service invoice-mint advisory
-      // lock ahead of its invoice lock; the conversion takes the same lock
-      // here — after the occupancy rung (slot-reservation's order) and
-      // before any row lock — so the two run strictly one after the other
-      // whichever starts first.
-      //
-      // A plain repricing save takes the SAME lock, for a different race
-      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
-      // minting path takes this lock before it mints, so acquiring it here
-      // — before the findBillingCoveredVisits check just below, and before
-      // this visit's own scheduled_services row is ever locked or written —
-      // means no invoice can be minted at the OLD price while this save is
-      // deciding whether to allow the new one. Held through the write below
-      // (transaction-scoped advisory lock — released on commit/rollback).
-      // Gated on `priceEditPosted` (the request shape), never on a
-      // pre-transaction DB comparison — see its own comment above.
-      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
-        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-        await acquireScheduledInvoiceMintLock(trx, req.params.id);
-      }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
       // revalidate after locking: an assignment may finish while we wait.
@@ -13332,6 +13308,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const { lockTechDays } = require('../services/scheduling/tech-day-lock');
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
+      }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung AND the tech-day fence above, and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      //
+      // A plain repricing save takes the SAME lock, for a different race
+      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
+      // minting path takes this lock before it mints, so acquiring it here
+      // — before the findBillingCoveredVisits check further below, and
+      // before this visit's own scheduled_services row is ever locked or
+      // written — means no invoice can be minted at the OLD price while
+      // this save is deciding whether to allow the new one. Held through
+      // the write below (transaction-scoped advisory lock — released on
+      // commit/rollback). Gated on `priceEditPosted` (the request shape),
+      // never on a pre-transaction DB comparison — see its own comment
+      // above.
+      //
+      // Taken AFTER the tech-day fence (Codex P2 on #5253): a save that
+      // combines a price/service edit with a technician assignment used to
+      // take this mint lock BEFORE the fence above, while a concurrent
+      // accept of a reservation-held appointment (estimate-public.js, its
+      // "RUNG 1 FIRST" block) takes the tech-day fence FIRST and this same
+      // mint lock after — an ABBA deadlock. Moved here, after the fence, so
+      // both paths agree: occupancy -> tech-day fence -> mint, in that
+      // order, before any row lock.
+      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
       // Save-time eligibility for the FINAL technician on the FINAL date
       // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
@@ -19018,9 +19028,9 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 
 // A held family (lawn_care / mosquito / tree_shrub — cancellation-
 // resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
-// before resume_on": every one of the family's upcoming visits was moved out
-// to no earlier than that date and the monthly component (when the customer
-// is on one) suspended. Top-up must honor that same promise rather than
+// before resume_on": every one of the family's visits inside the pause was
+// skipped (a prepaid one moved to on or after that date) and the monthly
+// component (when the customer is on one) suspended. Top-up must honor that same promise rather than
 // booking a fresh visit into the held window. Codex GitHub r6 P1.
 //
 // Reuses holds.js's own family classifier (familyOfServiceRow,
@@ -19034,8 +19044,8 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 //
 // "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
 // itself reads: status: 'active' AND resume_on in the future. A hold whose
-// resume_on has already arrived is not fenced here — startHold moves every
-// visit in the family to no earlier than resume_on, so a visit ON that date
+// resume_on has already arrived is not fenced here — startHold leaves no
+// family visit before resume_on, so a visit ON that date
 // is exactly what the hold always intended to let through once it ends;
 // runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
 // independently of top-up.
@@ -26202,6 +26212,7 @@ router._test = {
   isDuplicateActiveSeries,
   resolveDuplicateActiveSeries,
   normalizeTopUpWindow,
+  assignableRecurringTemplateTechnicianId,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
   acquireRecurringSeriesMaintenanceLock,

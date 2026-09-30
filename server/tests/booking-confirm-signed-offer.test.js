@@ -1100,4 +1100,216 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     expect(row.source_estimate_id).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not belong'));
   });
+
+  // ---- GATE_BOOK_ARRIVAL_GRACE (owner-approved 2026-09-29): the commit half of
+  // offer/commit parity. The strict travel-gap probe (findConflictingVisits
+  // with `travel`) tolerates a clash ONLY for a graced offer, with a prepared
+  // capacity proof, when every clash is a previous-side buffer against an
+  // assigned committed stop — and verifyArrivalCapacity then enforces the
+  // offer's own grace. The offer-side twin is book-arrival-grace-parity.test.js.
+  describe('GATE_BOOK_ARRIVAL_GRACE commit gate', () => {
+    const {
+      BOOK_ARRIVAL_GRACE_OFFER_POLICY,
+    } = require('../utils/slot-offer-token');
+    const ENV = ['GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT', 'GATE_BOOK_ARRIVAL_GRACE', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
+    const savedEnv = {};
+    let arrivalRoute; let prepareSpy; let verifySpy; let conflictSpy; let laneSpy;
+    const FIT = { feasible: true, routeOrder: ['earlier', '__candidate__', 'later'], arrivalDelayMinutes: 12 };
+    const clash = (extra = {}) => ({
+      id: 'prev-stop', technician_id: TECH_ID, customer_id: 'cust-x', reservation_expires_at: null,
+      conflict_reason: 'travel_gap', window_start: '08:00:00', ...extra,
+    });
+
+    beforeEach(() => {
+      for (const k of ENV) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'true';
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '120';
+      arrivalRoute = require('../services/scheduling/arrival-route');
+      prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({ options: { prospective: { lat: LAT, lng: LNG } } });
+      verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue(FIT);
+      conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
+      for (const k of ENV) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    const gracedSig = (grace = 90, overrides = {}) => mintSlotOfferField(offerPayload({
+      policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY, arrivalGrace: grace, ...overrides,
+    }));
+    const confirmGraced = (sig) => createSelfBooking(confirmPayload(sig));
+
+    test('a graced offer whose only clash is the previous stop\'s buffer commits — verifyArrivalCapacity gets the OFFER\'s grace, and the row is inserted', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL); // sentinel = reached the insert
+      expect(capturedScheduledInsert).toBeDefined();
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test('the grace comes from the signed field, not the live env: env now reads 30, the offer said 90 — the commit still enforces 90', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '30';
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test.each([
+      ['the next stop\'s buffer', clash({ window_start: '10:00:00' })],
+      ['a real overlap', clash({ conflict_reason: 'overlap' })],
+      ['an unassigned stop', clash({ technician_id: null })],
+      ['another technician\'s stop', clash({ technician_id: 'someone-else' })],
+      ['a live hold', clash({ customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z' })],
+      ['an interview', clash({ id: 'interview:1', conflict_reason: 'interview' })],
+    ])('a graced offer still refuses %s as SLOT_TAKEN, never reaching verifyArrivalCapacity', async (_label, row) => {
+      conflictSpy.mockResolvedValue([row]);
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('one waivable clash plus one that is not (both neighbours) refuses', async () => {
+      conflictSpy.mockResolvedValue([clash(), clash({ id: 'next-stop', window_start: '10:00:00' })]);
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('an ungraced offer (grace 0 — env unset, same-day pick) is strict: the same previous-side clash refuses', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY })); // grace 0 mints the plain insertion tag (round 3)
+      await expect(confirmGraced(sig)).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('an ungraced offer with no clash still verifies WITHOUT a grace bound (undefined — the pre-existing 120-minute promise only)', async () => {
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      await expect(confirmGraced(sig)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+    });
+
+    test('verifyArrivalCapacity refusing the graced slot (delay past the grace, route changed) is the standard SLOT_TAKEN', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      verifySpy.mockRejectedValue(Object.assign(new Error('This time is no longer available. Please choose another appointment.'), {
+        code: 'SLOT_UNAVAILABLE', reason: 'arrival_grace', statusCode: 409, isOperational: true,
+      }));
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    const SIG_MISS = { ok: false, status: 409, error: expect.stringMatching(/no longer available/i) };
+
+    test('a REAL gate / capacity-mode flip still fails the signature: a graced offer confirmed with the grace gate off, or with mid-route insertion off', async () => {
+      const graced = gracedSig(90);
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'false';
+      await expect(confirmGraced(graced)).resolves.toEqual(SIG_MISS);
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'false';
+      await expect(confirmGraced(graced)).resolves.toEqual(SIG_MISS);
+      // an insertion-tagged strict offer confirmed with insertion off fails as before (#5231)
+      const insertionOnly = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      await expect(confirmGraced(insertionOnly)).resolves.toEqual(SIG_MISS);
+    });
+
+    test('the grace env crossing zero does NOT orphan an in-flight offer (Codex r4 P2): a graced offer minted at 90 still confirms once the env reads 0, with ITS grace', async () => {
+      const graced = gracedSig(90);
+      conflictSpy.mockResolvedValue([clash()]);
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      await expect(confirmGraced(graced)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test('...and a strict offer minted while the env read 0 still confirms once it becomes positive — strict (no waiver, no grace bound)', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      const strict = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '120';
+      await expect(confirmGraced(strict)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+      // strict means strict: the previous-side buffer is still refused
+      verifySpy.mockClear();
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(strict)).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('the grace value crossing zero with a TAMPERED shape still fails: a strict offer given a grace segment, a graced offer stripped of it', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      const [exp, sig] = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY })).split('.');
+      await expect(confirmGraced([exp, '90', sig].join('.'))).resolves.toEqual(SIG_MISS);
+      const [gExp, , gSig] = gracedSig(90).split('.');
+      await expect(confirmGraced([gExp, gSig].join('.'))).resolves.toEqual(SIG_MISS);
+    });
+
+    test('with the second-tech fix (GATE_MULTI_TECH_CONFIRM): a graced offer survives the env crossing zero and the probe stays scoped to the booked tech', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        const graced = gracedSig(90);
+        process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+        conflictSpy.mockResolvedValue([clash()]);
+        await expect(confirmGraced(graced)).rejects.toThrow(SENTINEL);
+        expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID }));
+        expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+      } finally { delete process.env.GATE_MULTI_TECH_CONFIRM; }
+    });
+
+    test('the cleartext grace segment is verified, not trusted: raising it from 90 to 120 fails the signature', async () => {
+      const [exp, grace, sig] = gracedSig(90).split('.');
+      expect(grace).toBe('90');
+      await expect(confirmGraced([exp, '120', sig].join('.'))).resolves.toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+      // and stripping it (claiming an ungraced v2 shape) fails too
+      await expect(confirmGraced([exp, sig].join('.'))).resolves.toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+    });
+
+    test('GATE OFF (capacity + commit on, grace gate unset): an insertion-tagged offer commits with NO grace bound and a previous-side clash stays SLOT_TAKEN — byte-identical to before this lane', async () => {
+      delete process.env.GATE_BOOK_ARRIVAL_GRACE;
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(sig)).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+      conflictSpy.mockResolvedValue([]);
+      await expect(confirmGraced(sig)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+    });
+
+    test('GATE_MULTI_TECH_CONFIRM + GATE_BOOK_ARRIVAL_GRACE together: the probe is tech-scoped AND a graced offer still waives its previous-side buffer', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        conflictSpy.mockResolvedValue([clash()]);
+        await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL);
+        expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID }));
+        expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+        // and the non-waivable clashes still refuse under the scoped probe
+        capturedScheduledInsert = undefined; verifySpy.mockClear();
+        conflictSpy.mockResolvedValue([clash({ window_start: '10:00:00' })]);
+        await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+        expect(verifySpy).not.toHaveBeenCalled();
+      } finally { delete process.env.GATE_MULTI_TECH_CONFIRM; }
+    });
+
+    test('a same-day slot (grace 0 for its date) is signed and verified under the plain insertion policy even with the gate on', async () => {
+      const today = etDateString(new Date());
+      const sig = mintSlotOfferField(offerPayload({ date: today, policy: BOOK_INSERTION_OFFER_POLICY }));
+      const result = await createSelfBooking(confirmPayload(sig, { slot_date: today }));
+      // clears the signature gate (any later refusal is not the 409 signature miss)
+      expect(result.error || '').not.toMatch(/pick your time again/i);
+    });
+
+    test('an internal callback booking (re-service / inspection: no signed field) reads the live grace for its date', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(createSelfBooking(callbackPayload())).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 120 });
+    });
+
+    test('an internal callback booking with the gate OFF keeps the strict probe', async () => {
+      delete process.env.GATE_BOOK_ARRIVAL_GRACE;
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(createSelfBooking(callbackPayload())).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+  });
 });

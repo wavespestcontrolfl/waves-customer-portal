@@ -941,8 +941,11 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       // subquery convention this codebase already uses elsewhere
       // (availability.js's whereNotExists(function linkedVisit() {...})).
       this.where('md.prompt_version', drafter.PROMPT_VERSION)
-        .orWhere('md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION)
-        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`);
+        // the whole real-answers family (bare, '_cf', later suffixes, any
+        // '+category' tags) — NOT the current REAL_ANSWERS_PROMPT_VERSION,
+        // which moves with every suffix bump and would strand rows stamped
+        // under an earlier version. LIKE metacharacters escaped.
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_VERSION_FAMILY.replace(/[\\%_]/g, '\\$&')}%`);
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)

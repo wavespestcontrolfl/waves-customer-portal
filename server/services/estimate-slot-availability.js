@@ -41,6 +41,7 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
@@ -1838,8 +1839,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   // Cache check — keyed per (estimateId, hour bucket).
   cleanupCache(wrapperCache);
+  // Zone route day policy (GATE_ZONE_ROUTE_DAYS + system_settings
+  // schedule_zone_route_days) versioned into the key, resolved BEFORE the
+  // lookup: a gate flip or config edit (incl. the `{}` kill switch) must not
+  // serve — or hide — offers built under the old detour cap for the TTL.
+  // null = config unreadable this request: neither read nor write the cache.
+  const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const cacheKey = [
     estimateId,
+    `route-days:${routeDayPolicyKey}`,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     // Lunch gate state in the key (GATE_BOOKING_LUNCH_BLOCK, owner ruling
     // 2026-09-23): a result computed while noon was offerable must never be
@@ -1888,7 +1896,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // estimate's booking never invalidated, and never writes its own
   // (uncapped) result over the page's.
   const bypassCache = userOpts.bypassCache === true;
-  const cached = bypassCache ? null : wrapperCache.get(cacheKey);
+  const cached = bypassCache || routeDayPolicyKey == null ? undefined : wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
     // The result was cached for 5 min but the bucket can straddle a lead-time
     // boundary — a slot bookable when cached (e.g. 13:00 at 10:59 ET) can be
@@ -1977,6 +1985,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const skipResultCache = !!serviceProfile.reservationServiceMix
     || (isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed));
   const coords = await resolveEstimateCoords(estimate);
+  // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): the
+  // picker's find-time call lifts the detour cap on the zone's route day so
+  // an empty Friday can be offered (and seeded by the funnel below). Zone
+  // comes from the estimate's coordinates first, its city-resolved
+  // estimateZone as the fallback. Null with the gate off (no db call).
+  const routeDaySlug = coords
+    ? await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, estimateZone, conn: db })
+    : null;
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
   // no route-proximity tags. Getting the customer on the calendar still
@@ -2064,6 +2080,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
       lng: coords.lng,
+      zoneSlug: routeDaySlug,
       durationMinutes: serviceProfile.durationMinutes,
       serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
@@ -2151,9 +2168,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     filterPastSlotsForToday(filterTimeOfDay(classified, opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes }),
     serviceProfile,
   );
-  const preferredSeedDates = [];
+  let preferredSeedDates = [];
   for (const s of seedRankedRoute) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
+  }
+  // The zone's route day seeds first (GATE_ZONE_ROUTE_DAYS) — an empty
+  // Friday's detour score is the whole HQ round trip, so score order alone
+  // would rank it behind any other far day. Same-request config read, only
+  // when the gate resolved a route-day zone.
+  if (routeDaySlug) {
+    preferredSeedDates = preferRouteDayDates(preferredSeedDates, {
+      zoneSlug: routeDaySlug, config: await readZoneRouteDays(db),
+    });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
@@ -2208,7 +2234,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // cluster-day slot stays invisible until TTL expiry. Funneled-zone
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
-  if (funnelDays == null && !skipResultCache && !bypassCache) {
+  if (funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;
@@ -2303,9 +2329,14 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 
   const { dateFrom, dateTo } = etDateRange(opts.windowDays);
 
+  // Same zone-route-day lift as the live path (GATE_ZONE_ROUTE_DAYS), from
+  // coordinates only — this debug view has no resolved estimateZone.
+  const routeDaySlug = await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, conn: db });
+
   const raw = await findAvailableSlots({
     lat: coords.lat,
     lng: coords.lng,
+    zoneSlug: routeDaySlug,
     durationMinutes: serviceProfile.durationMinutes,
     serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     capacityPlacement: true,

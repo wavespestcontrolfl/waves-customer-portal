@@ -28,6 +28,7 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
+const { renderCompanyFactsSection } = require('./sms-company-facts');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -97,7 +98,21 @@ const PROMPT_VERSION = 'house_voice_v11';
 // cancellation). generateGroundedDraft stamps this version instead of
 // PROMPT_VERSION on a draft that actually used the rewritten prompt, so
 // judge/ledger rows tell the two cohorts apart.
-const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
+// COMPANY FACTS (owner rulings 2026-09-29/30): the gate-on facts block now
+// carries the owner-approved COMPANY FACTS section (sms-company-facts.js) and
+// the gate-on system prompt allows general pest knowledge + treats those
+// facts as authoritative, so drafts made with them stamp '_cf' — distinct
+// from every earlier bare-v12 draft. Still starts with 'house_voice_v12'
+// (sms-amount-recheck, sms-sealed-eval, agent-decision-send-checks and
+// sms-followup-sla all recognize the real-answers cohort by that prefix, and
+// sms-auto-send's discovery matches REAL_ANSWERS_VERSION_FAMILY). 31 chars; with all four
+// category tags ('+bclm') 36, under PROMPT_VERSION_COLUMN_MAX.
+// The identity FAMILY every real-answers cohort shares (bare, '_cf', any later
+// suffix, any '+category' tags): readers that must recognize ALL of them —
+// sms-auto-send's gratitude discovery — match this prefix, never the current
+// constant, so a suffix bump cannot orphan rows stamped under earlier versions.
+const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers_cf';
 const SHADOW_STATUS = 'shadow';
 
 /**
@@ -1473,7 +1488,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
   // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
@@ -1485,6 +1500,16 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const noAppointmentRule = realAnswersOn
     ? "If the customer asks when we're coming and no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times) so they can pick one; only if OPEN TIMES is absent or empty, say you'll confirm it and get right back to them."
     : "If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.";
+  // COMPANY FACTS (owner rulings 2026-09-29/30), gate-on only: the per-draft
+  // COMPANY FACTS section is authoritative. '' when the gate is off, so the
+  // v11 prompt is byte-identical. The section's content is per-draft data
+  // (buildFactsBlock), never interpolated here.
+  const companyFactsRules = realAnswersOn
+    ? `
+COMPANY FACTS:
+- The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
+`
+    : '';
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
@@ -1512,7 +1537,7 @@ PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
 ${deferRule}
-
+${companyFactsRules}
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
@@ -1668,6 +1693,12 @@ function buildFactsBlock(context, extras = {}) {
   // "not eligible" (fail closed). Resolved upstream (fetchReserviceLanes).
   const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS') && gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
     ? `${reserviceFactLine(extras.reserviceLanes)}\n`
+    : '';
+  // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
+  // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
+  // against like any other section. '' gate-off (byte-identical).
+  const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? renderCompanyFactsSection()
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -1909,7 +1940,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}${reserviceSection}BILLING:
+${openTimesSection}${slaSection}${reserviceSection}${companyFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -2847,6 +2878,7 @@ module.exports = {
   DRAFTER,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  REAL_ANSWERS_VERSION_FAMILY,
   currentPromptVersion,
   VERIFY_ENABLED,
   MAX_REVISIONS,

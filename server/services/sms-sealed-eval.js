@@ -40,6 +40,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const {
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
+} = require('./sms-company-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -131,10 +134,29 @@ function isV12PromptVersion(promptVersion) {
 // stamped with that category's tag must grade only items frozen with it —
 // otherwise it scores category behavior on inputs live drafts never lack.
 const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
+// Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
+// identity carries a suffix token for every per-draft fact section a later
+// revision added ('house_voice_v12_real_answers_cf' = COMPANY FACTS). A suffix
+// token REQUIRES its marker, and — since the contract is exact — versions
+// without the token FORBID it, so items frozen before the section existed
+// never grade a suffixed version and suffixed items never grade an older one.
+// A future fact section (LABEL FACTS, ...) is one more row here plus its
+// suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER });
+function versionSuffixTokens(promptVersion) {
+  const base = String(promptVersion).split('+')[0];
+  if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
+  return base.slice(REAL_ANSWERS_BASE_VERSION.length).split('_').filter(Boolean);
+}
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
   const tags = String(promptVersion).split('+')[1] || '';
-  return [V12_FACTS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return [
+    V12_FACTS_MARKER,
+    ...versionSuffixTokens(promptVersion).map((t) => VERSION_SUFFIX_FACT_MARKERS[t]).filter(Boolean),
+    ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
+  ];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
 // carry must be ABSENT too — an item frozen while complaints were on carries
@@ -142,7 +164,7 @@ function requiredFactMarkers(promptVersion) {
 // grade the plain v12 prompt after a rollback or switch. Every version has
 // one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
 // replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
@@ -155,19 +177,40 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
+// Does a frozen facts block carry this marker? The COMPANY FACTS marker is
+// TRUSTED only by an exact render before the first BILLING: line (a header
+// typed into a multi-line SMS proves nothing — Codex #5392 r3 P2); every other
+// marker is a server-rendered line and stays a substring check.
+function factPresent(facts, marker) {
+  return marker === COMPANY_FACTS_HEADER ? hasExactCompanyFacts(facts) : facts.includes(marker);
+}
 function itemCompatibleWith(factsBlock, promptVersion) {
   const facts = String(factsBlock || '');
-  return requiredFactMarkers(promptVersion).every((m) => facts.includes(m))
-    && forbiddenFactMarkers(promptVersion).every((m) => !facts.includes(m));
+  return requiredFactMarkers(promptVersion).every((m) => factPresent(facts, m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !factPresent(facts, m));
 }
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
 // complement), parameterized: required markers present, forbidden absent.
+// Mirrors factPresent: LIKE for ordinary markers, the exact-suffix test for
+// COMPANY FACTS (text before the first BILLING: line ends with the exact
+// render). Bindings follow clause order.
 function compatibleWhereRaw(markers, forbidden = []) {
-  const clauses = [
-    ...markers.map(() => "COALESCE(facts_block, '') LIKE ?"),
-    ...forbidden.map(() => "COALESCE(facts_block, '') NOT LIKE ?"),
-  ];
-  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => `%${m}%`) };
+  const col = "COALESCE(facts_block, '')";
+  const clauses = [];
+  const bindings = [];
+  const add = (marker, negate) => {
+    if (marker === COMPANY_FACTS_HEADER) {
+      const exact = exactSectionSuffix();
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    } else {
+      clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
+      bindings.push(`%${marker}%`);
+    }
+  };
+  markers.forEach((m) => add(m, false));
+  forbidden.forEach((m) => add(m, true));
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
@@ -1397,5 +1440,6 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
+    compatibleWhereRaw,
   },
 };

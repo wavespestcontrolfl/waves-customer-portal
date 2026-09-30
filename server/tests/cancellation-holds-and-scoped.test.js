@@ -6,6 +6,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n' }) }));
 const mockReschedule = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../services/rebooker', () => ({ reschedule: (...a) => mockReschedule(...a) }));
+// A skip is a one-way status change with follow-through; the holds tests only
+// care that it is asked for, in order, once the hold stands.
+const mockTransition = jest.fn().mockResolvedValue({});
+jest.mock('../services/job-status', () => ({ transitionJobStatus: (...a) => mockTransition(...a) }));
+const mockTechCancelled = jest.fn();
+jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitCancelled: (...a) => mockTechCancelled(...a) }));
+// The canonical billing-covered reader lives in the schedule route; a visit id
+// in this set is prepaid (moved, never skipped).
+const mockCovered = jest.fn(async () => new Set());
+jest.mock('../routes/admin-schedule', () => ({ findBillingCoveredVisits: (...a) => mockCovered(...a) }));
 const mockSms = jest.fn().mockResolvedValue({ sent: true });
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSms(...a) }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn().mockResolvedValue('body') }));
@@ -32,6 +42,7 @@ function mockMakeBuilder(table) {
           if (op === '>=') return a >= b;
           if (op === '<=') return a <= b;
           if (op === '>') return a > b;
+          if (op === '<') return a < b;
           return a === b;
         });
       } else if (typeof arg1 === 'function') {
@@ -45,11 +56,13 @@ function mockMakeBuilder(table) {
       }
       return builder;
     },
+    whereNotIn(k, vals) { const c = String(k).split('.').pop(); filters.push((r) => !vals.map(String).includes(String(r[c]))); return builder; },
     whereIn(k, vals) { const c = String(k).split('.').pop(); filters.push((r) => vals.map(String).includes(String(r[c]))); return builder; },
     whereNot(arg) { const e = Object.entries(arg); filters.push((r) => !e.every(([k, v]) => String(r[k]) === String(v))); return builder; },
     whereNull(k) { filters.push((r) => r[k] == null); return builder; },
     whereRaw() { return builder; },
     forUpdate() { mockState.forUpdate = (mockState.forUpdate || 0) + 1; return builder; },
+    forShare() { return builder; },
     leftJoin() { return builder; },
     orderBy() { return builder; },
     select(...cols) { return Promise.resolve(applied().map((r) => ({ ...r }))); },
@@ -72,7 +85,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 
-const { startHold, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
+const { startHold, applyHoldSkips, sendDueRestartTexts, runPlanHoldLifecycle } = require('../services/cancellation-resolution/holds');
 const { planScopedWindDown, applyScopedWindDown, scopedPricingFingerprint } = require('../services/cancellation-processor');
 const lockCalls = () => require('../models/db').raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql)).map(([, b]) => b);
 const { etDateString } = require('../utils/datetime-et');
@@ -97,9 +110,28 @@ function daysOut(n) {
   return dt.toISOString().slice(0, 10);
 }
 
+const displayOf = (ymd) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+};
+const lawnVisit = (id, date, extra = {}) => ({
+  id, customer_id: 'c1', status: 'confirmed', scheduled_date: date, service_type: 'Lawn Care Service', window_start: '08:00', window_end: '10:00', ...extra,
+});
+const { notifyAdmin: mockNotifyAdmin } = require('../services/notification-service');
+const bells = (kind) => mockNotifyAdmin.mock.calls.filter(([, , , opts]) => opts?.metadata?.kind === kind);
+
 beforeEach(() => {
-  mockReschedule.mockClear();
-  mockSms.mockClear();
+  // A move lands on the fixture, as the real rebooker does: the under-lock
+  // identity check reads the moved visit at its new date.
+  mockReschedule.mockReset().mockImplementation(async (id, to) => {
+    const row = (mockState.tables.scheduled_services || []).find((v) => v.id === id);
+    if (row) row.scheduled_date = to;
+    return { ok: true };
+  });
+  mockTransition.mockReset().mockResolvedValue({});
+  mockCovered.mockReset().mockResolvedValue(new Set());
+  mockNotifyAdmin.mockClear();
+  mockSms.mockReset().mockResolvedValue({ sent: true });
   seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }] });
 });
 
@@ -110,16 +142,22 @@ describe('startHold (ruling C-4)', () => {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(181) })).rejects.toMatchObject({ code: 'hold_too_long' });
   });
 
-  test('pest can never be held; once per family per 12 months', async () => {
+  test('pest can never be held; once per family per 12 months — an undone (cancelled) hold does not count', async () => {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'pest_control', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_family_invalid' });
-    seed({
-      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }],
-      holds: [{ id: 'h0', customer_id: 'c1', family_key: 'lawn_care', status: 'resumed', created_at: new Date() }],
-    });
-    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_cooldown' });
+    const customers = [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay' }];
+    const prior = (status) => ({ id: 'h0', customer_id: 'c1', family_key: 'lawn_care', status, created_at: new Date() });
+    for (const status of ['resumed', 'active']) {
+      seed({ customers, holds: [prior(status)], visits: [lawnVisit('l1', daysOut(10))] });
+      await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_cooldown' });
+    }
+    // A hold that was compensated, obsolete or churned was never used up.
+    seed({ customers, holds: [prior('cancelled')], visits: [lawnVisit('l1', daysOut(10))] });
+    const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) });
+    expect(result.holdId).toBeTruthy();
   });
 
   test('a monthly-lane family with no ledger component fails closed', async () => {
+    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }], components: [], visits: [lawnVisit('l1', daysOut(10))] });
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_unattributed' });
   });
 
@@ -127,23 +165,32 @@ describe('startHold (ruling C-4)', () => {
     // annual_prepay carries a legacy monthly_rate but the dues cron never
     // bills it; the old rate>0 shortcut demanded a component and blocked the
     // hold (Codex #3669 r3 P2).
-    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }] });
+    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }], visits: [lawnVisit('l1', daysOut(10))] });
     const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) });
     expect(result.holdId).toBeTruthy();
     expect(mockState.tables.plan_holds[0].held_monthly_rate).toBe(null);
     expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(150); // untouched
   });
 
-  test('happy path: component suspended, scalar recomputed, tier protected, no visit spam', async () => {
+  test('happy path: component suspended, scalar recomputed, tier protected; in-pause visits are handed back to skip, none are touched yet', async () => {
     seed({
       customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
       components: [
         { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 },
         { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
       ],
+      // Two inside the pause, one on the return date (the first visit back).
+      visits: [lawnVisit('l1', daysOut(10)), lawnVisit('l2', daysOut(40)), lawnVisit('l3', daysOut(90))],
     });
     const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) });
     expect(result.holdId).toBeTruthy();
+    expect(result.pendingSkips.map((v) => v.id)).toEqual(['l1', 'l2']);
+    // Nothing is shifted, and nothing is skipped by startHold itself.
+    expect(mockReschedule).not.toHaveBeenCalled();
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockState.tables.scheduled_services.map((v) => [v.id, v.status, v.scheduled_date])).toEqual([
+      ['l1', 'confirmed', daysOut(10)], ['l2', 'confirmed', daysOut(40)], ['l3', 'confirmed', daysOut(90)],
+    ]);
     const lawn = mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care');
     expect(Number(lawn.monthly_rate)).toBe(0);
     const customer = mockState.tables.customers[0];
@@ -152,63 +199,549 @@ describe('startHold (ruling C-4)', () => {
     expect(mockState.tables.plan_holds).toHaveLength(1);
     expect(Number(mockState.tables.plan_holds[0].held_monthly_rate)).toBe(90);
   });
+
+  test('a prepaid visit that shares a stop is refused before anything moves — the rebooker would carry the whole stop', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
+      visits: [lawnVisit('p1', daysOut(5), { visit_id: 'stop-1' }), lawnVisit('s1', daysOut(12))],
+    });
+    mockCovered.mockResolvedValue(new Set(['p1']));
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) }))
+      .rejects.toMatchObject({ code: 'hold_visits_unmovable' });
+    expect(mockReschedule).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds).toHaveLength(0);
+  });
+
+  test('a retry of the same accept picks up the hold its stopped attempt wrote, instead of reading "nothing to pause"', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay' }],
+      holds: [{ id: 'h9', customer_id: 'c1', family_key: 'lawn_care', cancellation_case_id: 'k', status: 'active', starts_on: TODAY, resume_on: daysOut(30),
+        moved_visits: JSON.stringify({ moved: [{ id: 'p1' }], toSkip: [{ id: 's1', status: 'confirmed', from: daysOut(9) }, { id: 's2', status: 'confirmed', from: daysOut(12) }], skipped: ['s2'], skipsFinal: false, acceptCommitted: false }) }],
+      visits: [lawnVisit('p1', daysOut(30)), lawnVisit('s1', daysOut(9)), lawnVisit('back', daysOut(45))],
+    });
+    const out = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
+    expect(out).toMatchObject({ holdId: 'h9', moved: 1, pendingSkips: [{ id: 's1' }] });
+    expect(out.notNeeded).toBeUndefined();
+    expect(mockState.tables.plan_holds).toHaveLength(1);
+    expect(mockReschedule).not.toHaveBeenCalled();
+  });
+
+  test('"nothing to pause" is answered before the once-a-year limit and the billing checks: no new hold, no free month either way', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }], components: [],
+      holds: [{ id: 'h0', customer_id: 'c1', family_key: 'lawn_care', status: 'resumed', created_at: new Date() }],
+      visits: [lawnVisit('back', daysOut(45))],
+    });
+    expect(await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+    expect(mockState.tables.plan_holds).toHaveLength(1);
+  });
+
+  test('a prepaid visit inside the pause is MOVED (first to the return date, spacing kept, single-visit), never skipped', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
+      visits: [lawnVisit('p1', daysOut(5)), lawnVisit('s1', daysOut(12)), lawnVisit('p2', daysOut(20)), lawnVisit('back', daysOut(45))],
+    });
+    mockCovered.mockResolvedValue(new Set(['p1', 'p2']));
+    const window = { start: '08:00', end: '10:00' };
+    const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
+    expect(mockReschedule).toHaveBeenCalledTimes(2);
+    expect(mockReschedule).toHaveBeenCalledWith('p1', daysOut(30), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(5), window_start: '08:00', window_end: '10:00', visit_id: null, status: 'confirmed' } });
+    expect(mockReschedule).toHaveBeenCalledWith('p2', daysOut(45), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(20), window_start: '08:00', window_end: '10:00', visit_id: null, status: 'confirmed' } });
+    expect(result.moved).toBe(2);
+    expect(result.pendingSkips.map((v) => v.id)).toEqual(['s1']);
+  });
+
+  test('a prepaid visit that will not move refuses the hold: earlier moves are reverted (single-visit), nothing is written or skipped', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
+      visits: [lawnVisit('p1', daysOut(5)), lawnVisit('s1', daysOut(12)), lawnVisit('p2', daysOut(20))],
+    });
+    mockCovered.mockResolvedValue(new Set(['p1', 'p2']));
+    mockReschedule.mockImplementationOnce(async () => ({ ok: true })).mockRejectedValueOnce(new Error('slot taken'));
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).rejects.toMatchObject({ code: 'hold_visits_unmovable' });
+    expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(30), window_start: '08:00', window_end: '10:00', visit_id: null } });
+    expect(mockState.tables.plan_holds).toHaveLength(0);
+    expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
+    expect(mockTransition).not.toHaveBeenCalled();
+  });
+
+  test('no visit inside the away dates: nothing to pause — no hold, no writes, and the next visit back is reported', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      // The only visits are on the return date and later; a past-dated
+      // 'rescheduled' placeholder anchors nothing.
+      visits: [lawnVisit('back', daysOut(60)), lawnVisit('later', daysOut(90)), lawnVisit('stale', daysOut(-3), { status: 'rescheduled' })],
+    });
+    const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) });
+    expect(result).toEqual({ notNeeded: true, familyKey: 'lawn_care', nextVisitOn: daysOut(60), nextVisitDisplay: displayOf(daysOut(60)) });
+    expect(mockState.tables.plan_holds).toHaveLength(0);
+    expect(Number(mockState.tables.customer_plan_rates[0].monthly_rate)).toBe(90);
+    expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(150);
+    expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
+    expect(mockState.tables.customer_interactions).toHaveLength(0);
+    expect(mockReschedule).not.toHaveBeenCalled();
+    // And with no visit booked at all there is no date to name.
+    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay' }] });
+    expect(await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) }))
+      .toEqual({ notNeeded: true, familyKey: 'lawn_care', nextVisitOn: null, nextVisitDisplay: null });
+  });
+});
+
+describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the hold stands)', () => {
+  const held = (over = {}) => ({
+    holdId: 'h1', familyKey: 'lawn_care', resumeOn: daysOut(30),
+    pendingSkips: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'pending', from: daysOut(12) }], ...over,
+  });
+  const record = () => JSON.parse(mockState.tables.plan_holds[0].moved_visits);
+
+  const seedHeld = (visits) => seed({
+    holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) }],
+    visits: visits || [lawnVisit('l1', daysOut(5), { technician_id: 't1' }), lawnVisit('l2', daysOut(12), { status: 'pending' })],
+  });
+
+  test('skips every in-pause visit through the canonical transition, under its row lock, with no customer notice; the assigned tech hears after commit', async () => {
+    mockTechCancelled.mockClear();
+    seedHeld();
+    await applyHoldSkips([held()]);
+    expect(mockTransition).toHaveBeenCalledTimes(2);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', fromStatus: 'confirmed', toStatus: 'skipped', notifyCustomer: false, trx: expect.anything() }));
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2', fromStatus: 'pending', toStatus: 'skipped', notifyCustomer: false }));
+    expect(mockState.forUpdate).toBeGreaterThanOrEqual(2);
+    expect(mockTechCancelled).toHaveBeenCalledTimes(1);
+    expect(mockTechCancelled).toHaveBeenCalledWith(expect.objectContaining({ visitId: 'l1', technicianId: 't1', actorId: 'customer', trx: expect.anything() }));
+    expect(record().skipped).toEqual(['l1', 'l2']);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the plan is re-checked under the lock: a visit moved out of the pause is left alone quietly; one paid for or gone live in the gap rings the office', async () => {
+    seedHeld([lawnVisit('l1', daysOut(40)), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2' }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    mockTransition.mockClear();
+    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'pending', track_state: 'on_property' })]);
+    mockCovered.mockImplementation(async (_conn, rows) => new Set(rows.filter((r) => r.id === 'l1').map((r) => r.id)));
+    await applyHoldSkips([held()]);
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(bells('plan_hold_skip_failed').map((c) => c[3].metadata)).toEqual([
+      expect.objectContaining({ visitId: 'l1', reason: 'prepaid' }),
+      expect.objectContaining({ visitId: 'l2', reason: 'live' }),
+    ]);
+  });
+
+  test('a skip re-checks the visit is still this customer\'s visit in this family; one reassigned since is left alone', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { customer_id: 'c2' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held({ customerId: 'c1' })]);
+    expect(mockTransition.mock.calls.map(([a]) => a.jobId)).toEqual(['l2']);
+  });
+
+  test('a visit left bookable inside the pause keeps the plan open, and the daily recovery retries it; an ended visit closes it', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'en_route' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ skipped: ['l2'], unresolved: ['l1'], skipsFinal: false });
+    // A visit whose STATUS says underway is live too, never "ended".
+    seedHeld([lawnVisit('l1', daysOut(5), { status: 'on_site' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ unresolved: ['l1'], skipsFinal: false });
+
+    mockTransition.mockClear();
+    seedHeld([lawnVisit('l1', daysOut(5), { status: 'completed' }), lawnVisit('l2', daysOut(12), { status: 'cancelled' })]);
+    await applyHoldSkips([held()]);
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ unresolved: [], skipsFinal: true });
+  });
+
+  test('a rebook placeholder inside the pause is not a visit: no hold is needed for it and it is never skipped', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('ph', daysOut(6), { status: 'rescheduled' }), lawnVisit('back', daysOut(45))],
+    });
+    const out = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
+    expect(out).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+    expect(mockState.tables.plan_holds || []).toHaveLength(0);
+  });
+
+  test('"nothing to pause" is re-checked under the writer lock: a visit booked into the pause meanwhile refuses it', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('back', daysOut(45))],
+    });
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.scheduled_services.push(lawnVisit('new', daysOut(8))); return openTrx(cb); };
+    try {
+      await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) }))
+        .rejects.toMatchObject({ code: 'hold_visits_changed' });
+    } finally { db.transaction = openTrx; }
+  });
+
+  test('a skip that fails rings the office for that visit, the hold stands, and the other skips still run', async () => {
+    seedHeld();
+    mockTransition.mockRejectedValueOnce(new Error('one-way guard'));
+    await expect(applyHoldSkips([held()])).resolves.toBeUndefined();
+    expect(mockTransition).toHaveBeenCalledTimes(2);
+    expect(bells('plan_hold_skip_failed')).toHaveLength(1);
+    expect(bells('plan_hold_skip_failed')[0][3]).toMatchObject({ bell: true, dedupeKey: 'plan_hold_skip_failed:l1', metadata: { holdId: 'h1', visitId: 'l1' } });
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+    expect(record().skipped).toEqual(['l2']);
+  });
 });
 
 describe('runPlanHoldLifecycle', () => {
-  test('reminds once at ≤7 days out, resumes on the date and restores the rate', async () => {
-    seed({
-      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly_membership', tier_protected_until: daysOut(5) }],
-      components: [
-        { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
-        { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
-      ],
-      holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(5), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date() }],
-    });
-    const first = await runPlanHoldLifecycle({ today: TODAY });
+  const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+  const holdSeed = (holdOver = {}, visits = []) => seed({
+    customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly_membership', tier_protected_until: daysOut(20) }],
+    components: [
+      { customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' },
+      { customer_id: 'c1', family_key: 'pest_control', monthly_rate: 60 },
+    ],
+    holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(20), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date(), ...holdOver }],
+    visits,
+  });
+
+  test('texts once, 7 days before the first visit back, naming that visit\'s date; resumes the rate on the return date', async () => {
+    // The first visit back is a week AFTER the return date; the skipped
+    // in-pause visit and a cancelled one do not count as "back".
+    holdSeed({}, [lawnVisit('paused', daysOut(8), { status: 'skipped' }), lawnVisit('gone', daysOut(21), { status: 'cancelled' }),
+      lawnVisit('back', daysOut(27)), lawnVisit('later', daysOut(57))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0); // 27 days out
+    expect(mockSms).not.toHaveBeenCalled();
+
+    const first = await runPlanHoldLifecycle({ today: daysOut(20) }); // 7 days before daysOut(27), and the return date
     expect(first.reminded).toBe(1);
-    expect(first.resumed).toBe(0);
+    expect(first.resumed).toBe(1);
     expect(mockSms).toHaveBeenCalledTimes(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit',
+      expect.objectContaining({ visit_date: displayOf(daysOut(27)) }), expect.anything());
+    expect(mockSms.mock.calls[0][0]).toMatchObject({ metadata: expect.objectContaining({ plan_hold_id: 'h1', visit_id: 'back' }) });
 
-    const second = await runPlanHoldLifecycle({ today: TODAY });
-    expect(second.reminded).toBe(0); // reminder claimed, never re-sent
-
-    // The reminder only went out TODAY (5 days before resume) — the 7-day
-    // notice period pushes the restart out, so the resume date itself does
-    // NOT resume billing yet.
-    const tooEarly = await runPlanHoldLifecycle({ today: daysOut(5) });
-    expect(tooEarly.resumed).toBe(0);
-    const onResume = await runPlanHoldLifecycle({ today: daysOut(7) });
-    expect(onResume.resumed).toBe(1);
+    expect((await runPlanHoldLifecycle({ today: daysOut(21) })).reminded).toBe(0); // stamped, never re-sent
     const lawn = mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care');
     expect(Number(lawn.monthly_rate)).toBe(90);
     expect(Number(mockState.tables.customers[0].monthly_rate)).toBe(150);
     expect(mockState.tables.customers[0].tier_protected_until).toBe(null);
     expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+    expect(mockReschedule).not.toHaveBeenCalled(); // nothing is ever shifted to make room for the notice
   });
-});
 
-describe('runPlanHoldLifecycle — notice period (codex r2)', () => {
-  test('a reminder delivered late pushes the restart AND the parked visits out 7 days from delivery', async () => {
-    seed({
-      customers: [{ id: 'c1', first_name: 'Pat', phone: '+19415550000', monthly_rate: 60, billing_mode: 'monthly_membership', tier_protected_until: daysOut(2) }],
-      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 0, source: 'plan_hold' }],
-      holds: [{ id: 'h2', customer_id: 'c1', family_key: 'lawn_care', status: 'active', resume_on: daysOut(2), held_monthly_rate: 90, reminder_sent_at: null, created_at: new Date(), moved_visits: JSON.stringify({ moved: [] }) }],
-      visits: [{ id: 'v1', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(2), service_type: 'Lawn Care Service', window_start: '08:00', window_end: '10:00' }],
-    });
-    // Day 0: reminder goes out (2 days before the old resume date).
+  test('an accept interrupted after its hold committed: the daily run carries out the unfinished skips once, and leaves an in-flight accept alone', async () => {
+    const plan = (over = {}) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'confirmed', from: daysOut(9) }], skipped: ['l2'], skipsFinal: false, acceptCommitted: true, ...over });
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-1), moved_visits: plan() },
+      [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9), { status: 'skipped' }), lawnVisit('back', daysOut(40))]);
+    // l1 was dated yesterday-in-the-pause territory too: a recovery the day
+    // after still skips it rather than calling it "moved out".
+    mockState.tables.scheduled_services.find((v) => v.id === 'l1').scheduled_date = daysOut(-1);
     const first = await runPlanHoldLifecycle({ today: TODAY });
-    expect(first.reminded).toBe(1);
-    // Day 2: resume date reached but only 2 days of notice → restart and
-    // the visit both move to day 7; billing stays suspended.
-    const onOldDate = await runPlanHoldLifecycle({ today: daysOut(2) });
-    expect(onOldDate.resumed).toBe(0);
-    expect(String(mockState.tables.plan_holds[0].resume_on)).toBe(daysOut(7));
-    expect(mockReschedule).toHaveBeenCalledWith('v1', daysOut(7), expect.objectContaining({ start: '08:00' }), 'plan_hold_notice', 'system', {});
-    expect(Number(mockState.tables.customer_plan_rates[0].monthly_rate)).toBe(0);
-    // Day 7: full notice elapsed → resumes.
-    const onNew = await runPlanHoldLifecycle({ today: daysOut(7) });
-    expect(onNew.resumed).toBe(1);
-    expect(Number(mockState.tables.customer_plan_rates[0].monthly_rate)).toBe(90);
+    expect(first.skipsRecovered).toBe(1);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', toStatus: 'skipped', notifyCustomer: false }));
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ skipped: ['l2', 'l1'], skipsFinal: true });
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(0);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+
+    mockTransition.mockClear();
+    holdSeed({ created_at: new Date(), moved_visits: plan({ skipped: [] }) }, [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(0);
+    expect(mockTransition).not.toHaveBeenCalled();
+  });
+
+  test('a hold from an accept that died before it finished is undone by the daily run, never skipped, and the office hears', async () => {
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), resume_on: daysOut(30),
+      moved_visits: JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }], skipped: [], skipsFinal: false, acceptCommitted: false }) },
+    [lawnVisit('l1', daysOut(5)), lawnVisit('back', daysOut(40))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('cancelled');
+    expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(90);
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(1);
+  });
+
+  test('a compensation never undoes a hold an accept already marked: dues stay suspended, nothing moves back', async () => {
+    const { cancelHold } = require('../services/cancellation-resolution/holds');
+    holdSeed({ moved_visits: JSON.stringify({ moved: [{ id: 'p1', from: daysOut(5), to: daysOut(20), window: { start: null, end: null } }], toSkip: [], skipped: [], skipsFinal: true, acceptCommitted: true }) });
+    expect(await cancelHold('h1', { compensateVisits: true })).toBe(false);
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+    expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(0);
+    expect(mockReschedule).not.toHaveBeenCalled();
+  });
+
+  test('the return date never resumes an unfinished accept: it stays active for recovery to finish or undo', async () => {
+    holdSeed({ resume_on: daysOut(0), created_at: new Date(), moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) });
+    const out = await runPlanHoldLifecycle({ today: TODAY });
+    expect(out.resumed).toBe(0);
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+  });
+
+  test('recovery never undoes a hold its accept marked after the bulk read; a hold being undone refuses a late marking', async () => {
+    const { markHoldsAccepted } = require('../services/cancellation-resolution/holds');
+    const unmarked = JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }], skipped: [], skipsFinal: false, acceptCommitted: false });
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: TODAY, moved_visits: unmarked }, [lawnVisit('l1', daysOut(5))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    let first = true;
+    db.transaction = async (cb) => {
+      if (first) { first = false; mockState.tables.plan_holds[0].moved_visits = JSON.stringify({ ...JSON.parse(unmarked), acceptCommitted: true }); }
+      return openTrx(cb);
+    };
+    try {
+      await runPlanHoldLifecycle({ today: TODAY });
+    } finally { db.transaction = openTrx; }
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(0);
+
+    holdSeed({ moved_visits: JSON.stringify({ ...JSON.parse(unmarked), compensating: true }) });
+    await expect(markHoldsAccepted(['h1'])).rejects.toThrow('no longer active');
+  });
+
+  test('a resumed hold with an unfinished skip plan is still retried; an unmarked resumed hold is never undone', async () => {
+    const plan = (over) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(-3) }], skipped: [], skipsFinal: false, ...over });
+    holdSeed({ status: 'resumed', created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-10), resume_on: daysOut(-1), moved_visits: plan({ acceptCommitted: true }) },
+      [lawnVisit('l1', daysOut(-3)), lawnVisit('back', daysOut(30))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', toStatus: 'skipped' }));
+
+    mockTransition.mockClear();
+    holdSeed({ status: 'resumed', created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-10), resume_on: daysOut(-1), moved_visits: plan({ acceptCommitted: false }) },
+      [lawnVisit('l1', daysOut(-3))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(0);
+  });
+
+  test('a failed paired accept restores Away Mode only while the row still holds the date it wrote', async () => {
+    const { restoreAwayMode } = require('../services/cancellation-resolution/holds');
+    seed({});
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
+    await restoreAwayMode('c1', daysOut(5), daysOut(30));
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(5));
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(60) }];
+    await restoreAwayMode('c1', daysOut(5), daysOut(30));
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
+  });
+
+  test('a same-case retry keeps the Away Mode value recorded by its first attempt, never the date that attempt wrote', async () => {
+    const { recordPendingAwayMode } = require('../services/cancellation-resolution/holds');
+    holdSeed({ moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { previousUntil: null, until: daysOut(30) } }) });
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
+    expect(await recordPendingAwayMode(['h1'], { customerId: 'c1', until: daysOut(30) })).toBe(null);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing).toEqual({ previousUntil: null, until: daysOut(30) });
+  });
+
+  test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
+    const seedPaired = (awayNow) => {
+      holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),
+        moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { previousUntil: null, until: daysOut(30) } }) });
+      mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: awayNow }];
+    };
+    seedPaired(daysOut(30));
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(null);
+    seedPaired(daysOut(60));
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
+  });
+
+  test('a resumed hold whose first visit back is months after the return date still gets its text a week before it', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-120) }, [lawnVisit('back', daysOut(5))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(5)) }), expect.anything());
+  });
+
+  test('a send that does not go through gives its claim back for tomorrow; a claim whose send never confirmed rings the office once', async () => {
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    mockSms.mockResolvedValueOnce({ sent: false });
+    await sendDueRestartTexts(['h1']);
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).reminderClaim).toBeUndefined();
+
+    const claimed = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    holdSeed({ resume_on: daysOut(2), reminder_sent_at: claimed,
+      moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: true, acceptCommitted: true, reminderClaim: { at: claimed.toISOString(), visitId: 'back', delivered: false } }) },
+    [lawnVisit('back', daysOut(3))]);
+    mockSms.mockClear();
+    await runPlanHoldLifecycle({ today: TODAY });
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(bells('plan_hold_restart_text_unconfirmed')).toHaveLength(1);
+  });
+
+  test('no restart text for a hold whose accept has not finished, or one undone just before the send', async () => {
+    holdSeed({ resume_on: daysOut(2), moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) }, [lawnVisit('back', daysOut(3))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.plan_holds[0].status = 'cancelled'; return openTrx(cb); };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+  });
+
+  test('a first visit back that changed between the read and the send is not texted with the stale date', async () => {
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.scheduled_services[0].scheduled_date = daysOut(6); return openTrx(cb); };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    await sendDueRestartTexts(['h1']);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(6)) }), expect.anything());
+  });
+
+  test('marking an accept fails when one of its holds was undone meanwhile — nothing gets marked', async () => {
+    const { markHoldsAccepted } = require('../services/cancellation-resolution/holds');
+    const rec = JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false });
+    seed({ holds: [
+      { id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: rec },
+      { id: 'h2', customer_id: 'c1', family_key: 'mosquito', status: 'cancelled', moved_visits: rec },
+    ] });
+    await expect(markHoldsAccepted(['h1', 'h2'])).rejects.toThrow('no longer active');
+    await expect(markHoldsAccepted(['h1', 'missing'])).rejects.toThrow('no longer active');
+  });
+
+  test('no restart text once the first visit back is underway', async () => {
+    holdSeed({ resume_on: daysOut(-2), status: 'resumed' }, [lawnVisit('back', TODAY, { status: 'en_route' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    holdSeed({ resume_on: daysOut(-2), status: 'resumed' }, [lawnVisit('back', TODAY, { track_state: 'on_property' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+  });
+
+  test.each(['voice_agent', 'ai_call_pipeline_followup'])('a %s booking still awaiting the office is not a visit: no hold for it, never skipped, never named as the first visit back', async (sourceAction) => {
+    const review = { status: 'pending', source_action: sourceAction, customer_confirmed: false };
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('req', daysOut(6), review), lawnVisit('back', daysOut(45))],
+    });
+    expect(await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('req', daysOut(3), review), lawnVisit('back', daysOut(6))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(6)) }), expect.anything());
+  });
+
+  test('the restart text retires once its moment has passed or the office owns the restart: no daily re-asking, one bell', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-30) }, [lawnVisit('back', daysOut(-2), { status: 'completed' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ reminderRetired: 'window_passed' });
+
+    holdSeed({ resume_on: daysOut(0) }, []);
+    await runPlanHoldLifecycle({ today: TODAY });
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(bells('plan_hold_no_visit_back')).toHaveLength(1);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ reminderRetired: 'no_visit_back' });
+  });
+
+  test('a churned customer\'s resumed hold retires its restart text for good', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-5) }, [lawnVisit('back', daysOut(3))]);
+    mockState.tables.customers[0].pipeline_stage = 'churned';
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits || '{}')).toMatchObject({ reminderRetired: 'customer_inactive' });
+    mockState.tables.customers[0].pipeline_stage = 'active_customer';
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+  });
+
+  test('a first visit back moved right before the send gives the claim back quietly: no text, no alarm', async () => {
+    holdSeed({ resume_on: daysOut(0) }, [lawnVisit('back', daysOut(1))]);
+    const { renderRequiredSmsTemplate: render } = require('../services/sms-template-renderer');
+    render.mockImplementationOnce(async () => 'body');
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { const r = await openTrx(cb); mockState.tables.scheduled_services[0].scheduled_date = daysOut(4); return r; };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    expect(bells('plan_hold_restart_text_undelivered')).toHaveLength(0);
+  });
+
+  test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
+    holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
+    expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(25)) }), expect.anything());
+    expect(mockSms.mock.calls[0][0].metadata).toMatchObject({ visit_id: 'back' });
+  });
+
+  test('accept-time send: a hold whose first visit back is inside the week is texted at once, claimed before the send, and never twice', async () => {
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    mockSms.mockImplementationOnce(async () => {
+      // The claim (the stamp) is committed before the provider is asked.
+      expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeTruthy();
+      return { sent: true };
+    });
+    await sendDueRestartTexts(['h1']);
+    expect(mockSms).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).reminderClaim).toMatchObject({ visitId: 'back', delivered: true });
+    await sendDueRestartTexts(['h1']);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0);
+    expect(mockSms).toHaveBeenCalledTimes(1);
+  });
+
+  test('a short pause texts at once (first visit back under 7 days out); a RESUMED hold whose first visit back comes later still gets its text', async () => {
+    holdSeed({ resume_on: daysOut(3), tier_protected_until: daysOut(3) }, [lawnVisit('back', daysOut(3))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(3)) }), expect.anything());
+
+    // Dues came back on the return date (3 days ago); the first visit back is in 4 days.
+    mockSms.mockClear();
+    holdSeed({ status: 'resumed', resume_on: daysOut(-3) }, [lawnVisit('back', daysOut(4))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
+    expect(mockSms).toHaveBeenCalledTimes(1);
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeTruthy();
+
+    // Once the first visit back has gone by, the moment for the text has
+    // passed: nothing is sent late.
+    mockSms.mockClear();
+    holdSeed({ status: 'resumed', resume_on: daysOut(-30) }, [lawnVisit('back', daysOut(-2), { status: 'completed' })]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0);
+    expect(mockSms).not.toHaveBeenCalled();
+  });
+
+  test('the return date restores dues even when no text went out (no visit back yet): bell for the office, no message', async () => {
+    holdSeed({ resume_on: daysOut(0) }, []);
+    const out = await runPlanHoldLifecycle({ today: TODAY });
+    expect(out).toMatchObject({ reminded: 0, resumed: 1 });
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+    expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(90);
+    expect(bells('plan_hold_no_visit_back')).toHaveLength(1);
+    expect(bells('plan_hold_no_visit_back')[0][3]).toMatchObject({ bell: true, dedupeKey: 'plan_hold_no_visit_back:h1' });
+
+    // Before the return date, no visit yet is not a problem.
+    mockNotifyAdmin.mockClear();
+    holdSeed({ resume_on: daysOut(5) }, []);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(bells('plan_hold_no_visit_back')).toHaveLength(0);
+  });
+
+  test('an undelivered text is retried next run and rings the office only when the first visit back is tomorrow or sooner', async () => {
+    mockSms.mockResolvedValue({ sent: false });
+    holdSeed({ resume_on: daysOut(5) }, [lawnVisit('back', daysOut(5))]);
+    const week = await runPlanHoldLifecycle({ today: TODAY });
+    expect(week).toMatchObject({ reminded: 0, errors: ['remind_unsent:h1'] });
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeNull();
+    expect(bells('plan_hold_restart_text_undelivered')).toHaveLength(0);
+
+    await runPlanHoldLifecycle({ today: daysOut(4) }); // visit is tomorrow
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeNull();
+    expect(bells('plan_hold_restart_text_undelivered')).toHaveLength(1);
+    expect(bells('plan_hold_restart_text_undelivered')[0][3]).toMatchObject({ bell: true, dedupeKey: 'plan_hold_restart_text_undelivered:h1' });
   });
 });
 
@@ -399,42 +932,59 @@ describe('scoped wind-down under the rung-6 writer lock (#3666 r34 — the prici
   });
 });
 
-test('a hold is refused under the lock when the family was cancelled in the gap (moved visits gone) or a concurrent hold landed', async () => {
+test('a hold is refused under the lock when a visit to skip was cancelled in the gap, a moved prepaid visit is gone, or a concurrent hold landed', async () => {
   const db = require('../models/db');
-  const visit = (id, date) => ({ id, customer_id: 'c1', status: 'confirmed', scheduled_date: date, service_type: 'Lawn Care Service' });
   seed({
     customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }],
-    visits: [visit('l1', daysOut(5))],
+    visits: [lawnVisit('l1', daysOut(5))],
   });
   const openTrx = db.transaction;
-  // A scoped wind-down cancelled the lawn visits between the move and the hold write.
+  // A scoped wind-down cancelled the lawn visits between the plan and the hold write.
   db.transaction = async (cb) => { mockState.tables.scheduled_services[0].status = 'cancelled'; return openTrx(cb); };
   try {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
   } finally { db.transaction = openTrx; }
   expect(mockState.tables.plan_holds || []).toHaveLength(0);
   expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
+
+  // A prepaid visit already moved to the return date is cancelled in the gap: refused, the move is put back.
+  seed({
+    customers: [{ id: 'c1', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }],
+    visits: [lawnVisit('p1', daysOut(5)), lawnVisit('s1', daysOut(12))],
+  });
+  mockCovered.mockResolvedValue(new Set(['p1']));
+  db.transaction = async (cb) => { mockState.tables.scheduled_services.find((v) => v.id === 'p1').status = 'cancelled'; return openTrx(cb); };
+  try {
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
+  } finally { db.transaction = openTrx; }
+  expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(90), window_start: '08:00', window_end: '10:00', visit_id: null } });
+  expect(mockState.tables.plan_holds || []).toHaveLength(0);
+
   // A concurrent hold for the same family committed first.
-  seed({ customers: [{ id: 'c1', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }] });
-  db.transaction = async (cb) => { mockState.tables.plan_holds = [{ id: 'h-race', customer_id: 'c1', family_key: 'lawn_care', created_at: new Date() }]; return openTrx(cb); };
+  seed({ customers: [{ id: 'c1', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }], visits: [lawnVisit('l1', daysOut(5))] });
+  db.transaction = async (cb) => { mockState.tables.plan_holds = [{ id: 'h-race', customer_id: 'c1', family_key: 'lawn_care', status: 'active', created_at: new Date() }]; return openTrx(cb); };
   try {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
   } finally { db.transaction = openTrx; }
   expect(mockState.tables.plan_holds).toHaveLength(1);
 });
 
-test('a hold with NO upcoming visits still compares the live set under the lock — a first visit booked in the gap refuses it', async () => {
+test('a visit booked into the pause in the gap refuses the hold — the skip set must match the live in-pause set by identity', async () => {
   const db = require('../models/db');
-  seed({ customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }] });
+  seed({
+    customers: [{ id: 'c1', waveguard_tier: 'Silver', monthly_rate: null, billing_mode: 'per_application', active: true, tier_protected_until: null }],
+    visits: [lawnVisit('l1', daysOut(5))],
+  });
   const openTrx = db.transaction;
   db.transaction = async (cb) => {
-    mockState.tables.scheduled_services = [{ id: 'l-new', customer_id: 'c1', status: 'confirmed', scheduled_date: daysOut(20), service_type: 'Lawn Care Service' }];
+    mockState.tables.scheduled_services.push(lawnVisit('l-new', daysOut(20)));
     return openTrx(cb);
   };
   try {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
   } finally { db.transaction = openTrx; }
   expect(mockState.tables.plan_holds || []).toHaveLength(0);
+  expect(mockTransition).not.toHaveBeenCalled();
 });
 
 describe('boundary re-plan refusals', () => {
