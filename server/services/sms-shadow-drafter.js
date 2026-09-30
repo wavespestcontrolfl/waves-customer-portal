@@ -279,7 +279,7 @@ function realAnswersHandoffBullets() {
     // Eligibility therefore rides in as a per-draft FACT, and the offer
     // routes to that link through an escalation a teammate owns — never
     // generic OPEN TIMES, never a promise the facts don't back.
-    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
+    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says a line is ALREADY BOOKED, never offer a new link, OPEN TIMES or a paid visit for it: acknowledge and refer to the appointment already on the schedule (the date/window in the fact), and offer help with that appointment. When it says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
   }
   if (gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES')) {
     lines.push('- BILLING DISPUTES: answer from the facts only — state the real numbers from BILLING, never resolve the dispute or offer a credit/refund/discount that is not in the facts.');
@@ -322,7 +322,7 @@ function realAnswersHandoffBullets() {
   // generateGroundedDraft's auto-send-safety check), so a model that misreads
   // a complaint as a plain pest report is caught by the human in the loop,
   // not by code.
-  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — anger, property damage, a refund/credit demand, a dispute over what happened or over billing, or a threat to cancel over it — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
+  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — anger, property damage, a refund/credit demand, a dispute over what happened or over billing, or a threat to cancel over it — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
 }
@@ -472,11 +472,37 @@ async function fetchReserviceLanes({ customerId } = {}) {
 // The rendered fact line, and its reader. One line, fixed wording, so the
 // deterministic check below and a frozen replay read the same thing.
 const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
-function reserviceFactLine(lanes) {
+function reserviceFactLine(lanes, booked = {}) {
   const list = Array.isArray(lanes) ? lanes : [];
-  return list.length
-    ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
+  // Codex round-13 P2 (PR #5336): a covered lane that already holds an open
+  // re-service callback is NOT "not eligible" — that wording steered the model
+  // to offer OPEN TIMES for a paid visit. It gets its own fact, naming the
+  // existing appointment so the reply references it. Validation still reads
+  // only the "eligible for …" lanes (eligibleReserviceLanes), i.e. bookable ones.
+  const bookedEntries = Object.entries(booked || {}).filter(([lane]) => lane === 'pest' || lane === 'lawn');
+  const bookedText = bookedEntries
+    .map(([lane, info]) => `${lane} already booked${info?.date ? ` (${info.date}${info.windowStart ? ` at ${info.windowStart}` : ''})` : ''}`)
+    .join('; ');
+  if (list.length) {
+    return `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
+      + (bookedText ? `; ${bookedText}` : '');
+  }
+  return bookedText
+    ? `${RESERVICE_FACT_LABEL} ${bookedText} — their free re-service for that line is already on the schedule`
     : `${RESERVICE_FACT_LABEL} not eligible`;
+}
+
+// Fact-block state for a live draft (Codex round-13 P2): the bookable lanes plus
+// the covered-but-already-booked lanes with their open callback's date/window.
+// null when real-answers is off (no fact is rendered), like fetchReserviceLanes.
+async function fetchReserviceFactState({ customerId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  const state = await liveReserviceLaneState(customerId);
+  const booked = {};
+  for (const lane of state.eligible) {
+    if (!state.bookable.includes(lane)) booked[lane] = state.open?.[lane] || {};
+  }
+  return { lanes: state.bookable, booked };
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -563,8 +589,15 @@ const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|tre
 // estimate/quote/consultation" is not a re-service promise. The other
 // alternatives are the explicit no-charge wordings, including "won't charge
 // you for ..." and "on us" (but not "count/rely on us").
-const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
-  + "|complimentary|gratis|\\bcomp(?:ed)?\\b|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no (?:additional )?(?:charge|cost)"
+// Codex round-13 P2 (PR #5336): a price word is bound to the noun it modifies.
+// "free" / "complimentary" / "no charge" followed within <=3 words by an
+// estimate / quote / consultation / cost assessment prices THAT thing, not a
+// visit — "We offer a free termite estimate before scheduling service" is not
+// an offer. The intervening words must not themselves be an offer noun, so
+// "your free pest re-service and a quote" still binds "free" to the re-service.
+const FREE_ESTIMATE_BIND_SOURCE = `(?!(?:\\s+(?!(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b)[\\w'’-]+){0,3}\\s+(?:estimates?|quotes?|quotations?|consultations?|cost\\s+assessments?|price\\s+checks?)\\b)`;
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))" + FREE_ESTIMATE_BIND_SOURCE
+  + "|complimentary" + FREE_ESTIMATE_BIND_SOURCE + "|gratis|\\bcomp(?:ed)?\\b|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)" + FREE_ESTIMATE_BIND_SOURCE + "|at no (?:additional )?(?:charge|cost)" + FREE_ESTIMATE_BIND_SOURCE
   + "|without\\s+(?:any\\s+)?(?:charge|cost|fee)|nothing\\s+extra|cost\\s+(?:you\\s+)?nothing"
   + "|waiv(?:e|ed|ing)\\s+(?:the\\s+|any\\s+)?(?:charge|cost|fee)s?"
   + "|(?<!\\b(?:count|rely|depend|counting|relying|depending|wait|waiting)\\s)on us(?!\\s+to\\b)|on the house"
@@ -1948,7 +1981,7 @@ function buildFactsBlock(context, extras = {}) {
   // lanes renders "not eligible" (fail closed). Resolved upstream
   // (fetchReserviceLanes).
   const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `${reserviceFactLine(extras.reserviceLanes)}\n`
+    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked)}\n`
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -2576,7 +2609,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
-  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
+  const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2589,7 +2623,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -3254,6 +3288,7 @@ module.exports = {
   liveServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
+  fetchReserviceFactState,
   liveReserviceLanes,
   liveReserviceLaneState,
   reserviceFactLine,

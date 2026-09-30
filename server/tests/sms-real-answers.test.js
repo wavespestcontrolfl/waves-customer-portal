@@ -2512,6 +2512,45 @@ describe('free re-service is an entitlement resolved through the existing mechan
       await expect(drafter.reservicePromiseStillEligible({ outgoingBody: bad, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/excluded specialty/);
     });
 
+    // Codex round-13 P2 #1 (PR #5336): a covered lane that already holds an open callback
+    // is "already booked", never "not eligible" (which steered the model to a paid visit).
+    describe('already-booked re-service fact', () => {
+      const open = { pest: { date: '2026-10-05', windowStart: '09:00' } };
+
+      test('the fact names the booked lane and its appointment; validation still reads bookable lanes only', () => {
+        const { reserviceFactLine, validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const only = reserviceFactLine([], open);
+        expect(only).toContain('pest already booked (2026-10-05 at 09:00)');
+        expect(only).not.toContain('not eligible');
+        const mixed = reserviceFactLine(['lawn'], open);
+        expect(mixed).toContain('eligible for lawn');
+        expect(mixed).toContain('pest already booked');
+        const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+        // No bookable lane → a free-re-service promise is still refused.
+        expect(validateReserviceOffer({ reply: "We'll send your free pest re-service link now", factsBlock: `X\n${only}\nBILLING:`, intendedActions: sendLink }).ok).toBe(false);
+        // The pest word inside "pest already booked" never makes pest promisable next to a lawn-eligible fact.
+        expect(validateReserviceOffer({ reply: "We'll send your free pest re-service link now", factsBlock: `X\n${mixed}\nBILLING:`, intendedActions: sendLink }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply: "We'll send your free lawn re-service link now", factsBlock: `X\n${mixed}\nBILLING:`, intendedActions: sendLink }).ok).toBe(true);
+      });
+
+      test('fetchReserviceFactState: bookable lanes + booked lanes with the open callback; gate off → null', async () => {
+        process.env.GATE_SMS_REAL_ANSWERS = 'true';
+        const { drafter } = loadWith({ lanes: ['pest'], booked: ['pest'] });
+        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: { pest: { date: '2026-10-05' } } });
+        const both = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
+        await expect(both.drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } } });
+        delete process.env.GATE_SMS_REAL_ANSWERS;
+        await expect(loadWith({ lanes: ['pest'], booked: ['pest'] }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toBeNull();
+      });
+
+      test('the prompt tells the model to reference the existing appointment, not offer a link, OPEN TIMES or a paid visit', () => {
+        const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+        const prompt = buildSystemPrompt();
+        expect(prompt).toContain('says that service line is ALREADY BOOKED');
+        expect(prompt).toContain('refer to the appointment already on the schedule');
+      });
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].
@@ -2583,6 +2622,12 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["Your lawn is looking great. We'll send your free pest re-service link for the ants.", true, ['pest']],
   ["Sorry about the termites in the shed, your free pest re-service link is on the way.", true, ['pest']],
   ["Your pest re-service is covered; your lawn visit is Tuesday at 9.", true, ['pest']],
+  ["We offer a free termite estimate before scheduling service.", false, []],
+  ["We offer a free lawn quote before scheduling service.", false, []],
+  ["Complimentary pest consultation, then we schedule the visit.", false, []],
+  ["No charge for the estimate, and we book the visit after.", false, []],
+  ["We'll send your free pest re-service and a free quote.", true, ['pest']],
+  ["A free cost assessment comes first, then the treatment visit.", false, []],
   ["We can't offer a free lawn re-service.", false, []],
   ["You're not eligible for a free re-service right now.", false, []],
   ["Unfortunately that isn't covered - the re-service is not free.", false, []],
