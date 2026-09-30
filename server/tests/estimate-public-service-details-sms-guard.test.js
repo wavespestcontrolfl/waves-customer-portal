@@ -559,7 +559,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     // shorter window — otherwise it would only ever be reclaimable after
     // the full 10 minutes, and a legitimate retap moments later (once a
     // fresh delivery makes the offer eligible again) could never send.
-    expect(sql).toMatch(/outcome = 'withheld'/);
+    expect(sql).toMatch(/outcome IN \('withheld', 'policy_blocked'\)/);
     expect(sql).toMatch(/created_at < NOW\(\) - interval '\d+ seconds'/);
   });
 

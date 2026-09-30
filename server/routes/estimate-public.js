@@ -70,6 +70,7 @@ const {
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
@@ -26550,6 +26551,7 @@ const SERVICE_DETAILS_SMS_DEDUP_MS = 10 * 60 * 1000;
 // makes the offer eligible again — found the claim still held and could
 // never send.
 const WITHHELD_SMS_CLAIM_RECLAIM_SECONDS = 6;
+const POLICY_BLOCKED_CLAIM_OUTCOME = 'policy_blocked';
 // Recipient-level refusal from the policy chain on the packet text. The page
 // shows body.error as-is, so this doubles as the customer-facing copy: it
 // points at the PDF button and does not say why the text was refused.
@@ -26740,6 +26742,18 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: 'withheld' });
       } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
     };
+    // Same durable stamp for a policy-chain refusal (suppression / consent /
+    // DNC): a cross-process loser polling the claim row reads it and answers
+    // the SAME generic 409 the winner does, instead of timing out into a 502.
+    // Bounded exactly like 'withheld': the claim-acquire takeover below lets a
+    // retap reclaim the row after WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a
+    // stale marker can never keep answering 409 once the number is cleared.
+    // outcome is a free-form varchar(32) — no migration.
+    const markClaimPolicyBlocked = async () => {
+      try {
+        await db('sms_send_claims').where({ claim_key: claimKey }).update({ outcome: POLICY_BLOCKED_CLAIM_OUTCOME });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome write failed: ${e.message}`); }
+    };
     const priorClaim = serviceDetailsSmsClaims.get(dedupKey);
     if (priorClaim?.promise) {
       // A send for this exact packet is in flight — share ITS outcome rather
@@ -26805,7 +26819,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           `INSERT INTO sms_send_claims (claim_key) VALUES (?)
            ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW(), outcome = NULL
            WHERE sms_send_claims.created_at < NOW() - interval '10 minutes'
-              OR (sms_send_claims.outcome = 'withheld'
+              OR (sms_send_claims.outcome IN ('withheld', '${POLICY_BLOCKED_CLAIM_OUTCOME}')
                   AND sms_send_claims.created_at < NOW() - interval '${WITHHELD_SMS_CLAIM_RECLAIM_SECONDS} seconds')
            RETURNING id`,
           [claimKey],
@@ -26849,6 +26863,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           try {
             const claimRow = await db('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
             if (claimRow?.outcome === 'withheld') return { success: false, withheld: true };
+            if (claimRow?.outcome === POLICY_BLOCKED_CLAIM_OUTCOME) return { success: false, policyBlocked: true };
           } catch (e) { logger.warn(`[estimate-public] service-details SMS claim outcome poll skipped: ${e.message}`); }
         }
         return { success: false, claimHeldElsewhere: true };
@@ -26903,6 +26918,18 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           capturedAt: new Date().toISOString(),
         },
         entryPoint: 'estimate_service_details_send',
+        // Suppression writers (STOP / wrong-number / DNC) serialize through
+        // lockSmsPhone. Taking the same lock here makes sendCustomerMessage
+        // re-read consent + suppression on the locked connection immediately
+        // before the Twilio call, and it FAILS CLOSED there (retryable
+        // SUPPRESSION_LOOKUP_FAILED / CONSENT_LOOKUP_FAILED) when suppression
+        // state cannot be positively loaded — so an opt-out committed after
+        // the initial read, or a read error the initial chain fails open on,
+        // can never send. Same shape as admin-leads / lead-auto-reply.
+        withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+          await lockSmsPhone(trx, contact.customerPhone);
+          return dispatch(trx);
+        }),
         metadata: {
           original_message_type: 'estimate_service_details',
           estimate_id: estimate.id,
@@ -26930,6 +26957,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // Codex round 3 on #4608 (P0): the durable stamp for the annual-offer
       // withhold, resolved as a coded refusal rather than a throw.
       if (withheldByOffer) await markClaimWithheld();
+      if (smsSendResult.policyBlocked) await markClaimPolicyBlocked();
       return smsSendResult;
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });
@@ -26955,7 +26983,12 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // claim would reopen the duplicate window it is guarding.
       if (smsResult?.claimHeldElsewhere) {
         serviceDetailsSmsClaims.delete(dedupKey);
-      } else if (withheld) {
+      } else if (withheld || smsResult?.policyBlocked) {
+        // A policy-chain refusal keeps its DB claim row for the same reason
+        // (its outcome is stamped 'policy_blocked' inside sendPromise): a
+        // cross-process loser mid-poll must still be able to read it. Only
+        // the in-process Map entry clears; the row is reclaimable after
+        // WITHHELD_SMS_CLAIM_RECLAIM_SECONDS, so a retap re-evaluates.
         // Codex round 3 on #4608 (P0 PRRT_kwDOR3YQi86j8Ydq): keep the DB
         // claim row (its outcome is already stamped 'withheld' inside
         // sendPromise, above) so a concurrent loser's poll can still read

@@ -63,6 +63,16 @@ function resetFixtures() {
   fixtures.prefs = { customer_id: 'cust-b01-1', sms_enabled: true };
   fixtures.customer = { id: 'cust-b01-1', first_name: 'Sam', last_name: 'Customer', phone: PHONE, email: 'sam-b01@example.test' };
   fixtures.suppression = null;
+  // Per-read override: fixtures.suppressionReads[n] is what the n-th
+  // messaging_suppression read returns (the last entry repeats); an Error
+  // entry makes that read throw. Lets a test commit a suppression row BETWEEN
+  // the chain's first read and the locked handoff re-read.
+  fixtures.suppressionSequence = null;
+  fixtures.suppressionReadCount = 0;
+  fixtures.claimAcquired = true;
+  fixtures.claimOutcome = null;
+  fixtures.claimUpdates = [];
+  fixtures.claimDeletes = 0;
   fixtures.tablesTouched = new Set();
 }
 
@@ -76,17 +86,26 @@ function chain(resolveFirst, resolveAll = []) {
 }
 
 function makeDb() {
-  const raw = jest.fn(() => ({ rows: [{ id: 'claim-1' }] }));
+  const raw = jest.fn(() => ({ rows: fixtures.claimAcquired ? [{ id: 'claim-1' }] : [] }));
   const db = jest.fn((table) => {
     fixtures.tablesTouched.add(table);
     if (table === 'estimates') return chain(() => ({ ...fixtures.estimate }));
     if (table === 'notification_prefs') return chain(() => (typeof fixtures.prefs === 'function' ? fixtures.prefs() : fixtures.prefs));
     if (table === 'customers') return chain(() => fixtures.customer);
-    if (table === 'messaging_suppression') return chain(() => fixtures.suppression);
+    if (table === 'messaging_suppression') {
+      return chain(() => {
+        const seq = fixtures.suppressionSequence;
+        if (!seq) return fixtures.suppression;
+        const entry = seq[Math.min(fixtures.suppressionReadCount, seq.length - 1)];
+        fixtures.suppressionReadCount += 1;
+        if (entry instanceof Error) throw entry;
+        return entry;
+      });
+    }
     if (table === 'sms_send_claims') {
-      const b = chain(() => null);
-      b.del = jest.fn(async () => 0);
-      b.update = jest.fn(async () => 1);
+      const b = chain(() => (fixtures.claimOutcome ? { outcome: fixtures.claimOutcome } : null));
+      b.del = jest.fn(async () => { fixtures.claimDeletes += 1; return 0; });
+      b.update = jest.fn(async (payload) => { fixtures.claimUpdates.push(payload); return 1; });
       return b;
     }
     // sms_log (dedupe lookups) and anything else: empty.
@@ -157,6 +176,30 @@ const post = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, 
 });
 
 const SID = `SM${'b1'.repeat(16)}`;
+
+// What the real TwilioService.sendSMS does with a caller's withSmsHandoff: run
+// it, let it refuse before dispatch (-> preSendBlocked, nothing sent), or let it
+// call dispatch(trx) (-> the provider accepts).
+function realisticSend(acceptedResult) {
+  return async (_to, _body, options) => {
+    let accepted = null;
+    const dispatch = async () => { accepted = acceptedResult; return acceptedResult; };
+    if (typeof options.withSmsHandoff !== 'function') return dispatch();
+    let verdict;
+    try {
+      verdict = await options.withSmsHandoff(dispatch);
+    } catch (err) {
+      if (accepted) throw err;
+      verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED', reason: 'SMS handoff authority check failed', retryable: true };
+    }
+    if (!accepted) {
+      return { success: false, preSendBlocked: true, code: verdict?.code, error: verdict?.reason,
+        retryable: verdict?.retryable === true, validator: verdict?.validator || 'check_sms_handoff_authority', deliveryOutcome: 'not_sent' };
+    }
+    return accepted;
+  };
+}
+const ACCEPTED = { success: true, sid: SID, deliveryOutcome: 'accepted' };
 const UNAVAILABLE = { ok: false, error: 'Text is unavailable for this number — use the PDF button to view the details instead.' };
 
 describe('B01: service-details SMS honors the suppression store and sms_enabled', () => {
@@ -221,7 +264,7 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
 
   test('normal case: a clean recipient is texted through the chokepoint with the same message type, no signature, and 200', async () => {
     const TwilioService = require('../services/twilio');
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: SID, deliveryOutcome: 'accepted' });
+    TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
     const res = await post();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, channel: 'sms' });
@@ -241,7 +284,7 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
 
   test('normal case for a lead-only estimate (no notification_prefs row) still sends, on the transactional consent basis', async () => {
     const TwilioService = require('../services/twilio');
-    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: SID, deliveryOutcome: 'accepted' });
+    TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
     fixtures.estimate = deliveredRow(fixtures.phone, { customer_id: null });
     fixtures.prefs = null;
     fixtures.customer = null;
@@ -257,7 +300,7 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
     gates.isEnabled.mockImplementation((key) => (key === 'smsSendWindow' ? true : actualIsEnabled(key)));
     jest.useFakeTimers({ doNotFake: ['setImmediate', 'setTimeout', 'nextTick', 'queueMicrotask'], now: new Date('2026-01-01T06:00:00Z') }); // 1 AM ET
     try {
-      TwilioService.sendSMS.mockResolvedValueOnce({ success: true, sid: SID, deliveryOutcome: 'accepted' });
+      TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
       const res = await post();
       expect(res.status).toBe(200);
       expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
@@ -286,5 +329,100 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
     const res = await post();
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ ok: false, error: 'Text could not be sent right now.' });
+  });
+
+  describe('Codex round 1 on #5384 (P0s)', () => {
+    const lockCalls = () => mockDb.raw.mock.calls.filter((c) => /twilio_21610/.test(c[0]));
+
+    test('P0-2: the send takes the phone lock (lockSmsPhone) and re-reads suppression under it, before the provider', async () => {
+      const TwilioService = require('../services/twilio');
+      TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
+      const res = await post();
+      expect(res.status).toBe(200);
+      expect(TwilioService.sendSMS.mock.calls[0][2].withSmsHandoff).toEqual(expect.any(Function));
+      expect(lockCalls().length).toBeGreaterThanOrEqual(1);
+      expect(lockCalls()[0][1]).toEqual([fixtures.phone]);
+    });
+
+    test('P0-2: an opt-out committed AFTER the chain\'s first suppression read but BEFORE the handoff is caught under the lock — nothing is sent', async () => {
+      const TwilioService = require('../services/twilio');
+      const row = { phone: fixtures.phone, reason: 'opt_out_keyword', active: true, created_at: '2026-01-01T00:00:00Z' };
+      fixtures.suppressionSequence = [null, row]; // clean at the first read, suppressed by the locked re-read
+      let providerDispatched = false;
+      TwilioService.sendSMS.mockImplementationOnce(realisticSend({ ...ACCEPTED, get sid() { providerDispatched = true; return SID; } }));
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(UNAVAILABLE);
+      expect(fixtures.suppressionReadCount).toBeGreaterThanOrEqual(2);
+      // sendSMS was entered (the chain passed) but the handoff refused before dispatch.
+      expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+      expect(providerDispatched).toBe(false);
+    });
+
+    test.each([
+      ['a customer with a prefs row', {}],
+      ['a lead-only estimate (explicit transactional consent basis)', { lead: true }],
+    ])('P0-3: %s — suppression cannot be read: retryable 502 and NO send (fails closed, never open)', async (_label, opts) => {
+      const TwilioService = require('../services/twilio');
+      if (opts.lead) {
+        fixtures.estimate = deliveredRow(fixtures.phone, { customer_id: null });
+        fixtures.prefs = null;
+        fixtures.customer = null;
+      }
+      // An active wrong_number row may exist, but every read of the table errors.
+      fixtures.suppressionSequence = [new Error('messaging_suppression unavailable (simulated)')];
+      let providerDispatched = false;
+      TwilioService.sendSMS.mockImplementation(realisticSend({ ...ACCEPTED, get sid() { providerDispatched = true; return SID; } }));
+      const res = await post();
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ ok: false, error: 'Text could not be sent right now.' });
+      expect(providerDispatched).toBe(false);
+    });
+
+    test('P0-3: only the FIRST read fails (chain fails open) but the locked re-read finds an active wrong_number — still no send', async () => {
+      const TwilioService = require('../services/twilio');
+      const row = { phone: fixtures.phone, reason: 'wrong_number', active: true, created_at: '2026-01-01T00:00:00Z' };
+      fixtures.suppressionSequence = [new Error('blip (simulated)'), row];
+      let providerDispatched = false;
+      TwilioService.sendSMS.mockImplementationOnce(realisticSend({ ...ACCEPTED, get sid() { providerDispatched = true; return SID; } }));
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect(providerDispatched).toBe(false);
+    });
+
+    test('P0-1: the winner stamps outcome=policy_blocked and KEEPS the claim row (no delete) when the policy chain refuses', async () => {
+      fixtures.suppression = { phone: fixtures.phone, reason: 'wrong_number', active: true, created_at: '2026-01-01T00:00:00Z' };
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect(fixtures.claimUpdates).toContainEqual({ outcome: 'policy_blocked' });
+      expect(fixtures.claimDeletes).toBe(0);
+    });
+
+    test('P0-1: a cross-process LOSER polling a claim the winner stamped policy_blocked answers the SAME 409 (not a 502 after ~4.5 s), and never calls the provider', async () => {
+      const TwilioService = require('../services/twilio');
+      fixtures.claimAcquired = false; // another replica holds the claim
+      fixtures.claimOutcome = 'policy_blocked';
+      const started = Date.now();
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(UNAVAILABLE);
+      expect(Date.now() - started).toBeLessThan(4000); // first poll, not the full 3-attempt timeout
+      expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+      // The loser must not delete the winner's claim row.
+      expect(fixtures.claimDeletes).toBe(0);
+    });
+
+    test('P0-1: a stale policy_blocked marker cannot pin 409 forever — the claim-acquire takeover reclaims it on the short window, and a retap after the number is cleared sends', async () => {
+      const TwilioService = require('../services/twilio');
+      fixtures.suppression = { phone: fixtures.phone, reason: 'manual_dnc', active: true, created_at: '2026-01-01T00:00:00Z' };
+      expect((await post()).status).toBe(409);
+      // Operator clears the DNC entry; the retap re-runs the whole chain.
+      fixtures.suppression = null;
+      TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
+      const retap = await post();
+      expect(retap.status).toBe(200);
+      const sql = mockDb.raw.mock.calls.map((c) => c[0]).find((q) => /INSERT INTO sms_send_claims/.test(q));
+      expect(sql).toMatch(/outcome IN \('withheld', 'policy_blocked'\)\s+AND sms_send_claims\.created_at < NOW\(\) - interval '6 seconds'/);
+    });
   });
 });
