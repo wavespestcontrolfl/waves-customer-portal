@@ -13180,6 +13180,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
     const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
+    // The edited visit as it will stand once this save commits, for the
+    // secure-prepay coverage rail: every coverage column this save posts,
+    // plus the property on an address change. Read at call time (updates is
+    // still normalized inside the transaction). ONE builder shared by the
+    // single-visit price guard and both 'following' guard calls, so no
+    // guard judges the edited visit on a narrower overlay (pre-push audits
+    // found the date, start time, service, then the 'following' path).
+    const saveCoverageProposed = () => {
+      const proposed = {};
+      for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+        if (updates[col] !== undefined) proposed[col] = updates[col];
+      }
+      if (addressPlan) proposed.property_id = addressPlan.propertyId;
+      return proposed;
+    };
     // Plan the full series before acquiring ANY scheduling lock. Revalidate
     // the same membership and route keys after locking, before assignment.
     const assignmentPlan = assignmentShouldRun
@@ -13578,14 +13593,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // is overlaid on the locked row (_proposed), never one column at a
           // time: pre-push audits found the date, then the start time, then
           // the service identity missing from narrower overlays.
-          if (priceGuardRow) {
-            const proposed = {};
-            for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
-              if (updates[col] !== undefined) proposed[col] = updates[col];
-            }
-            if (addressPlan) proposed.property_id = addressPlan.propertyId;
-            priceGuardRow._proposed = proposed;
-          }
+          if (priceGuardRow) priceGuardRow._proposed = saveCoverageProposed();
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
             : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
@@ -13693,7 +13701,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (earlyGroups.changed) {
             await lockAndGuardFollowingSiblings(trx, {
               editedId: req.params.id,
-              editedRow: earlyBeforeRow,
+              editedRow: { ...earlyBeforeRow, _proposed: saveCoverageProposed() },
               parentId: earlyBeforeRow.recurring_parent_id || req.params.id,
               fromDateStr: earlyBeforeRow.recurring_parent_id
                 ? (dateOnly(earlyBeforeRow.scheduled_date) || etDateString())
@@ -14622,7 +14630,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // sibling update loop): the edited visit's own live invoice
             // refuses a 'following' save exactly like a sibling's would
             // (Codex #3505 r8 P1).
-            editedRow: priceServiceBeforeRow,
+            editedRow: priceServiceBeforeRow ? { ...priceServiceBeforeRow, _proposed: saveCoverageProposed() } : priceServiceBeforeRow,
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates

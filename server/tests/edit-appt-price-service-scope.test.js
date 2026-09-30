@@ -598,8 +598,8 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   });
 
   it('the edited visit joins the billing guards while staying out of the sibling update loop (r8)', () => {
-    expect(src).toMatch(/const guardRows = editedRow \? \[editedRow, \.\.\.targets\] : targets;/);
-    expect(src).toMatch(/editedRow: priceServiceBeforeRow,/);
+    expect(src).toMatch(/const guardRows = \(editedRow \? \[editedRow, \.\.\.targets\] : targets\)\.map\(withProposed\);/);
+    expect(src).toMatch(/editedRow: priceServiceBeforeRow \? \{ \.\.\.priceServiceBeforeRow, _proposed: saveCoverageProposed\(\) \} : priceServiceBeforeRow,/);
   });
 
   it('the list payload carries recurring_parent_id so a list-opened modal can tell a child from the template (r8)', () => {
