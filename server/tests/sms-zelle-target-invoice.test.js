@@ -118,7 +118,10 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     const { zelleInvoiceId, checked, factsBlock } = await draft({ inboundMessage: 'Can I pay by Zelle?', open });
     expect(checked).toEqual([]);
     expect(zelleInvoiceId).toBe(null);
-    expect(factsBlock).toContain('Zelle is not available for this account right now, so do not offer it');
+    // Codex round-25 P1: NEITHER offered NOR denied — the fact tells the model to ask which invoice
+    expect(factsBlock).toContain('SEVERAL open invoices');
+    expect(factsBlock).toContain('do not offer Zelle and do not say it is unavailable; ask which invoice');
+    expect(factsBlock).not.toContain('Zelle is not available for this account');
     expect(factsBlock).not.toContain('or Zelle to pay@example.com');
   });
   test('one open invoice: unchanged (that invoice)', async () => {
@@ -156,5 +159,46 @@ describe('resolveZelleTargetInvoice with ONE open invoice', () => {
   });
   test('a number that matches but an invoice-tied amount that contradicts it => abstain', () => {
     expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Zelle invoice WPC-2026-0202, the $95 invoice')).toEqual({ invoiceId: null, reason: 'reference_conflict' });
+  });
+});
+
+describe('the Payment options fact for the three Zelle situations (Codex round-25 P1)', () => {
+  const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+  const GATE = 'GATE_SMS_REAL_ANSWERS';
+  const line = (extras) => {
+    process.env[GATE] = 'true';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    try {
+      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), ...extras })
+        .split('\n').find((l) => l.startsWith('- Payment options:'));
+    } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
+  };
+  test('eligible target => offered; ineligible single target => denied; ambiguous target => ask which invoice (neither)', () => {
+    expect(line({ zelleEligible: true })).toContain('or Zelle to pay@example.com');
+    expect(line({ zelleEligible: false })).toContain('Zelle is not available for this account right now');
+    const ambiguous = line({ zelleEligible: false, zelleTargetAmbiguous: true });
+    expect(ambiguous).toContain('ask which invoice they want to pay');
+    expect(ambiguous).not.toContain('or Zelle to');
+    expect(ambiguous).not.toContain('is not available');
+    expect(ambiguous.startsWith('- Payment options:')).toBe(true); // the sealed-eval marker line is unchanged
+  });
+  test('no recipient configured: the "no Zelle configured" wording wins even if the target is ambiguous', () => {
+    process.env[GATE] = 'true';
+    delete process.env.ZELLE_RECIPIENT;
+    try {
+      const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleTargetAmbiguous: true })
+        .split('\n').find((x) => x.startsWith('- Payment options:'));
+      expect(l).toContain('no Zelle recipient is configured right now');
+    } finally { delete process.env[GATE]; }
+  });
+  test('the drafter marks a named-but-not-open invoice and an ambiguous amount as "ask" too; one open invoice and no open invoice are not', async () => {
+    const { resolveZelleTargetInvoice: r } = require('../services/zelle-target-invoice');
+    const open2 = [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 50 }, { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 50 }];
+    for (const msg of ['Can I pay by Zelle?', 'Zelle the $50?', 'Zelle invoice WPC-2026-0999?']) {
+      const t = r({ openInvoices: open2 }, msg);
+      expect({ msg, ask: !t.invoiceId && t.reason !== 'no_open_invoice' }).toEqual({ msg, ask: true });
+    }
+    expect(r({ openInvoices: [] }, 'Zelle?').reason).toBe('no_open_invoice');
+    expect(r({ openInvoices: [open2[0]] }, 'Zelle?').invoiceId).toBe('a');
   });
 });

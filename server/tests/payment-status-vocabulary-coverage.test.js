@@ -955,3 +955,57 @@ describe('round-22: unrecognized payment assertions fail closed (draft and send 
     expect(V3.unrecognizedPaymentAssertion('Everything is squared away and paid.')).toBe(true);
   });
 });
+
+// Codex round-25 P1: exemptions are scoped to the payment phrase's own sub-clause; invoice / bill subjects are covered.
+describe('round-25: non-assertive exemption is sub-clause scoped; invoice/bill subjects join the fail-closed rule', () => {
+  const V4 = require('../services/payment-receipt-vocabulary');
+  const rq = (r, extra = {}) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }], invoiceStatuses: [], ...extra } }, { byMeaning: true });
+
+  test('a non-assertive marker elsewhere in the clause does NOT exempt the payment assertion', () => {
+    for (const s of [
+      'Your payment settled so please call if you need anything', 'Your payment settled, but you can pay online if you like', 'Your payment settled and I will send the receipt',
+      'Your payment settled because you can rest easy', 'Your payment settled, can you confirm?', 'Your payment settled if that helps', 'Your payment settled. Please call us.',
+    ]) expect({ s, r: V4.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: true });
+  });
+  test('a genuinely non-assertive PAYMENT sub-clause still is exempt', () => {
+    for (const s of [
+      'Did your payment settle, or is it still pending?', 'If your payment does not go through, let us know.', 'Can you confirm when you paid?', 'You can pay with the link below.',
+      'Once the visit is done we will reschedule your payment date.', 'I will send you the payment link.', 'Please use your personal pay link so your payment goes through.',
+    ]) expect({ s, r: V4.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: false });
+  });
+  test('invoice / bill subjects: unrecognized status wording fails closed; delivery / offers do not', () => {
+    for (const s of ['Your invoice is settled.', 'The bill finalized.', 'Your invoice cleared out.', 'Your bill is squared away.', 'The invoice got resolved.']) {
+      expect({ s, r: V4.unrecognizedPaymentAssertion(s), flagged: V4.mayAssertPaymentStatus(s), draft: rq(s) }).toEqual({ s, r: true, flagged: true, draft: true });
+    }
+    for (const s of ['Your invoice is attached.', 'Your invoice is ready below.', 'I will email you the invoice.', 'Can you send me the invoice number?', 'We bill on the first of the month.', 'Your invoice was sent Tuesday.']) {
+      expect({ s, r: V4.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: false });
+    }
+  });
+  test('the prescreen is a superset of the unrecognized-assertion trigger (invoice / bill included)', () => {
+    for (const s of ['Your invoice is settled.', 'The bill finalized.', 'Your payment settled.', 'Everything is unpaid.', 'A chargeback resolved.']) {
+      if (V4.unrecognizedPaymentAssertion(s)) expect({ s, flagged: V4.mayAssertPaymentStatus(s) }).toEqual({ s, flagged: true });
+    }
+  });
+});
+
+// Codex round-25 P1: invoice binding rejects conflicting inbound / reply identity.
+describe('round-25: invoice status claims agree with the invoice the customer asked about', () => {
+  const rq = (r, list, inboundMessage) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: [], invoiceStatuses: list } }, { byMeaning: true, inboundMessage });
+  const inv = (num, status, total) => ({ id: `i-${num}`, invoiceNumber: `WPC-2026-${num}`, status, total, amountDue: status === 'sent' ? total : 0 });
+  const list = [inv('0101', 'paid', 120), inv('0202', 'paid', 95)];
+
+  test('the auditor case: "Is my $120 invoice paid?" + "Your $95 invoice is paid" binds NEITHER (was: the separate $95 invoice)', () => {
+    expect(rq('Your $95 invoice is paid.', list, 'Is my $120 invoice paid?')).toBe(true);
+    expect(rq('Your $120 invoice is paid.', list, 'Is my $120 invoice paid?')).toBe(false); // agrees
+    expect(rq('Your invoice is paid.', list, 'Is my $120 invoice paid?')).toBe(false); // reply silent: inherits the inbound
+  });
+  test('a reply invoice NUMBER that the customer did not ask about is rejected', () => {
+    expect(rq('Invoice WPC-2026-0202 is paid.', list, 'Is invoice WPC-2026-0101 paid?')).toBe(true);
+    expect(rq('Invoice WPC-2026-0101 is paid.', list, 'Is invoice 0101 paid?')).toBe(false);
+    expect(rq('Invoice #0202 is paid.', list, 'Is invoice #0101 paid?')).toBe(true);
+  });
+  test('no inbound identity: the reply resolves on its own, as before', () => {
+    expect(rq('Your $95 invoice is paid.', list)).toBe(false);
+    expect(rq('Invoice WPC-2026-0202 is paid.', list)).toBe(false);
+  });
+});

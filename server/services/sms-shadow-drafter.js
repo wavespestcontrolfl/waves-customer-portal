@@ -2181,7 +2181,17 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   if (!Array.isArray(list)) return true; // invoice state unavailable => fail closed
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   let pool = list;
+  const strip0 = (x) => String(x).replace(/^0+/, '') || '0';
   const named = [text, env.inboundText].map(invoiceNumbersNamed);
+  // Codex round-25 P1: the reply's invoice identity must AGREE with the invoice the customer asked about (like
+  // the payment-row binder): a number the reply names that the inbound's numbers don't include, or a reply
+  // amount the inbound didn't name, is a DIFFERENT invoice — ungrounded, never resolved to a separate one.
+  const numberKeys = (n) => [...n.full.map((f) => strip0(f.split('-').pop())), ...n.tail.map(strip0)];
+  const replyKeys = numberKeys(named[0]);
+  const askedKeys = numberKeys(named[1]);
+  if (replyKeys.length && askedKeys.length && !replyKeys.some((k) => askedKeys.includes(k))) return true;
+  const askedAmounts = amountCentsIn(env.inboundText);
+  if (askedAmounts.length && amounts.length && amounts.some((a) => !askedAmounts.includes(a))) return true;
   const fullNames = named.flatMap((n) => n.full);
   const tails = named.flatMap((n) => n.tail);
   if (fullNames.length || tails.length) {
@@ -2865,6 +2875,13 @@ function buildFactsBlock(context, extras = {}) {
     // the fact never states something untrue: no recipient configured at
     // all, vs a recipient exists but this account isn't Zelle-eligible
     // right now (a saved-method-required invoice, combined balance, etc.).
+    // Codex round-25 P1: with SEVERAL open invoices and no way to tell which one the customer means, Zelle is
+    // neither offered nor DENIED — the fact tells the model to ask which invoice. (Design call: even when every
+    // open invoice happens to be Zelle-eligible we still ask, rather than claim availability without a target —
+    // the offer, and the send-time recheck, are always about ONE named invoice.)
+    if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetAmbiguous) {
+      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; this customer has SEVERAL open invoices and whether Zelle works depends on WHICH invoice they mean — do not offer Zelle and do not say it is unavailable; ask which invoice they want to pay (its number or amount)');
+    } else
     billingLines.push(zelleRecipient
       ? `- Payment options: card or bank account (ACH) through their personal pay link, or Zelle to ${zelleRecipient} (have them put their name or invoice number in the Zelle memo so the office can match it) — {"type":"send_payment_link"} texts their personal pay link`
       : configuredZelleRecipient
@@ -3367,7 +3384,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, zelleEligible, now: factsAt });
+  // several open invoices and no way to tell which one: neither offer nor deny Zelle (buildFactsBlock asks which)
+  const zelleTargetAmbiguous = !presetFactsBlock && !zelleTarget.invoiceId && zelleTarget.reason !== 'no_open_invoice';
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, zelleEligible, zelleTargetAmbiguous, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.

@@ -960,10 +960,17 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
     await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, zelleInvoiceId: 'inv-1', inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
-  test('a Zelle DENIAL: unresolvable with several open => it stands; named invoice now eligible => stale', async () => {
+  test('a Zelle DENIAL: unresolvable with several open => UNVERIFIABLE, blocked (the draft asks which invoice); named invoice now eligible => stale', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available right now.", dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
+    // an ambiguous reference (two invoices share the amount) is unverifiable too; a named invoice that is not open too
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0999?' })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
+    // nothing open at all: there is nothing to pay by Zelle, the denial stands
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith([]));
     await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
     await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0101?' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
   });
 });

@@ -400,8 +400,14 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } 
     if (!ctx) return { stale: true, reason: 'zelle_recheck_failed' };
     // several open invoices: the SAME resolver as the draft (Codex round-19 P1); an unresolvable reference
     // abstained at draft time, so the denial stands
-    const invoiceId = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
-    if (!invoiceId) return { stale: false }; // nothing to pay by Zelle => "not available" is true
+    const target = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage);
+    const invoiceId = target.invoiceId;
+    if (!invoiceId) {
+      // Codex round-25 P1: no open invoice at all => nothing to pay by Zelle, the denial stands. An UNRESOLVED
+      // target (several open invoices, none identified) is UNVERIFIABLE — the draft asks which invoice instead of
+      // denying — so a denial is blocked.
+      return target.reason === 'no_open_invoice' ? { stale: false } : { stale: true, reason: 'zelle_target_ambiguous' };
+    }
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
     if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
     // an UNVERIFIABLE state (lookup failed, payer or credit state unknown) is not a confirmed "ineligible" —

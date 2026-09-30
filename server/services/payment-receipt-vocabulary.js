@@ -365,7 +365,7 @@ function paymentStatusPromptLine() {
 // payment words, so it is a guaranteed superset of paymentStatusPhraseClaim —
 // a phrase added to the table is automatically screened in (Codex round-9 P1).
 const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
-  `\\b(?:payments?|paid|unpaid|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
+  `\\b(?:payments?|paid|unpaid|invoices?|bills?|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
     phrasePattern([...Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]), ...SETTLEMENT_PHRASES])
   })\\b`,
   'i',
@@ -376,7 +376,7 @@ const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
 // can pay…", "please…"), or a plain reference to the payment options / pay link / payment method.
 const NON_ASSERTIVE_PAYMENT_RE = new RegExp([
   '\\?', // a question
-  '\\b(?:if|once|when|whenever|unless|in\\s+case|should\\s+you|as\\s+soon\\s+as|after\\s+you|before\\s+you)\\b', // conditional
+  '^\\s*(?:if|once|when|whenever|unless|in\\s+case|should\\s+you|as\\s+soon\\s+as|after\\s+you|before\\s+you)\\b', // conditional (opens the sub-clause)
   '\\b(?:you\\s+(?:can|could|may|might|will\\s+be\\s+able\\s+to)|feel\\s+free|please|(?:can|could|would|will)\\s+you|let\\s+me|reply\\s+with|just\\s+(?:reply|text)|go\\s+ahead)\\b', // offer / request
   "\\b(?:we|i)(?:'ll|\\s+will|'d|\\s+can|\\s+could)\\s+(?:send|text|email|share|resend|forward|get|help|check|look|find|make|set|go|take|give|walk|confirm|follow|let|reach|call|update|see)\\b", // future action
   '\\b(?:we\\s+(?:accept|take|offer|support)|to\\s+pay|ways?\\s+to\\s+pay|how\\s+to\\s+pay|pay(?:ing)?\\s+(?:link|online|by|with|via|through|using))\\b', // how-to-pay
@@ -390,10 +390,42 @@ const isNonAssertivePaymentClause = (text) => NON_ASSERTIVE_PAYMENT_RE.test(Stri
 // a bare "processing" / "pending" with no payment noun ("we're processing your request"), or "Zelle" /
 // "account" alone (offers and availability are rechecked by their own seams), are not status assertions.)
 const PAYMENT_STATUS_NOUN_RE = /\b(?:payments?|paid|unpaid|charges?|transfers?|deposits?|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+// Codex round-25 P1: an INVOICE / BILL is a payment-status subject too ("Your invoice is settled", "The bill
+// finalized") — the same noun family as the invoice-status tagger (invoiceSubjectClause). "bill" only as a
+// noun ("the/your/a bill"), never the verb ("we bill monthly"). Benign delivery predicates ("your invoice is
+// attached / ready / below") assert nothing about payment.
+const INVOICE_NOUN_RE = /\binvoices?\b|\b(?:the|your|a|this|that|our|my)\s+(?:\w+\s+)?bills?\b/i;
+const BENIGN_INVOICE_PREDICATE_RE = /\b(?:attached|enclosed|ready|below|above|included|linked|available|sent|emailed|texted|coming|on\s+its\s+way|in\s+your\s+(?:email|inbox|portal)|for\s+your\s+records)\b/i;
+// One sub-clause: does it hold a payment / invoice status noun (or a settlement phrase / zero balance)?
+function paymentStatusHit(sub) {
+  return PAYMENT_STATUS_NOUN_RE.test(sub) || SETTLEMENT_PHRASE_RE.test(sub) || ZERO_BALANCE_RE.test(sub)
+    || (INVOICE_NOUN_RE.test(sub) && !BENIGN_INVOICE_PREDICATE_RE.test(sub));
+}
+// Codex round-25 P1: the non-assertive exemption is judged on the payment phrase's OWN sub-clause — split on
+// so / because / while / however / and / but / punctuation — so "Your payment settled so please call if you
+// need anything" is an assertion (the "please…" belongs to the other sub-clause). Only a clause that is ENTIRELY a
+// question ("Did your payment settle, or is it pending?") is exempt as a whole.
+const SUBCLAUSE_SPLIT_RE = /(\s+(?:so(?:\s+that)?|because|since|though|although|while|whereas|however|then|which|and|but)\s+|[,;\u2014\u2013]\s*|\s-\s|(?<=[.!?])\s+)/i;
+const PURPOSE_CONNECTOR_RE = /^\s*so(?:\s+that)?\s*$/i;
+const INTERROGATIVE_START_RE = /^\s*(?:did|do|does|is|are|was|were|has|have|had|can|could|will|would|should|may|what|when|why|how|where|which|who)\b/i;
 function unrecognizedPaymentAssertion(text) {
   const t = String(text || '');
-  if (!(PAYMENT_STATUS_NOUN_RE.test(t) || SETTLEMENT_PHRASE_RE.test(t) || ZERO_BALANCE_RE.test(t))) return false;
-  return !isNonAssertivePaymentClause(t);
+  if (/\?\s*$/.test(t) && INTERROGATIVE_START_RE.test(t)) return false; // the whole clause is a question
+  // pieces alternate: sub-clause, connector, sub-clause, ...
+  const pieces = t.split(SUBCLAUSE_SPLIT_RE);
+  let prevExempt = false;
+  let connector = '';
+  for (let i = 0; i < pieces.length; i += 1) {
+    if (i % 2 === 1) { connector = pieces[i]; continue; }
+    const sub = pieces[i];
+    if (!sub || !sub.trim()) continue;
+    // a "so (that) …" PURPOSE clause after an instruction/offer ("Please use your pay link so your payment goes
+    // through") is part of the instruction, not a status assertion
+    const exempt = isNonAssertivePaymentClause(sub) || (prevExempt && PURPOSE_CONNECTOR_RE.test(connector));
+    if (paymentStatusHit(sub) && !exempt) return true;
+    prevExempt = exempt;
+  }
+  return false;
 }
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || '')) || ZERO_BALANCE_RE.test(String(text || ''));
