@@ -10,7 +10,7 @@ const { loadPaymentHistory, ensureAbsenceHistory, PAYMENT_HISTORY_CAP } = requir
 function fakeDb(rows, { fail = false } = {}) {
   const calls = [];
   const q = {};
-  ['where', 'whereNot', 'whereRaw', 'orderBy', 'limit'].forEach((m) => {
+  ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => {
     q[m] = jest.fn((...args) => { calls.push([m, args]); return q; });
   });
   q.then = (res, rej) => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows)).then(res, rej);
@@ -77,5 +77,25 @@ describe('ensureAbsenceHistory (lazy)', () => {
     const c = ctx({ recentPayments: [], recentPaymentsTruncated: true });
     await ensureAbsenceHistory(c, "Your payment isn't showing.", fakeDb([], { fail: true }));
     expect(c.billing.paymentHistory).toBeNull();
+  });
+});
+
+describe('Codex round-12 P0: payer-owned rows with no invoice_id', () => {
+  test('payments.payer_id IS NULL is applied in SQL before the limit', async () => {
+    const dbh = fakeDb([{ id: 1 }]);
+    await loadPaymentHistory('c1', dbh);
+    const names = dbh.calls.map(([m]) => m);
+    expect(dbh.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'payments.payer_id')).toBe(true);
+    expect(names.indexOf('whereNull')).toBeLessThan(names.indexOf('limit'));
+  });
+});
+
+describe('Codex round-12 P0: the aggregator\'s Recent payments read excludes payer-owned rows in SQL too', () => {
+  test('getContextForCustomer\'s db(\'payments\') display read carries whereNull(\'payments.payer_id\') before its limit', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/context-aggregator'), 'utf8');
+    const line = src.split('\n').find((l) => /db\('payments'\)\.where\(\{ 'payments\.customer_id': customer\.id \}\)/.test(l));
+    expect(line).toBeDefined();
+    expect(line).toMatch(/whereNull\('payments\.payer_id'\)/);
+    expect(line.indexOf("whereNull('payments.payer_id')")).toBeLessThan(line.indexOf('.limit('));
   });
 });

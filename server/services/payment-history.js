@@ -23,6 +23,9 @@ async function loadPaymentHistory(customerId, dbh = db) {
   try {
     const rows = await dbh('payments')
       .where({ 'payments.customer_id': customerId })
+      // Payer-owned money (payments.payer_id — the AP party that paid) never belongs to the
+      // homeowner's history, even with no metadata.invoice_id (Codex round-12 P0).
+      .whereNull('payments.payer_id')
       .whereNot('payments.status', 'upcoming')
       .whereRaw(
         "COALESCE(payments.metadata->>'invoice_id', '') NOT IN (SELECT id::text FROM invoices WHERE customer_id = ? AND payer_id IS NOT NULL)",

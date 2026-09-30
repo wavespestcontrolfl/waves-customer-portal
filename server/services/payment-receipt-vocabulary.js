@@ -40,7 +40,15 @@ const RECEIPT_VERB_RE = new RegExp(`\\b(?:${receiptVerbPattern})\\b`, 'i');
 // The "thank(s|you) for … payment" courtesy construction, "payment"-anchored
 // so a bare "Thanks!" with no payment word nearby never counts as a receipt
 // claim on its own.
-const THANKS_FOR_PAYMENT_RE = /\bthank(?:s|\s+you)\b[^.\n]{0,25}\bpayment\b/i;
+// Codex round-12 P1: the SUBJECT of a paid-status claim is any payment noun, not
+// literally "payment" — "your Zelle transfer cleared", "your charge posted",
+// "your check cleared". PAYMENT_SUBJECT (receipt/ack verbs) stays to nouns that
+// unambiguously name a payment so "we've got Zelle" (an OFFER) is never a
+// receipt; PAYMENT_EVENT_SUBJECT additionally takes "your/the Zelle|ACH|check"
+// because its verbs (cleared/posted/went through/complete) are unambiguous.
+const PAYMENT_SUBJECT = '(?:payments?|transfers?|deposits?|charges?|(?:your|the|our)\\s+check)';
+const PAYMENT_EVENT_SUBJECT = '(?:payments?|transfers?|deposits?|charges?|(?:your|the|our)\\s+(?:zelle|ach|check))';
+const THANKS_FOR_PAYMENT_RE = new RegExp(`\\bthank(?:s|\\s+you)\\b[^.\\n]{0,25}\\b${PAYMENT_SUBJECT}\\b`, 'i');
 
 // The full "payment acknowledgement" pattern SOURCE (a string, not a
 // compiled RegExp — sms-shadow-drafter.js's PAYMENT_ACK_RE also needs the
@@ -52,9 +60,9 @@ const THANKS_FOR_PAYMENT_RE = /\bthank(?:s|\s+you)\b[^.\n]{0,25}\bpayment\b/i;
 // independently-maintained copy.
 function paymentAckPatternSource() {
   return [
-    `\\b(?:${receiptVerbPattern})\\b[^.\\n]{0,30}\\bpayment\\b`,
-    `\\bpayment\\b[^.\\n]{0,30}\\b(?:${receiptVerbPattern}|all set|all paid|paid in full)\\b`,
-    `\\b(?:all set|all paid|paid in full)\\b[^.\\n]{0,30}\\bpayment\\b`,
+    `\\b(?:${receiptVerbPattern})\\b[^.\\n]{0,30}\\b${PAYMENT_SUBJECT}\\b`,
+    `\\b${PAYMENT_SUBJECT}\\b[^.\\n]{0,30}\\b(?:${receiptVerbPattern}|all set|all paid|paid in full)\\b`,
+    `\\b(?:all set|all paid|paid in full)\\b[^.\\n]{0,30}\\b${PAYMENT_SUBJECT}\\b`,
     THANKS_FOR_PAYMENT_RE.source,
   ].join('|');
 }
@@ -135,7 +143,7 @@ const phrasePattern = (list) => list.map((v) => v.replace(/\s+/g, '\\s+').replac
 // noun (or an amount, or the customer's own message is about a payment, both
 // handled by the caller) — "your invoice is pending" or "we're processing your
 // request" are not.
-const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid|refund(?:ed|s)?|disputed?|chargeback|(?:your|the|our|a)\s+check)\b/i;
 const familyRe = (family) => new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY[family].phrases)})\\b`, 'i');
 const STATUS_PHRASE_RES = Object.freeze([
   ['not_found', familyRe('not_found')],
@@ -165,23 +173,50 @@ const inboundNamesPayment = (text) => INBOUND_PAYMENT_RE.test(String(text || '')
 // through", "haven't received", "isn't showing") are members of their family
 // and are matched first, so they keep their positive meaning.
 const NEGATOR_BEFORE_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s*$/i;
-const NEGATED_STEM_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s+(?:fail|decline|refund|dispute|bounce|reverse|process|pend)(?:ed|ing|s|e)?\b/i;
+const NEGATED_STEM_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s+(?:fail|declin|refund|disput|bounc|revers|return|process|pend|charg(?=ed\s*back))(?:e|ed|d|ing|es|s)?\b/i;
 const POSITIVE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
+// Codex round-12 P1: question suppression is scoped to the status phrase ITSELF
+// — it is a question only when the first sentence terminator at/after it is a
+// '?' (interrogative order: "is your payment still processing?"). A statement
+// followed by a question ("still processing — does that answer it?") is NOT
+// suppressed. Dashes/em-dashes terminate a span like . ! ; do.
+function insideQuestion(text, index) {
+  const m = /[.!?;\u2014\u2013\n]/.exec(String(text || '').slice(index));
+  return !!m && m[0] === '?';
+}
 function paymentStatusPhraseClaim(clause, namesPayment = false) {
   const text = String(clause || '');
-  if (/\?/.test(text)) return null;
   if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return null;
   for (const [family, re] of STATUS_PHRASE_RES) {
     const m = re.exec(text);
-    if (!m) continue;
+    if (!m || insideQuestion(text, m.index)) continue;
     if (POSITIVE_FAMILIES.has(family) && NEGATOR_BEFORE_RE.test(text.slice(0, m.index))) return 'negated';
     return family;
   }
   // "didn't fail", "wasn't declined", "not refunded" forms whose positive stem
   // is not itself a table phrase: still a negated status claim.
-  if (NEGATED_STEM_RE.test(text)) return 'negated';
+  const stem = NEGATED_STEM_RE.exec(text);
+  if (stem && !insideQuestion(text, stem.index)) return 'negated';
   return null;
 }
+// Codex round-12 P1: ONE table of SETTLEMENT phrases ("nothing is owed" claims),
+// feeding the drafter's settlement classifier AND the prescreen so a phrase can
+// never be classified but not screened. Each is grounded only when nothing is
+// outstanding or in flight (billingHasOutstandingObligation).
+const SETTLEMENT_PHRASES = Object.freeze([
+  "you're paid up", 'you are paid up', 'paid in full', 'all paid',
+  'your account is current', 'your account is up to date', 'your account is up-to-date',
+  "you're all caught up", 'you are all caught up', 'all caught up',
+  "you don't owe anything", "you don't owe us anything", 'you do not owe anything', 'you do not owe us anything', 'you owe nothing', "you don't owe a thing",
+  'there is no balance', "there's no balance", 'no balance due', 'no balance owed', 'no balance remaining', 'no outstanding balance', 'no balance on your account',
+  'nothing is due', "nothing's due", 'nothing is owed', "nothing's owed", 'nothing is owing', 'nothing due', 'nothing owed', 'nothing outstanding',
+  'zero balance',
+]);
+const SETTLEMENT_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(SETTLEMENT_PHRASES)})\\b`, 'i');
+// "$0 balance" / "balance is $0" / "owe $0" — checked on the RAW text (masking a
+// figure loses its value).
+const ZERO_BALANCE_RE = /(?:\$\s?0(?:\.00?)?|\bzero)\s+(?:balance|due|owed|owing)\b|\bbalance\s+(?:is|of)\s+(?:\$\s?0(?:\.00?)?|zero)\b|\bowe\s+(?:us\s+)?\$\s?0(?:\.00?)?\b/i;
+
 // The prompt sentence derived from the table above.
 function paymentStatusPromptLine() {
   const q = (list) => list.map((p) => `"${p}"`).join(', ');
@@ -209,15 +244,21 @@ function paymentStatusPromptLine() {
 // a phrase added to the table is automatically screened in (Codex round-9 P1).
 const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
   `\\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
-    phrasePattern(Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]))
+    phrasePattern([...Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]), ...SETTLEMENT_PHRASES])
   })\\b`,
   'i',
 );
 function mayAssertPaymentStatus(text) {
-  return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || ''));
+  return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || '')) || ZERO_BALANCE_RE.test(String(text || ''));
 }
 
 module.exports = {
+  SETTLEMENT_PHRASES,
+  SETTLEMENT_PHRASE_RE,
+  ZERO_BALANCE_RE,
+  PAYMENT_SUBJECT,
+  PAYMENT_EVENT_SUBJECT,
+  insideQuestion,
   containsAbsencePhrase,
   PAYMENT_STATUS_VOCABULARY,
   ANY_STATUS,

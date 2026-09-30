@@ -1058,7 +1058,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1080,7 +1080,8 @@ const PAYMENT_NEGATION_RE = /\b(?:haven't|have not|hasn't|has not|didn't|did not
 // the one comma this split must never break on; every other list/clause comma
 // ("$50, $60, and $70", "Got it, thanks") is followed by something other than
 // a bare 4-digit token and still splits exactly as before.
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s[—–-]\s/;
+// Round-12 P1: an UNSPACED em/en dash ends a clause too ("processing—does that answer…").
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s?[—–]\s?|\s-\s/;
 // Codex round-10 P1 (PR #5331): the ONE polarity-aware ack test. 'positive' =
 // an affirmative receipt/ack phrase; 'negated' = the same phrase under a
 // negator in the SAME clause ("wasn't processed", "didn't get"); null = no ack
@@ -1118,22 +1119,29 @@ function hasAffirmativePaymentAck(text) {
 // clause (PAYMENT_NEGATION_RE, shared with the narrower guard above), and a
 // how-to/instruction on WAYS to pay (never a claim that payment already
 // happened).
-const PAYMENT_SETTLEMENT_STATUS_RE = /\byou'?re\s+paid\s+up\b|\byou\s+are\s+paid\s+up\b|\bpaid\s+in\s+full\b|\ball\s+paid\b|\byour\s+account\s+is\s+(?:current|up[- ]to[- ]date)\b/i;
-// "payment"-anchored, either order, so an inline amount between "your" and
-// "payment" (e.g. masked "your  AMT  payment cleared") never breaks the
-// match — the anchor is the word "payment" itself, never its possessive
-// prefix.
-const PAYMENT_EVENT_STATUS_RE = /\bpayment\b[^.\n]{0,25}\b(?:clear(?:ed|s)?|post(?:ed|s)?|went\s+through|(?:was|is|'s)\s+(?:successful|complete|processed))\b|\b(?:clear(?:ed|s)?|post(?:ed|s)?)\b[^.\n]{0,25}\bpayment\b|\bwe\s+have\s+your\s+payment\b/i;
+// Round-12 P1: settlement phrases come from the shared SETTLEMENT_PHRASES table
+// (also feeding the prescreen); event subjects from PAYMENT_EVENT_SUBJECT so
+// "your Zelle transfer cleared" / "your charge posted" are event claims too.
+const PAYMENT_SETTLEMENT_STATUS_RE = SETTLEMENT_PHRASE_RE;
+const PAYMENT_EVENT_STATUS_RE = new RegExp(
+  `\\b${PAYMENT_EVENT_SUBJECT}\\b[^.\\n]{0,25}\\b(?:clear(?:ed|s)?|post(?:ed|s)?|went\\s+through|(?:was|is|'s)\\s+(?:successful|complete|processed))\\b`
+  + `|\\b(?:clear(?:ed|s)?|post(?:ed|s)?)\\b[^.\\n]{0,25}\\b${PAYMENT_EVENT_SUBJECT}\\b`
+  + `|\\bwe\\s+have\\s+your\\s+${PAYMENT_EVENT_SUBJECT}\\b`,
+  'i',
+);
 const PAYMENT_HOWTO_RE = /\byou\s+can\s+pay\b|\bpay\s+link\b|\bto\s+pay\b|\bpay(?:ing)?\s+(?:via|by|with|through)\b|\bways?\s+to\s+pay\b/i;
 // null (not a status claim, or excluded by question/negation/how-to), else
-// 'settlement' | 'event'.
+// 'settlement' | 'event'. Settlement is tested BEFORE the negation exclusion
+// (round-12): "you don't owe anything" / "no balance due" are settlement claims
+// that themselves contain a negator.
 function paymentStatusClaimKind(clause) {
   const text = String(clause || '');
-  if (/\?/.test(text)) return null;
-  if (PAYMENT_NEGATION_RE.test(text)) return null;
   if (PAYMENT_HOWTO_RE.test(text)) return null;
-  if (PAYMENT_SETTLEMENT_STATUS_RE.test(text)) return 'settlement';
-  if (PAYMENT_EVENT_STATUS_RE.test(text)) return 'event';
+  const settle = PAYMENT_SETTLEMENT_STATUS_RE.exec(text);
+  if (settle && !insideQuestion(text, settle.index)) return 'settlement';
+  if (PAYMENT_NEGATION_RE.test(text)) return null;
+  const event = PAYMENT_EVENT_STATUS_RE.exec(text);
+  if (event && !insideQuestion(text, event.index)) return 'event';
   return null;
 }
 
@@ -1470,7 +1478,10 @@ function classifyAmountFreeClause(ackPol, statusKind) {
 }
 function classifyAmountClause(masked, ackPol, statusKind, env) {
   if (ackPol === 'negated') return { kind: 'negated_ack' };
-  const owed = AMOUNT_OWED_RE.test(masked);
+  // "charge" is BOTH an owed noun and a payment subject ("your charge posted",
+  // round-12): on a receipt-shaped clause it is the subject, not owed language.
+  const receiptSubject = ackPol === 'positive' || statusKind === 'event';
+  const owed = AMOUNT_OWED_RE.test(receiptSubject ? masked.replace(/\bcharges?\b/gi, ' ') : masked);
   // trustOwedAmounts (scheduler's "a human reviewed this figure") excuses only a
   // genuinely OWED clause — never a receipt/status assertion (round-4/6 P1:
   // "invoice payment" reads as owed and must not skip the binder).
@@ -1560,7 +1571,11 @@ function clauseUngrounded(clause, env) {
   // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
   if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
   const amounts = amountCentsIn(text);
-  const cls = classifyPaymentClause(masked, amounts.length > 0, env);
+  // "$0 balance" / "balance is $0": a settlement claim (raw text — masking loses the value).
+  const zero = ZERO_BALANCE_RE.exec(text);
+  const cls = zero && !insideQuestion(text, zero.index)
+    ? { kind: 'settlement' }
+    : classifyPaymentClause(masked, amounts.length > 0, env);
   return KIND_VALIDATORS[cls.kind]({ ...cls, text, amounts }, env);
 }
 
@@ -3208,6 +3223,7 @@ module.exports = {
   billingAmountCents,
   hasAffirmativePaymentAck,
   paymentAckPolarity,
+  classifyPaymentClause,
   paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

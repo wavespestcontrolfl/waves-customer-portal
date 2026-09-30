@@ -87,7 +87,7 @@ const ZELLE_NEGATION_RE = new RegExp(
 // day/year comma guard mirrors the drafter's own fix (independent-review P2,
 // round 4): "September 12, 2026" must stay one clause so a Zelle RECEIPT
 // clause's stated date keeps its year (see classifyZelleClause below).
-const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s[—–-]\s/;
+const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:and|but)\s|\s?[—–]\s?|\s-\s/;
 
 // Independent-review P1 (round 4, PR #5331, finding 1): a Zelle-mentioning
 // clause is either an INSTRUCTION/OFFER ("you can Zelle us", "Zelle to
