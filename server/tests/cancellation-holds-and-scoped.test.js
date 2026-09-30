@@ -42,6 +42,7 @@ function mockMakeBuilder(table) {
           if (op === '>=') return a >= b;
           if (op === '<=') return a <= b;
           if (op === '>') return a > b;
+          if (op === '<') return a < b;
           return a === b;
         });
       } else if (typeof arg1 === 'function') {
@@ -352,6 +353,24 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.customers[0].tier_protected_until).toBe(null);
     expect(mockState.tables.plan_holds[0].status).toBe('resumed');
     expect(mockReschedule).not.toHaveBeenCalled(); // nothing is ever shifted to make room for the notice
+  });
+
+  test('an accept interrupted after its hold committed: the daily run carries out the unfinished skips once, and leaves an in-flight accept alone', async () => {
+    const plan = (over = {}) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'confirmed', from: daysOut(9) }], skipped: ['l2'], skipsFinal: false, ...over });
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), moved_visits: plan() },
+      [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9), { status: 'skipped' }), lawnVisit('back', daysOut(40))]);
+    const first = await runPlanHoldLifecycle({ today: TODAY });
+    expect(first.skipsRecovered).toBe(1);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', toStatus: 'skipped', notifyCustomer: false }));
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ skipped: ['l2', 'l1'], skipsFinal: true });
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(0);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+
+    mockTransition.mockClear();
+    holdSeed({ created_at: new Date(), moved_visits: plan({ skipped: [] }) }, [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).skipsRecovered).toBe(0);
+    expect(mockTransition).not.toHaveBeenCalled();
   });
 
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {

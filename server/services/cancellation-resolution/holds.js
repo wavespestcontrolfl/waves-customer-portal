@@ -280,7 +280,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         starts_on: today,
         resume_on: resume,
         held_monthly_rate: heldRate,
-        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, from: dateOnlyString(v.scheduled_date) })), skipped: [] }),
+        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })), skipped: [], skipsFinal: false }),
         status: 'active',
       }).returning(['id']);
       holdId = hold?.id || hold;
@@ -354,13 +354,16 @@ async function applyHoldSkips(holdResults) {
     }).catch(() => {});
   };
   for (const hold of holdResults || []) {
-    if (!hold?.holdId || !hold.pendingSkips?.length) continue;
+    if (!hold?.holdId || !Array.isArray(hold.pendingSkips)) continue;
     const skipped = [];
     for (const visit of hold.pendingSkips) {
       let outcome;
       try {
         outcome = await db.transaction(async (trx) => {
           const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('*');
+          // Idempotent: a recovery pass re-offers visits a crashed accept
+          // may already have skipped.
+          if (row && row.status === 'skipped') return 'skipped';
           if (!row || row.status !== visit.status) return 'changed';
           const date = dateOnlyString(row.scheduled_date);
           // Moved out of the pause in the gap: nothing to skip.
@@ -393,13 +396,14 @@ async function applyHoldSkips(holdResults) {
       if (outcome === 'skipped') skipped.push(visit.id);
       else if (outcome !== 'left_pause') await bellOffice(hold, visit, outcome);
     }
-    if (!skipped.length) continue;
+    // skipsFinal marks the plan as carried out (bells rang for anything
+    // left), so the lifecycle's recovery pass never re-runs it.
     try {
       const row = await db('plan_holds').where({ id: hold.holdId }).first('moved_visits');
       let record = {};
       try { record = typeof row?.moved_visits === 'string' ? JSON.parse(row.moved_visits) : (row?.moved_visits || {}); } catch { record = {}; }
       await db('plan_holds').where({ id: hold.holdId }).update({
-        moved_visits: JSON.stringify({ ...record, skipped: [...(record.skipped || []), ...skipped] }),
+        moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], skipsFinal: true }),
         updated_at: new Date(),
       });
     } catch (err) { logger.warn(`[holds] skip record failed for hold ${hold.holdId}: ${err.message}`); }
@@ -480,6 +484,9 @@ async function firstVisitBack(hold, dbh = db) {
 // A hold whose first visit back has not come round within this many days of
 // the return date is no longer texted about.
 const REMINDER_LOOKBACK_DAYS = 90;
+// An accept runs its skips within seconds of writing the hold; a hold
+// older than this with an unfinished skip plan was interrupted.
+const SKIP_RECOVERY_AFTER_MS = 15 * 60 * 1000;
 
 /**
  * The restart text for one hold (rule 3): sent when the first visit back is
@@ -572,7 +579,30 @@ async function sendDueRestartTexts(holdIds) {
  * live-unique index. Nothing is ever moved to make room for the notice.
  */
 async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
-  const out = { reminded: 0, resumed: 0, errors: [] };
+  const out = { reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] };
+
+  // Recovery: an accept that committed its hold but died before its skips
+  // ran (restart, deploy) leaves visits booked inside the pause. Holds past
+  // the in-flight window whose skip plan never finished are carried out
+  // here; applyHoldSkips re-checks every visit under its lock.
+  const recoverBefore = new Date(Date.now() - SKIP_RECOVERY_AFTER_MS);
+  const unfinished = await db('plan_holds').where({ status: 'active' }).where('created_at', '<', recoverBefore).select('*');
+  for (const hold of unfinished) {
+    try {
+      let record = {};
+      try { record = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : (hold.moved_visits || {}); } catch { record = {}; }
+      if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
+      const done = new Set((record.skipped || []).map(String));
+      await applyHoldSkips([{
+        holdId: hold.id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on),
+        pendingSkips: record.toSkip.filter((v) => !done.has(String(v.id))),
+      }]);
+      out.skipsRecovered += 1;
+    } catch (err) {
+      out.errors.push(`skips:${hold.id}`);
+      logger.error(`[holds] skip recovery failed for hold ${hold.id}: ${err.message}`);
+    }
+  }
 
   // A resumed hold still owes its text when the first visit back comes
   // after the return date.
