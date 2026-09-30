@@ -100,8 +100,8 @@ const {
 const DEFAULT_MIN_CELL = 10;
 
 // The three counties this report covers (work order D5). Deliberately NOT
-// the fuller Manatee/Sarasota/Charlotte/DeSoto/Lee/Collier service-area or
-// tax county sets used elsewhere — a customer outside these three counties
+// the fuller Manatee/Sarasota/Charlotte service-area or the
+// Manatee/Sarasota/Charlotte/DeSoto/Lee/Collier tax county sets used elsewhere — a customer outside these three counties
 // is excluded from the county breakdown regardless of which other list
 // might name their county.
 const REPORT_COUNTIES = ['Sarasota', 'Manatee', 'Charlotte'];
