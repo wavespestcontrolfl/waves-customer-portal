@@ -75,7 +75,7 @@ function makeConn({
     const rows = byTable[table] || [];
     const c = {};
     let lastEqWhere = null;
-    for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'orderBy', 'select']) c[m] = jest.fn(() => c);
+    for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'join', 'orderBy', 'select']) c[m] = jest.fn(() => c);
     c.where = jest.fn((w) => { if (w && typeof w === 'object') lastEqWhere = w; return c; });
     c.first = jest.fn(async () => {
       if (!lastEqWhere) return rows[0] || null;
