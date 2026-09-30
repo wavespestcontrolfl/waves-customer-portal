@@ -180,19 +180,34 @@ function gapBellText({ id, source, domain, reopened = false }) {
 // gap. The dedupe key is unique per ring event (first sighting, or the
 // reopening sighting), so a reopen rings again but a replay of the same
 // event does not double-ring.
+//
+// belled_at is stamped inside the row's transaction (a claim, so two
+// concurrent sightings ring once). If the bell is not written — notifyAdmin
+// throws, or returns null on its dedupe path — the claim is released
+// (belled_at back to NULL, only if it is still this event's stamp) so the
+// gap's next sighting rings instead of losing its bell for good.
 async function ringGapBell(event) {
+  let delivered = false;
   try {
     if (!gapReportsEnabled()) return;
     const { title, body } = gapBellText(event);
     const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin('agents', title, body, {
+    const result = await NotificationService.notifyAdmin('agents', title, body, {
       link: BELL_LINK,
       bell: true,
       dedupeKey: `agent-gap:${event.id}:${event.at.toISOString()}`,
       metadata: { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) },
     });
+    delivered = Boolean(result);
+    if (!delivered) logger.warn('[agent-gap-reports] bell failed (not written)');
   } catch (err) {
     logger.warn(`[agent-gap-reports] bell failed (${err.code || err.name || 'error'})`);
+  }
+  if (delivered) return;
+  try {
+    await db('agent_gap_reports').where({ id: event.id, belled_at: event.at }).update({ belled_at: null });
+  } catch (err) {
+    logger.warn(`[agent-gap-reports] bell claim release failed (${err.code || err.name || 'error'})`);
   }
 }
 
