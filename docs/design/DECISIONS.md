@@ -2776,7 +2776,7 @@ every other field always stay as Gemini read them.
 **Merge: tie-break only.** Fable answers a / b / neither per disputed item.
 Matching Sol's side replaces that name (the grass type, or the finding's name
 with Sol's own wording and confirmation step) and caps the finding's confidence
-at `moderate`; matching Gemini's side keeps Gemini's name and caps at
+at `moderate`, never above Sol's own rating of that cause; matching Gemini's side keeps Gemini's name and caps at
 `moderate` as well. A third answer, no usable answer, timeout, or error leaves
 that item, and on a failed call the whole result, exactly as Gemini read it. No
 partial credit. `analyzeVisit` never throws for any of it.

@@ -4773,6 +4773,19 @@ async function lockAndGuardFollowingSiblings(conn, {
       const label = firstId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
       throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
     }
+    // A /secure card confirmation mid-finish on the edited visit OR any
+    // sibling this propagation would reprice — same VISIT_BUSY_RETRY
+    // contract as the single-visit guard above (findCompletingCardRequest
+    // VisitId's own comment has the full lock-vs-plain-read rationale).
+    const finishingId = await findCompletingCardRequestVisitId(conn, guardRows.map((visit) => visit.id));
+    if (finishingId) {
+      const when = guardRows.find((visit) => visit.id === finishingId);
+      const label = finishingId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
+      throw Object.assign(
+        new Error(`The customer is finishing their card confirmation for ${label} — try the price change again in a moment.`),
+        { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+      );
+    }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
     if (invoiceLinkColumn) {
       for (const visit of guardRows) {
@@ -13565,17 +13578,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // #5253). Refuse with a retry rather than race it. The consent
           // amount itself is LEAST-stamped at render and caps the charge, so
           // a confirmation that lands after this save can never charge more
-          // than the customer was shown.
-          if (await trx.schema.hasTable('appointment_card_requests')) {
-            const finishing = await trx('appointment_card_requests')
-              .where({ scheduled_service_id: req.params.id, status: 'completing' })
-              .first('id');
-            if (finishing) {
-              throw Object.assign(
-                new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
-                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
-              );
-            }
+          // than the customer was shown. See findCompletingCardRequestVisitId
+          // for the lock-vs-plain-read contract this shares with
+          // finishVerifiedSecureCapture.
+          if (await findCompletingCardRequestVisitId(trx, [req.params.id])) {
+            throw Object.assign(
+              new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
+              { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+            );
           }
         }
       }
@@ -13627,6 +13637,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               throw Object.assign(
                 httpError(409, `Can't convert this series to a free re-service: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Void or release that first, or convert this appointment only.`),
                 { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+              );
+            }
+            // Same VISIT_BUSY_RETRY contract as the single-visit and
+            // 'following' sibling guards — a /secure card confirmation
+            // mid-finish on any zeroed sibling.
+            const sibFinishingId = await findCompletingCardRequestVisitId(trx, convSiblings.map((visit) => visit.id));
+            if (sibFinishingId) {
+              const when = convSiblings.find((visit) => visit.id === sibFinishingId);
+              throw Object.assign(
+                new Error(`The customer is finishing their card confirmation for the ${dateOnly(when?.scheduled_date) || 'later'} visit — try converting the series again in a moment.`),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
               );
             }
           }
@@ -17869,6 +17890,35 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     }
   }
   return covered;
+}
+
+// A /secure card confirmation mid-finish ('completing') for one of these
+// visits is not durable yet, so the money-committed rails findBillingCovered
+// Visits runs can't see it (Codex r8 P1 on #5253; broadened to sibling
+// guards on #5253 follow-up) — a plain read, kept OUTSIDE that function
+// deliberately: this is a transient contention signal (VISIT_BUSY_RETRY,
+// retry the save) never a durable committed-money refusal
+// (REPRICE_BLOCKED_COMMITTED_MONEY). finishVerifiedSecureCapture
+// (appointment-card-request.js) takes this SAME visit's scheduled-invoice
+// mint lock around its pending→completing claim and its completing→
+// completed write, so a capture mid-claim or mid-final-write is already
+// serialized by the mint lock this route holds (taken above for the edited
+// visit, try-locked for siblings) — a capture waits for that lock, or this
+// save's own lock acquisition blocks until the capture's claim/write
+// commits and releases it. This plain read exists ONLY to catch the window
+// a capture sits 'completing' WITHOUT holding the lock — between its claim
+// commit and its later completing→completed write, which spans an
+// out-of-transaction Stripe SetupIntent re-read and so cannot hold a
+// transaction-scoped advisory lock the whole time. Returns the first
+// covered visit id, or null.
+async function findCompletingCardRequestVisitId(conn, visitIds) {
+  const ids = [...new Set((visitIds || []).filter((id) => id != null))];
+  if (ids.length === 0 || !(await conn.schema.hasTable('appointment_card_requests'))) return null;
+  const finishing = await conn('appointment_card_requests')
+    .whereIn('scheduled_service_id', ids)
+    .where({ status: 'completing' })
+    .first('scheduled_service_id');
+  return finishing ? finishing.scheduled_service_id : null;
 }
 
 // Reconcile a recurring series to an exact number of upcoming visits — the
@@ -26114,6 +26164,7 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+module.exports.findCompletingCardRequestVisitId = findCompletingCardRequestVisitId;
 module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB
 // create_appointment proposal and executor for its single visit

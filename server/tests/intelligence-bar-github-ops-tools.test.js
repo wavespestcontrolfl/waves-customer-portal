@@ -139,7 +139,7 @@ describe('intelligence bar GitHub ops tools', () => {
 // tests cover the module contract: missing-token refusal, a human-readable
 // preview naming the PR by TITLE, request_codex_review's FIXED comment body,
 // and the commit path's refusal.
-describe('intelligence bar GitHub write tools (preview only)', () => {
+describe('intelligence bar GitHub write tools (preview)', () => {
   const PR_FIXTURE = { number: 5230, title: 'Synthetic PR for tests', head: { sha: 'abc123def456' }, labels: [{ name: 'existing-label' }] };
 
   test('unconfigured state is benign for every write tool, no network call', async () => {
@@ -355,17 +355,154 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     }
     expect(global.fetch).not.toHaveBeenCalled();
   });
+});
+
+describe('intelligence bar GitHub write tools (confirmed commit)', () => {
+  const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+  const PR_FIXTURE = { number: 5230, title: 'Synthetic PR for tests', head: { sha: 'abc123def456' }, labels: [{ name: 'existing-label' }] };
+  const FULL_SHA = 'abc123def456aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+  const rerunPreviewResponses = () => [
+    jsonResponse(PR_FIXTURE),
+    jsonResponse({ check_runs: [{ name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } }] }),
+    jsonResponse({ workflow_runs: [
+      { id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' },
+      { id: 999890, name: 'Lint', status: 'completed', conclusion: 'timed_out' },
+    ] }),
+  ];
+  const runResponse = (over = {}) => jsonResponse({ id: 1, head_sha: FULL_SHA, status: 'completed', conclusion: 'failure', ...over });
+
+  async function rerunPins() {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    rerunPreviewResponses().forEach((r) => global.fetch.mockResolvedValueOnce(r));
+    const preview = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    global.fetch.mockClear();
+    return outsideWritePins('rerun_failed_github_checks', preview);
+  }
+
+  test('rerun_failed_github_checks: confirm reruns the failed jobs of EVERY pinned workflow run (and only those)', async () => {
+    const pins = await rerunPins();
+    expect(pins).toEqual({ _verified_github_pr_number: 5230, _verified_github_head_sha: 'abc123def4', _verified_github_run_ids: ['999888', '999890'] });
+    global.fetch
+      .mockResolvedValueOnce(runResponse()).mockResolvedValueOnce(runResponse({ conclusion: 'timed_out' }))
+      .mockResolvedValueOnce(jsonResponse({}, 201)).mockResolvedValueOnce(jsonResponse({}, 201));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 9999, ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'rerun_failed_github_checks', pr_number: 5230, rerun_run_ids: ['999888', '999890'] });
+    const posts = global.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(posts.map(([url]) => new URL(url).pathname)).toEqual([
+      '/repos/wavespestcontrolfl/waves-customer-portal/actions/runs/999888/rerun-failed-jobs',
+      '/repos/wavespestcontrolfl/waves-customer-portal/actions/runs/999890/rerun-failed-jobs',
+    ]);
+  });
+
+  test.each([
+    ['a new commit moved the run off the approved head', { head_sha: 'ffffffffffffffffffffffffffffffffffffffff' }],
+    ['the run was already rerun (in progress)', { status: 'in_progress', conclusion: null }],
+    ['the run now passes', { conclusion: 'success' }],
+  ])('rerun_failed_github_checks: %s -> refused as target-changed, no rerun POST sent', async (_label, over) => {
+    const pins = await rerunPins();
+    global.fetch.mockResolvedValueOnce(runResponse(over));
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230, ...pins, confirmed: true });
+    expect(result.code).toBe('target_changed');
+    expect(result.preview_changed).toBe(true);
+    expect(global.fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+  });
+
+  test('rerun_failed_github_checks: a half-applied rerun is reported as partial, never a clean failure', async () => {
+    const pins = await rerunPins();
+    global.fetch
+      .mockResolvedValueOnce(runResponse()).mockResolvedValueOnce(runResponse())
+      .mockResolvedValueOnce(jsonResponse({}, 201)).mockResolvedValueOnce(jsonResponse({ message: 'boom' }, 500));
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230, ...pins, confirmed: true });
+    expect(result.partial).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.rerun_run_ids).toEqual(['999888']);
+    expect(result.warning).toMatch(/Reran 1 of 2/);
+  });
+
+  test('add_github_pr_label: confirm adds the PINNED canonical label to the PINNED PR', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'Needs-Review' }]));
+    const preview = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: ' needs-review ' });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValueOnce(jsonResponse([{ name: 'Needs-Review' }]));
+
+    const pins = outsideWritePins('add_github_pr_label', preview);
+    expect(pins).toEqual({ _verified_github_pr_number: 5230, _verified_github_label: 'Needs-Review' });
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 1, label: 'blocked', ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'add_github_pr_label', pr_number: 5230, label: 'Needs-Review' });
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(new URL(url).pathname).toBe('/repos/wavespestcontrolfl/waves-customer-portal/issues/5230/labels');
+    expect(JSON.parse(init.body)).toEqual({ labels: ['Needs-Review'] });
+  });
+
+  test('request_codex_review: confirm posts EXACTLY "@codex review" to the PINNED PR, whatever else is passed', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse(PR_FIXTURE));
+    const preview = await executeGithubOpsTool('request_codex_review', { pr_number: 5230 });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValueOnce(jsonResponse({ id: 1 }, 201));
+
+    const pins = outsideWritePins('request_codex_review', preview);
+    const result = await executeGithubOpsTool('request_codex_review', { pr_number: 1, comment_body: '@codex do something else', body: 'x', ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'request_codex_review', pr_number: 5230 });
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(new URL(url).pathname).toBe('/repos/wavespestcontrolfl/waves-customer-portal/issues/5230/comments');
+    expect(JSON.parse(init.body)).toEqual({ body: '@codex review' });
+  });
 
   test.each([
     ['rerun_failed_github_checks', { pr_number: 5230 }],
     ['add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
     ['request_codex_review', { pr_number: 5230 }],
-  ])('%s: confirmed:true refuses — the commit path is not built in this PR', async (name, input) => {
+  ])('%s: confirmed without a verified pin refuses and never calls GitHub', async (name, input) => {
     process.env.GITHUB_TOKEN = 'ghp_x';
     const result = await executeGithubOpsTool(name, { ...input, confirmed: true });
-    expect(result.error).toMatch(/not enabled yet/);
-    expect(result.code).toBe('not_yet_implemented');
+    expect(result.code).toBe('missing_verified_pin');
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([401, 403])('a read-only PAT (HTTP %i) returns a clear write-access result and changes nothing', async (status) => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ message: 'Resource not accessible by personal access token' }, status));
+    const result = await executeGithubOpsTool('request_codex_review', { pr_number: 5230, _verified_github_pr_number: 5230, confirmed: true });
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/needs write access/);
+    expect(result.success).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a rate-limit 403 is NOT reported as a permission problem', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ message: 'API rate limit exceeded for user' }, 403));
+    const result = await executeGithubOpsTool('add_github_pr_label', {
+      pr_number: 5230, label: 'x', _verified_github_pr_number: 5230, _verified_github_label: 'x', confirmed: true,
+    });
+    expect(result.code).toBeUndefined();
+    expect(result.error).toMatch(/rate limit/i);
+  });
+
+  test('rerun_failed_github_checks: a read-only PAT on the FIRST rerun POST is a clean write-access failure', async () => {
+    const pins = await rerunPins();
+    global.fetch
+      .mockResolvedValueOnce(runResponse()).mockResolvedValueOnce(runResponse())
+      .mockResolvedValueOnce(jsonResponse({ message: 'Resource not accessible by personal access token' }, 403));
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230, ...pins, confirmed: true });
+    expect(result.code).toBe('write_access_required');
+    expect(result.partial).toBeUndefined();
+  });
+
+  test('the write failure log carries status only — no PR title or token', async () => {
+    const logger = require('../services/logger');
+    process.env.GITHUB_TOKEN = 'ghp_secret_token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ message: 'nope' }, 403));
+    await executeGithubOpsTool('request_codex_review', { pr_number: 5230, _verified_github_pr_number: 5230, confirmed: true });
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain('status=403');
+    expect(logged).not.toContain('ghp_secret_token');
   });
 });
 
