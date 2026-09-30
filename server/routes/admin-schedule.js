@@ -24731,6 +24731,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
+      // Under the writer rules product names never reach the prompt, so what
+      // the output screens check joins the key instead: a draft screened for
+      // one product set is never served for another.
+      .update(writerRulesOn
+        ? `|withheld:${JSON.stringify([
+          productsText,
+          (Array.isArray(products) ? products : []).map((prod) => [prod?.productId || null, prod?.name || null]),
+          typedProductNameGuards,
+        ])}`
+        : '')
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });

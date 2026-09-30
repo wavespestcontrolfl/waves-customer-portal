@@ -36,6 +36,8 @@ const IN_SCOPE = [
   ['bee_wasp_removal', null],
   ['fire_ant', null],
   ['pest_inspection', 'pest_inspection'],
+  ['tick_control', null],
+  ['rodent_sanitation_light', 'rodent_sanitation'],
 ];
 
 // Owner 2026-09-30: "dont touch Lawn / Tree, shrub & palm".
@@ -92,12 +94,10 @@ describe('writer rules scope', () => {
 });
 
 describe('prompt rewrites', () => {
-  const inScopePrompts = [
-    ['pest_general_quarterly', null], ['rodent_trapping', 'rodent_trapping'], ['termite_liquid', 'termite_treatment'],
-  ].map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType, writerRules: true }));
-  const sourcePrompts = [
-    ['pest_general_quarterly', null], ['rodent_trapping', 'rodent_trapping'],
-  ].map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType }));
+  const inScopePrompts = IN_SCOPE
+    .map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType, writerRules: true }));
+  const sourcePrompts = IN_SCOPE
+    .map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType }));
 
   test.each(PROMPT_REWRITES.map(([from, to], index) => [index, from, to]))(
     'rewrite %i still matches its source text and never survives', (index, from, to) => {
@@ -141,8 +141,22 @@ describe('writerRulesRejection', () => {
     ['We applied a chemical along the base.', 'chemical'],
     ['We applied fipronil along the foundation.', 'active_ingredient'],
     ['A lambda-cyhalothrin spray went on the eaves.', 'active_ingredient'],
+    ['Please keep off the lawn until dry.', 'reentry'],
+    ['You can re-enter the treated rooms after it has dried.', 'reentry'],
+    ['Keep pets and kids away from the treated band for a while.', 'reentry'],
+    ['Stay out of the garage until the spray has dried.', 'reentry'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
+  });
+
+  test('a three-letter catalog active and a parenthesized alias are screened', () => {
+    expect(writerRulesRejection('We placed Bti larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis israelensis (Bti)'] })).toBe('active_ingredient');
+    expect(writerRulesRejection('We placed a larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis israelensis (Bti)'] })).toBeNull();
+  });
+
+  test('a dry cabinet or a note about rain is not re-entry wording', () => {
+    expect(writerRulesRejection('The cabinet under the sink was dry.')).toBeNull();
+    expect(writerRulesRejection('About 1.4 inches of rain fell after the rain dried up the week before.')).toBeNull();
   });
 
   test("this visit's catalog actives are screened as well", () => {

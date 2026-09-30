@@ -124,6 +124,23 @@ test('gate on: copy that breaks a rule is rejected and retried', async () => {
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
 });
 
+test('gate on: a cached draft is never served for a different product set', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const body = { serviceNotes: 'Perimeter band on the lanai side (cache identity case).' };
+  await handler(mkReq(body), mkRes());
+  const second = mkRes();
+  await handler(mkReq({
+    ...body,
+    productsApplied: 'Talak 7.9% F (0.33 fl oz/gal)',
+    products: [{ productId: 'prod-2', name: 'Talak 7.9% F', applicationMethod: 'perimeter_spray' }],
+  }), second);
+  // Same prompt text (names are withheld), different products: the second
+  // request is screened fresh instead of reusing the first draft.
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(mockProvider.mock.calls[0][0].text).toBe(mockProvider.mock.calls[1][0].text);
+  expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
+});
+
 test('gate off: the same amount is not screened by the rules', async () => {
   const withAmount = CLEAN.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds');
   mockProvider.mockImplementation(async () => ({ ok: true, text: withAmount }));

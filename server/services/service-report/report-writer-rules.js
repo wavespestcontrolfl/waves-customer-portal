@@ -26,12 +26,12 @@ The customer reads your two sections joined into ONE paragraph, with no headings
 4. Every "none" stays local. State an absence only for the place and day the technician checked ("none were seen at the dishwasher today"). Never "all clear", "no problems", "nothing to worry about", or no activity for the whole property.
 5. Products by job only. Never name a product, brand, trade name or active ingredient, and never use the word "chemical". Say what the product did: an insect-control treatment, bait, an insect growth regulator, a larvicide.
 6. No amounts or measurements: no mL, cc, teaspoons, tablespoons, fluid ounces, ounces, gallons, pounds, grams, rates, mix strength, percentages, linear feet, square feet or acreage.
-7. Never the word "safe" in any form ("safe once dry", "pet-safe", "safely"), and never "non-toxic" or "harmless". Give no re-entry, drying, rainfast or waiting time: the report's safety section covers re-entry.
+7. Never the word "safe" in any form ("safe once dry", "pet-safe", "safely"), and never "non-toxic" or "harmless". Give no re-entry, drying, rainfast or waiting time and no aftercare or safety instructions: the report's own sections cover them.
 8. Say nothing about EPA registration. If it ever must appear, only "EPA-registered" or "EPA-exempt", never "EPA-approved".
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, or "per visit". If a cadence must be named, say "per application".
 10. The company is "Waves Pest Control", or "we". Never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".
-11. No timeframes ("7–14 days", "a few days", "two weeks") and no next-visit date, day or arrival window.
-12. Do not repeat what the report prints on its own: the product list, re-entry guidance, the next visit, the technician's tip, the "What to expect", rain and spider cards, the "What you flagged" card, and the activity gauge.
+11. No timeframes ("7–14 days", "a few days", "two weeks") and no next-visit date, day or arrival window. A recorded next step may be named without one ("at your next visit").
+12. Do not repeat what the report prints on its own: the product list, re-entry and aftercare guidance, the next visit's date and time, the technician's tip, the "What to expect", rain and spider cards, the "What you flagged" card, and the activity gauge.
 13. The report refuses these words, so never use them: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, "all clear", "is clear", "clear of pests", pest-free, any "-proof" word, guarantee, guaranteed, toxic, poison, poisonous, dangerous, deadly, unsafe.
 14. Never mention a treatment map, a traced route or a treated outline.
 15. Season, weather, prior visits and product labels are background. Never present them as something found today.
@@ -99,6 +99,38 @@ const PROMPT_REWRITES = Object.freeze([
     'Keep product names in the product table. In the main report, never name an active ingredient; use an accurate functional description.',
   ],
   ['Necessary uncertainty, explanatory contrasts, and accurate repeated terms are allowed.', 'Necessary uncertainty and accurate repeated terms are allowed.'],
+  // Remaining-service core and modules: aftercare, precautions and next
+  // visits belong to the report's own sections under the owner rules.
+  [
+    'Preserve validated safety and aftercare instructions and their conditions. Do not create',
+    'Leave safety, re-entry and aftercare instructions to the report\'s own sections. Do not create',
+  ],
+  [
+    'State the recorded next program check or approved review plan without inventing a date. Use the existing approved device-handling instructions; do not encourage',
+    'Name a recorded next program check without a date, day or window. Leave device-handling instructions to the report\'s own sections; do not encourage',
+  ],
+  ['Relay only the approved site-specific precautions or referral.', 'Name a recorded referral; leave site precautions to the report\'s own sections.'],
+  [
+    'Keep validated aftercare and any site constraints intact, without adding rates, dilution, re-entry periods, or homeowner digging/drilling instructions.',
+    'Leave aftercare and site precautions to the report\'s own sections, and never add rates, dilution, re-entry periods, or homeowner digging/drilling instructions.',
+  ],
+  [
+    'Protect the actual product aftercare and do not add homeowner drill, foam, or wood-removal directions.',
+    'Leave product aftercare to the report\'s own sections and do not add homeowner drill, foam, or wood-removal directions.',
+  ],
+  [
+    'Preserve approved cleaning and aftercare details, including any conditions about treated surfaces or re-entry.',
+    'Leave cleaning, aftercare and re-entry details to the report\'s own sections.',
+  ],
+  [
+    'Use the approved next step and aftercare, without creating veterinary instructions,',
+    'Name a recorded next step without a date and leave aftercare to the report\'s own sections; never create veterinary instructions,',
+  ],
+  [
+    'Use the approved preparation and aftercare instructions and keep them consistent with the recorded method.',
+    'Leave preparation and aftercare instructions to the report\'s own sections.',
+  ],
+  ['Relay approved site precautions and next steps.', 'Leave site precautions to the report\'s own sections; name a recorded next step without a date.'],
   // Remaining-service main adapter: one line per section, and the owner
   // rules now name what the report prints on its own.
   ['Return exactly these titles and plain-text paragraphs:', 'Return exactly these titles, each followed by exactly one line of plain text:'],
@@ -153,16 +185,18 @@ function activeIngredientPattern(name) {
     .replace(/[^a-z\s-]+/g, ' ')
     .split(/[\s-]+/)
     .filter(Boolean);
-  if (!words.length || words.join('').length < 5) return null;
+  // Three letters is the shortest real active in the catalog (Bti).
+  if (!words.length || words.join('').length < 3) return null;
   return words.map(escapeRe).join('[\\s-]*');
 }
 
-// Catalog active_ingredient text ("Fipronil 9.1%, Pyriproxyfen") → names.
+// Catalog active_ingredient text ("Fipronil 9.1%, Pyriproxyfen",
+// "Bacillus thuringiensis israelensis (Bti)") → names, aliases included.
 function activeIngredientNames(values) {
   return (Array.isArray(values) ? values : [])
-    .flatMap((value) => String(value || '').split(/[,;/+&]|\band\b/i))
+    .flatMap((value) => String(value || '').split(/[,;/+&()]|\band\b/i))
     .map((part) => part.replace(/[\d.]+\s*%?/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter((part) => part.length >= 5);
+    .filter((part) => part.length >= 3);
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*cc\b/i;
@@ -172,6 +206,8 @@ const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
 const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b)/i;
 const SAFE_WORD_RE = /\b(?:safe|safer|safest|safely|unsafe|non-?toxic|harmless)\b/i;
 const CHEMICAL_RE = /\bchemicals?\b/i;
+// Re-entry and aftercare wording without a number ("stay off until dry").
+const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
 // Returns a short rejection reason, or null when the copy passes. Runs on
 // top of the report's existing screens (banned words, access codes, shape,
@@ -185,6 +221,7 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (COMPANY_NAME_RE.test(copy)) return 'company_name';
   if (SAFE_WORD_RE.test(copy)) return 'safe_word';
   if (CHEMICAL_RE.test(copy)) return 'chemical';
+  if (REENTRY_RE.test(copy)) return 'reentry';
   const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean);

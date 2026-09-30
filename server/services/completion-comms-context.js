@@ -226,6 +226,9 @@ async function buildCompletionCommsContext({
     excludeUnresolvedSendReservations(knex('sms_log')
       .where({ customer_id: customerId }))
       .where('created_at', '>=', floor)
+      // customerWordsOnly: only the customer's own texts count against the
+      // cap, so a run of Waves texts can never crowd theirs out.
+      .modify((q) => { if (customerWordsOnly) q.where('direction', 'inbound'); })
       .select('created_at', 'direction', 'message_body', 'message_type')
       .orderBy('created_at', 'desc')
       .limit(8)
@@ -236,6 +239,13 @@ async function buildCompletionCommsContext({
     knex('emails')
       .where({ customer_id: customerId })
       .where('received_at', '>=', floor)
+      // customerWordsOnly: Waves' own mail never takes a slot either.
+      .modify((q) => {
+        if (customerWordsOnly) {
+          q.whereRaw("NOT (COALESCE(label_ids, '[]'::jsonb) @> '[\"SENT\"]'::jsonb)")
+            .whereRaw("COALESCE(from_address, '') NOT ILIKE '%@wavespestcontrol.com%'");
+        }
+      })
       .select('received_at', 'subject', 'snippet', 'body_text', ...(customerWordsOnly ? ['from_address', 'label_ids'] : []))
       .orderBy('received_at', 'desc')
       .limit(6)
@@ -249,7 +259,8 @@ async function buildCompletionCommsContext({
   for (const call of calls) {
     const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
     if (summary) {
-      const who = call.direction === 'outbound' ? 'Waves called the customer' : 'the customer called';
+      const who = call.direction === 'inbound' ? 'the customer called'
+        : call.direction === 'outbound' ? 'Waves called the customer' : 'caller unknown';
       entries.push({
         ts: contextTs(call.created_at),
         line: customerWordsOnly

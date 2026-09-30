@@ -33,7 +33,8 @@ function stubKnex(rowsByTable = {}, whereArgs = {}) {
         }
         return q;
       },
-      whereRaw() { return q; },
+      whereRaw(...args) { (whereArgs[`${table}:raw`] = whereArgs[`${table}:raw`] || []).push(args); return q; },
+      modify(fn) { fn(q); return q; },
       orderBy() { return q; },
       limit() { return q; },
       select() { return q; },
@@ -237,7 +238,7 @@ describe('buildCompletionCommsContext', () => {
   // own words, each labeled; Waves' own texts and emails stay out.
   test('customerWordsOnly keeps the customer\'s own words, labeled, and drops what Waves sent', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
-    const knex = stubKnex({
+    const knexWith = (whereArgs) => stubKnex({
       scheduled_services: [
         { id: 'svc-1', customer_id: 'c1', service_type: 'Rodent Exclusion Service', created_at: mk(10) },
       ],
@@ -245,6 +246,7 @@ describe('buildCompletionCommsContext', () => {
       call_log: [
         { created_at: mk(1), direction: 'inbound', lead_synopsis: 'Heard noises again in the attic' },
         { created_at: mk(4), direction: 'outbound', lead_synopsis: 'Confirmed the visit window' },
+        { created_at: mk(7), direction: null, lead_synopsis: 'Discussed the attic hatch' },
       ],
       sms_log: [
         { created_at: mk(2), direction: 'outbound', message_body: 'Confirming your exclusion visit window' },
@@ -254,16 +256,22 @@ describe('buildCompletionCommsContext', () => {
         { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
         { received_at: mk(6), subject: 'Your visit', snippet: 'See you Tuesday', from_address: 'Waves Pest Control <contact@wavespestcontrol.com>', label_ids: ['SENT'] },
       ],
-    });
+    }, whereArgs);
+    const whereArgs = {};
     const ctx = await buildCompletionCommsContext({
-      customerId: 'c1', scheduledServiceId: 'svc-1', customerWordsOnly: true, knex,
+      customerId: 'c1', scheduledServiceId: 'svc-1', customerWordsOnly: true, knex: knexWith(whereArgs),
     });
+    // The filters run in the queries, before each channel's cap, so Waves'
+    // own texts and mail can never crowd the customer's words out.
+    expect(whereArgs.sms_log).toContainEqual(['direction', 'inbound']);
+    expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
     const lines = ctx.text.split('\n');
     expect(lines).toEqual([
       expect.stringMatching(/^Call .* \(the customer called; AI summary, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),
       expect.stringMatching(/^Call .* \(Waves called the customer; AI summary, not verified\): Confirmed the visit window$/),
       expect.stringMatching(/^Customer email .* "Attic photos": Photos of the soffit gap attached$/),
+      expect.stringMatching(/^Call .* \(caller unknown; AI summary, not verified\): Discussed the attic hatch$/),
     ]);
     expect(ctx.text).not.toContain('Confirming your exclusion visit window');
     expect(ctx.text).not.toContain('See you Tuesday');
