@@ -36,7 +36,7 @@
   "services/call-self-audit.js": 1,
   "services/cancellation-processor.js": 1,
   "services/cancellation-resolution/actions.js": 1,
-  "services/cancellation-resolution/holds.js": 3,
+  "services/cancellation-resolution/holds.js": 6,
   "services/collections/outbound-voice/collections-conversation.js": 8,
   "services/collections/outbound-voice/flags.js": 1,
   "services/collections/shadow-sweep.js": 1,

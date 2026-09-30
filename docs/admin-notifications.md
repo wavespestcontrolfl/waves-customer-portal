@@ -85,9 +85,9 @@ resolves a `person` row.
 |---|---|---|
 | Headline 60, why 110, Area from the list, severity / subject / done-when / who present | `composeAdminAlert` throws on a violation | enforced for every caller of the helper |
 | Forbidden tokens in headline and why | `composeAdminAlert` throws | enforced for every caller of the helper |
-| New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file; a file may only go down | ratchet |
+| New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
-| Body over 110 chars moves to `detail` | `notification-service.js` | enforced for `ops_digest` only; logged for every other category |
+| Body over 110 chars moves to `detail`, read from the bell's "Show full text" | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
