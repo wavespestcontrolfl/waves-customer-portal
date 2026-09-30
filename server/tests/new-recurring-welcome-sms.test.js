@@ -32,7 +32,9 @@ const mockDb = jest.fn((table) => {
     whereIn: jest.fn((col, vals) => { wheres.push({ whereIn: col, vals }); return chain; }),
     whereNotNull: jest.fn(() => chain),
     whereRaw: jest.fn(() => chain),
+    select: jest.fn(() => chain),
     limit: jest.fn(async () => {
+      if (table === 'email_messages') return mockEmailProviderRow ? [mockEmailProviderRow] : [];
       if (table === 'sms_sequences') {
         // The sweep runs two scans over this table — stale-claim recovery
         // (status 'sending') and due delivery (status 'active').
@@ -588,6 +590,8 @@ describe('new recurring welcome SMS', () => {
   });
 
   describe('ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome text is unchanged, only its email half can be folded away', () => {
+    const { APP_SECTION_VALUES } = require('../services/signup-single-email');
+    const FULL_APP_SECTION_TEXT = `Welcome aboard.\n${APP_SECTION_VALUES.join('\n')}`;
     function dueWelcome({ phone = '(941) 555-1234' } = {}) {
       mockDueSequences = [{
         id: 'seq-1',
@@ -605,7 +609,7 @@ describe('new recurring welcome SMS', () => {
     test('gate on and the combined signup email was delivered: the text still sends, the welcome EMAIL does not', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1' }; // the delivered combined signup email
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT }; // the delivered combined signup email
       const results = await service.processDueWelcomes();
       expect(results.sent).toBe(1);
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -618,7 +622,7 @@ describe('new recurring welcome SMS', () => {
     test('the delivery-time lookup only counts a delivered full signup email that still carries the app steps', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1' };
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
       const covered = await service._internals.combinedSignupEmailCoversWelcome(
         { id: 'customer-1', email: 'Ada@Example.com' }, { created_at: new Date('2026-09-29T14:00:00Z') });
       expect(covered).toBe(true);
@@ -627,11 +631,33 @@ describe('new recurring welcome SMS', () => {
       expect(emailQuery.whereIn).toHaveBeenCalledWith('recipient_id', ['customer-1']);
       expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
       expect(emailQuery.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);
-      expect(emailQuery.whereRaw).toHaveBeenCalledWith('text_snapshot ILIKE ?', ['%enter your texted code%']);
       expect(emailQuery.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['ada@example.com']);
       // The window opens an hour BEFORE the queued row (the row is queued moments before the email).
       // 10:00 AM ET queue row: the hour before is 9:00 AM ET, but the window opens at the ET day start (midnight).
       expect(emailQuery.where).toHaveBeenCalledWith('created_at', '>=', new Date('2026-09-29T04:00:00Z'));
+    });
+
+    test.each([
+      ['the marker kept but the app link removed', (values) => values.filter((v) => !v.endsWith('/app/'))],
+      ['the marker kept but the sign-in guide removed', (values) => values.filter((v) => !v.includes('waves-app-guide'))],
+      ['the sign-in steps trimmed to a bare marker', (values) => [values[0], 'enter your texted code', values[3]]],
+      ['only the marker', () => ['enter your texted code']],
+    ])('reworded or trimmed app section fails safe (%s): the welcome email sends', async (_label, trim) => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: `Welcome aboard.\n${trim(APP_SECTION_VALUES).join('\n')}` };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('the app section is also recognised in the html snapshot (links live in href attributes, & escaped)', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: '', html_snapshot: APP_SECTION_VALUES.map((v) => v.replace(/&/g, '&amp;')).join('<br>') };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
     });
 
     test('gate on but no delivered combined email (failed, blocked, no address, a plain fallback): the welcome email sends exactly as today', async () => {
@@ -647,7 +673,7 @@ describe('new recurring welcome SMS', () => {
 
     test('the gate turned OFF between signup and delivery: the welcome email sends even though a combined email exists', async () => {
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1' };
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
       await service.processDueWelcomes();
       expect(mockSendTemplate).toHaveBeenCalledTimes(1);
       expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
@@ -665,7 +691,7 @@ describe('new recurring welcome SMS', () => {
     test('a phoneless customer whose signup email was delivered: the sequence still completes, nothing is emailed or texted', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome({ phone: '' });
-      mockEmailProviderRow = { id: 'email-1' };
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
       const results = await service.processDueWelcomes();
       expect(results.sent).toBe(1);
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();

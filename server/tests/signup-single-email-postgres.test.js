@@ -64,7 +64,7 @@ postgres('one signup email against migrated PostgreSQL', () => {
       idempotency_key: `synthetic:${id}`,
       categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_full']),
       payload_snapshot: JSON.stringify({ property_address: '100 Test Lane, Test City, 00000' }),
-      text_snapshot: 'You can get ready now: sign in with the mobile number on your account, and enter your texted code.',
+      text_snapshot: `You can get ready now:\n${require('../services/signup-single-email').APP_SECTION_VALUES.join('\n')}`,
       ...overrides,
     });
     return id;
@@ -145,6 +145,11 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect(await covers({ created_at: new Date() })).toBe(true);
       });
 
+      test('marker kept but the app link removed: not covered (the welcome email sends)', async () => {
+        await message({ text_snapshot: 'You can get ready now: sign in with the mobile number on your account, and enter your texted code.' });
+        expect(await covers()).toBe(false);
+      });
+
       test('a second property on the same account is covered by the full email sent for the first, at the same address', async () => {
         await message({ recipient_id: siblingId });
         expect(await covers(undefined, { id: siblingId, email: EMAIL })).toBe(true);
@@ -181,7 +186,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
     const owedRows = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).orderBy('created_at');
     const dueNow = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).update({ next_send_at: new Date(Date.now() - 1000) });
     const membership = () => Signup.recordOwedMembership(trx, { customerId, estimateId, onboardingKey: KEY, membershipEmail: { ...MEMBERSHIP_ARGS, customerId } });
-    const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
+    const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, status: 'delivered', delivered_at: new Date(), ...overrides });
+    const carrier = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
 
     beforeEach(() => {
       estimateId = randomUUID();
@@ -238,6 +244,82 @@ postgres('one signup email against migrated PostgreSQL', () => {
         const [row] = await owedRows();
         expect(row).toMatchObject({ status: 'completed' });
         expect(row.metadata.satisfied_by_message).toBe(messageId);
+      });
+
+      describe('acceptance is not delivery (a bounce reported after `sent` must not strand the plan email)', () => {
+        const HOUR = 60 * 60 * 1000;
+        const setStatus = (id, fields) => trx('email_messages').where({ id }).update(fields);
+
+        test('sent, then the provider reports delivered: satisfied on the next look, nothing sent separately', async () => {
+          const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
+          expect((await owedRows())[0]).toMatchObject({ status: 'active' });
+          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+          await setStatus(messageId, { status: 'delivered', delivered_at: new Date() });
+          await dueNow();
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
+          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+          expect((await owedRows())[0]).toMatchObject({ status: 'completed' });
+        });
+
+        test('sent, then bounced / dropped / blocked: the membership email is sent separately', async () => {
+          for (const status of ['bounced', 'dropped', 'blocked']) {
+            Membership.sendMembershipStarted.mockClear();
+            await trx('email_messages').del();
+            await trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).del();
+            const id = await membership();
+            await Signup.recordExpected(id, PLAN_VALUES);
+            const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
+            expect(await Signup.resolveOwedEmail(id)).toMatchObject({ pending: true });
+            await setStatus(messageId, { status, bounced_at: new Date() });
+            await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
+            expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
+            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
+          }
+        });
+
+        test('sent with no provider event past the settle window: sent separately (a lost webhook cannot hold the email forever)', async () => {
+          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(Date.now() - (Signup.CARRIER_SETTLE_HOURS * HOUR + 60 * 1000)) });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
+          expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
+        });
+
+        test('sent and still inside the window: the row stays open, rechecked on the backoff but never later than the deadline', async () => {
+          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(Date.now() - (Signup.CARRIER_SETTLE_HOURS * HOUR - 10 * 60 * 1000)) });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
+          const [row] = await owedRows();
+          expect(row).toMatchObject({ status: 'active' });
+          const minutes = (new Date(row.next_send_at).getTime() - Date.now()) / 60000;
+          expect(minutes).toBeGreaterThan(8);
+          expect(minutes).toBeLessThanOrEqual(10.1); // the 15-minute backoff is cut to the deadline
+          expect(row.metadata.awaiting_delivery_of).toBeTruthy();
+          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+        });
+
+        test('the sweep leaves a pending row alone until it is due, then settles it', async () => {
+          const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
+          await dueNow();
+          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ requeued: 1, sent: 0, satisfied: 0 });
+          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ requeued: 0, sent: 0 }); // not due again yet
+          await setStatus(messageId, { status: 'delivered', delivered_at: new Date() });
+          await dueNow();
+          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ satisfied: 1 });
+        });
+
+        test('an open or click proves delivery even when the delivered event never arrived (status stays sent)', async () => {
+          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(), opened_at: new Date() });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
+        });
+
+        test('a spam report or unsubscribe after delivery does not undo the delivery', async () => {
+          await carrier(PLAN_VALUES.join('\n'), { status: 'spam_report', delivered_at: new Date() });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
+        });
+
+        test('delivered, then an asynchronous bounce: sent separately', async () => {
+          await delivered(PLAN_VALUES.join('\n'), { status: 'bounced', bounced_at: new Date() });
+          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
+        });
       });
 
       test('the short template and a sweep\'s day-scoped resend key count too', async () => {
@@ -463,6 +545,16 @@ postgres('one signup email against migrated PostgreSQL', () => {
       expect(r.validation.ok).toBe(true);
       expect(r.subject).toBe("You're booked, Taylor — here's what happens next");
       for (const f of fixtures) expect(Object.keys(f.payload).filter((k) => PAYMENT_KEYS.includes(k))).toEqual([]);
+    });
+
+    test('the app-section values the welcome check requires are all present in the rendered signup email (template and constant cannot drift)', async () => {
+      const t = await template('estimate.accepted_signup');
+      const fixtures = await trx('email_template_fixtures').where({ template_id: t.id });
+      const r = await lib.renderVersion(t.active_version_id, fixtures.find((f) => f.is_default).payload);
+      const Signup = require('../services/signup-single-email');
+      expect(Signup.messageCarriesAll({ rendered: { text: r.text, html: r.html } }, Signup.APP_SECTION_VALUES)).toBe(true);
+      // And the check is whole-section: dropping the app link from the same render fails it.
+      expect(Signup.messageCarriesAll({ rendered: { text: r.text.split('https://www.wavespestcontrol.com/app/').join(''), html: '' } }, Signup.APP_SECTION_VALUES)).toBe(false);
     });
 
     test('the short template names the property, has the plan and no app section', async () => {

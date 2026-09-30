@@ -16,11 +16,14 @@
  *   - the owed record is a row in sms_sequences (the queue the welcome email
  *     already uses, swept every 10 minutes by the same scheduler tick),
  *     written when the email would otherwise have been sent;
- *   - resolved at delivery time by ONE check: if a DELIVERED combined email
- *     (email_messages status sent/delivered/opened/clicked — never a provider
- *     drop/bounce/block) carries every value the plan section was built with,
- *     the row is satisfied; otherwise the email is sent exactly as it would
- *     have been (same sender, payload and idempotency key).
+ *   - resolved at delivery time by ONE check (carrierState): if a combined
+ *     email the provider REPORTED DELIVERED (delivered, or opened / clicked,
+ *     which prove it) carries every value the plan section was built with, the
+ *     row is satisfied. Acceptance alone (`sent`) is not delivery: the row stays
+ *     open and is rechecked until the provider settles it or CARRIER_SETTLE_HOURS
+ *     pass; a bounce, drop, block, or a message still unsettled past the window
+ *     sends the email exactly as it would have been (same sender, payload and
+ *     idempotency key).
  *
  * Nothing lives in process memory: a crash or redeploy at any point leaves the
  * row for the sweep, and the owed email ends up covered or sent. A failed send
@@ -42,13 +45,36 @@ const SIGNUP_TEMPLATE_KEY = 'estimate.accepted_signup';
 const SHORT_TEMPLATE_KEY = 'estimate.accepted_additional_property';
 const SIGNUP_FULL_CATEGORY = 'signup_full';
 const SIGNUP_SHORT_CATEGORY = 'signup_short';
-// Sits in the "get the app" paragraph of the full template. The welcome queue
-// skips its email only when a delivered combined email still carries these
-// steps — reworded copy fails safe (the welcome email then sends as today).
-const SIGNUP_APP_MARKER = 'enter your texted code';
+// The "get the app" section of the full template (seeded by migration
+// 20260907000090's ACCEPTED_POINTER): the app page, the sign-in steps and the
+// sign-in guide. The welcome queue skips its email only when a delivered
+// combined email carries EVERY one of these, checked like the plan section
+// (messageCarriesAll). Reworded, trimmed or de-linked copy fails safe: the
+// welcome email then sends as today. A test renders the live template against
+// this list so the two cannot drift apart unnoticed.
+const APP_SECTION_VALUES = [
+  'https://www.wavespestcontrol.com/app/',
+  'sign in with the mobile number on your account',
+  'enter your texted code',
+  'https://www.wavespestcontrol.com/pest-control/waves-app-guide/',
+];
 // Statuses that mean the provider accepted the message. A message a webhook
-// later marked bounced / dropped / blocked is none of these.
+// later marked bounced / dropped / blocked is none of these. (`sent` is only
+// acceptance; see carrierState for what counts as delivered.)
 const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
+// email_messages statuses that can still describe a delivered message: the
+// SendGrid webhook sets `delivered`, but open / click only stamp opened_at /
+// clicked_at (status stays `delivered`, or `sent` when the delivered event never
+// arrived), and a spam report / unsubscribe overwrites the status after the
+// message was delivered. bounced / dropped / blocked / failed never carry.
+const CARRIER_STATUSES = [...SENT_ISH, 'spam_report', 'unsubscribed'];
+// How long a carrier that is only `sent` (accepted, no delivery event yet) may
+// hold the owed email back, from its send. SendGrid normally reports `delivered`
+// within seconds to minutes; a deferral (receiving server slow or greylisting)
+// can run for hours, and a lost or unconfigured webhook never reports at all.
+// 2 hours covers ordinary deferral and greylisting while keeping a missing
+// event from delaying a required plan email much past the day it was earned.
+const CARRIER_SETTLE_HOURS = 2;
 
 const MEMBERSHIP_TYPE = 'signup_membership';
 const OWED_TYPES = [MEMBERSHIP_TYPE];
@@ -170,16 +196,45 @@ async function recordExpected(rowId, values) {
 
 // ── Resolving owed records ────────────────────────────────────────────────
 
-async function deliveredCarrier(meta) {
+// One carrier row's delivery state: 'delivered' (the provider reported delivery,
+// or an open / click proves it), 'pending' (accepted, nothing more yet), or
+// 'failed' (bounced / dropped / blocked / failed, including a bounce that
+// followed an early delivered event).
+function carrierRowState(row) {
+  if (row.bounced_at) return 'failed';
+  const status = String(row.status || '').toLowerCase();
+  if (['delivered', 'opened', 'clicked'].includes(status) || row.delivered_at || row.opened_at || row.clicked_at) return 'delivered';
+  return status === 'sent' ? 'pending' : 'failed';
+}
+
+// Does a message that carries every expected value exist, and has it SETTLED?
+//   { state: 'delivered', id }            -> the owed email is covered
+//   { state: 'pending', id, waitUntil }   -> accepted but not yet reported
+//                                            delivered, still inside the settle
+//                                            window: check again, send nothing
+//   { state: 'none' }                     -> nothing carried it, or it bounced
+//                                            or stayed unsettled past the window:
+//                                            send the email separately
+// Acceptance alone (`sent`) never covers: a bounce / drop / block reported later
+// would otherwise leave the customer with no plan email and nothing to retry.
+async function carrierState(meta, now = Date.now()) {
   const expected = Array.isArray(meta.expected) ? meta.expected : [];
-  if (!expected.length || !meta.onboarding_key) return null;
+  if (!expected.length || !meta.onboarding_key) return { state: 'none' };
   const rows = await db('email_messages')
     .whereIn('template_key', [SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY])
     .where((q) => q.where('idempotency_key', meta.onboarding_key).orWhere('idempotency_key', 'like', `${meta.onboarding_key}:%`))
-    .whereIn('status', SENT_ISH)
-    .select('id', 'text_snapshot', 'html_snapshot');
-  const hit = (rows || []).find((row) => messageCarriesAll({ message: row }, expected));
-  return hit ? hit.id : null;
+    .whereIn('status', CARRIER_STATUSES)
+    .select('id', 'status', 'text_snapshot', 'html_snapshot', 'sent_at', 'created_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at');
+  const carriers = (rows || []).filter((row) => messageCarriesAll({ message: row }, expected));
+  const delivered = carriers.find((row) => carrierRowState(row) === 'delivered');
+  if (delivered) return { state: 'delivered', id: delivered.id };
+  let pending = null;
+  for (const row of carriers) {
+    if (carrierRowState(row) !== 'pending') continue;
+    const waitUntil = new Date(new Date(row.sent_at || row.created_at || now).getTime() + CARRIER_SETTLE_HOURS * 60 * 60 * 1000);
+    if (waitUntil.getTime() > now && (!pending || waitUntil > pending.waitUntil)) pending = { state: 'pending', id: row.id, waitUntil };
+  }
+  return pending || { state: 'none' };
 }
 
 // membership.started, sent as it always was. Returns { done, reason }.
@@ -258,10 +313,18 @@ async function resolveOwedEmail(rowId) {
       .returning('*');
     if (!row) return { skipped: true };
     meta = parseMeta(row);
-    const carrier = await deliveredCarrier(meta);
-    if (carrier) {
-      await settle(row.id, 'completed', { satisfied_by_message: carrier });
+    const carrier = await carrierState(meta);
+    if (carrier.state === 'delivered') {
+      await settle(row.id, 'completed', { satisfied_by_message: carrier.id });
       return { satisfied: true };
+    }
+    if (carrier.state === 'pending') {
+      // Accepted, not yet reported delivered: keep the row open and look again
+      // on the usual backoff, but never past the settle deadline, so the send
+      // below happens right when the wait runs out.
+      const next = Math.min(Date.now() + retryDelayMinutes(row.step) * 60 * 1000, carrier.waitUntil.getTime());
+      await settle(row.id, 'active', { awaiting_delivery_of: carrier.id, awaiting_until: carrier.waitUntil.toISOString() }, { next_send_at: new Date(next) });
+      return { requeued: true, pending: true };
     }
     const outcome = await sendOwed(meta);
     if (outcome.done) {
@@ -323,8 +386,9 @@ module.exports = {
   SHORT_TEMPLATE_KEY,
   SIGNUP_FULL_CATEGORY,
   SIGNUP_SHORT_CATEGORY,
-  SIGNUP_APP_MARKER,
+  APP_SECTION_VALUES,
   SENT_ISH,
+  CARRIER_SETTLE_HOURS,
   MEMBERSHIP_TYPE,
   OWED_TYPES,
   signupGateLive,
@@ -332,6 +396,7 @@ module.exports = {
   renderedCarries,
   sectionValues,
   messageCarriesAll,
+  carrierState,
   recordOwedMembership,
   recordExpected,
   resolveOwedEmail,

@@ -399,14 +399,15 @@ async function sendWelcomeEmail(customer) {
 
 // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome EMAIL is skipped —
 // never the welcome text — when this customer's signup email was actually
-// accepted for sending and still carries the app steps. Decided HERE, at
+// accepted for sending and still carries the whole app section (link, sign-in
+// steps and guide). Decided HERE, at
 // delivery time (~60 minutes after signup), from what was really sent: a
 // combined email that failed, was blocked or never went out (or a gate turned
 // off in the meantime) leaves the welcome email to send exactly as it does
 // today. Any lookup error reads as "not covered".
 async function combinedSignupEmailCoversWelcome(customer, row) {
   try {
-    const { signupGateLive, SIGNUP_APP_MARKER, SIGNUP_FULL_CATEGORY, SIGNUP_TEMPLATE_KEY, SENT_ISH } = require('./signup-single-email');
+    const { signupGateLive, APP_SECTION_VALUES, messageCarriesAll, SIGNUP_FULL_CATEGORY, SIGNUP_TEMPLATE_KEY, SENT_ISH } = require('./signup-single-email');
     if (!signupGateLive()) return false;
     const { accountCustomerIds } = require('./estimate-accepted-email');
     // The sequence row is queued moments BEFORE the signup email is sent, so
@@ -429,12 +430,14 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
       .whereIn('recipient_id', ids)
       .whereIn('status', SENT_ISH)
       .whereRaw('categories @> ?::jsonb', [JSON.stringify([SIGNUP_FULL_CATEGORY])])
-      .where('created_at', '>=', since)
-      .whereRaw('text_snapshot ILIKE ?', [`%${SIGNUP_APP_MARKER}%`]);
+      .where('created_at', '>=', since);
     const address = String(customer.email || '').trim().toLowerCase();
     if (address) query.whereRaw('lower(recipient_email_snapshot) = ?', [address]);
-    const found = await query.first('id');
-    return !!found;
+    // The WHOLE app section, not a sample of it: a message that kept the sign-in
+    // steps but lost the app link or the guide (reworded or trimmed template)
+    // does not count, and the welcome email then sends as today.
+    const rows = await query.select('id', 'text_snapshot', 'html_snapshot').limit(25);
+    return (rows || []).some((message) => messageCarriesAll({ message }, APP_SECTION_VALUES));
   } catch (err) {
     logger.warn(`[new-recurring-welcome] signup-email check failed for customer ${customer?.id}; sending the welcome email as usual: ${err.message}`);
     return false;
