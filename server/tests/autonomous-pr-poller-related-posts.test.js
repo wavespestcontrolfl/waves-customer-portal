@@ -13,6 +13,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/content/related-posts', () => ({
   getLiveRelatedPaths: jest.fn(),
+  // Default: every path is in the live sitemap (the registry check decides).
+  getSitemapLiveRelatedPaths: jest.fn(),
   _internals: { normalizePathForCompare: jest.requireActual('../services/content/related-posts')._internals.normalizePathForCompare },
 }));
 
@@ -24,6 +26,10 @@ function fileWith(frontmatterYaml) {
   return `---\n${frontmatterYaml}\n---\n\nBody.\n`;
 }
 
+beforeEach(() => {
+  const { normalizePathForCompare } = jest.requireActual('../services/content/related-posts')._internals;
+  relatedPosts.getSitemapLiveRelatedPaths.mockImplementation(async (paths) => new Set(paths.map(normalizePathForCompare)));
+});
 afterEach(() => jest.clearAllMocks());
 
 describe('relatedPostsLivenessVerdict', () => {
@@ -141,3 +147,32 @@ test('an unused reference definition is not a rendered link', async () => {
   expect(relatedPosts.getLiveRelatedPaths).not.toHaveBeenCalled();
 });
 
+
+describe('merge-time sitemap freshness (later-queue from #5272)', () => {
+  const FILE = fileWith('title: Test Post\nslug: /pest-control/test-post/\ndomains: ["wavespestcontrol.com"]\nrelated_posts:\n  - /pest-control/fire-ants/\n  - /pest-control/carpenter-ants/');
+  beforeEach(() => {
+    relatedPosts.getLiveRelatedPaths.mockResolvedValue(new Set(['/pest-control/fire-ants/', '/pest-control/carpenter-ants/']));
+  });
+  test('registry says live but the post left the sitemap → withheld, names it', async () => {
+    relatedPosts.getSitemapLiveRelatedPaths.mockResolvedValue(new Set(['/pest-control/carpenter-ants/']));
+    const res = await relatedPostsLivenessVerdict(FILE);
+    expect(res.ok).toBe(false);
+    expect(res.transient).not.toBe(true);
+    expect(res.reason).toMatch(/live sitemap: \/pest-control\/fire-ants\/$/);
+    expect(relatedPosts.getSitemapLiveRelatedPaths).toHaveBeenCalledWith(
+      ['/pest-control/fire-ants/', '/pest-control/carpenter-ants/'],
+      { hosts: ['wavespestcontrol.com'] },
+    );
+  });
+  test('an unreadable sitemap → withheld, transient', async () => {
+    relatedPosts.getSitemapLiveRelatedPaths.mockResolvedValue(null);
+    const res = await relatedPostsLivenessVerdict(FILE);
+    expect(res).toMatchObject({ ok: false, transient: true });
+  });
+  test('registry stale → the sitemap is not consulted', async () => {
+    relatedPosts.getLiveRelatedPaths.mockResolvedValue(new Set(['/pest-control/carpenter-ants/']));
+    const res = await relatedPostsLivenessVerdict(FILE);
+    expect(res.ok).toBe(false);
+    expect(relatedPosts.getSitemapLiveRelatedPaths).not.toHaveBeenCalled();
+  });
+});
