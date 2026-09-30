@@ -397,10 +397,11 @@ async function fetchReserviceLanes({ customerId } = {}) {
 // reconciliation, an already succeeded/processing PaymentIntent, or a
 // committed estimate-deposit receipt whose credit isn't posted yet (round 2:
 // GET /:token itself refuses the whole page for that case via
-// withInvoiceDepositSettlement — a check pay-v2.js's own isZelleTransferEligible
+// withInvoiceDepositSettlement — a check pay-v2.js's own payPageZelleVisibility
 // predicate does NOT run, since every one of ITS callers besides this one
 // already sits inside that same fence; run explicitly here since this path
-// does not). Reuses pay-v2.js's OWN predicate (isZelleTransferEligible) —
+// does not), or a partial account credit still pending application (round 5,
+// finding 4). Reuses pay-v2.js's OWN predicate (payPageZelleVisibility) —
 // never a re-derived copy — so this fact and the pay page can never
 // disagree. Resolved upstream of buildFactsBlock (which stays SYNC on
 // purpose — see its own comment) exactly like OPEN TIMES / re-service
@@ -435,8 +436,12 @@ async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
         if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
         return false;
       }
-      const { isZelleTransferEligible } = require('../routes/pay-v2');
-      return Boolean(await isZelleTransferEligible(row));
+      // Independent-review P1 (round 5, findings 3 & 4): payPageZelleVisibility
+      // is now the ONE shared decision (pay-v2.js) — folds in the live-payer
+      // and credit-pending fixes so this draft-time fact can never offer
+      // Zelle in a case the pay page itself would withhold it.
+      const { payPageZelleVisibility } = require('../routes/pay-v2');
+      return Boolean((await payPageZelleVisibility({ invoice: row })).visible);
     })();
     return await Promise.race([work, timeout]);
   } catch (err) {
@@ -2976,6 +2981,8 @@ module.exports = {
   replyQuotesUngroundedAmount,
   fetchZelleEligibility,
   billingAmountCents,
+  hasAffirmativePaymentAck,
+  paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
   replyClaimedTender,

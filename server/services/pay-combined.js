@@ -110,8 +110,17 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
  * or null when the combined flow must not engage (gate off, payer-billed
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
+ *
+ * `onPayerResolved(payerId)` (independent-review P1, round 5, finding 3):
+ * fired ONLY when the LIVE resolution below finds a payer for the anchor
+ * (never for the plain "no siblings"/incomplete-read/over-cap null cases) —
+ * a null return alone conflates "genuinely nothing to add" with "this
+ * invoice is payer-owned as of right now," and a caller like pay-v2.js's
+ * isZelleTransferEligible, which reads null as "no previous balance,
+ * continue," must be able to tell the two apart instead of silently
+ * offering Zelle on a payer-owned invoice.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null, onPayerResolved = null } = {}) {
   try {
     if (!isEnabled('payIncludeBalance')) return null;
     if (!anchorInvoice?.customer_id) return null;
@@ -163,6 +172,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           err.combinedSetupAbort = true;
           throw err;
         }
+        if (typeof onPayerResolved === 'function') onPayerResolved(resolved.payerId);
         logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
         return null;
       }

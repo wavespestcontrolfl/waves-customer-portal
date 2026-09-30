@@ -345,6 +345,89 @@ describe('GET /pay/:token manualPayOptions', () => {
       expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
     }
   });
+
+  // Independent-review P1 (round 5, finding 3): a payer assigned via the
+  // scheduled service or the customer default AFTER this invoice was
+  // created leaves invoices.payer_id null — only the LIVE resolution
+  // combinedEligibleSiblings runs finds it. That must deny Zelle, not read
+  // as "no previous balance, continue" the way a bare null return used to.
+  test('env set ⇒ key absent when the anchor LIVE-resolves to a payer (round 5 finding 3)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const { isEnabled } = require('../config/feature-gates');
+    const PayerService = require('../services/payer');
+    isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
+    require('../config/feature-gates').gates.payIncludeBalance = true;
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    try {
+      const { body } = await getPayPage(invoiceData());
+      expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(body, 'previousBalance')).toBe(false);
+    } finally {
+      isEnabled.mockImplementation(() => false);
+      delete require('../config/feature-gates').gates.payIncludeBalance;
+      PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    }
+  });
+});
+
+// The extracted contract itself (independent-review P1, round 5, findings 3
+// & 4): payPageZelleVisibility({ invoice }) → { visible, reason }, the ONE
+// function GET /:token, fetchZelleEligibility (draft time) and
+// zelleInvoiceStillEligible (send time) all now call.
+describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
+  const { payPageZelleVisibility } = payRouter;
+
+  afterEach(() => {
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation(() => false);
+    delete require('../config/feature-gates').gates.payIncludeBalance;
+    require('../config/feature-gates').gates.autoApplyAccountCredit = false;
+    require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  test('not configured ⇒ { visible: false, reason: "not_configured" }, no lookup at all', async () => {
+    delete process.env.ZELLE_RECIPIENT;
+    const dbFn = require('../models/db');
+    dbFn.mockReset();
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'not_configured' });
+    expect(dbFn).not.toHaveBeenCalled();
+  });
+
+  test('eligible, no pending credit ⇒ visible true', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: true, reason: null });
+  });
+
+  // Finding 4: the client-side "hides Zelle while creditPending" rule
+  // (PayPageV2.jsx), now expressed here so the SMS side asks the same
+  // question. This reason is what lets GET /:token keep populating
+  // manualPayOptions (creditPending: true) while every OTHER caller reads
+  // this exact case as not-visible.
+  test('a pending partial account credit withholds visibility with its own reason (round 5 finding 4)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: { billing_mode: null, monthly_rate: null, account_credits: 20, auto_apply_account_credit: true } });
+      return chain({ first: null });
+    });
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'credit_pending' });
+  });
+
+  test('a LIVE-resolved payer denies visibility (round 5 finding 3)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
+    require('../config/feature-gates').gates.payIncludeBalance = true;
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
+    expect(result).toEqual({ visible: false, reason: 'not_eligible' });
+  });
 });
 
 // GATE_PAY_PAGE_FAQ — the FAQ accordion flag rides the same GET payload.

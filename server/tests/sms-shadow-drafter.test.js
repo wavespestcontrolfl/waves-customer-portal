@@ -1360,28 +1360,28 @@ describe('Codex round 4 P2 (finding 5): fetchZelleEligibility short-circuits wit
     jest.doMock('../models/db', () => dbFn);
     const assertInvoiceDepositSettlementReady = jest.fn(async () => { throw new Error('deposit settlement should never be read'); });
     jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady }));
-    const isZelleTransferEligible = jest.fn(async () => { throw new Error('Stripe/pay-v2 should never be read'); });
-    jest.doMock('../routes/pay-v2', () => ({ isZelleTransferEligible }));
+    const payPageZelleVisibility = jest.fn(async () => { throw new Error('Stripe/pay-v2 should never be read'); });
+    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility }));
     const drafter = require('../services/sms-shadow-drafter');
-    return { drafter, dbFn, assertInvoiceDepositSettlementReady, isZelleTransferEligible };
+    return { drafter, dbFn, assertInvoiceDepositSettlementReady, payPageZelleVisibility };
   }
 
   test('GATE_SMS_REAL_ANSWERS off ⇒ false, no DB/Stripe reads even with a Zelle recipient configured', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
-    const { drafter, dbFn, isZelleTransferEligible } = freshDrafterWithSpies();
+    const { drafter, dbFn, payPageZelleVisibility } = freshDrafterWithSpies();
     await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
     expect(dbFn).not.toHaveBeenCalled();
-    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
   });
 
   test('GATE_SMS_REAL_ANSWERS on but no ZELLE_RECIPIENT ⇒ false, no DB/Stripe reads', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     delete process.env.ZELLE_RECIPIENT;
-    const { drafter, dbFn, isZelleTransferEligible } = freshDrafterWithSpies();
+    const { drafter, dbFn, payPageZelleVisibility } = freshDrafterWithSpies();
     await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(false);
     expect(dbFn).not.toHaveBeenCalled();
-    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
   });
 
   test('both gate ON and a recipient configured ⇒ the real lookup runs', async () => {
@@ -1390,11 +1390,11 @@ describe('Codex round 4 P2 (finding 5): fetchZelleEligibility short-circuits wit
     jest.resetModules();
     jest.doMock('../models/db', () => jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'inv-1', customer_id: 'c1' }) }) })));
     jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
-    const isZelleTransferEligible = jest.fn(async () => true);
-    jest.doMock('../routes/pay-v2', () => ({ isZelleTransferEligible }));
+    const payPageZelleVisibility = jest.fn(async () => ({ visible: true, reason: null }));
+    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility }));
     const drafter = require('../services/sms-shadow-drafter');
     await expect(drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).resolves.toBe(true);
-    expect(isZelleTransferEligible).toHaveBeenCalled();
+    expect(payPageZelleVisibility).toHaveBeenCalled();
   });
 });
 
@@ -1417,7 +1417,7 @@ describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a
     else process.env.ZELLE_RECIPIENT = priorZelle;
   });
 
-  function freshDrafter({ invoiceRow, depositError, isZelleTransferEligible }) {
+  function freshDrafter({ invoiceRow, depositError, zelleVisible }) {
     jest.resetModules();
     jest.doMock('../models/db', () => {
       const dbFn = jest.fn(() => ({ where: () => ({ first: async () => invoiceRow }) }));
@@ -1429,7 +1429,7 @@ describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a
       }),
     }));
     jest.doMock('../routes/pay-v2', () => ({
-      isZelleTransferEligible: jest.fn(async () => isZelleTransferEligible),
+      payPageZelleVisibility: jest.fn(async () => ({ visible: zelleVisible, reason: zelleVisible ? null : 'not_eligible' })),
     }));
     return require('../services/sms-shadow-drafter');
   }
@@ -1442,27 +1442,36 @@ describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a
   });
 
   test('no customerId / openInvoiceId → false without a lookup', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1' }, isZelleTransferEligible: true });
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1' }, zelleVisible: true });
     expect(await drafter.fetchZelleEligibility({ customerId: null, openInvoiceId: 'inv-1' })).toBe(false);
     expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: null })).toBe(false);
   });
 
-  test('a pending deposit-settlement receipt blocks Zelle even when isZelleTransferEligible would say yes', async () => {
+  test('a pending deposit-settlement receipt blocks Zelle even when payPageZelleVisibility would say yes', async () => {
     const depositError = Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' });
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError, isZelleTransferEligible: true });
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError, zelleVisible: true });
     expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
-    const { isZelleTransferEligible } = require('../routes/pay-v2');
+    const { payPageZelleVisibility } = require('../routes/pay-v2');
     // Fails closed BEFORE reaching pay-v2's own predicate.
-    expect(isZelleTransferEligible).not.toHaveBeenCalled();
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
   });
 
-  test('deposit settlement ready and isZelleTransferEligible true → eligible', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, isZelleTransferEligible: true });
+  test('deposit settlement ready and payPageZelleVisibility visible → eligible', async () => {
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, zelleVisible: true });
     expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(true);
   });
 
+  // Independent-review P1 (round 5, finding 4): payPageZelleVisibility
+  // returns visible:false while a partial account credit is pending —
+  // fetchZelleEligibility must read that as ineligible, same as any other
+  // not-visible reason.
+  test('payPageZelleVisibility visible:false (e.g. credit_pending) → not eligible', async () => {
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, zelleVisible: false });
+    expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
+  });
+
   test('an unexpected deposit-settlement read error fails closed too (never a throw)', async () => {
-    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError: new Error('db down'), isZelleTransferEligible: true });
+    const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError: new Error('db down'), zelleVisible: true });
     expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
   });
 });

@@ -28,6 +28,12 @@ jest.mock('../services/sms-suggest-mode', () => ({
 jest.mock('../services/sms-shadow-drafter', () => ({
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
+  // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's new
+  // amount-free status-claim recheck reads these two off the real drafter —
+  // stubbed here since this suite exercises the ZELLE recheck specifically,
+  // via its own amountFreeStatusClaimStale mock below.
+  hasAffirmativePaymentAck: jest.fn(() => false),
+  paymentStatusClaimKind: jest.fn(() => null),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -35,6 +41,10 @@ jest.mock('../services/sms-amount-recheck', () => ({
   outgoingZelleStale: jest.fn(),
   hasAffirmativeZelleMention: jest.fn(),
   zelleInvoiceStillEligible: jest.fn(),
+  // Independent-review P1 (round 5, finding 1): dispatchClaimedSend's own
+  // amount-free status-claim recheck, right alongside the Zelle recheck this
+  // suite exercises. Defaults clean; the dedicated describe below overrides it.
+  amountFreeStatusClaimStale: jest.fn(async () => ({ stale: false })),
 }));
 
 const db = require('../models/db');
@@ -77,6 +87,7 @@ beforeEach(() => {
   amountRecheck.hasAffirmativeZelleMention.mockReturnValue(false);
   amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
   amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
+  amountRecheck.amountFreeStatusClaimStale.mockResolvedValue({ stale: false });
   sendCustomerMessage.mockResolvedValue({
     sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}`,
   });
@@ -166,4 +177,34 @@ test('no zelleInvoiceId on the claim (missing snapshot) blocks the send — fail
     customerId: '00000000-0000-4000-8000-000000000002', zelleInvoiceId: null,
   });
   expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+// Independent-review P1 (round 5, finding 1): dispatchClaimedSend's OWN
+// amount-free payment-status recheck, right alongside the Zelle recheck
+// above — a "You're paid up" reply carries no dollar figure and no Zelle
+// mention, so it clears every OTHER guard in this file untouched.
+describe('amount-free payment-status recheck (round 5, finding 1)', () => {
+  test('a clean amount-free reply sends normally', async () => {
+    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: true });
+    expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalledWith({
+      customerId: '00000000-0000-4000-8000-000000000002', body: "You're paid up!", strict: true,
+    });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('a stale amount-free status claim blocks the send, fails the claim, reopens parked suggestions', async () => {
+    amountRecheck.amountFreeStatusClaimStale.mockResolvedValue({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_no_longer_authorized' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+
+  test('it runs even for a reply with an eligible Zelle mention (both rechecks apply)', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
+    amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
+    amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
+    await expect(attempt({ zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: true });
+    expect(amountRecheck.amountFreeStatusClaimStale).toHaveBeenCalled();
+  });
 });

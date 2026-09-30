@@ -91,13 +91,30 @@ const CLAUSE_SPLIT_RE = /(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s(?!\d{4}\b(?!\d))|\s(?:
 // naming both ("we got your Zelle payment; you can also Zelle the rest to
 // X") is a live instruction too, whatever else it also reports.
 const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bzelle\b|\buse\s+zelle\b|\bzelle\s+(?:us|to|it|that)\b|\bpay(?:ing)?\s*(?:via|by|with|through)\s+zelle\b|\baccept(?:s|ed|ing)?\s+zelle\b|\bsend\b[^.\n]{0,20}\bzelle\b/i;
-const ZELLE_RECEIPT_RE = /\b(?:received|got|cleared|posted|processed)\b[^.\n]{0,30}\bzelle\b|\bzelle\b[^.\n]{0,30}\b(?:received|cleared|posted|processed)\b|\byour\b[^.\n]{0,25}\bzelle\b[^.\n]{0,15}\bpayment\b/i;
+// Independent-review P1 (round 5, finding 2): RECEIPT now requires an
+// explicit past-tense/completed verb IN THE SAME CLAUSE — the old third
+// alternative ("your … Zelle … payment") matched pure structure, no verb at
+// all, so "For your Zelle payment, use old@example.com" (an INSTRUCTION,
+// split by the clause boundary from its own "use <contact>" half) read as a
+// receipt and bypassed the offer rechecks below entirely. A clause naming an
+// instruction marker (use/send/pay/can/please) is never a receipt even when
+// it also carries a past-tense verb ("we received your payment; please
+// Zelle the rest" is still an offer for its own half — that clause already
+// splits out under CLAUSE_SPLIT_RE, this guard covers the residual case
+// where it doesn't).
+const ZELLE_RECEIPT_VERB_RE = /\b(?:received|got|came\s+through|cleared|posted|processed|arrived|went\s+through)\b/i;
+const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
 function classifyZelleClause(clause) {
   const text = String(clause || '');
   if (!ZELLE_WORD_RE.test(text) || ZELLE_NEGATION_RE.test(text)) return null;
   if (ZELLE_OFFER_RE.test(text)) return 'offer';
-  if (ZELLE_RECEIPT_RE.test(text)) return 'receipt';
+  // A clause naming a specific contact (email/phone) is ALWAYS live payment
+  // instructions, whatever verb it does or doesn't carry (finding 2):
+  // "For your Zelle payment, use old@example.com" names no offer VERB, but
+  // a contact address is never something a historical receipt states.
+  if (zelleBodyContacts(text).length) return 'offer';
+  if (ZELLE_RECEIPT_VERB_RE.test(text) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
   // Ambiguous — mentions Zelle affirmatively but matches neither pattern —
   // fails closed as an OFFER (the stricter path).
   return 'offer';
@@ -156,9 +173,14 @@ function outgoingZelleStale(body) {
  * unposted) between the draft's own fetchZelleEligibility read and this
  * send-time recheck, exactly like every other condition here. GET /:token
  * refuses the whole pay page for this case via withInvoiceDepositSettlement,
- * a fence pay-v2.js's own isZelleTransferEligible predicate does not run
+ * a fence pay-v2.js's own payPageZelleVisibility predicate does not run
  * itself (every other caller of it already sits inside that fence) — so
  * this path, like fetchZelleEligibility's, runs it explicitly alongside.
+ *
+ * Independent-review P1 (round 5, findings 3 & 4): calls the SAME shared
+ * payPageZelleVisibility pay-v2.js exports — never the bare isZelleTransferEligible
+ * predicate alone — so a live-resolved payer or a pending partial account
+ * credit blocks the send exactly as they now block the pay page itself.
  */
 async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db } = {}) {
   if (!customerId || !zelleInvoiceId) return { eligible: false, reason: 'zelle_invoice_unresolved' };
@@ -171,9 +193,9 @@ async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db 
       if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED') throw err;
       return { eligible: false, reason: 'zelle_invoice_ineligible' };
     }
-    const { isZelleTransferEligible } = require('../routes/pay-v2');
-    const eligible = Boolean(await isZelleTransferEligible(invoiceRow));
-    return eligible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
+    const { payPageZelleVisibility } = require('../routes/pay-v2');
+    const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh });
+    return visibility.visible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle eligibility recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { eligible: false, reason: 'zelle_recheck_failed' };
@@ -196,6 +218,39 @@ async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db 
 function strictForVersion(promptVersion) {
   if (typeof promptVersion === 'string' && promptVersion) return promptVersion.startsWith('house_voice_v12');
   return require('./sms-followup-sla').realAnswersGateOn();
+}
+
+// Independent-review P1 (round 5, finding 1): a body with NO dollar amount at
+// all can still assert a payment-status or receipt fact ("You're paid up.",
+// "We have your payment.") that the strict clause-aware binder
+// (replyQuotesUngroundedAmount, via paymentStatusClaimKind / hasAffirmativePaymentAck)
+// already validates at DRAFT time — but outgoingAmountsStale's own no-amount
+// fast path used to return clean without ever re-fetching billing, so a v12
+// "You're paid up" that stopped being true between draft and send (a new
+// charge posted, a payment reversed) sailed through unrechecked at every
+// send seam. Shared by that fast path AND any seam that never reaches it at
+// all because dollar-bearing bodies are refused earlier in that seam's own
+// pipeline (sms-auto-send's own hasPriceQuote refusal, (3.7)) — a status
+// claim carries no dollar figure and so clears that guard too, yet still
+// needs this same recheck before it actually sends.
+async function amountFreeStatusClaimStale({
+  customerId, body, strict, trustOwedAmounts = false, dbh = db,
+} = {}) {
+  if (!strict) return { stale: false };
+  const text = String(body || '');
+  const hasStatusClaim = text.split(CLAUSE_SPLIT_RE)
+    .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null);
+  if (!hasStatusClaim) return { stale: false };
+  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
+  try {
+    const customerRow = await dbh('customers').where({ id: customerId }).first();
+    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+    const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts });
+    return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] amount-free status-claim recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
 }
 
 // `trustOwedAmounts` (independent-review P1, round 4, finding 3): the
@@ -258,7 +313,11 @@ async function outgoingAmountsStale({
     // below, this whole-body check cannot tell an owed figure from a receipt
     // one, so it stays conservative for every caller.
     const unverifiable = strict && require('./sms-suggest-mode').hasPriceQuote(text);
-    return unverifiable ? { stale: true, reason: 'amount_unverifiable' } : { stale: false };
+    if (unverifiable) return { stale: true, reason: 'amount_unverifiable' };
+    // Independent-review P1 (round 5, finding 1): a payment-status or receipt
+    // claim with no dollar figure at all ("You're paid up.") still needs
+    // fresh billing before it sends — see amountFreeStatusClaimStale above.
+    return amountFreeStatusClaimStale({ customerId, body: text, strict, trustOwedAmounts, dbh });
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   // trustOwedAmounts on the POOLED (pre-v12) rule has nothing left to check —
@@ -299,5 +358,5 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, classifyZelleClause,
+  hasAffirmativeZelleMention, classifyZelleClause, amountFreeStatusClaimStale,
 };

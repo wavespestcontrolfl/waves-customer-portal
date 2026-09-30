@@ -861,6 +861,23 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
         return outcome;
       }
     }
+    // Amount-free payment-status recheck (independent-review P1, round 5,
+    // finding 1): (3.7) above already refuses any DOLLAR-bearing reply
+    // before the claim, but a payment-status/receipt claim with no dollar
+    // figure at all ("You're paid up.", "We have your payment.") carries no
+    // price-quote grammar and clears that guard too — reaching the provider
+    // with no recheck against CURRENT billing. Auto-send is the fully
+    // autonomous lane, so this always runs at its strictest (`strict: true`)
+    // regardless of prompt version. Same supersede-via-failClaim mechanism
+    // as the other two rechecks above.
+    const { amountFreeStatusClaimStale } = require('./sms-amount-recheck');
+    const statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true });
+    if (statusClaimCheck.stale) {
+      logger.warn(`[sms-auto-send] amount-free status claim stale (decision ${claim.decisionId}): ${statusClaimCheck.reason}`);
+      const outcome = await notSent(statusClaimCheck.reason);
+      await reopenParked('Auto-send held: a payment status statement is no longer accurate — suggestion reopened.');
+      return outcome;
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
