@@ -68,8 +68,8 @@ function mockDb(state = {}) {
   return s;
 }
 
-const earlierFull = (address = '99 Other Rd, Bradenton, FL 34205') => ({ categories: ['estimate_accepted_onboarding', 'signup_full'], payload_snapshot: { property_address: address } });
-const earlierShort = (address) => ({ categories: ['estimate_accepted_onboarding', 'signup_short'], payload_snapshot: { property_address: address } });
+const earlierFull = (address = '99 Other Rd, Bradenton, FL 34205') => ({ status: 'delivered', categories: ['estimate_accepted_onboarding', 'signup_full'], payload_snapshot: { property_address: address } });
+const earlierShort = (address) => ({ status: 'delivered', categories: ['estimate_accepted_onboarding', 'signup_short'], payload_snapshot: { property_address: address } });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -212,6 +212,23 @@ describe('the onboarding email itself', () => {
         expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_signup');
       });
 
+      test.each([
+        ['only accepted (`sent`, no delivery evidence)', { status: 'sent' }],
+        ['delivered then bounced (bounced_at)', { status: 'delivered', delivered_at: new Date(), bounced_at: new Date() }],
+      ])('an earlier full email that is %s does not make this an added property: the full email', async (_label, fields) => {
+        mockDb({ earlier: [{ ...earlierFull(), ...fields }] });
+        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+        await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_signup');
+      });
+
+      test('an earlier full email with only an open on record (delivered event lost) counts as delivered: the short email', async () => {
+        mockDb({ earlier: [{ ...earlierFull(), status: 'sent', opened_at: new Date() }] });
+        EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+        await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+        expect(EmailTemplates.sendTemplate.mock.calls[0][0].templateKey).toBe('estimate.accepted_additional_property');
+      });
+
       test('only short emails earlier (no full one delivered): the full email', async () => {
         mockDb({ earlier: [earlierShort('99 Other Rd')] });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
@@ -226,7 +243,7 @@ describe('the onboarding email itself', () => {
         const q = s.qbs.find((x) => x.table === 'email_messages');
         expect(q.whereIn).toHaveBeenCalledWith('template_key', ['estimate.accepted_signup', 'estimate.accepted_additional_property']);
         expect(q.whereIn).toHaveBeenCalledWith('recipient_id', ['cust-1']);
-        expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
+        expect(q.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked', 'spam_report', 'unsubscribed']);
         expect(q.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['taylor@example.com']);
         expect(q.whereNot).toHaveBeenCalledWith('idempotency_key', 'estimate.accepted_onboarding:est-1:acc:acc-9');
       });

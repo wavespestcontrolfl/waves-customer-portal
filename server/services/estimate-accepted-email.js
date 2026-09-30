@@ -35,7 +35,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { withAccountPrimaryContact } = require('./customer-contact');
 const {
   BASE_TEMPLATE_KEY, SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY, SIGNUP_FULL_CATEGORY, SIGNUP_SHORT_CATEGORY,
-  SENT_ISH, signupGateLive, sectionValues, recordExpected,
+  CARRIER_STATUSES, carrierRowState, signupGateLive, sectionValues, recordExpected,
 } = require('./signup-single-email');
 const { propertyStreetAddress, propertyStreetLine } = require('../utils/property-display');
 
@@ -104,7 +104,7 @@ const normalizeAddress = (value) => clean(value).toLowerCase().replace(/\s+/g, '
 // earlier today, ET, and no signup email today (full or short) already named
 // THIS property — a second estimate for a property already on the plan (pest
 // in the morning, lawn in the afternoon) is not an added property and gets the
-// full email. If the first acceptance's email failed or was blocked, the next
+// full email. If the first acceptance's email failed, bounced or is not yet delivered, the next
 // one is the first the customer actually received and gets the full version.
 async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
   const start = parseETDateTime(`${etDateString()}T00:00`);
@@ -114,16 +114,20 @@ async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
     .whereIn('template_key', [SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY])
     .where({ recipient_type: 'customer' })
     .whereIn('recipient_id', ids)
-    .whereIn('status', SENT_ISH)
+    .whereIn('status', CARRIER_STATUSES)
     .whereRaw('lower(recipient_email_snapshot) = ?', [clean(email).toLowerCase()])
     .where('created_at', '>=', start)
     .whereNot('idempotency_key', ownKey)
-    .select('categories', 'payload_snapshot');
+    .select('categories', 'payload_snapshot', 'status', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at');
   const parsed = (value, fallback) => {
     if (typeof value !== 'string') return value ?? fallback;
     try { return JSON.parse(value); } catch { return fallback; }
   };
-  const earlier = (rows || []).map((r) => ({
+  // Only an email the provider REPORTED DELIVERED counts (the same rule the owed
+  // membership email and the welcome check use): a first email that is merely
+  // `sent`, or that bounced, leaves the customer without the full content, so
+  // this acceptance sends the full version.
+  const earlier = (rows || []).filter((r) => carrierRowState(r) === 'delivered').map((r) => ({
     full: (parsed(r.categories, []) || []).includes(SIGNUP_FULL_CATEGORY),
     address: normalizeAddress(parsed(r.payload_snapshot, {})?.property_address),
   }));

@@ -102,6 +102,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
     test.each([
       ['only a short email earlier', { template_key: 'estimate.accepted_additional_property', categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_short']) }],
       ['a plain onboarding email (the old template)', { template_key: 'estimate.accepted_onboarding', categories: JSON.stringify(['estimate_accepted_onboarding']) }],
+      ['an email that is only accepted (`sent`, no delivery evidence)', { status: 'sent', delivered_at: null }],
+      ['an email delivered and then bounced', { bounced_at: new Date() }],
       ['an email that failed', { status: 'failed' }],
       ['an email that was blocked', { status: 'blocked' }],
       ['another recipient address', { recipient_email_snapshot: 'someone-else@example.invalid' }],
