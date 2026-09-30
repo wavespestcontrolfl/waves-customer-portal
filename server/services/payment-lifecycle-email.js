@@ -10,6 +10,7 @@ const { invoiceAmountDue } = require('./invoice-helpers');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isDefiniteRejection } = require('./sendgrid-mail');
+const BillingEmailDetails = require('./billing-email-details');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -578,12 +579,51 @@ async function sendPaymentRetryNotice({
   });
 }
 
+// The card that was declined, from the failed PaymentIntent Stripe just sent
+// (last_payment_error.payment_method — the only place a pay-page failure with
+// no payments row still names the card). '' when it is not a card or carries no
+// last four.
+function failedIntentCardLabel(paymentIntent) {
+  const card = paymentIntent?.last_payment_error?.payment_method?.card;
+  const last4 = clean(card?.last4);
+  if (!last4) return '';
+  return methodParts({
+    card_brand: BillingEmailDetails.cardBrandName(card.brand), last_four: last4,
+  }).label;
+}
+
+// The retry the dunning ladder ACTUALLY armed for this failure — a stored
+// payments.next_retry_at (billing-cron's RETRY_DELAYS_DAYS ladder writes it),
+// never a computed guess. A pay-page failure the ladder does not retry has no
+// such row, and the answer is '' (the template drops the row).
+async function armedRetryDate({ payment, invoice }) {
+  if (payment?.next_retry_at) return payment.next_retry_at;
+  if (!invoice?.id) return null;
+  try {
+    const armed = await db('payments')
+      .where({ customer_id: invoice.customer_id, status: 'failed' })
+      .whereNotNull('next_retry_at')
+      .where('next_retry_at', '>', new Date())
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy('created_at', 'desc')
+      .first('next_retry_at');
+    return armed?.next_retry_at || null;
+  } catch {
+    return null;
+  }
+}
+
 async function sendPaymentFailed({
   customerId,
   paymentIntentId,
   attemptId,
   invoiceId = null,
   paymentId = null,
+  // GATE_BILLING_EMAIL_DETAILS: the failed PaymentIntent (for the card label)
+  // and when Stripe says the attempt failed (for the attempt date). Unused with
+  // the gate off.
+  paymentIntent = null,
+  failedAt = null,
   // Combined full-balance PI (codex #3427 r7 P2): the caller passes the
   // allocation total so the email names the amount the customer actually
   // attempted, never one arbitrary share's remainder.
@@ -623,6 +663,18 @@ async function sendPaymentFailed({
     retry_date: displayDate(payment?.next_retry_at),
     payment_method_label: method?.last4 ? method.label : '',
   };
+  if (BillingEmailDetails.billingEmailDetailsLive()) {
+    // Card label, attempt date and the ladder's own retry date, each only where
+    // the data exists: the payments row first, then the saved method it points
+    // at, then the failed intent itself.
+    if (!payload.payment_method_label) {
+      const saved = payment?.payment_method_id ? await loadPaymentMethod(payment.payment_method_id) : null;
+      const savedParts = saved ? methodParts(saved) : null;
+      payload.payment_method_label = savedParts?.last4 ? savedParts.label : failedIntentCardLabel(paymentIntent);
+    }
+    if (!payload.failed_payment_date) payload.failed_payment_date = displayDate(failedAt);
+    if (!payload.retry_date) payload.retry_date = displayDate(await armedRetryDate({ payment, invoice }));
+  }
   const effectiveCustomerId = customerId || invoice?.customer_id || payment?.customer_id;
   if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };
   const dedupeKey = idempotencyKey

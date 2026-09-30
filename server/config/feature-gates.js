@@ -3450,6 +3450,16 @@ const gates = {
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
   lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
 
+  // Billing email details (owner-approved 2026-09-29 audit of email_messages):
+  // the invoice / receipt / payment-failed / estimate follow-up emails carry
+  // the service, service date, payment method, full street address, card
+  // label, attempt date and the retry date the ladder armed, plus a
+  // deterministic idempotency key on invoice.sent and receipts. Ships DARK:
+  // off unless exactly 'true'. This entry is for logGateStatus only: every
+  // sender reads GATE_BILLING_EMAIL_DETAILS at call time via
+  // billingEmailDetailsLive().
+  billingEmailDetails: process.env.GATE_BILLING_EMAIL_DETAILS === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3792,6 +3802,18 @@ function lawnAssessmentRefereeLive() {
   return process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true';
 }
 
+// GATE_BILLING_EMAIL_DETAILS read at CALL time — ships DARK, off unless exactly
+// 'true' (owner-approved 2026-09-29). ONE gate covers every change of the
+// billing-email-details lane: the extra detail rows on invoice.sent /
+// invoice.receipt / billing.notice / billing.receipt_notice, the card label,
+// attempt date and armed retry date on payment.failed, the Property row on the
+// estimate follow-ups, and the deterministic idempotency keys. The template
+// blocks are variable-driven, so with the gate off no sender fills the new
+// variables and every email renders exactly as before.
+function billingEmailDetailsLive() {
+  return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -3966,4 +3988,5 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
+module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 // gates 1775330914

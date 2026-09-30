@@ -26,6 +26,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
+const { billingEmailDetailsLive, customerPropertyAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
@@ -394,6 +395,25 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // `idempotencyKey` is stable per (stage, estimate) — duplicate cron ticks
 // hit the email_messages unique index instead of resending. The atomic
 // claimStage() flag is still primary; idempotency is belt-and-suspenders.
+// Property row on the estimate follow-up emails (GATE_BILLING_EMAIL_DETAILS,
+// owner-approved 2026-09-29). The payload already carried `property_address`;
+// the audit found 203 follow-ups where no template block showed it. The
+// templates now render the NEW `property_full_address` variable, filled only
+// here and only under the gate, so gate off the emails are byte-identical. The
+// estimate's own address text wins (it is the property the quote is FOR, which
+// can differ from the customer's primary); a value with no street number is a
+// nickname, not an address, so it falls through to the structured property /
+// customer address through the shared street-address helper.
+async function withFollowupPropertyRow(est, payload) {
+  if (!billingEmailDetailsLive()) return payload;
+  const own = String(est.address || "").trim();
+  let address = /\d/.test(own) ? own : "";
+  if (!address) {
+    address = await customerPropertyAddress(est.customer_id, est.property_id);
+  }
+  return address ? { ...payload, property_full_address: address } : payload;
+}
+
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   let smsHold = null;
@@ -514,7 +534,7 @@ async function sendDualChannel(est, { sms, email }) {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         to: est.customer_email,
-        payload: email.payload || {},
+        payload: await withFollowupPropertyRow(est, email.payload || {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

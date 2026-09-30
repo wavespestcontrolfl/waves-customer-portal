@@ -1,0 +1,315 @@
+/**
+ * Billing email details (GATE_BILLING_EMAIL_DETAILS, dark; owner-approved
+ * 2026-09-29 after an audit of production email_messages).
+ *
+ * The audit found the customer's billing emails were thin on the facts a
+ * customer looks for: invoice.sent and the receipts often went out with a blank
+ * service, service date or payment method; payment.failed with no card label,
+ * attempt date or retry date; invoices, receipts and estimate follow-ups with no
+ * Property row; and invoice.sent (plus a handful of receipts) with no
+ * idempotency key at all.
+ *
+ * This module is the ONE place the sending code asks "what do we know about
+ * this invoice / payment" and gets a plain string back ('' when the data does
+ * not exist, which the template renderer drops as a blank row). Every reader
+ * here is a pure lookup; the callers decide whether to use the answer, and
+ * they only do so under billingEmailDetailsLive(), so gate off the payloads and
+ * keys are exactly what they were.
+ */
+
+const crypto = require('node:crypto');
+const db = require('../models/db');
+const logger = require('./logger');
+const { propertyStreetAddress } = require('../utils/property-display');
+const { invoiceCustomerAddress } = require('./invoice-address');
+const { formatDateOnly } = require('../utils/date-only');
+const featureGates = require('../config/feature-gates');
+
+// The one reader every sender in the lane goes through. Read at CALL time; a
+// gates module without the reader (a partial test mock) reads as off, which is
+// the dark default.
+function billingEmailDetailsLive() {
+  return typeof featureGates.billingEmailDetailsLive === 'function' && featureGates.billingEmailDetailsLive() === true;
+}
+
+function clean(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+// ── Card / tender labels ────────────────────────────────────────────────
+
+const BRAND_NAMES = Object.freeze({
+  visa: 'Visa',
+  mastercard: 'Mastercard',
+  amex: 'American Express',
+  american_express: 'American Express',
+  discover: 'Discover',
+  diners: 'Diners Club',
+  diners_club: 'Diners Club',
+  jcb: 'JCB',
+  unionpay: 'UnionPay',
+});
+
+// Stripe sends 'visa' / 'amex'; the payments table stores whatever the writer
+// had. Customer copy names the brand the way the card does.
+function cardBrandName(brand) {
+  const raw = clean(brand);
+  if (!raw) return '';
+  return BRAND_NAMES[raw.toLowerCase().replace(/[\s-]+/g, '_')] || raw;
+}
+
+// "VISA ···· 4242" — the format the receipt email already used for cards, kept
+// so the same card reads the same way in every email.
+function dottedCardLabel(brand, last4) {
+  const b = clean(brand);
+  const l = clean(last4);
+  return b && l ? `${b.toUpperCase()} ···· ${l}` : '';
+}
+
+const MANUAL_TENDERS = Object.freeze({
+  cash: 'Cash',
+  check: 'Check',
+  zelle: 'Zelle',
+  venmo: 'Venmo',
+  paypal: 'PayPal',
+  other: 'Other payment',
+  card: 'Card',
+  card_present: 'Card',
+  us_bank_account: 'Bank account (ACH)',
+  ach: 'Bank account (ACH)',
+});
+
+async function savedMethodRow(customerId) {
+  if (!customerId) return null;
+  try {
+    const customer = await db('customers').where({ id: customerId }).first('autopay_payment_method_id');
+    if (customer?.autopay_payment_method_id) {
+      const chosen = await db('payment_methods').where({ id: customer.autopay_payment_method_id }).first();
+      if (chosen) return chosen;
+    }
+    return (await db('payment_methods').where({ customer_id: customerId, is_default: true }).first()) || null;
+  } catch (err) {
+    logger.warn(`[billing-email-details] saved payment method lookup failed for ${customerId}: ${err.message}`);
+    return null;
+  }
+}
+
+function bankOrCardLabel(method = {}) {
+  const type = clean(method.method_type || method.payment_method_type).toLowerCase();
+  if (type === 'ach' || type === 'us_bank_account') {
+    const bank = clean(method.bank_name) || 'Bank account';
+    const last4 = clean(method.bank_last_four || method.last_four || method.card_last_four);
+    return last4 ? `${bank} ···· ${last4}` : bank;
+  }
+  return dottedCardLabel(method.card_brand, method.last_four || method.card_last_four);
+}
+
+// The card (or bank account) the customer has on file for this invoice — what
+// an unpaid invoice.sent email can honestly name. A payer-billed invoice or an
+// operator's one-off recipient must never see the homeowner's card, so the
+// caller passes `allowed: false` for those and gets '' back.
+async function payMethodOnFileLabel(invoice, { allowed = true } = {}) {
+  if (!allowed || !invoice?.customer_id || invoice.payer_id) return '';
+  const own = dottedCardLabel(invoice.card_brand, invoice.card_last_four);
+  if (own) return own;
+  return bankOrCardLabel(await savedMethodRow(invoice.customer_id) || {});
+}
+
+// The tender behind a PAID invoice, for the receipt. The receipt email already
+// showed a card's brand and last four; it went blank for everything else (cash,
+// a check, Zelle, an ACH debit, a card with no stored last four). `payment` is
+// the ledger row (or null).
+function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
+  const card = dottedCardLabel(payment?.card_brand, payment?.card_last_four)
+    || dottedCardLabel(invoice.card_brand, invoice.card_last_four);
+  if (card) return card;
+  const paymentType = clean(payment?.payment_method_type).toLowerCase();
+  if (paymentType === 'ach' || paymentType === 'us_bank_account') return bankOrCardLabel(payment);
+  let meta = payment?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const named = clean(invoice.payment_method).toLowerCase()
+    || clean(meta?.payment_method).toLowerCase()
+    || paymentType;
+  return MANUAL_TENDERS[named] || '';
+}
+
+// ── Property (full street address) ──────────────────────────────────────
+
+// The visit's own stamped service address (a call booking for a secondary or
+// rental property) wins; otherwise the address frozen on the invoice; otherwise
+// the customer's. Only ever a STREET address: the nickname in profile_label
+// ("Primary", "Rental") is never a fallback here, so a customer with no street
+// line simply gets no Property row.
+async function scheduledServiceIdFor(invoice) {
+  if (invoice?.scheduled_service_id) return invoice.scheduled_service_id;
+  if (!invoice?.service_record_id) return null;
+  try {
+    const record = await db('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id');
+    return record?.scheduled_service_id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function stampedVisitAddress(scheduledServiceId) {
+  if (!scheduledServiceId) return '';
+  try {
+    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first(
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
+    );
+    if (!row) return '';
+    return propertyStreetAddress({
+      address_line1: row.service_address_line1,
+      address_line2: row.service_address_line2,
+      city: row.service_address_city,
+      state: row.service_address_state,
+      zip: row.service_address_zip,
+    }) || '';
+  } catch {
+    return '';
+  }
+}
+
+async function invoicePropertyAddress(invoice, customer) {
+  try {
+    const stamped = await stampedVisitAddress(await scheduledServiceIdFor(invoice));
+    if (stamped) return stamped;
+    let source = customer;
+    if (!source?.address_line1 && invoice?.customer_id) {
+      source = await db('customers').where({ id: invoice.customer_id })
+        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    }
+    return propertyStreetAddress(invoiceCustomerAddress(invoice, source || {})) || '';
+  } catch (err) {
+    logger.warn(`[billing-email-details] property address lookup failed: ${err.message}`);
+    return '';
+  }
+}
+
+// A customer (no invoice) — estimate follow-ups whose estimate carries no
+// address text of its own.
+async function customerPropertyAddress(customerId, propertyId = null) {
+  if (!customerId && !propertyId) return '';
+  try {
+    if (propertyId) {
+      const property = await db('customer_properties').where({ id: propertyId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+      const fromProperty = property ? propertyStreetAddress(property) : null;
+      if (fromProperty) return fromProperty;
+    }
+    if (!customerId) return '';
+    const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    return (customer && propertyStreetAddress(customer)) || '';
+  } catch (err) {
+    logger.warn(`[billing-email-details] customer property lookup failed: ${err.message}`);
+    return '';
+  }
+}
+
+// ── Service and service date ────────────────────────────────────────────
+
+const MONTH_TITLE_SUFFIX = /\s+[—–-]\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\s*$/i;
+
+// What the invoice was for. invoice.service_type is the answer when it is set;
+// the audit found it blank on the invoices that were emailed before the visit
+// was closed out, so fall back to the visit and the completion record it hangs
+// off, the combined-visit packet's services, and last the invoice title.
+async function invoiceServiceDetails(invoice) {
+  const fromInvoice = clean(invoice?.service_type);
+  const invoiceDate = invoice?.service_date ? formatDateOnly(invoice.service_date) : '';
+  if (fromInvoice && invoiceDate) return { label: fromInvoice, date: invoiceDate };
+
+  let label = fromInvoice;
+  let date = invoiceDate;
+  try {
+    if (invoice?.visit_completion_packet_id && !label) {
+      const members = await db('visit_completion_packet_items as i')
+        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+        .where({ 'i.invoice_id': invoice.id, 'i.packet_id': invoice.visit_completion_packet_id })
+        .orderBy('s.id').select('s.service_type');
+      const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
+      if (names.length) label = names.join(', ');
+    }
+    if (!label || !date) {
+      const scheduledId = await scheduledServiceIdFor(invoice);
+      const visit = scheduledId
+        ? await db('scheduled_services').where({ id: scheduledId }).first('service_type', 'scheduled_date')
+        : null;
+      const record = (!visit || !visit.service_type) && invoice?.service_record_id
+        ? await db('service_records').where({ id: invoice.service_record_id }).first('service_type', 'service_date')
+        : null;
+      if (!label) label = clean(visit?.service_type) || clean(record?.service_type);
+      if (!date) {
+        const raw = record?.service_date || visit?.scheduled_date;
+        date = raw ? formatDateOnly(raw) : '';
+      }
+    }
+  } catch (err) {
+    logger.warn(`[billing-email-details] service lookup failed for invoice ${invoice?.id}: ${err.message}`);
+  }
+  if (!label) label = clean(invoice?.title).replace(MONTH_TITLE_SUFFIX, '');
+  return { label, date };
+}
+
+// The ledger row behind a paid invoice — the same lookup sendReceiptEmail has
+// always used, shared so the routed billing.receipt_notice reads the same row.
+async function paidPaymentForInvoice(invoice) {
+  if (!invoice?.id || !invoice.customer_id) return null;
+  try {
+    return (await db('payments')
+      .where({ customer_id: invoice.customer_id })
+      .whereIn('status', ['paid', 'refunded'])
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy('created_at', 'desc')
+      .first()) || null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Idempotency keys ────────────────────────────────────────────────────
+
+function shortHash(value) {
+  return crypto.createHash('sha256').update(clean(value).toLowerCase()).digest('hex').slice(0, 12);
+}
+
+// invoice.sent: one email per send CLAIM. Every delivery attempt of an invoice
+// runs under a fresh send_claim_token, so a provider retry, a re-run worker or
+// a double-fired request of the SAME claim collapses to one email while an
+// operator's deliberate resend (a new claim) still goes out. The unclaimed
+// payer-completion send has no claim, so it keys on the invoice and the
+// recipient.
+function invoiceSentKey({ invoiceId, claimToken = null, recipientEmail = '' }) {
+  return claimToken
+    ? `invoice_sent:${invoiceId}:${claimToken}`
+    : `invoice_sent:${invoiceId}:unclaimed:${shortHash(recipientEmail)}`;
+}
+
+// invoice.receipt when the caller passed no key of its own (the record-payment
+// path and the operator resends deliberately pass none). One email per RECEIPT
+// GENERATION: the first delivery of a payment has no receipt_sent_at yet, and
+// every successful delivery stamps it, so a retry of the same delivery keys
+// identically (deduped) and the operator's next deliberate resend, after the
+// stamp moved, keys differently (sent).
+function receiptKey({ invoice, payment = null }) {
+  const stamp = invoice?.receipt_sent_at ? new Date(invoice.receipt_sent_at).getTime() : 'first';
+  const payRef = payment?.id || (invoice?.paid_at ? new Date(invoice.paid_at).getTime() : 'unpaid');
+  return `invoice_receipt:${invoice.id}:${payRef}:${stamp}`;
+}
+
+module.exports = {
+  billingEmailDetailsLive,
+  cardBrandName,
+  dottedCardLabel,
+  bankOrCardLabel,
+  payMethodOnFileLabel,
+  receiptTenderLabel,
+  invoicePropertyAddress,
+  customerPropertyAddress,
+  invoiceServiceDetails,
+  paidPaymentForInvoice,
+  invoiceSentKey,
+  receiptKey,
+  _private: { stampedVisitAddress, scheduledServiceIdFor, savedMethodRow, MANUAL_TENDERS },
+};

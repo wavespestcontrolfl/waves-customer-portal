@@ -31,6 +31,7 @@ const {
 } = require('./billing-channel-email-authority');
 const { billingEmailRefusal } = require('./billing-email-sender');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+const BillingEmailDetails = require('./billing-email-details');
 
 function acceptedInvoiceEmailEvidence(result) {
   return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
@@ -465,6 +466,24 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     }
   };
 
+  // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
+  // address and payment method on file, plus a per-claim idempotency key. The
+  // template rows are variable-driven, so gate off nothing below is filled and
+  // the email is exactly what it was.
+  const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
+  let detailPayload = {};
+  if (detailsLive) {
+    const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+    detailPayload = {
+      service_label: service.label,
+      service_date: service.date,
+      property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+      // An operator's one-off recipient or a payer's AP inbox must never see
+      // the homeowner's card: only the customer's own delivery names it.
+      payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, { allowed: !effectiveOverride }),
+    };
+  }
+
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -486,10 +505,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',
+          ...detailPayload,
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_sent:${invoice.id}`,
+        ...(detailsLive ? {
+          idempotencyKey: BillingEmailDetails.invoiceSentKey({
+            invoiceId: invoice.id, claimToken, recipientEmail: recipient.email,
+          }),
+        } : {}),
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
         // Ownership AGAIN at the provider boundary (Codex #4311 r46 P1): the
@@ -700,7 +725,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // retried delivery doesn't email the customer twice; manual operator
   // resends from /admin/invoices intentionally omit it so the operator
   // can always force a fresh send.
-  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+  let idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
     ? options.idempotencyKey.trim()
     : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
@@ -755,6 +780,23 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   } catch (err) {
     logger.error(`[invoice-email] Receipt PDF build failed for ${invoice.invoice_number}: ${err.message}`);
     return { ok: false, error: 'PDF generation failed' };
+  }
+
+  // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
+  // address and the tender behind the payment (cash, check, ACH... not just a
+  // card), and a deterministic key for the deliveries that passed none (the
+  // record-payment path and the operator resends). Gate off, nothing is filled.
+  const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
+  let detailPayload = {};
+  if (detailsLive) {
+    const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+    detailPayload = {
+      service_label: service.label,
+      service_date: service.date,
+      property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+      payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
+    };
+    if (!idempotencyKey) idempotencyKey = BillingEmailDetails.receiptKey({ invoice, payment });
   }
 
   const first = recipient.name || customer.first_name || 'there';
@@ -819,6 +861,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
           service_label: invoice.service_type || '',
           payment_method: cardText || '',
           memo: memo ? `Note from Waves: ${memo}` : '',
+          ...detailPayload,
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
