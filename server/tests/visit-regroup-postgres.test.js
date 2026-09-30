@@ -196,23 +196,24 @@ postgres('same-stop regroup sweep', () => {
 
   test('a transitive window chain groups its first loose pair and the dry run says the same', async () => {
     const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['10:00', '11:00'], ['11:00', '12:00']] });
-    // Candidates walk in id order, so which overlapping pair forms first varies;
-    // either way it holds the middle row, and the apply writes what the dry run said.
+    // Candidates walk in id order. When the middle row comes first its verdict
+    // spans all three; otherwise the first overlapping pair forms and the third
+    // row is left. Either way the apply writes exactly what the dry run said.
     const middle = String(f.rows[1].id);
     const dry = await regroupUngroupedSameStopRows({ fromDate: f.date, toDate: f.date });
     expect(dry.groups).toHaveLength(1);
     const pair = [...dry.groups[0].rowIds].sort();
-    expect(pair).toHaveLength(2);
     expect(pair).toContain(middle);
-    const loose = f.rows.map((r) => String(r.id)).find((id) => !pair.includes(id));
-    expect(dry.left).toEqual([{ rowId: loose, reason: 'joins_existing_visit' }]);
+    const loose = f.rows.map((r) => String(r.id)).filter((id) => !pair.includes(id));
+    expect(pair.length + loose.length).toBe(3);
+    expect(dry.left).toEqual(loose.map((rowId) => ({ rowId, reason: 'joins_existing_visit' })));
     const out = await sweep(f);
     expect(out.groups).toHaveLength(1);
     expect([...out.groups[0].rowIds].sort()).toEqual(pair);
     const byId = new Map((await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).select('id', 'visit_id'))
       .map((r) => [String(r.id), r.visit_id]));
     expect(pair.every((id) => byId.get(id) === out.groups[0].visitId)).toBe(true);
-    expect(byId.get(loose)).toBeNull();
+    expect(loose.every((id) => byId.get(id) === null)).toBe(true);
     expect(await visitCount(f.customerId)).toBe(1);
   });
 
@@ -223,6 +224,32 @@ postgres('same-stop regroup sweep', () => {
     expect(out.candidates).toBe(0);
     expect(out.groups).toHaveLength(0);
     expect((await visitIds([f.rows[2]]))[0]).toBeNull();
+  });
+
+  test('the locked fence refuses a loose pair createOrJoinVisit would put in an existing visit', async () => {
+    const f = await fixture({
+      date: nextDate(), windows: [['09:00', '10:00'], ['09:00', '10:00'], ['09:00', '10:00']],
+    });
+    const VisitGroups = require('../services/visit-groups');
+    const { _lockedFences, earliestRegroupDate } = require('../services/visit-regroup');
+    const existing = await VisitGroups.createOrJoinVisit({ rows: f.rows.slice(0, 2), createdBy: 'test' });
+    // A loose pair (row 3 + a new partner): the destination search finds the open visit at
+    // this stop; the regroup fence must refuse it (loose pairs only).
+    const loose = f.rows[2];
+    const [partner] = await mockPg('scheduled_services').insert({
+      customer_id: f.customerId, property_id: loose.property_id, technician_id: technicianId,
+      service_id: services[0].id, service_type: services[0].name, scheduled_date: f.date,
+      window_start: '09:00', window_end: '10:00', status: 'pending', estimated_duration_minutes: 60,
+    }).returning('*');
+    created.rows.push(partner.id);
+    const now = new Date();
+    await expect(VisitGroups.createOrJoinVisit({
+      rows: [loose, partner], createdBy: 'regroup-sweep', lockedGuard: _lockedFences(earliestRegroupDate(now), now),
+    })).rejects.toThrow('regroup never joins an existing visit');
+    expect((await visitIds([loose, partner])).every((v) => v === null)).toBe(true);
+    // Without the fence the same call joins the existing visit — the case is real.
+    const joined = await VisitGroups.createOrJoinVisit({ rows: [loose, partner], createdBy: 'test' });
+    expect(joined.id).toBe(existing.id);
   });
 
   test('visits inside the 76h reminder clearance are left alone', async () => {

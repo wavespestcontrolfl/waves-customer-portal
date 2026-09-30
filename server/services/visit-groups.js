@@ -535,11 +535,6 @@ async function createOrJoinVisit({ rows, createdBy, trx = null, lockedGuard = nu
       throw err;
     }
 
-    // Caller-specific fences re-checked under the row locks, in the same
-    // transaction as the membership write (regroup sweep: rows untouched,
-    // reminder tiers equal). A throw refuses the whole grouping.
-    if (lockedGuard) await lockedGuard(fresh, t);
-
     const attachedVisitIds = [...new Set(fresh.map((r) => r.visit_id).filter(Boolean).map(String))];
     if (attachedVisitIds.length > 1) {
       throw new Error('visit membership conflict: rows span two visits');
@@ -644,6 +639,12 @@ async function createOrJoinVisit({ rows, createdBy, trx = null, lockedGuard = nu
         visit = v; break;
       }
     }
+
+    // Caller-specific fences, under the row locks and in the membership-write
+    // transaction, once the destination is known (regroup sweep: rows
+    // untouched, reminder tiers equal, never an existing visit). A throw
+    // refuses the whole grouping.
+    if (lockedGuard) await lockedGuard(fresh, t, { existingVisit: visit || null });
 
     if (!visit) {
       const seq = await nextStopSeq(t, baseKey);

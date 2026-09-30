@@ -138,8 +138,15 @@ async function findCandidateRows(database, { fromDate, toDate, limit, after = nu
 // reminder rows are read FOR SHARE so a concurrent reminder stamp serializes
 // behind the grouping (or is seen, committed, before it).
 function lockedFences(earliest, now) {
-  return async (fresh, trx) => {
+  return async (fresh, trx, { existingVisit } = {}) => {
     const ids = fresh.map((r) => String(r.id));
+    // Loose pairs only: a join to an open visit already at the stop (whose
+    // other members this sweep never judged) is left to the office.
+    if (existingVisit) {
+      const err = new Error('regroup never joins an existing visit');
+      err.code = 'REGROUP_FENCE_CHANGED';
+      throw err;
+    }
     await trx('appointment_reminders').whereIn('scheduled_service_id', ids).forShare().select('id');
     if (!(await membersStillUntouched(trx, ids, earliest, now)) || new Set(await reminderStateKey(trx, ids)).size > 1) {
       const err = new Error('regroup fence changed under lock');
@@ -261,4 +268,5 @@ async function countRegroupCandidateRows({ fromDate, toDate = null, database = d
 
 module.exports = {
   regroupUngroupedSameStopRows, countRegroupCandidateRows, earliestRegroupDate, DEFAULT_LIMIT, REMINDER_CLEARANCE_MS,
+  _lockedFences: lockedFences,
 };
