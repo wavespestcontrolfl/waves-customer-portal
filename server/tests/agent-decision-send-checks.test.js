@@ -126,7 +126,13 @@ test('a decision carrying a label snapshot is rechecked against the body that wi
     .resolves.toBe('label timing no longer current (label_facts_visit_changed)');
 });
 
-test('no label snapshot -> no label recheck', async () => {
-  await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' });
+test('no label snapshot: a real-answers decision still runs the reply guard on the final body (empty authorized set); an older-prompt decision is untouched', async () => {
+  await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'Keep pets off for 1 hour.' });
+  expect(labelFactsSendBlockReason).toHaveBeenCalledWith({ snapshot: null, body: 'Keep pets off for 1 hour.' });
+  labelFactsSendBlockReason.mockResolvedValue('label_facts_unauthorized_claim');
+  await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'Keep pets off for 1 hour.' }))
+    .resolves.toBe('label timing no longer current (label_facts_unauthorized_claim)');
+  labelFactsSendBlockReason.mockClear();
+  await expect(agentDecisionSendBlockReason({ decision: decision({ prompt_version: 'house_voice_v11' }), outgoingBody: 'Keep pets off for 1 hour.' })).resolves.toBeNull();
   expect(labelFactsSendBlockReason).not.toHaveBeenCalled();
 });

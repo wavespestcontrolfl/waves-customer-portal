@@ -4458,15 +4458,11 @@ function initScheduledJobs() {
               try {
                 const labelDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot');
-                let labelSnapshot = labelDecision?.input_snapshot;
-                if (typeof labelSnapshot === 'string') {
-                  try { labelSnapshot = JSON.parse(labelSnapshot); } catch { labelSnapshot = null; }
-                }
-                if (labelSnapshot?.label_facts_snapshot) {
-                  const { labelFactsSendBlockReason } = require('./sms-label-facts');
-                  labelStale = Boolean(await labelFactsSendBlockReason({ snapshot: labelSnapshot.label_facts_snapshot, body: msg.message_body }));
-                }
+                  .first('input_snapshot', 'prompt_version');
+                // The reply guard runs on the final body of every real-answers
+                // decision (an edit may not add label timing); the visit recheck
+                // only for a body that still copies a snapshotted sentence.
+                labelStale = Boolean(await require('./agent-decision-send-checks').labelFactsBlock({ decision: labelDecision || {}, outgoingBody: msg.message_body }));
               } catch (err) {
                 logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 labelStale = true;

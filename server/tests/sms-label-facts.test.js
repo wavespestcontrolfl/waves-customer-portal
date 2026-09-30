@@ -129,7 +129,8 @@ describe('gate on — section rendering (one exact sentence per kind)', () => {
       expect(text).not.toContain('for 4 hours.');
     }
     // one product whose own label text says both a figure and "until dry" is the same mixed case
-    expect(sentences(section([product({ reiHours: 4 })]).text)).toEqual([mixed]); // default summary says "until dry"
+    // ... but ONE product whose own label text says a different thing than its figure is unknown, not mixed (see the agreement test)
+    expect(section([product({ reiHours: 4 })]).text).not.toContain('keep people'); // default summary says "until dry"
     // every product until dry -> "until dry"; every product a figure -> the longest figure
     expect(section([pest, product({ reiHours: 0 })]).text).toContain('areas until dry.');
     expect(section([lawn, product({ reiHours: 6, reentrySummary: null })]).text).toContain('areas for 6 hours.');
@@ -161,6 +162,25 @@ describe('gate on — section rendering (one exact sentence per kind)', () => {
     expect(section([product({ reiHours: null, reentrySummary: 'Keep off until dry, at least 24 hours.' })]).text).not.toContain('keep people');
     // the plain until-dry statements still work
     expect(section([product({ reiHours: 0 })]).text).toContain('until dry');
+  });
+
+  test('a positive frozen figure stands only when its own re-entry text AGREES; any other duration or condition makes re-entry unknown', () => {
+    const re = (reiHours, reentrySummary, extra = {}) => section([product({ rainfastMinutes: 180, reiHours, reentrySummary, ...extra })]).text;
+    // longer / shorter / another unit / until dry / a range / a condition -> omitted, the rain sentence stays
+    for (const summary of ['Keep people and pets off treated areas for 12 hours.', 'Stay off for 2 hours.', 'Do not re-enter for 1 day.', 'Keep off until dry.', 'Stay off for 4 hours or until dry.',
+      'Keep off for 4-6 hours.', 'Stay off overnight.', 'Wait at least 4 hours.', 'Keep off for four hours.', 'Stay off for 4 hours after it has been watered in.', 'Do not enter for 2 weeks.']) {
+      const t = re(4, summary);
+      expect(t).toContain("rain won't wash it off after 3 hours.");
+      expect(t).not.toContain('keep people');
+    }
+    // the same figure in the text (any unit that equals it), the placeholder, or no text -> the figure is used
+    for (const summary of ['Keep people and pets off treated areas for 4 hours.', 'Do not enter for 4 hours after application.', 'Keep off for 240 minutes.', 'Follow the product label and technician service report before re-entering treated areas.', null]) {
+      expect(re(4, summary)).toContain('areas for 4 hours.');
+    }
+    // the text field is judged the same way
+    expect(re(4, null, { reentryText: 'Keep off for 12 hours.' })).not.toContain('keep people');
+    // one product with a disagreeing text makes the WHOLE-visit re-entry unknown
+    expect(section([product({ reiHours: 6, reentrySummary: null }), product({ reiHours: 4, reentrySummary: '12 hours' })]).text).not.toContain('keep people');
   });
 
   test('fail closed: any unverified product at the visit means no whole-visit figures at all', () => {
@@ -260,7 +280,8 @@ describe('label row selection (mock knex)', () => {
     expect(conn.calls.some((q) => q.ops.some((o) => o[0] === 'max'))).toBe(true);
     const productQuery = conn.calls.find((q) => q.table === 'service_products as sp');
     expect(productQuery.ops).toContainEqual(['whereIn', 'sp.service_record_id', many.map((m) => m.id)]);
-    // the live catalog is joined for classification only: no timing column is selected
+    // the live catalog is not joined at all: classification and timing are completion-time data
+    expect(productQuery.ops.some((o) => o[0] === 'leftJoin')).toBe(false);
     const selected = productQuery.ops.filter((o) => o[0] === 'select').flatMap((o) => o.slice(1)).join(' ');
     expect(selected).not.toMatch(/rainfast_minutes|rei_hours|reentry_|label_verified_at/);
     // performed = completed + not a non-performed outcome; report posture is NOT part of the selection
@@ -294,6 +315,27 @@ describe('label row selection (mock knex)', () => {
     const mixed = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen() }), snapVisit('r3', undefined)], rows: [row(), row({ id: 2, service_record_id: 'r3' })] }) });
     expect(mixed.unverifiedCount).toBe(1);
     expect(labelFactsLib.renderLabelFactsSection(mixed, { formatDate: (d) => d })).toBe('');
+  });
+
+  test('classification reads completion-time data only: a live catalog edit to "adjuvant" cannot hide an unverified applied product', async () => {
+    const edited = { catalog_category: 'adjuvant', catalog_product_type: 'adjuvant' };
+    // unverified at completion + a live catalog now saying adjuvant -> still COUNTED unverified (the visit is none on file)
+    const hidden = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ labelVerifiedAt: null }), p2: frozen() })], rows: [row(edited), row({ id: 2, product_id: 'p2', product_name: 'Second' })] }) });
+    expect(hidden.unverifiedCount).toBe(1);
+    // ... even when the service_products row itself says adjuvant: the unverified check runs before any exclusion
+    const rowSaysAdjuvant = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ labelVerifiedAt: null }), p2: frozen() })], rows: [row({ product_category: 'adjuvant' }), row({ id: 2, product_id: 'p2', product_name: 'Second' })] }) });
+    expect(rowSaysAdjuvant.unverifiedCount).toBe(1);
+    // no snapshot entry at all (nothing completion-time to classify from) is unverified too
+    const noFacts = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p2: frozen() })], rows: [row(edited), row({ id: 2, product_id: 'p2', product_name: 'Second' })] }) });
+    expect(noFacts.unverifiedCount).toBe(1);
+    // a live catalog category never re-classifies a verified product either way
+    const live = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen() })], rows: [row(edited)] }) });
+    expect(live.products).toHaveLength(1);
+    expect(live.unverifiedCount).toBe(0);
+    // a VERIFIED product the completion snapshot classes as an adjuvant / water conditioner is still left out
+    const adj = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen(), p3: frozen({ category: 'adjuvant' }) })], rows: [row(), row({ id: 3, product_id: 'p3', product_name: 'Some Surfactant', active_ingredient: 'nonionic surfactant', product_category: 'adjuvant' })] }) });
+    expect(adj.products).toHaveLength(1);
+    expect(adj.unverifiedCount).toBe(0);
   });
 
   test('a deleted catalog row (product_id null) is found in the snapshot by its frozen name; ids are matched case-insensitively', async () => {
@@ -435,16 +477,57 @@ describe('label row selection (mock knex)', () => {
       await expect(block(snapshotFor(reentry), reentry, boom)).resolves.toBe('label_facts_recheck_failed');
     });
 
-    test('a body that no longer copies a label sentence (edited out), or a decision with no snapshot, needs no check and reads nothing', async () => {
+    test('a body that still copies only authorized sentences, or copies none and claims nothing, reads only what it needs', async () => {
       const boom = () => { throw new Error('must not read'); };
+      // edited OUT and nothing claimed: no visit read needed
       await expect(block(snapshotFor(reentry), 'Sounds good, see you Thursday.', boom)).resolves.toBeNull();
-      await expect(block(null, reentry, boom)).resolves.toBeNull();
-      await expect(block({ sentences: [] }, reentry, boom)).resolves.toBeNull();
+      await expect(block(null, 'Sounds good, see you Thursday.', boom)).resolves.toBeNull();
+      await expect(block({ sentences: [] }, 'Sounds good, see you Thursday.', boom)).resolves.toBeNull();
       // only the sentence that is still in the body is rechecked
       const snap = snapshotFor(`${rainfast} ${reentry}`);
       const changedRain = connFor({ visits: [snapVisit('r2', { p1: frozen({ reentryHours: 4, reentrySummary: null, rainfastMinutes: 90 }) })] });
       await expect(block(snap, reentry, changedRain)).resolves.toBeNull();
       await expect(block(snap, rainfast, changedRain)).resolves.toBe('label_facts_changed');
+    });
+
+    test('EDIT-REPLACEMENT: a reviewer who changes a snapshotted figure holds the send - the edited sentence is no longer authorized', async () => {
+      const boom = () => { throw new Error('must not read'); };
+      const snap = snapshotFor(`${rainfast} ${reentry}`);
+      const edited = [
+        rainfast.replace('after 3 hours', 'after 1 hour'),
+        rainfast.replace('after 3 hours', 'after 30 minutes'),
+        reentry.replace('for 4 hours', 'for 1 hour'),
+        reentry.replace('for 4 hours', 'until dry'),
+        `${reentry} Keep them in overnight to be safe.`,
+        `${reentry} Rain is fine after 20 minutes.`,
+        `Keep pets off for 2 hours. ${reentry}`,
+      ];
+      for (const body of edited) await expect(block(snap, body, boom)).resolves.toBe('label_facts_unauthorized_claim');
+      // a snapshot that authorized only the re-entry sentence does not authorize the rain one
+      await expect(block(snapshotFor(reentry), rainfast, boom)).resolves.toBe('label_facts_unauthorized_claim');
+    });
+
+    test('EDIT-REMOVAL: a sentence deleted and a time typed in its place holds; deleted and replaced with plain words sends', async () => {
+      const boom = () => { throw new Error('must not read'); };
+      const snap = snapshotFor(reentry);
+      await expect(block(snap, 'Thanks for asking. Pets should stay off for 1 hour.', boom)).resolves.toBe('label_facts_unauthorized_claim');
+      await expect(block(snap, 'Thanks for asking. It is rainfast after 2 hours.', boom)).resolves.toBe('label_facts_unauthorized_claim');
+      await expect(block(snap, 'Thanks for asking, a teammate will follow up today.', boom)).resolves.toBeNull();
+      // the sanctioned idiom still sends
+      await expect(block(snap, 'Pets are safe once dry, and the technician will confirm timing.', boom)).resolves.toBeNull();
+    });
+
+    test('NO SNAPSHOT (the draft copied no sentence): an edit that types a label time in holds; an unedited plain reply sends', async () => {
+      const boom = () => { throw new Error('must not read'); };
+      await expect(block(null, 'Sure, keep the pets in for 2 hours.', boom)).resolves.toBe('label_facts_unauthorized_claim');
+      await expect(block(null, reentry, boom)).resolves.toBe('label_facts_unauthorized_claim'); // not authorized: no snapshot
+      await expect(block({ sentences: [] }, 'Rain will not wash it off after 2 hours.', boom)).resolves.toBe('label_facts_unauthorized_claim');
+    });
+
+    test('a Spanish paraphrase of label timing holds at send time too', async () => {
+      const boom = () => { throw new Error('must not read'); };
+      await expect(block(null, 'Espere dos horas antes de dejar salir a las mascotas.', boom)).resolves.toBe('label_facts_unauthorized_claim');
+      await expect(block(snapshotFor(reentry), 'Hola, gracias por escribir. Le confirmamos su cita del jueves.', boom)).resolves.toBeNull();
     });
   });
 });
@@ -601,6 +684,36 @@ describe('exact-sentence contract — the guard', () => {
     expect(labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences('Keep pets off for 4 hours.', sec))).toBe(true);
     expect(hasBannedCustomerCopy('Keep pets off for 4 hours.', { rainTimeGuard: true, labelFactsText: sec })).toBe(true);
     expect(hasBannedCustomerCopy(re, { rainTimeGuard: true, labelFactsText: sec })).toBe(false);
+  });
+});
+
+describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
+  const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
+  test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
+    for (const text of [
+      'Espere dos horas antes de dejar salir a las mascotas', 'Los perros pueden salir en 2 horas.', 'Los niños pueden jugar afuera cuando el césped esté seco.',
+      'La lluvia no lo lava después de 30 minutos.', 'Si llueve, espere un día.', 'Dejen secar el césped antes de salir.', 'Tres días y ya pueden salir.',
+      'Aguarde duas horas antes de deixar os animais sair.', 'Attendez deux heures avant de laisser sortir les chiens.',
+      'Es seguro para todos.', 'Ya pueden caminar en el jardin.', '请等两个小时再让宠物出去', 'Подождите два часа',
+    ]) expect(held(text)).toBe(true);
+  });
+  test('benign Spanish with no timing passes; the greeting "buenos días" is no timing', () => {
+    for (const text of ['Hola, gracias por escribir. Le confirmamos su cita.', 'Buenos días, gracias por avisarnos. Un compañero le contestará pronto.', 'Gracias, con gusto le ayudamos con su factura.']) {
+      expect(held(text)).toBe(false);
+    }
+  });
+  test('English stays as it was: "application", "minutes" and "patio" are English words, not foreign vocabulary', () => {
+    expect(labelFactsLib.nonEnglishTimingWords('The application went well and the patio looks great.')).toBe(false);
+  });
+  test('looksNonEnglish: accents, inverted marks and a few function words say so; plain English does not', () => {
+    for (const text of ['¿Cuándo pueden salir los perros?', 'Hola, tengo una pregunta', 'Los perros pueden salir?', 'Puis-je sortir avec mon chien? merci']) expect(labelFactsLib.looksNonEnglish(text)).toBe(true);
+    for (const text of ['How long until the dogs can go out?', 'Will rain wash it off?', 'Thanks, see you Friday.', '']) expect(labelFactsLib.looksNonEnglish(text)).toBe(false);
+  });
+  test('through validateComplianceCopy: the Codex example is held even when LABEL FACTS has both sentences', () => {
+    process.env[GATE] = 'true';
+    const f = buildFactsBlock(context, { now: NOW, labelFacts: labelFacts([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]) });
+    expect(validateComplianceCopy({ reply: 'Espere dos horas antes de dejar salir a las mascotas.', factsBlock: f }).ok).toBe(false);
+    expect(validateComplianceCopy({ reply: 'Hola, gracias por escribir. Le confirmamos su cita.', factsBlock: f }).ok).toBe(true);
   });
 });
 
@@ -1021,6 +1134,22 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).not.toContain('keep people and pets off');
       expect(r.converged).toBe(false);
       expect(r.labelFactsSnapshot ?? null).toBeNull();
+    });
+
+    test('a text in another language gets the none-on-file section (the sentences are English); a Spanish paraphrase is held', async () => {
+      const spanish = draft('Espere dos horas antes de dejar salir a las mascotas.');
+      const r = await run('¿Cuánto tiempo hasta que los perros puedan salir?', [spanish, spanish, spanish]);
+      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
+      expect(r.factsBlock).not.toContain('keep people and pets off');
+      expect(r.converged).toBe(false);
+      expect(r.labelFactsSnapshot ?? null).toBeNull();
+      // an English question that gets a Spanish paraphrase is held by the guard too
+      const en = await run('How long until the dogs can go out?', [spanish, spanish, spanish]);
+      expect(en.factsBlock).toContain(`- ${RE}`);
+      expect(en.converged).toBe(false);
+      // a benign Spanish reply with no timing converges
+      const ok = await run('Hola, tengo una pregunta sobre mi cita', [draft('Hola, gracias por escribir. Un compañero le confirmará su cita.')]);
+      expect(ok.converged).toBe(true);
     });
 
     test('a reply that copies no label sentence carries no snapshot', async () => {

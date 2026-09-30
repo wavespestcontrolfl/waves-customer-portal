@@ -18,6 +18,10 @@ function parseInputSnapshot(inputSnapshot) {
   }
 }
 
+// Real-answers drafts (prompt family house_voice_v12*) are the ones whose facts
+// carry billing amounts and LABEL FACTS; older drafts are left as they were.
+const isRealAnswersDecision = (decision) => typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
+
 // OPEN TIMES: a draft that offered appointment times persists the exact
 // (date, window) pairs; a reviewer-edited body is matched to them pair by
 // pair, an unverifiable edit refuses, and surviving pairs are rechecked
@@ -61,19 +65,23 @@ function followupBlock({ decision, outgoingBody }) {
 // through a payment; re-read billing now, same check the scheduler runs at
 // fire time. Older-prompt decisions are untouched.
 async function amountsBlock({ decision, outgoingBody }) {
-  const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
-  if (!realAnswers || !decision.customer_id) return null;
+  if (!isRealAnswersDecision(decision) || !decision.customer_id) return null;
   const { outgoingAmountsStale } = require('./sms-amount-recheck');
   const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
-// LABEL FACTS: a draft that copied a label sentence persists which visit it
-// came from; the copied timing must still be the customer's current latest
-// performed visit (a newer visit, a visit today or a changed label refuses).
+// LABEL FACTS: the reply guard runs on the FINAL body of every real-answers
+// decision, whatever the reviewer did to it (an edited label sentence, a time
+// typed in, and a body on a decision that copied no sentence all read the same
+// way: label timing is allowed only as a verbatim sentence from the decision's
+// own snapshot). A draft that copied a sentence also persists which visit it
+// came from; that timing must still be the customer's current latest performed
+// visit (a newer visit, a visit today or a changed label refuses). Older-prompt
+// decisions without a snapshot are untouched.
 async function labelFactsBlock({ decision, outgoingBody }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot)?.label_facts_snapshot || null;
-  if (!snapshot) return null;
+  if (!snapshot && !isRealAnswersDecision(decision)) return null;
   const reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot, body: outgoingBody });
   return reason ? `label timing no longer current (${reason})` : null;
 }
@@ -89,4 +97,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await amountsBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, labelFactsBlock };

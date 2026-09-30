@@ -5,7 +5,8 @@
 // whole feature's data + wording + grounding logic:
 //
 //   readLastVisitLabelFacts()   DB read: the customer's most recent performed
-//                               visit -> service_products -> products_catalog.
+//                               visit -> service_products + the label facts
+//                               frozen on the visit's service record.
 //   renderLabelFactsSection()   the per-draft facts section (gate-on only; the
 //                               drafter passes it in through buildFactsBlock).
 //                               Each line is ONE exact customer-safe sentence.
@@ -15,7 +16,12 @@
 //                               word for word. The sentences are stripped from
 //                               the reply and ANY label-context timing or
 //                               clearance claim left over is held.
-//   labelFactsSendBlockReason() the send-time recheck of a delayed reply.
+//   labelFactsSendBlockReason() the send-time recheck of a delayed reply: the
+//                               reply guard on the FINAL body (an edited sentence
+//                               is no longer authorized) plus the visit recheck.
+//   looksNonEnglish()           the label sentences are English: a text in another
+//                               language gets none on file, and the guard holds
+//                               non-English timing vocabulary (nonEnglishTimingWords).
 //
 // Gate handling lives in the caller (sms-shadow-drafter): this file never
 // reads GATE_SMS_REAL_ANSWERS, so gate off never reaches it.
@@ -119,21 +125,25 @@ function frozenReiHours(frozen) {
   return UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) ? 0 : null;
 }
 
-// One joined row -> a customer-visible verified product, 'unverified' (counted,
-// omitted) or null (adjuvant / water conditioner / not customer-visible).
-// `frozen` is the product's snapshot facts (frozenFactsFor), or null.
+// One service_products row -> a customer-visible verified product, 'unverified'
+// (counted, omitted) or null (adjuvant / water conditioner / not
+// customer-visible). `frozen` is the product's snapshot facts (frozenFactsFor),
+// or null. The unverified check runs FIRST, so nothing can be hidden by being
+// (re)classified as an adjuvant: an applied product with no verified frozen
+// label always counts and voids the visit's figures. Classification reads
+// completion-time data only (the frozen facts' category / productType and the
+// service_products row written at completion), never the live catalog row
+// (its category can be edited after the visit).
 function productFromRow(row, frozen) {
   const f = frozen || {};
-  const catalogCategory = f.category || row.catalog_category;
-  const catalogProductType = f.productType || row.catalog_product_type;
+  if (!f.labelVerifiedAt) return 'unverified';
   const family = classifyProduct({
     productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
-    catalogCategory, catalogProductType,
+    catalogCategory: f.category, catalogProductType: f.productType,
   });
   const def = PRODUCT_FAMILIES[family];
   if (!def || !def.customerVisible) return null;
-  if ([row.product_category, catalogCategory, catalogProductType, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
-  if (!f.labelVerifiedAt) return 'unverified';
+  if ([row.product_category, f.category, f.productType, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
   return {
     // A neutral customer-facing type ("an insecticide"), never the brand.
     phrase: def.phrase || 'a product',
@@ -190,12 +200,10 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   const snapshotByRecord = new Map(visits.map((v) => [String(v.id), readReportIdentitySnapshot({ service_data: v.service_data })]));
 
   const rows = await conn('service_products as sp')
-    .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
     .whereIn('sp.service_record_id', recordIds)
     .orderBy([{ column: 'sp.applied_at', order: 'asc' }, { column: 'sp.id', order: 'asc' }])
     .select(
       'sp.id', 'sp.service_record_id', 'sp.product_id', 'sp.product_name', 'sp.active_ingredient', 'sp.product_category',
-      'pc.category as catalog_category', 'pc.product_type as catalog_product_type',
     );
 
   const products = [];
@@ -252,26 +260,42 @@ const STATED_DURATION_RE = /\d\s*-?\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?
 function statesOwnDuration(product) {
   return [product.reentrySummary, product.reentryText].some((t) => t && (STATED_DURATION_RE.test(String(t)) || new RegExp(SPELLED_QTY_RE.source, 'i').test(String(t))));
 }
+// A positive frozen figure stands only when the product's own re-entry text
+// AGREES with it: every duration the text states equals the figure and it adds
+// no condition of its own (until dry, whichever is later, overnight, at least,
+// a rain / watering condition ...). A text that says anything else - longer,
+// shorter, another unit, "until dry", a range - makes the re-entry unknown.
+const REENTRY_CONDITION_RE = /\b(?:until|till|til|after|before|once|when|whenever|while|dr(?:y|ies|ied|ying)|overnight|whichever|at\s+least|minimum|up\s+to|longer|more\s+than|next\s+day|weeks?|wet|damp|water(?:ed|ing)?|irrigat\w*|rain\w*)\b/i;
+const HOURS_PER_UNIT = { m: 1 / 60, h: 1, d: 24, w: 168 };
+function statedHourFigures(text) {
+  return [...text.matchAll(new RegExp(TIME_EXPR_RE.source, 'gi'))]
+    .flatMap((m) => [m[1], m[2]].filter((n) => n != null).map((n) => Number(n) * HOURS_PER_UNIT[m[3][0].toLowerCase()]));
+}
+function reentryTextAgrees(text, hours) {
+  const t = singleLine(text, 160).replace(/\bafter\s+(?:the\s+)?(?:application|spraying|treatment)\b/gi, ' ');
+  if (!t || REENTRY_PLACEHOLDER_RE.test(t)) return true; // states nothing
+  if (new RegExp(SPELLED_QTY_RE.source, 'i').test(t) && !/\d/.test(t)) return false; // a spelled figure is not compared: unknown
+  const figures = statedHourFigures(t);
+  return figures.every((h) => Math.abs(h - hours) < 1e-9) && !REENTRY_CONDITION_RE.test(t);
+}
 function reentryLevelHours(product) {
-  if (Number.isFinite(product.reiHours) && product.reiHours > 0) return product.reiHours;
+  if (Number.isFinite(product.reiHours) && product.reiHours > 0) {
+    return [product.reentrySummary, product.reentryText].every((t) => reentryTextAgrees(t, product.reiHours)) ? product.reiHours : null;
+  }
   if (product.reiHours === 0) return statesOwnDuration(product) ? null : 0;
   const summary = singleLine(product.reentrySummary || product.reentryText, 160);
   return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) && !statesOwnDuration(product) ? 0 : null;
 }
-// A product with a fixed hour figure whose own label text ALSO says "until dry".
-function figureAlsoUntilDry(product) {
-  const summary = singleLine(product.reentrySummary || product.reentryText, 160);
-  return Boolean(summary) && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary);
-}
 // { hours, untilDry } for the whole visit, or null when ANY product's re-entry
 // is unknown. `untilDry` with hours > 0 is the mixed case (a fixed figure on
 // one product, "until dry" on another): stated as "at least N hours AND until
-// dry, whichever is later", never as just the hour figure.
+// dry, whichever is later", never as just the hour figure. (A single product
+// never carries both: a figure whose own text says "until dry" is unknown.)
 function wholeVisitReentry(products) {
   const levels = products.map(reentryLevelHours);
   if (!levels.length || levels.some((l) => l == null)) return null;
   const hours = Math.max(...levels);
-  const untilDry = hours === 0 || levels.some((l) => l === 0) || products.some((p, i) => levels[i] > 0 && figureAlsoUntilDry(p));
+  const untilDry = hours === 0 || levels.some((l) => l === 0);
   return { hours, untilDry };
 }
 // Same all-known rule as re-entry: ONE product without a rainfast time makes
@@ -533,48 +557,90 @@ function isSchedulingClause(clause, { staffCarry, clock, sentence = clause }) {
 }
 
 const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|would\s+not|can'?t|cannot|shouldn'?t|should\s+not)\s+(?:\w+\s+){0,2}?(?:affect|hurt|harm|matter|damage|ruin|undo|change|impact|wash|remove|rinse|dilute|bother|be\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b|\b(?:don'?t\s+worry|no\s+need\s+to\s+worry|nothing\s+to\s+worry|not\s+to\s+worry|(?:isn'?t|is\s+not|not)\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b/;
-function clauseIsLabelClaim({ clause: c, staffCarry, sentence, question, replyContext, replyDryCondition }) {
-  const being = BEING_RE.test(c);
-  const staffLed = (STAFF_SUBJECT_RE.test(c) || staffCarry) && !being;
+// The facts one clause is judged on. `sched(clock)` is the positive-scheduling
+// shape check for this clause, with or without a clock time beside it.
+function clauseFacts({ clause, staffCarry, sentence, question, replyContext, replyDryCondition }) {
+  const being = BEING_RE.test(clause);
   // a results timeline ("7 to 10 days", "a couple of weeks") is no duration claim
   // unless the clause carries label context (people, pets, dry, rain, stay-off, wait...)
-  const duration = LABEL_CONTEXT_NO_RAIN_RE.test(c) ? hasDuration(c) : hasShortDuration(c);
-  const clock = hasClockTime(c);
-  if (duration || clock) return !isSchedulingClause(c, { staffCarry, clock: clock && !duration, sentence });
-  if (RAINFAST_RE.test(c) || UNTIL_DRY_HOLD_RE.test(c)) return true;
-  if (REENTRY_TOPIC_RE.test(c)) return true;
-  if (UNTIL_TIME_RE.test(c) && !isSchedulingClause(c, { staffCarry, clock: true, sentence })) return true;
-  if (GIVE_IT_RE.test(c) && !staffLed) return true;
-  if (REENTRY_MOVE_RE.test(c) && !staffLed && !ACCESS_RE.test(c)) return true;
-  if (TAKES_A_WHILE_RE.test(c) && DRY_RE.test(c)) return true;
-  if (/\bwait(?:ing)?\b/.test(c) && !staffLed && !WAIT_ALLOWED_RE.test(c)) return true;
+  const duration = LABEL_CONTEXT_NO_RAIN_RE.test(clause) ? hasDuration(clause) : hasShortDuration(clause);
+  return {
+    c: clause, sentence, question, replyContext, replyDryCondition, being,
+    staffLed: (STAFF_SUBJECT_RE.test(clause) || staffCarry) && !being,
+    duration,
+    clock: hasClockTime(clause),
+    rain: RAIN_WORD_RE.test(clause),
+    rainSentence: RAIN_WORD_RE.test(sentence),
+    sched: (clock) => isSchedulingClause(clause, { staffCarry, clock, sentence }),
+  };
+}
+
+const NOT_BEFORE_RE = /\bnot\s+(?:before|until|till)\b/;
+const WAIT_RE = /\bwait(?:ing)?\b/;
+const DRY_QUICKLY_RE = /\bby\s+the\s+time\b|\b(?:quick(?:ly)?|fast|rapidly|shortly|in\s+no\s+time|within)\b/;
+const DAY_CLEARANCE_RE = /\b(?:tonight|tomorrow|today|this\s+(?:evening|afternoon|morning))\b(?:'s)?\s+(?:is\s+|will\s+be\s+|should\s+be\s+)?(?:fine|ok|okay|good|safe|clear)\b/;
+const BARE_UNIT_RE = /\b(?:hours|minutes|mins|hrs|overnight)\b/;
+const BARE_LONG_UNIT_RE = /\b(?:days|nights|weeks)\b/;
+const BOOKED_DAY_QUALIFIER_RE = /\b(?:by|until|till|after|once|when|now|already|later|then|soon)\b/;
+const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(x.c);
+
+// A clause is a label claim when ANY rule holds, evaluated in order. A clause
+// with a duration or a clock time is decided by scheduling alone (first rule,
+// decisive); a question asks and does not claim, so it stops the rules that
+// follow it.
+const CLAIM_RULES_BEFORE_QUESTION = [
+  { name: 'rainfast or until-dry wording', test: (x) => RAINFAST_RE.test(x.c) || UNTIL_DRY_HOLD_RE.test(x.c) },
+  { name: 're-entry / stay-off wording', test: (x) => REENTRY_TOPIC_RE.test(x.c) },
+  { name: 'until a time that is not scheduling', test: (x) => UNTIL_TIME_RE.test(x.c) && !x.sched(true) },
+  { name: 'give it time', test: (x) => GIVE_IT_RE.test(x.c) && !x.staffLed },
+  { name: 're-entry movement', test: (x) => REENTRY_MOVE_RE.test(x.c) && noAccessNoStaff(x) },
+  { name: 'takes a while to dry', test: (x) => TAKES_A_WHILE_RE.test(x.c) && DRY_RE.test(x.c) },
+  { name: 'a wait that is not for staff', test: (x) => WAIT_RE.test(x.c) && !x.staffLed && !WAIT_ALLOWED_RE.test(x.c) },
   // rain: "rain is fine / not a concern / don't worry / won't matter" needs the dried-and-bonded condition
-  const rain = RAIN_WORD_RE.test(c);
-  const rainSentence = RAIN_WORD_RE.test(sentence);
-  if ((!replyDryCondition || CLEARANCE_TIMING_RE.test(c))
-    && ((rain && CLEARANCE_STATE_RE.test(c)) || (rainSentence && RAIN_REASSURE_RE.test(c)))) return true;
-  if (question) return false; // a question asks, it does not claim
+  {
+    name: 'rain clearance or reassurance',
+    test: (x) => (!x.replyDryCondition || CLEARANCE_TIMING_RE.test(x.c))
+      && ((x.rain && CLEARANCE_STATE_RE.test(x.c)) || (x.rainSentence && RAIN_REASSURE_RE.test(x.c))),
+  },
+];
+const CLAIM_RULES_AFTER_QUESTION = [
   // people / pets, or a lawn activity, with permission, a directive or a movement word
-  if ((being || ACTIVITY_RE.test(c)) && (PERMISSION_RE.test(c) || DIRECTIVE_RE.test(c) || MOVEMENT_RE.test(c)) && !staffLed && !ACCESS_RE.test(c)) return true;
-  if (being && DRY_RE.test(c)) return true;
+  {
+    name: 'people, pets or an activity with permission, a directive or a movement',
+    test: (x) => (x.being || ACTIVITY_RE.test(x.c)) && (PERMISSION_RE.test(x.c) || DIRECTIVE_RE.test(x.c) || MOVEMENT_RE.test(x.c)) && noAccessNoStaff(x),
+  },
+  { name: 'people or pets beside drying', test: (x) => x.being && DRY_RE.test(x.c) },
   // "it will be dry by tonight / after lunch / by the time you get home": a drying time in other words
-  if (DRY_RE.test(c) && (CLEARANCE_TIMING_RE.test(c) || /\bby\s+the\s+time\b|\b(?:quick(?:ly)?|fast|rapidly|shortly|in\s+no\s+time|within)\b/.test(c)) && !staffLed) return true;
+  { name: 'a drying time in other words', test: (x) => DRY_RE.test(x.c) && (CLEARANCE_TIMING_RE.test(x.c) || DRY_QUICKLY_RE.test(x.c)) && !x.staffLed },
   // "tonight is fine", "tomorrow should be good": a day named as the clearance
-  if (replyContext && /\b(?:tonight|tomorrow|today|this\s+(?:evening|afternoon|morning))\b(?:'s)?\s+(?:is\s+|will\s+be\s+|should\s+be\s+)?(?:fine|ok|okay|good|safe|clear)\b/.test(c) && !staffLed) return true;
-  if (PLACE_CLEARANCE_RE.test(c) && !staffLed) return true;
+  { name: 'a day named as the clearance', test: (x) => x.replyContext && DAY_CLEARANCE_RE.test(x.c) && !x.staffLed },
+  { name: 'a place cleared for use', test: (x) => PLACE_CLEARANCE_RE.test(x.c) && !x.staffLed },
   // "not before evening", "not until Thursday": a wait in other words
-  if (/\bnot\s+(?:before|until|till)\b/.test(c) && !staffLed && !isSchedulingClause(c, { staffCarry, clock: true, sentence })) return true;
+  { name: 'not before / until', test: (x) => NOT_BEFORE_RE.test(x.c) && !x.staffLed && !x.sched(true) },
   // a bare unit beside label wording: "dries in hours", "off for days"
-  if (LABEL_CONTEXT_NO_RAIN_RE.test(c) && /\b(?:hours|minutes|mins|hrs|overnight)\b/.test(c) && !isSchedulingClause(c, { staffCarry, clock: false, sentence })) return true;
-  if (STAY_OFF_CONTEXT_RE.test(c) && /\b(?:days|nights|weeks)\b/.test(c) && !isSchedulingClause(c, { staffCarry, clock: false, sentence })) return true;
-  // "they can go outside as soon as it's dry": a movement with permission, in a reply that is about drying / rain / pets
-  if (replyContext && (PERMISSION_RE.test(c) || DIRECTIVE_RE.test(c)) && MOVEMENT_RE.test(c) && !staffLed && !ACCESS_RE.test(c)) return true;
+  { name: 'a bare unit beside label wording', test: (x) => LABEL_CONTEXT_NO_RAIN_RE.test(x.c) && BARE_UNIT_RE.test(x.c) && !x.sched(false) },
+  { name: 'days beside stay-off wording', test: (x) => STAY_OFF_CONTEXT_RE.test(x.c) && BARE_LONG_UNIT_RE.test(x.c) && !x.sched(false) },
+  // "they can go outside as soon as it's dry": a movement with permission, in a reply about drying / rain / pets
+  {
+    name: 'a movement with permission in a label-context reply',
+    test: (x) => x.replyContext && (PERMISSION_RE.test(x.c) || DIRECTIVE_RE.test(x.c)) && MOVEMENT_RE.test(x.c) && noAccessNoStaff(x),
+  },
   // "you're good", "all clear": only with a label-context sentence, or a "now / tomorrow / later" qualifier,
   // and never when the sentence is plainly about a booked day ("you're all set for Thursday").
-  if (PRONOUN_CLEARANCE_RE.test(c)
-    && (replyContext || CLEARANCE_TIMING_RE.test(c) || hasDuration(c))
-    && !(SCHEDULE_WORD_RE.test(sentence) && !/\b(?:by|until|till|after|once|when|now|already|later|then|soon)\b/.test(sentence))) return true;
-  return false;
+  {
+    name: 'pronoun clearance',
+    test: (x) => PRONOUN_CLEARANCE_RE.test(x.c)
+      && (x.replyContext || CLEARANCE_TIMING_RE.test(x.c) || hasDuration(x.c))
+      && !(SCHEDULE_WORD_RE.test(x.sentence) && !BOOKED_DAY_QUALIFIER_RE.test(x.sentence)),
+  },
+];
+const holds = (rules, x) => rules.some((r) => r.test(x));
+
+function clauseIsLabelClaim(input) {
+  const x = clauseFacts(input);
+  if (x.duration || x.clock) return !x.sched(x.clock && !x.duration);
+  if (holds(CLAIM_RULES_BEFORE_QUESTION, x)) return true;
+  return !x.question && holds(CLAIM_RULES_AFTER_QUESTION, x);
 }
 
 /**
@@ -584,12 +650,66 @@ function clauseIsLabelClaim({ clause: c, staffCarry, sentence, question, replyCo
  */
 function hasUngroundedLabelClaim(strippedText) {
   const text = canonText(strippedText).toLowerCase();
+  // The clause rules are English: another language's timing words are held outright.
+  if (nonEnglishTimingWords(text)) return true;
   // The reply as a whole is about label timing when it copied a sentence or
   // mentions drying, rain, pets or a stay-off anywhere.
   const replyContext = /labelsentence/.test(text) || LABEL_CONTEXT_RE.test(text);
   // "a treatment needs to dry and bond ... after that it holds up" / "once dried, rain is fine"
   const replyDryCondition = DRY_CONDITIONAL_RE.test(text) || /\bneeds?\s+to\s+dry\b/.test(text);
   return clausesOf(text).some((c) => clauseIsLabelClaim({ ...c, replyContext, replyDryCondition }));
+}
+
+// ---- Other languages ------------------------------------------------------
+// The label sentences and every clause rule above are ENGLISH. A reply (or a
+// question) in Spanish, Portuguese or French would slip past them, so the guard
+// also holds the timing / re-entry / rain vocabulary of those languages, and a
+// text that looks non-English gets the none-on-file section (no sentence to copy).
+const stripMarks = (text) => String(text || '').normalize('NFD').replace(/\p{M}/gu, '');
+const foreignWords = (list) => new RegExp(`(?<![\\p{L}])(?:${list})(?![\\p{L}])`, 'iu');
+// [{ language, re }]: time units, pets / people, rain, drying, going out, waiting, lawn.
+// Compared after accents are removed and case folded (dias = días, nino = niño).
+const NON_ENGLISH_TIMING_VOCAB = [
+  { language: 'es', re: foreignWords('horas?|minutos?|dias?|semanas?|noches?|madrugada|mascotas?|perros?|gatos?|ninos?|ninas?|familia|lluvia|llover|llueve|lloviendo|mojad[oa]s?|seco|seca|secos|secas|secar|secarse|seque|sequen|secado|seguro|segura|seguros|seguras|caminar|jugar|pisar|regar|tormentas?|aguacero|afuera|fuera|salir|salgan|salga|esperar|espere|esperen|espera|esperan|antes\\s+de|hasta\\s+que|cesped|pasto|grama|jardin|rociado|aplicacion|tratamiento|reingreso|entrar|volver') },
+  { language: 'pt', re: foreignWords('horas?|minutos?|dias?|semanas?|noites?|animais|criancas?|chuva|chover|chove|molhad[oa]s?|secar|seco|seca|secou|esperar|espere|aguarde|aguardar|gramado|grama|quintal|tratamento|aplicacao|sair|saiam') },
+  { language: 'fr', re: foreignWords('heures?|jours?|semaines?|nuits?|animaux|chiens?|enfants?|pluie|pleuvoir|pleut|seche|secher|sechent|attendre|attendez|dehors|sortir|gazon|pelouse|traitement') },
+];
+// Everyday non-English words that are not English words: one is enough. The WEAK
+// ones (common in short non-English text, rare in English) need two.
+const NON_ENGLISH_STRONG_RE = foreignWords('hola|gracias|buenos|buenas|cuando|cuanto|puedo|pueden|puede|quiero|quisiera|tengo|por\\s+favor|senora|senor|ustedes|usted|obrigad[oa]|voce|nao|bonjour|merci|bonsoir|vous|nous|donde|manana|saludos');
+const NON_ENGLISH_WEAK_RE = new RegExp('(?<![\\p{L}])(?:de|la|el|los|las|que|un|una|por|para|con|su|sus|es|esta|estan|del|al|muy|como|pero|tiene|tambien|uma|com|est|une|les|des|pour|avec)(?![\\p{L}])', 'giu');
+const NON_ENGLISH_MARKS_RE = /[\u00BF\u00A1]/;
+// A script this guard cannot read at all (Cyrillic, Arabic, CJK ...): unverifiable, so held.
+const UNREADABLE_SCRIPT_RE = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u;
+function looksNonEnglish(text) {
+  const raw = String(text || '');
+  if (NON_ENGLISH_MARKS_RE.test(raw)) return true;
+  if (UNREADABLE_SCRIPT_RE.test(raw)) return true;
+  const t = stripMarks(canonText(raw).toLowerCase());
+  if (NON_ENGLISH_STRONG_RE.test(t)) return true;
+  return (t.match(NON_ENGLISH_WEAK_RE) || []).length >= 2 || NON_ENGLISH_TIMING_VOCAB.some((v) => v.re.test(t));
+}
+// The greeting "buenos dias" says no timing; everything else in the table is held.
+const NON_ENGLISH_GREETING_RE = /(?<![\p{L}])buen(?:os|as)\s+(?:dias|noches)(?![\p{L}])/giu;
+function nonEnglishTimingWords(text) {
+  const t = stripMarks(canonText(text).toLowerCase()).replace(NON_ENGLISH_GREETING_RE, ' ');
+  return UNREADABLE_SCRIPT_RE.test(t) || NON_ENGLISH_TIMING_VOCAB.some((v) => v.re.test(t));
+}
+
+// ---- The reply guard on a final body -------------------------------------
+// "Safe once dry" with the technician confirming timing is the one sanctioned
+// idiom: it carries no timing modifier, so it is swapped for a neutral token
+// before the guard reads the reply (unless it names a time: "safe once dry in 30 minutes").
+const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-\u2013\u2014,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
+const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+function sanctionSafeOnceDry(text) {
+  const t = String(text || '');
+  return SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t) ? t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ') : t;
+}
+
+/** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine). */
+function replyClaimsUngroundedLabelTiming(body, sectionText) {
+  return hasUngroundedLabelClaim(stripLabelSentences(sanctionSafeOnceDry(body), sectionText));
 }
 
 // ---- Send-time recheck ---------------------------------------------------
@@ -609,16 +729,22 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
 
 /**
  * Send-time revalidation, the same refuse-don't-rewrite shape as the other
- * delayed-send checks. A body that still copies a snapshotted sentence must
- * still be backed by the customer's CURRENT latest performed visit: same
- * visit date, same service records, and the same sentence. A newer visit, a
- * visit today (the today guard now fires), a changed label or any lookup error
- * refuses. A body with no snapshotted sentence (edited out) needs no check.
+ * delayed-send checks. Two steps:
+ *   1. The reply guard runs on the FINAL body, whatever a reviewer did to it:
+ *      the snapshot's own sentences (verbatim) are the only authorized label
+ *      timing, so an edited sentence, a figure typed in, or a claim added
+ *      around a copy is held ('label_facts_unauthorized_claim'). With no
+ *      snapshot the authorized set is empty.
+ *   2. A body that still copies a snapshotted sentence must still be backed by
+ *      the customer's CURRENT latest performed visit: same visit date, same
+ *      service records, same sentence. A newer visit, a visit today, a changed
+ *      label or any lookup error refuses. A body with no snapshotted sentence
+ *      left needs no visit read.
  * Returns null when it may go out, else a short reason.
  */
 async function labelFactsSendBlockReason({ snapshot, body, conn = db, today } = {}) {
   const sentences = snapshot && Array.isArray(snapshot.sentences) ? snapshot.sentences : [];
-  if (!sentences.length) return null;
+  if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'))) return 'label_facts_unauthorized_claim';
   const text = canonText(body).toLowerCase();
   const present = sentences.filter((s) => text.includes(sentenceCore(s).toLowerCase()));
   if (!present.length) return null;
@@ -653,38 +779,59 @@ function isoAddDays(iso, days) {
   return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
+const YESTERDAY_RE = /\byesterday\b/g;
+const DAYS_AGO_RE = /\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g;
+const DAYS_AGO_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
+const MONTH_DATE_RE = new RegExp(`\\b(${MONTH_NAMES.map((n) => n.slice(0, 3)).join('|')})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'g');
+const NUMERIC_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
+const FUTURE_OR_OLDER_RE = new RegExp(`${FUTURE_VISIT_RE.source}|${OLDER_VISIT_RE.source}`, 'g');
+const yearOf = (m, vy) => (m ? (m.length === 2 ? 2000 + Number(m) : Number(m)) : vy);
+
+// Every way a message can point at a visit: a pattern, and a resolver that says
+// whether ONE match names a visit other than the facts' own. The message refers
+// to another visit when any match of any pattern does. `v` = { date, today,
+// weekday, sinceVisit, year, month, day }.
+const VISIT_REFERENCES = [
+  { re: FUTURE_OR_OLDER_RE, differs: () => true },
+  // "yesterday" / "N days ago" resolve against today and must land on the visit date
+  { re: YESTERDAY_RE, differs: (m, v) => isoAddDays(v.today, -1) !== v.date },
+  { re: DAYS_AGO_RE, differs: (m, v) => isoAddDays(v.today, -(DAYS_AGO_WORDS[m[1]] ?? Number(m[1]))) !== v.date },
+  // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
+  {
+    re: WEEKDAY_ABBR_RE,
+    differs: (m, v) => {
+      const name = WEEKDAYS.find((w) => w.startsWith(m[1].slice(0, 3)));
+      return !name || name !== v.weekday || v.sinceVisit < 0 || v.sinceVisit > 6;
+    },
+  },
+  // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
+  { re: MONTH_DATE_RE, differs: (m, v) => MONTH_NAMES.findIndex((n) => n.startsWith(m[1])) + 1 !== v.month || Number(m[2]) !== v.day },
+  { re: NUMERIC_DATE_RE, differs: (m, v) => Number(m[1]) !== v.month || Number(m[2]) !== v.day || yearOf(m[3], v.year) !== v.year },
+];
+
 /**
- * True when the inbound message refers to a visit other than the facts' visit
- * (`visitDate`, YYYY-MM-DD, `today` the ET date). Errs toward true.
+ * The facts a draft may render for `inboundText`: null (none on file) when the
+ * text points at another visit or is not in English (the sentences are English).
+ */
+function labelFactsForInbound(labelFacts, inboundText) {
+  if (!labelFacts) return null;
+  return inboundRefersToOtherVisit(inboundText, labelFacts.serviceDate) || looksNonEnglish(inboundText) ? null : labelFacts;
+}
+
+/**
+ * True when the inbound message refers to a visit other than the facts'
+ * visit (`visitDate`, YYYY-MM-DD, `today` the ET date). Errs toward true.
  */
 function inboundRefersToOtherVisit(inboundText, visitDate, today = etDateString()) {
   const text = canonText(inboundText).toLowerCase();
   if (!text || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDate || ''))) return false;
-  if (FUTURE_VISIT_RE.test(text) || OLDER_VISIT_RE.test(text)) return true;
   const visit = new Date(`${visitDate}T12:00:00Z`);
-  const sinceVisit = Math.round((new Date(`${today}T12:00:00Z`) - visit) / 86400000);
-  // "yesterday" / "N days ago" resolve against today and must land on the visit date
-  if (/\byesterday\b/.test(text) && isoAddDays(today, -1) !== visitDate) return true;
-  for (const m of text.matchAll(/\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g)) {
-    const words = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
-    const n = words[m[1]] ?? Number(m[1]);
-    if (isoAddDays(today, -n) !== visitDate) return true;
-  }
-  // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
-  for (const m of text.matchAll(WEEKDAY_ABBR_RE)) {
-    const name = WEEKDAYS.find((w) => w.startsWith(m[1].slice(0, 3)));
-    if (!name || name !== WEEKDAYS[visit.getUTCDay()] || sinceVisit < 0 || sinceVisit > 6) return true;
-  }
-  // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
-  const [vy, vmo, vday] = visitDate.split('-').map(Number);
-  for (const m of text.matchAll(new RegExp(`\\b(${MONTH_NAMES.map((n) => n.slice(0, 3)).join('|')})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'g'))) {
-    if (MONTH_NAMES.findIndex((n) => n.startsWith(m[1])) + 1 !== vmo || Number(m[2]) !== vday) return true;
-  }
-  for (const m of text.matchAll(/(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g)) {
-    const yr = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : vy;
-    if (Number(m[1]) !== vmo || Number(m[2]) !== vday || yr !== vy) return true;
-  }
-  return false;
+  const [year, month, day] = visitDate.split('-').map(Number);
+  const v = {
+    date: visitDate, today, weekday: WEEKDAYS[visit.getUTCDay()], year, month, day,
+    sinceVisit: Math.round((new Date(`${today}T12:00:00Z`) - visit) / 86400000),
+  };
+  return VISIT_REFERENCES.some((ref) => [...text.matchAll(ref.re)].some((m) => ref.differs(m, v)));
 }
 
 module.exports = {
@@ -710,4 +857,9 @@ module.exports = {
   labelFactsSnapshotFor,
   labelFactsSendBlockReason,
   inboundRefersToOtherVisit,
+  sanctionSafeOnceDry,
+  replyClaimsUngroundedLabelTiming,
+  looksNonEnglish,
+  nonEnglishTimingWords,
+  labelFactsForInbound,
 };

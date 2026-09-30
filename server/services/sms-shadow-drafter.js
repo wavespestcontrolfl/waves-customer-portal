@@ -589,9 +589,9 @@ function reserviceFactLine(lanes) {
 // be a compound's tail ("pet-safe once dry") and the idiom must not carry a
 // timing modifier ("safe once dry in 30 minutes") — those stay in the text
 // for the screens below, and the exempt match is replaced by a neutral
-// token rather than removed so nothing around it is altered.
-const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-–—,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
-const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+// token rather than removed so nothing around it is altered (the idiom
+// itself lives in sms-label-facts.sanctionSafeOnceDry, shared with the
+// send-time recheck so both read a reply the same way).
 // `opts.rainTimeGuard` + `opts.labelFactsText` (LABEL FACTS, owner ruling
 // 2026-09-30, the EXACT-SENTENCE contract): label timing may reach a customer
 // only by copying a rendered LABEL FACTS sentence word for word. Those
@@ -605,10 +605,7 @@ function hasBannedCustomerCopy(text, opts = {}) {
     ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
   } catch { bannedCopyGuard = null; }
   if (!bannedCopyGuard) return true;
-  let t = String(text || '');
-  if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
-    t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
-  }
+  let t = labelFactsLib.sanctionSafeOnceDry(text);
   if (opts && opts.rainTimeGuard) {
     t = labelFactsLib.stripLabelSentences(t, opts.labelFactsText || '');
     if (labelFactsLib.hasUngroundedLabelClaim(t)) return true;
@@ -2232,9 +2229,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
   // pointing at another visit (a coming one, an older one, another day) gets
   // the none-on-file section for that draft. Ambiguity reads as another visit.
-  const labelFacts = fetchedLabelFacts && labelFactsLib.inboundRefersToOtherVisit(inboundMessage, fetchedLabelFacts.serviceDate)
-    ? null
-    : fetchedLabelFacts;
+  // The label sentences are English: a text in another language gets none on
+  // file too (a paraphrase in that language would slip past the English guard;
+  // the guard also holds that language's timing words, sms-label-facts).
+  const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, inboundMessage);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
