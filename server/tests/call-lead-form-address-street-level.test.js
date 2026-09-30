@@ -443,6 +443,9 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
     expect(at).toBeGreaterThan(s.indexOf("const [created] = await trx('scheduled_services')"));
     const block = s.slice(at, at + 1400);
     expect(block).toContain('lead_id: leadId || null');
+    // Same origin as the voice agent's card: the confirm hook never guesses a lead when lead_id is null.
+    expect(block).toContain("origin: 'voice_agent',");
+    expect(block).not.toContain('call_street_level');
     expect(block).toContain('scheduled_service_id: created.id');
     expect(block).toContain("if (!card) throw new Error('a booking review card is already open for this call');");
   });

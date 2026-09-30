@@ -17347,7 +17347,9 @@ const CallRecordingProcessor = {
                         extraction: v2ApprovedExtraction || extracted,
                         severity: 'advisory',
                         extraPayload: {
-                          origin: 'call_street_level',
+                          // Same origin the voice agent's card carries: the confirm hook
+                          // then never guesses a lead when lead_id is null.
+                          origin: 'voice_agent',
                           scheduled_service_id: created.id,
                           lead_id: leadId || null,
                           keep_open_for_quote: !!callQuotePromised,
