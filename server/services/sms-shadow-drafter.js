@@ -30,6 +30,7 @@ const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratit
 const { gateEnvValue } = require('../config/feature-gates');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
+const { TURF_INSECT_NOUN_SOURCES } = require('./covered-pests');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -673,7 +674,7 @@ async function liveReserviceLaneState(customerId) {
   // no row to have a plan). A lookup error / timeout / self-serve off / unusable customer row is verified:false —
   // "could not check", never a confirmed no-plan prospect.
   const none = { eligible: [], open: {}, bookable: [], verified: false };
-  if (!customerId) return { ...none, verified: true };
+  if (!customerId) return { ...none, verified: true, hasRecurringPlan: false };
   let timer = null;
   try {
     const { reserviceSelfServeEnabled, loadReserviceLaneAvailability } = require('./reservice-scheduler');
@@ -697,6 +698,8 @@ async function liveReserviceLaneState(customerId) {
       // covered lanes with no open callback whose booking link is down: entitled, but nothing to offer or book right now
       linkDownLanes: linkAvailable ? [] : eligible.filter((lane) => !open[lane]),
       verified: state?.verified === true,
+      // Codex round-33 P2: false ONLY when the lookup affirmatively found no recurring plan of ANY kind (undefined = unknown)
+      hasRecurringPlan: typeof state?.hasRecurringPlan === 'boolean' ? state.hasRecurringPlan : undefined,
     };
   } catch (err) {
     logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
@@ -759,9 +762,19 @@ function reserviceFactLine(lanes, booked = {}, planState = 'unknown', linkDownLa
     // inspection/assessment wording (validateReserviceOffer). An unavailable / errored / unrequested lookup
     // renders "(eligibility unavailable)" and is treated as a plan customer (fail closed). Gate-on only (the
     // fact is never rendered gate-off).
-    : `${RESERVICE_FACT_LABEL} not eligible (${planState === 'none' ? 'no recurring plan on file' : 'eligibility unavailable'})`;
+    : `${RESERVICE_FACT_LABEL} not eligible (${planState === 'none' ? 'no recurring plan on file' : (planState === 'unsupported' ? 'recurring plan on file, no self-serve re-service lane' : 'eligibility unavailable')})`;
 }
 
+// 'none' — a COMPLETED lookup affirmatively found NO recurring plan of ANY kind (the prospect signal);
+// 'unsupported' — verified, a plan exists, but no self-serve re-service lane (termite / mosquito / tree-and-shrub only): a
+//                 plan customer, NOT a prospect (Codex round-33 P2);
+// 'unknown' — anything else, including a lookup that could not say (fail closed).
+function reserviceLanePlanState(state) {
+  if (!state.verified || state.eligible.length) return 'unknown';
+  if (state.hasRecurringPlan === false) return 'none';
+  if (state.hasRecurringPlan === true) return 'unsupported';
+  return 'unknown';
+}
 // Fact-block state for a live draft (Codex round-13 P2): the bookable lanes plus
 // the covered-but-already-booked lanes with their open callback's date/window.
 // null when real-answers is off (no fact is rendered).
@@ -773,7 +786,7 @@ async function fetchReserviceFactState({ customerId } = {}) {
   for (const lane of ['pest', 'lawn']) {
     if (state.open?.[lane]) booked[lane] = state.open[lane];
   }
-  return { lanes: state.bookable, booked, linkDownLanes: state.linkDownLanes || [], planState: state.verified && !state.eligible.length ? 'none' : 'unknown' };
+  return { lanes: state.bookable, booked, linkDownLanes: state.linkDownLanes || [], planState: reserviceLanePlanState(state) };
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -1260,7 +1273,7 @@ function reservicePromiseClauses(text) {
 const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip|inspections?|assessments?|check-?up|come\\s+back(?:\\s+out)?|go\\s+back(?:\\s+out)?|come\\s+out|back\\s+out|out\\s+again';
 // Codex round-10 P2: purpose clauses attach a lane to the offer too — "a free visit to treat your lawn".
 const RESERVICE_PURPOSE_VERB = 'treat|re-?treat|handle|take\\s+care\\s+of|spray|service|address|deal\\s+with|control|fix|inspect|check(?:\\s+on)?|look\\s+(?:at|over)|assess|get\\s+rid\\s+of|kill';
-const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
+const RESERVICE_LAWN_SERVICE_WORDS = `lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod|${TURF_INSECT_NOUN_SOURCES.join('|')}`;
 let reservicePromiseLaneRes = null;
 function promiseLaneRegexes() {
   if (reservicePromiseLaneRes) return reservicePromiseLaneRes;
@@ -1829,7 +1842,7 @@ async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedL
   // only in that ambiguous case.
   if (promise && customerId && !isReserviceOfferPromise(withoutGenericInspections(body))) {
     const live = await liveReserviceLaneState(customerId);
-    if (live.verified && !live.eligible.length) promise = false; // an unverified lookup stays a plan customer's promise
+    if (live.verified && !live.eligible.length && live.hasRecurringPlan === false) promise = false; // unverified / unsupported-plan stays a plan customer's promise
   }
   if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
   const fault = reserviceBodyLaneFault(body, promise, promisedLanes);

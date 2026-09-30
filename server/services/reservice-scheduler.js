@@ -21,7 +21,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
-const { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_PEST_NOUN_SOURCES } = require('./covered-pests');
+const { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_NOUN_SOURCES } = require('./covered-pests');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
@@ -78,6 +78,13 @@ function laneForCoverageRow({ category, serviceType } = {}) {
 // Assessment" as a bookable RE-SERVICE lane, which it categorically is not
 // (a re-service is a free callback for an ACTIVE recurring/WaveGuard
 // customer; an assessment is the free first-visit consultation for a lead).
+// index of the first excluded-specialty mention in a service label (or -1)
+function firstSpecialtyIndex(label) {
+  const hits = [EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE, TREE_SHRUB_SPECIALTY_ISSUE_RE, /\bpalm\b/i]
+    .map((re) => label.search(new RegExp(re.source, re.flags.replace('g', ''))))
+    .filter((at) => at >= 0);
+  return hits.length ? Math.min(...hits) : -1;
+}
 function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return 'assessment';
   if (serviceKey === RESERVICE_LANES.lawn.serviceKey) return 'lawn';
@@ -87,7 +94,14 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   if (serviceKey === 'rodent_trapping_followup') return 'rodent';
   // ...and the same visit recorded WITHOUT a catalog key (legacy / unlinked rows: service_type 'Rodent Trapping
   // Follow-Up') — classified by its label before the pest fallback (Codex round-26 P2).
-  if (/\brodent\b/i.test(String(serviceType || ''))) return 'rodent';
+  // Codex round-33 P2: EVERY excluded specialty (termite, mosquito, tree & shrub, bed bug, flea, German roach, wildlife —
+  // the same source reportedReserviceExcludedSpecialty reads) is its own non-pest lane, or an open termite / mosquito /
+  // tree-and-shrub callback would populate booked.pest and suppress the covered pest offer. Only SPECIALTY-LED labels
+  // qualify: a retained pest-led "Pest & Rodent Control" service stays pest.
+  const label = String(serviceType || '');
+  const pestAt = label.search(/\bpest\b/i);
+  const specialtyAt = firstSpecialtyIndex(label);
+  if (specialtyAt >= 0 && (pestAt < 0 || specialtyAt < pestAt)) return /\brodent/i.test(label) ? 'rodent' : 'specialty';
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
 }
 
@@ -271,13 +285,36 @@ async function loadReserviceEligibility(customerId, dbh = db) {
  * inactive customer has no eligible lanes. Throws on a lookup error (callers
  * choose how to fail; the by-id loader below fails closed).
  */
+// any live recurring row of ANY kind (upcoming, non-terminal, not a callback)
+async function customerHasAnyRecurringRow(customerId, dbh = db) {
+  const row = await dbh('scheduled_services as s')
+    .where('s.customer_id', customerId)
+    .where('s.is_recurring', true)
+    .whereNotIn('s.status', TERMINAL_STATUSES)
+    .where('s.scheduled_date', '>=', etDateString())
+    .where((qb) => qb.whereNull('s.is_callback').orWhere('s.is_callback', false))
+    .first('s.id');
+  return Boolean(row);
+}
 async function reserviceLaneAvailability(customer, dbh = db, { strict = false } = {}) {
   const eligible = !customer || customer.active === false ? [] : await reserviceLanesForCustomer(customer, dbh, { strict });
   // Codex round-32 P2: open callbacks are loaded INDEPENDENTLY of current eligibility — a callback booked while the plan
   // covered the lane is still an appointment on the schedule after coverage changes. Eligibility is intersected only for
   // "newly bookable".
   const open = customer?.id ? await openReserviceCallbacks(customer.id, dbh) : {};
-  return { eligible, open, bookable: eligible.filter((lane) => !open[lane]) };
+  // Codex round-33 P2: "no supported lane" is not "no plan" — a termite / mosquito / tree-and-shrub recurring customer has no
+  // self-serve lane but IS a plan customer. hasRecurringPlan is the affirmative "NO recurring plan of ANY kind" evidence
+  // (false) or its opposite (true); null when it could not be read (non-strict path).
+  let hasRecurringPlan = eligible.length > 0;
+  if (!hasRecurringPlan && customer) {
+    try {
+      hasRecurringPlan = isMembershipCustomerRow(customer) || await customerHasAnyRecurringRow(customer.id, dbh);
+    } catch (err) {
+      if (strict) throw err;
+      hasRecurringPlan = null;
+    }
+  }
+  return { eligible, open, bookable: eligible.filter((lane) => !open[lane]), hasRecurringPlan };
 }
 
 /**
@@ -372,7 +409,7 @@ const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
 // (sms-shadow-drafter.js RESERVICE_LAWN_SERVICE_WORDS) reads — a test pins they cannot drift. "yard" is a
 // LOCATION ("ants are back in the yard" is a pest report on a dual-lane account), a lawn word only when
 // service-qualified ("yard treatment", "service for my yard"); "grass" keeps its own reading.
-const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
+const RESERVICE_LAWN_SERVICE_WORDS = `lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod|${TURF_INSECT_NOUN_SOURCES.join('|')}`; // + the lawn copy's covered TURF insects (covered-pests.js)
 const RESERVICE_LAWN_LOCATION_SERVICE_QUALIFIED = '(?:yard|grass)\\s+(?:service|treatment|care|program|maintenance|spray(?:ing)?)'
   + '|(?:service|treatment|care|program|spray(?:ing)?)\\s+(?:for|on|of|to)\\s+(?:(?:my|our|the|your)\\s+)?(?:yard|grass)';
 const RESERVICE_LAWN_WORDS_RE = new RegExp(`\\b(?:${RESERVICE_LAWN_SERVICE_WORDS}|grass|${RESERVICE_LAWN_LOCATION_SERVICE_QUALIFIED})\\b`, 'i');
@@ -412,7 +449,7 @@ const RESERVICE_LANE_WORD_PATTERNS = [
 // ---------------------------------------------------------------------------
 const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
 const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
-const RESERVICE_ANY_PEST_NOUN = `(?:${SEPARATE_SERVICE_PEST_NOUN_SOURCES.join('|')}|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*)`;
+const RESERVICE_ANY_PEST_NOUN = `(?:${TURF_INSECT_NOUN_SOURCES.join('|')}|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.join('|')}|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*)`;
 // Codex round-27/28 P2: only constructions that AFFIRM the sighting are exempt from negation — surprise
 // ("I can't believe the ants are back"), puzzlement ("I don't know why ants are back", "not sure why …"). They are
 // blanked before the negation test. "I don't think / don't believe / not sure ants are back" DENY or doubt it, so
@@ -514,10 +551,15 @@ const RESERVICE_NOUN_LIST_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b(?:\\
 // ...but only when the list is a SUBJECT sharing the predicate. A list that is the OBJECT of a preceding verb ("I do not have
 // termites and ants are back" — "have termites" is complete, "ants are back" is a new clause) is not masked (round-32 P2).
 const RESERVICE_OBJECT_POSITION_BEFORE_RE = /\b(?:have|has|had|having|got|get|getting|see|saw|seen|seeing|find|found|finding|spot\w*|notic\w*|with|without|no|not|any|about|for|of|like|than)\s+(?:(?:the|some|any|these|those|many|more|all|a|an|of)\s+)*$/i;
+const RESERVICE_NEW_PREDICATE_AFTER_RE = /^\s*(?:are|is|were|was|came|come|comes|keep|kept|have|has|had|seem|seems|appear\w*|returned|returns|showed|shows|started|starts|went|go|goes)\b/i;
 function maskCoordinatedNouns(text) {
   const s = String(text);
   return s.replace(RESERVICE_NOUN_LIST_RE, (m, offset) => {
-    if (RESERVICE_OBJECT_POSITION_BEFORE_RE.test(s.slice(Math.max(0, offset - 40), offset))) return m;
+    // Codex round-33 P2: after "X and Y", a NEW predicate on Y ("… ants are back") makes the object-position list two clauses;
+    // otherwise it is a shared object ("I have ants and termites", "I saw ants and bed bugs") and stays together.
+    const objectPosition = RESERVICE_OBJECT_POSITION_BEFORE_RE.test(s.slice(Math.max(0, offset - 40), offset));
+    const newPredicate = RESERVICE_NEW_PREDICATE_AFTER_RE.test(s.slice(offset + m.length, offset + m.length + 40));
+    if (objectPosition && newPredicate) return m;
     return m.replace(/,/g, '&').replace(/\b(?:and|plus)\b/gi, (w) => '&'.repeat(w.length));
   });
 }
@@ -616,14 +658,20 @@ function mentionsAffirmed(text, termRe) {
 // The lane is derived from the clause(s) carrying the ACTIVE report (Codex round-24 P2): "My lawn service is
 // Tuesday, and the ants are back" is a pest report even though another clause names the lawn service. With no
 // active clause (a bare lawn complaint, "tell me more about ants") every surviving clause is read.
+const RESERVICE_TURF_INSECT_RE = new RegExp(`\\b(?:${TURF_INSECT_NOUN_SOURCES.join('|')})\\b`, 'i');
+const RESERVICE_TURF_INSECT_G_RE = new RegExp(RESERVICE_TURF_INSECT_RE.source, 'gi');
 function reportedReserviceLane(text) {
   const facts = reservicePestReportFacts(text);
   if (!facts.survivingText.trim() || reportedReserviceExcludedSpecialty(text)) return null;
   const active = activePestClauses(facts.asserted);
   const basis = active.length ? active.join(' , ') : facts.survivingText;
   const located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
-  const hasLawn = RESERVICE_LAWN_WORDS_RE.test(located);
-  const hasPest = RESERVICE_PEST_WORDS_RE.test(located);
+  // TURF insects (chinch bugs, mole crickets, armyworms, grubs, sod webworms) are LAWN, matched before the generic
+  // household nouns they contain (Codex round-33 P2)
+  const turfHit = RESERVICE_TURF_INSECT_RE.test(located);
+  const stripped = located.replace(RESERVICE_TURF_INSECT_G_RE, ' ');
+  const hasLawn = turfHit || RESERVICE_LAWN_WORDS_RE.test(stripped);
+  const hasPest = RESERVICE_PEST_WORDS_RE.test(stripped);
   if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
   if (hasLawn) return 'lawn';
   if (hasPest) return 'pest';
@@ -687,7 +735,7 @@ async function openReserviceCallbacks(customerId, dbh = db) {
     // catalog row) still block their lane — one open free visit per lane.
     const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
     // A rodent follow-up is not a pest/lawn re-service: it neither books nor blocks either lane here.
-    if (lane === 'rodent') continue;
+    if (lane === 'rodent' || lane === 'specialty') continue;
     if (byLane[lane]) continue; // soonest visit represents the lane
     byLane[lane] = {
       date: typeof row.scheduled_date === 'string'
@@ -732,7 +780,7 @@ async function openReserviceCallbacks(customerId, dbh = db) {
 // open-assessment checks already use, so this atomic re-check can never miss
 // a row those checks would have caught.
 async function openCallbackExistsForLane(dbh, customerId, lane) {
-  if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment' || lane === 'rodent')) return false;
+  if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment' || lane === 'rodent' || lane === 'specialty')) return false;
   if (lane === 'assessment') {
     // The assessment identity IN SQL, never after a LIMIT (Codex #4737 r12
     // pre-push P1): any non-terminal row that is an assessment by name or

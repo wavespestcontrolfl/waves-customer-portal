@@ -15,13 +15,13 @@
  */
 const COVERED_PEST_NOUN_SOURCES = Object.freeze([
   'pests?',
-  'bugs?',
+  '(?<!\\bchinch\\s+)bugs?',
   'palmetto\\s*bugs?',
   'ants?',
   'roach(?:es)?',
   'cockroach(?:es)?',
   'spider\\w*',
-  'crickets?',
+  '(?<!\\bmole\\s+)crickets?',
   'earwigs?',
   'silverfish',
   'millipedes?',
@@ -71,4 +71,35 @@ const unmapped = SEPARATE_SERVICE_ITEMS.filter((item) => !Object.prototype.hasOw
 if (unmapped.length) throw new Error(`covered-pests: map these "Separate services" items to a pest noun source (or null): ${unmapped.join(', ')}`);
 const SEPARATE_SERVICE_PEST_NOUN_SOURCES = Object.freeze(SEPARATE_SERVICE_ITEMS.map((item) => SEPARATE_SERVICE_ITEM_SOURCES[item]).filter(Boolean));
 
-module.exports = { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES };
+/**
+ * TURF insects — the lawn program's "Covered turf insects" row in estimate-service-details.js ("Chinch bugs, sod webworms,
+ * armyworms, white grubs & mole crickets"). They are LAWN-lane pests, matched BEFORE the generic household nouns (chinch
+ * BUGS, mole CRICKETS would otherwise read as general pest). Derived at load from the copy like the separate-services set;
+ * an item the copy adds without a mapping fails loudly. (Codex round-33 P2, PR #5336)
+ */
+const TURF_INSECT_ITEM_SOURCES = Object.freeze({
+  'chinch bugs': 'chinch\\s*bugs?',
+  'sod webworms': '(?:sod\\s*)?webworms?',
+  armyworms: 'army\\s*worms?',
+  'white grubs': '(?:white\\s*)?grubs?',
+  'mole crickets': 'mole\\s*crickets?',
+});
+function turfInsectItems() {
+  const { SERVICE_DETAILS_COPY } = require('./estimate-service-details');
+  const rows = [];
+  const walk = (o) => {
+    if (Array.isArray(o)) {
+      if (o[0] === 'Covered turf insects' && typeof o[1] === 'string') rows.push(o[1]);
+      o.forEach(walk);
+    } else if (o && typeof o === 'object') Object.values(o).forEach(walk);
+  };
+  walk(SERVICE_DETAILS_COPY);
+  if (!rows.length) throw new Error('covered-pests: the lawn "Covered turf insects" row is missing from estimate-service-details');
+  return rows[0].split(/\s+[\u2014\u2013-]\s+/)[0].split(/\s*,\s*|\s*&\s*|\s+and\s+/).map((item) => item.trim().toLowerCase()).filter(Boolean);
+}
+const TURF_INSECT_ITEMS = Object.freeze(turfInsectItems());
+const unmappedTurf = TURF_INSECT_ITEMS.filter((item) => !Object.prototype.hasOwnProperty.call(TURF_INSECT_ITEM_SOURCES, item));
+if (unmappedTurf.length) throw new Error(`covered-pests: map these "Covered turf insects" items to a noun source: ${unmappedTurf.join(', ')}`);
+const TURF_INSECT_NOUN_SOURCES = Object.freeze(TURF_INSECT_ITEMS.map((item) => TURF_INSECT_ITEM_SOURCES[item]));
+
+module.exports = { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES };

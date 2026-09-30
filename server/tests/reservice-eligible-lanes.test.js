@@ -289,7 +289,8 @@ describe('reportedReserviceLane — "yard" is a location unless service-qualifie
       expect(reportedReserviceLane(`my ${word} looks bad`)).toBe('lawn');
       expect(drafter.namedReserviceLanesInText(`We will send your free ${word} re-service link.`)).toEqual(['lawn']);
     }
-    expect(RESERVICE_LAWN_SERVICE_WORDS).toBe('lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod');
+    const { TURF_INSECT_NOUN_SOURCES } = require('../services/covered-pests');
+    expect(RESERVICE_LAWN_SERVICE_WORDS).toBe(`lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod|${TURF_INSECT_NOUN_SOURCES.join('|')}`);
   });
 
   test('loadEligibleReserviceLanesStrict throws on a lookup error but returns [] for a genuinely ineligible row', async () => {
@@ -436,6 +437,20 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['I had ants last year', false, 'pest', false],
     ['I had ants yesterday', true, 'pest', false],
     ['I have ants', true, 'pest', false],
+    // round-33 P2: shared-verb coordinated objects keep both nouns (specialty detected); TURF insects are LAWN
+    ['I have ants and termites', true, null, true],
+    ['I saw ants and termites', true, null, true],
+    ['I found ants and bed bugs', true, null, true],
+    ['I saw ants and termites in the attic', true, null, true],
+    ['I do not have termites and ants are back', true, 'pest', false],
+    ['chinch bugs are back', true, 'lawn', false],
+    ['mole crickets are back', true, 'lawn', false],
+    ['the white grubs are back', true, 'lawn', false],
+    ['sod webworms came back', true, 'lawn', false],
+    ['armyworms are everywhere', true, 'lawn', false],
+    ['crickets are back', true, 'pest', false],
+    ['the bugs are back', true, 'pest', false],
+    ['chinch bugs and ants are back', true, null, false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -583,5 +598,57 @@ describe('reserviceLaneAvailability — open callbacks survive a coverage change
     jest.resetModules();
     expect(state.booked).toEqual({ pest: { date: '2026-10-08', windowStart: '09:00' } });
     expect(state.lanes).toEqual([]);
+  });
+});
+
+
+// Codex round-33 P2: TURF insects come from the lawn copy's "Covered turf insects" row (single source, like covered-pests).
+describe('turf insects are LAWN-lane, derived from the lawn copy', () => {
+  const { TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES } = require('../services/covered-pests');
+  const { reportedReserviceLane, isActivePestReport } = require('../services/reservice-scheduler');
+  test('the derived items equal the copy row and every one resolves to lawn before the generic bug / cricket nouns', () => {
+    expect(TURF_INSECT_ITEMS).toEqual(['chinch bugs', 'sod webworms', 'armyworms', 'white grubs', 'mole crickets']);
+    expect(TURF_INSECT_NOUN_SOURCES).toHaveLength(5);
+    for (const noun of ['chinch bugs', 'sod webworms', 'webworms', 'armyworms', 'army worms', 'white grubs', 'grubs', 'mole crickets']) {
+      expect(reportedReserviceLane(`the ${noun} are back`)).toBe('lawn');
+      expect(isActivePestReport(`the ${noun} are back`)).toBe(true);
+    }
+    // the outgoing promise classifier reads the same words
+    const drafter = require('../services/sms-shadow-drafter');
+    expect(drafter.namedReserviceLanesInText('We will send your free chinch bug re-service link.')).toEqual(['lawn']);
+    expect(drafter.namedReserviceLanesInText('We will send your free mole cricket re-service link.')).toEqual(['lawn']);
+    expect(drafter.namedReserviceLanesInText('We will send your free cricket re-service link.')).toEqual(['pest']);
+  });
+});
+
+// Codex round-33 P2: "no supported lane" is not "no plan" — a termite / mosquito / tree-and-shrub recurring customer is a plan customer.
+describe('reserviceLaneAvailability — hasRecurringPlan (the affirmative prospect evidence)', () => {
+  const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+  const fakeDb = ({ recurringRow = null, throwOnRecurring = false } = {}) => {
+    let kind = 'coverage';
+    const chain = {};
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotIn', 'modify', 'select', 'limit', 'forUpdate', 'orWhere', 'orWhereIn', 'whereNull']) chain[m] = () => chain;
+    chain.orderBy = () => { kind = 'callbacks'; return chain; };
+    chain.first = async () => { if (throwOnRecurring) throw new Error('db down'); return recurringRow; };
+    chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    return () => chain;
+  };
+  const customer = { id: 'cust-1', active: true, waveguard_tier: null, monthly_rate: 0 };
+
+  test('no coverage, no membership, no recurring row of ANY kind → false (a prospect)', async () => {
+    expect((await reserviceLaneAvailability(customer, fakeDb())).hasRecurringPlan).toBe(false);
+  });
+  test('a recurring row of another kind (termite / mosquito / tree & shrub) → true with no supported lane', async () => {
+    const out = await reserviceLaneAvailability(customer, fakeDb({ recurringRow: { id: 'row-1' } }));
+    expect(out.eligible).toEqual([]);
+    expect(out.hasRecurringPlan).toBe(true);
+  });
+  test('a membership row (tier / monthly rate) → true', async () => {
+    expect((await reserviceLaneAvailability({ ...customer, waveguard_tier: 'Gold' }, fakeDb())).hasRecurringPlan).toBe(true);
+    expect((await reserviceLaneAvailability({ ...customer, monthly_rate: 45 }, fakeDb())).hasRecurringPlan).toBe(true);
+  });
+  test('a lookup error: strict rethrows; non-strict reports null (unknown)', async () => {
+    await expect(reserviceLaneAvailability(customer, fakeDb({ throwOnRecurring: true }), { strict: true })).rejects.toThrow('db down');
+    expect((await reserviceLaneAvailability(customer, fakeDb({ throwOnRecurring: true }))).hasRecurringPlan).toBeNull();
   });
 });

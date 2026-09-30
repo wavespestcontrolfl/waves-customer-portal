@@ -182,6 +182,43 @@ describe('laneForCallbackRow — the lane predicate', () => {
     expect(typeof reserviceLaneAvailability).toBe('function');
   });
 
+  // Codex round-33 P2: EVERY excluded specialty is its own non-pest lane, so an open termite / mosquito / tree-and-shrub callback
+  // never populates booked.pest and suppresses the covered pest offer.
+  test.each([
+    ['Termite Bait Re-Service', 'specialty'],
+    ['Termite Follow-Up', 'specialty'],
+    ['Mosquito Misting Callback', 'specialty'],
+    ['Tree & Shrub Care Callback', 'specialty'],
+    ['Bed Bug Follow-Up', 'specialty'],
+    ['Flea Re-Treat', 'specialty'],
+    ['German Roach Cleanout Follow-Up', 'specialty'],
+    ['Rodent Trapping Follow-Up', 'rodent'],
+    ['Pest & Rodent Control Re-Service', 'pest'], // pest-led combined service (retired-combined migration): stays pest
+    ['Pest Control Re-Service', 'pest'],
+    ['Lawn Care Re-Service', 'lawn'],
+  ])('laneForCallbackRow: %s → %s', (serviceType, lane) => {
+    expect(laneForCallbackRow({ serviceKey: null, serviceType })).toBe(lane);
+  });
+
+  test('openReserviceCallbacks: specialty callbacks (termite / mosquito / tree & shrub) never appear as a booked pest re-service', async () => {
+    const { openReserviceCallbacks } = require('../services/reservice-scheduler');
+    const rows = [
+      { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Termite Bait Re-Service', reschedule_token: 't1', service_key: null },
+      { id: 'r2', scheduled_date: '2099-01-06', window_start: '09:00', window_end: '11:00', service_type: 'Mosquito Misting Callback', reschedule_token: 't2', service_key: null },
+      { id: 'r3', scheduled_date: '2099-01-07', window_start: '09:00', window_end: '11:00', service_type: 'Tree & Shrub Care Callback', reschedule_token: 't3', service_key: null },
+    ];
+    const chain = { leftJoin: () => chain, where: () => chain, whereIn: () => chain, orderBy: () => chain, select: async () => rows };
+    expect(await openReserviceCallbacks('cust-1', () => chain)).toEqual({});
+    rows.push({ id: 'r4', scheduled_date: '2099-01-08', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't4', service_key: 'pest_re_service' });
+    expect(Object.keys(await openReserviceCallbacks('cust-1', () => chain))).toEqual(['pest']);
+  });
+
+  test('openCallbackExistsForLane accepts the "specialty" lane (a specialty booking dedupes only against specialty callbacks)', async () => {
+    listResults.scheduled_services = [{ service_type: 'Termite Bait Re-Service', service_key: null, is_callback: true }];
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'specialty')).toBe(true);
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'pest')).toBe(false);
+  });
+
   test('RESERVICE_LANES itself carries only the two reservice lanes — the assessment lane is intentionally NOT a member', () => {
     expect(Object.keys(RESERVICE_LANES).sort()).toEqual(['lawn', 'pest']);
   });

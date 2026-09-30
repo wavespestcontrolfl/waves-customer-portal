@@ -1926,7 +1926,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
   // through — so the active/deleted/token/lane checks are exercised once,
   // at that loader (server/tests/reservice-eligible-lanes.test.js), not
   // re-tested here against a fake customer row.
-  function loadWith({ lanes = ['pest'], selfServe = true, throws = false, booked = [] } = {}) {
+  function loadWith({ lanes = ['pest'], selfServe = true, throws = false, booked = [], recurring = false } = {}) {
     jest.resetModules();
     // Codex round-11 P2 (PR #5336): the drafter reads reservice-scheduler's SHARED
     // lane availability (coverage minus open callbacks); `lanes` is the covered
@@ -1935,7 +1935,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     const loadEligibleReserviceLanes = jest.fn(async () => {
       if (throws) throw new Error('boom');
       const open = Object.fromEntries(booked.map((l) => [l, { date: '2026-10-05' }]));
-      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)), verified: true };
+      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)), verified: true, hasRecurringPlan: lanes.length > 0 || recurring };
     });
     // namedReserviceLanesInText (Codex round-6 P1) reads the real module's
     // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
@@ -1984,14 +1984,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
   test('liveReserviceLaneState: consults the mechanism even with GATE_SMS_REAL_ANSWERS off', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest'] });
-    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'], linkAvailable: true, linkDownLanes: [], verified: true });
+    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'], linkAvailable: true, linkDownLanes: [], verified: true, hasRecurringPlan: true });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
   });
 
   test('liveReserviceLaneState fails closed the same way fetchReserviceFactState does', async () => {
     // Codex round-32 P1: with the public surface OFF the ENTITLEMENT is still read — covered, but nothing is bookable and the link is down
-    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: [], linkAvailable: false, linkDownLanes: ['pest'], verified: true });
-    await expect(loadWith({}).drafter.liveReserviceLaneState(null)).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: true });
+    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: [], linkAvailable: false, linkDownLanes: ['pest'], verified: true, hasRecurringPlan: true });
+    await expect(loadWith({}).drafter.liveReserviceLaneState(null)).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: true, hasRecurringPlan: false });
     await expect(loadWith({ throws: true }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: false });
   });
 
@@ -3886,6 +3886,72 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(has('Pest & Rodent Control Service')).toBe(true);
       expect(has('Pest Control')).toBe(true);
       for (const t of ['Rodent Pest Control', 'Rodent Trapping', 'Rodent Control', 'Rodent Exclusion', 'Termite Bait Stations', 'Mosquito Misting']) expect(has(t)).toBe(false);
+    });
+
+    // Codex round-33 P2: verified-but-no-supported-lane (a termite / mosquito / tree-and-shrub recurring customer) is a PLAN customer.
+    describe('recurring plan without a self-serve re-service lane is not a prospect', () => {
+      test('planState: none only for NO plan of any kind; unsupported for a plan without a lane; unknown when unread', async () => {
+        process.env.GATE_SMS_REAL_ANSWERS = 'true';
+        const stateFor = async (availability) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => availability }));
+          const drafter = require('../services/sms-shadow-drafter');
+          const out = await drafter.fetchReserviceFactState({ customerId: 'cust-1' });
+          jest.dontMock('../services/reservice-scheduler');
+          return out.planState;
+        };
+        const base = { eligible: [], open: {}, bookable: [], verified: true };
+        expect(await stateFor({ ...base, hasRecurringPlan: false })).toBe('none');
+        expect(await stateFor({ ...base, hasRecurringPlan: true })).toBe('unsupported');
+        expect(await stateFor({ ...base })).toBe('unknown'); // could not say → fail closed
+        expect(await stateFor({ ...base, hasRecurringPlan: null })).toBe('unknown');
+        expect(await stateFor({ ...base, verified: false, hasRecurringPlan: false })).toBe('unknown');
+        delete process.env.GATE_SMS_REAL_ANSWERS;
+        jest.resetModules();
+      });
+
+      test('the "unsupported" fact line is NOT the prospect signal: generic free-inspection wording needs the full re-service checks', () => {
+        const { reserviceFactLine, validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const line = reserviceFactLine([], {}, 'unsupported');
+        expect(line).toBe('FREE RE-SERVICE: not eligible (recurring plan on file, no self-serve re-service lane)');
+        const args = { reply: 'We can do a free assessment of your home.', intendedActions: [], inboundMessage: 'hi' };
+        expect(validateReserviceOffer({ ...args, factsBlock: `X\n${line}\nBILLING:` }).ok).toBe(false);
+        expect(validateReserviceOffer({ ...args, factsBlock: `X\n${reserviceFactLine([], {}, 'none')}\nBILLING:` }).ok).toBe(true);
+      });
+
+      test('send time: a termite-only plan customer is NOT released as a prospect; a confirmed no-plan customer is', async () => {
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        const decision = { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2_cf' };
+        const body = 'We can do a free assessment of your home.';
+        loadWith({ lanes: [], recurring: true }); // verified, no supported lane, but a recurring plan of another kind
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable/);
+        loadWith({ lanes: [], recurring: false });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toBeNull();
+      });
+    });
+
+    test('a termite / mosquito / tree-and-shrub callback never populates booked.pest in the SMS fact state', async () => {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+      expect(typeof reserviceLaneAvailability).toBe('function');
+      jest.resetModules();
+      const actual = jest.requireActual('../services/reservice-scheduler');
+      // the REAL openReserviceCallbacks classification, fed termite / mosquito / tree-and-shrub callback rows
+      const rows = [
+        { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Termite Bait Re-Service', reschedule_token: 't1', service_key: null },
+        { id: 'r2', scheduled_date: '2099-01-06', window_start: '09:00', window_end: '11:00', service_type: 'Mosquito Misting Callback', reschedule_token: 't2', service_key: null },
+      ];
+      const chain = { leftJoin: () => chain, where: () => chain, whereIn: () => chain, orderBy: () => chain, select: async () => rows };
+      const open = await actual.openReserviceCallbacks('cust-1', () => chain);
+      jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open, bookable: ['pest'], verified: true, hasRecurringPlan: true }) }));
+      const drafter = require('../services/sms-shadow-drafter');
+      const state = await drafter.fetchReserviceFactState({ customerId: 'cust-1' });
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      jest.dontMock('../services/reservice-scheduler');
+      jest.resetModules();
+      expect(state.booked).toEqual({});
+      expect(state.lanes).toEqual(['pest']); // the covered pest offer is NOT suppressed
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
