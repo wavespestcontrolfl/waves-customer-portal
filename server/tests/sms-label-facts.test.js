@@ -308,7 +308,9 @@ describe('label row selection (mock knex)', () => {
     expect(out.customerId).toBe('c1');
     expect(out.recordIds).toEqual(many.map((m) => m.id).sort());
     expect(out.unverifiedCount).toBe(1);
-    expect(out.products).toHaveLength(1);
+    // r23: the verified adjuvant and water conditioner stay in the timing aggregation (flagged additive: never named to the customer)
+    expect(out.products).toHaveLength(3);
+    expect(out.products.map((x) => x.additive)).toEqual([false, true, true]);
     expect(out.products[0]).toMatchObject({ phrase: 'an insecticide', rainfastMinutes: 180, reiHours: 0 });
     // no limit anywhere; the date is selected first with a max(), then every record of that date
     expect(conn.calls.some((q) => q.ops.some((o) => o[0] === 'limit'))).toBe(false);
@@ -367,9 +369,9 @@ describe('label row selection (mock knex)', () => {
     const live = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen() })], rows: [row(edited)] }) });
     expect(live.products).toHaveLength(1);
     expect(live.unverifiedCount).toBe(0);
-    // a VERIFIED product the completion snapshot classes as an adjuvant / water conditioner is still left out
+    // a VERIFIED product the completion snapshot classes as an adjuvant / water conditioner stays in the timing aggregation, flagged additive
     const adj = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen(), p3: frozen({ category: 'adjuvant' }) })], rows: [row(), row({ id: 3, product_id: 'p3', product_name: 'Some Surfactant', active_ingredient: 'nonionic surfactant', product_category: 'adjuvant' })] }) });
-    expect(adj.products).toHaveLength(1);
+    expect(adj.products.map((x) => x.additive)).toEqual([false, true]);
     expect(adj.unverifiedCount).toBe(0);
   });
 
@@ -1310,7 +1312,7 @@ describe('r20: qualified weekdays, a language allowlist, and answer-shaped quest
     for (const text of ["next Friday's treatment", 'this Friday', 'this coming Friday', 'Friday after next', 'the following Friday', 'every Tuesday you spray', 'the upcoming Tuesday visit', 'each Wednesday']) {
       expect([text, other(text)]).toEqual([text, true]);
     }
-    for (const text of ['Tuesday', 'on Tuesday you sprayed', 'last Tuesday', 'you came Tuesday, dogs ok?']) expect([text, other(text)]).toEqual([text, false]);
+    for (const text of ['Tuesday', 'on Tuesday you sprayed', 'you came Tuesday, dogs ok?']) expect([text, other(text)]).toEqual([text, false]);
   });
 
   test('2. German, Italian, Dutch and Haitian Creole timing is held (positive evidence of an unsupported language)', () => {
@@ -1467,6 +1469,89 @@ describe('r22: lowercase "may" as a month; an unverified inbound language', () =
     const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
     expect(labelFactsLib.labelFactsForInbound(facts, ['Hola, tengo una pregunta sobre mi cita'], '2026-09-30')).toBeNull();
     expect(labelFactsLib.askedLabelKinds('Quand les chiens peuvent-ils sortir ?')).not.toContain('unverified_language');
+  });
+});
+
+describe('r23: past-qualified weekdays, additive timing in the visit aggregate, weather-only questions', () => {
+  const other = (text, today = '2026-09-30', visit = '2026-09-29') => labelFactsLib.inboundRefersToOtherVisit(text, visit, today);
+  test('1. "last / past / previous <weekday>", "<weekday> before last" and a same-day bare weekday are ambiguous: none on file', () => {
+    for (const text of ["last Tuesday's treatment", 'last Tuesday', 'past Tuesday', 'previous Tuesday', 'Tuesday before last', 'a week ago Tuesday', 'the previous Tuesday visit']) {
+      expect([text, other(text)]).toEqual([text, true]);
+    }
+    // a bare weekday (or "on Tuesday") still resolves through the 6-day rule
+    for (const text of ['Tuesday', 'on Tuesday you sprayed', 'you came Tuesday, dogs ok?']) expect([text, other(text)]).toEqual([text, false]);
+    // ...but not when it is TODAY's weekday and the visit is today: it could mean a week ago
+    expect(other('You came Tuesday, dogs ok?', '2026-09-29', '2026-09-29')).toBe(true);
+    expect(other('You came Monday, dogs ok?', '2026-09-29', '2026-09-28')).toBe(false); // visit yesterday: unambiguous
+  });
+
+  describe('2. a verified additive keeps its timing in the whole-visit aggregate', () => {
+    const TODAY = '2026-06-10';
+    const rowFor = (over) => ({ id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide', ...over });
+    const fz = (over) => ({ productType: 'pesticide', name: 'Some Product', category: 'insecticide', rainfastMinutes: 240, reentryHours: 4, reentrySummary: 'Keep people and pets off treated areas for 4 hours.', labelVerifiedAt: '2026-05-28', ...over });
+    const conn = (facts, rows) => {
+      const make = (table) => {
+        const q = { ops: [] };
+        for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'leftJoin', 'orderBy', 'max']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
+        const visits = [{ id: 'r2', structured_notes: null, service_data: { reportIdentitySnapshot: { version: 1, productFacts: facts } } }];
+        q.first = () => Promise.resolve(q.ops.some((o) => o[0] === 'max') ? { service_date: '2026-06-05' } : null);
+        q.select = () => Promise.resolve(table === 'scheduled_services' ? [] : (table === 'service_products as sp' ? rows : (q.ops.some((o) => o[0] === 'where' && o[1] && typeof o[1] === 'object' && 'service_date' in o[1]) ? [] : visits)));
+        return q;
+      };
+      return make;
+    };
+    const sentences = async (facts, rows) => {
+      const out = await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn: conn(facts, rows) });
+      return out ? labelFactsLib.labelFactsSentences(out).map((x) => x.text) : null;
+    };
+    const additiveRow = rowFor({ id: 2, product_id: 'p3', product_name: 'Some Surfactant', active_ingredient: 'nonionic surfactant', product_category: 'adjuvant' });
+    test('a 12 h surfactant beside a 4 h insecticide: the visit says 12 hours', async () => {
+      const facts = { p1: fz(), p3: fz({ category: 'adjuvant', productType: 'adjuvant', rainfastMinutes: 720, reentryHours: 12, reentrySummary: 'Keep people and pets off treated areas for 12 hours.' }) };
+      const out = await sentences(facts, [rowFor(), additiveRow]);
+      expect(out).toHaveLength(2);
+      expect(out.find((t) => /rain won't wash it off/.test(t))).toContain('after 12 hours');
+      expect(out.find((t) => /keep people and pets/.test(t))).toContain('for 12 hours');
+    });
+    test('the additive with the LONGER interval is the visit figure even when it is the only one with a figure per kind', async () => {
+      const facts = { p1: fz(), p3: fz({ category: 'adjuvant', productType: 'adjuvant', rainfastMinutes: 360, reentryHours: 4 }) };
+      const out = await sentences(facts, [rowFor(), additiveRow]);
+      expect(out.find((t) => /rain won't wash it off/.test(t))).toContain('after 6 hours');
+    });
+    test('an additive with NO timing figure fails the visit line closed, like any other product (the snapshot has no "no restriction" value)', async () => {
+      const facts = { p1: fz(), p3: fz({ category: 'adjuvant', productType: 'adjuvant', rainfastMinutes: null, reentryHours: null, reentrySummary: null }) };
+      expect(await sentences(facts, [rowFor(), additiveRow])).toEqual([]); // neither line can be stated
+      const rainOnly = { p1: fz(), p3: fz({ category: 'adjuvant', productType: 'adjuvant', rainfastMinutes: null, reentryHours: 4 }) };
+      const out = await sentences(rainOnly, [rowFor(), additiveRow]);
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatch(/keep people and pets/); // the rainfast sentence is omitted; re-entry (4 h on both) stands
+    });
+    test('a water conditioner is included the same way; an unverified additive still voids the visit', async () => {
+      const facts = { p1: fz(), p4: fz({ name: 'Buffer', category: 'water conditioner', rainfastMinutes: 900, reentryHours: 4 }) };
+      const out = await sentences(facts, [rowFor(), rowFor({ id: 3, product_id: 'p4', product_name: 'Buffer', product_category: 'water conditioner' })]);
+      expect(out.find((t) => /rain won't wash it off/.test(t))).toContain('after 15 hours');
+      const unverified = { p1: fz(), p3: fz({ category: 'adjuvant', labelVerifiedAt: null }) };
+      expect(await sentences(unverified, [rowFor(), additiveRow])).toEqual([]);
+    });
+  });
+
+  test('3. weather-only wording asks the rain kind', () => {
+    const asked = labelFactsLib.askedLabelKinds;
+    for (const text of [
+      'Will this weather affect the treatment?', "it's supposed to storm, is that a problem?", 'is the wet grass ok?', 'humid today, will it still work?', 'forecast says showers',
+      'the forecast is stormy, will the spray hold?', 'it drizzled after you sprayed', 'the ground is soaked, does the application still work?', 'heavy downpour last night, any effect on the treatment',
+    ]) expect([text, asked(text)]).toEqual([text, expect.arrayContaining(['rain'])]);
+    for (const text of ['What time are you coming Thursday?', 'Please send my invoice', 'nice weather today', 'thanks for the wet floor sign']) expect([text, asked(text).includes('rain')]).toEqual([text, false]);
+  });
+  test('3. an outgoing "rainproof / set / bonded / sealed / absorbed" statement is a rain claim, held without the rainfast copy', () => {
+    const claims = (reply) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(reply, ''));
+    for (const reply of [
+      'The treatment is rainproof now.', 'The spray is weatherproof.', 'The application is water-resistant.', 'It is waterproof once applied.', "The treatment won't wash away.", 'The treatment has bonded.', 'The product is set in.',
+      'The application is absorbed.', 'The treatment is locked in.', 'Everything is sealed.', 'The granules are already set.', 'The treatment has been absorbed by now.',
+    ]) expect([reply, claims(reply)]).toEqual([reply, true]);
+    for (const reply of [
+      'A treatment needs to dry and bond to surfaces; after that it holds up to weather.', 'Rain after the treatment has dried and bonded is not a concern; it holds up to weather.',
+      'We sealed the gaps around the garage door.', 'Entry points are sealed.', 'The office is set for Tuesday.', 'Your appointment is set for Tuesday at 9.',
+    ]) expect([reply, claims(reply)]).toEqual([reply, false]);
   });
 });
 

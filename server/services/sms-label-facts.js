@@ -147,11 +147,15 @@ function productFromRow(row, frozen) {
     catalogCategory: f.category, catalogProductType: f.productType,
   });
   const def = PRODUCT_FAMILIES[family];
-  if (!def || !def.customerVisible) return null;
-  if ([row.product_category, f.category, f.productType, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
+  // An adjuvant / water conditioner (or an unclassified family) is never NAMED to the customer, but a VERIFIED one still
+  // constrains the whole visit's timing (a 12 h surfactant beside a 4 h insecticide): it stays in the aggregation and, with
+  // no frozen figure (the snapshot has no "no restriction" value), fails the visit's line closed like any other product.
+  const additive = !def || !def.customerVisible
+    || [row.product_category, f.category, f.productType, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)));
   return {
+    additive,
     // A neutral customer-facing type ("an insecticide"), never the brand.
-    phrase: def.phrase || 'a product',
+    phrase: (def && def.phrase) || 'a product',
     rainfastMinutes: f.rainfastMinutes == null ? null : Number(f.rainfastMinutes),
     reiHours: frozenReiHours(f),
     reentrySummary: f.reentrySummary || null,
@@ -517,7 +521,7 @@ const hasClockTime = (clause) => CLOCK_TIME_RE.test(clause);
 // drafter rewrites the former before calling this and the latter carries none
 // of the above.
 const RAIN_WORD_RE = /\b(?:rain(?:s|ed|ing|fall|y|fast)?|rain-fast|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation|drizzle)\b/;
-const RAINFAST_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+|the\s+\w+\s+)?(?:off|away|out)\b|\bwashed\s+off\b/;
+const RAINFAST_RE = /\brain[-\s]?(?:fast|proof|resistant)\b|\bweather[-\s]?(?:proof|resistant)\b|\bwater[-\s]?(?:proof|resistant)\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+|the\s+\w+\s+)?(?:off|away|out)\b|\bwashed\s+off\b/;
 const UNTIL_DRY_HOLD_RE = /\b(?:until|till|til|unless|before)\b[^.]{0,40}\bdr(?:y|ies|ied|ying)\b/;
 const DRY_RE = /\bdr(?:y|ies|ied|ying)\b|\bto\s+set\b|\b(?:cure[sd]?|curing|bond(?:s|ed|ing)?|settle[sd]?|settling|soak(?:s|ed|ing)?|absorb(?:s|ed|ing)?|sink(?:s|ing)?\s+in)\b/;
 const DRY_CONDITIONAL_RE = /\b(?:once|after|when|as\s+long\s+as|provided|if|since)\b[^.]{0,40}\b(?:dr(?:y|ies|ied|ying)|bond(?:s|ed)?|cure[sd]?)\b/;
@@ -665,7 +669,11 @@ const CLAIM_RULES_BEFORE_QUESTION = [
       && ((x.rain && CLEARANCE_STATE_RE.test(x.c)) || (x.rainSentence && RAIN_REASSURE_RE.test(x.c))),
   },
 ];
+// "The treatment is set / bonded / absorbed / sealed / locked in" is a rain claim in other words (allowed only inside the
+// reply's own dry-and-bond condition, like the COMPANY FACTS rain line).
+const TREATMENT_STATE_RE = /\b(?:treatment|spray|application|product|granules?|fertilizer|it|everything)\b[^.?!]{0,25}\b(?:is|are|has|have|was|were|'s)\s+(?:now\s+|already\s+|fully\s+|completely\s+|all\s+|been\s+)*(?:set(?:\s+in)?|bonded|absorbed|locked\s+in|sealed|cured|soaked\s+in|sunk\s+in)\b/;
 const CLAIM_RULES_AFTER_QUESTION = [
+  { name: 'a treatment stated as set / bonded / absorbed / sealed', test: (x) => TREATMENT_STATE_RE.test(x.c) && !x.replyDryCondition },
   // people / pets, or a lawn activity, with permission, a directive or a movement word
   {
     name: 'people, pets or an activity with permission, a directive or a movement',
@@ -854,7 +862,12 @@ function sanctionSafeOnceDry(text) {
 // sentence, "safe once dry" + the technician confirming, the COMPANY FACTS rain line, or a hand-off.
 const ASKED_QUESTION_RE = /\?|(?:^|[.!\n]\s*)(?:can|could|will|would|should|may|is|are|do|does|when|how|what|which|ok|okay)\b|\b(?:wondering|want\s+to\s+know|need\s+to\s+know|curious)\b/;
 const ASKED_REENTRY_RE = new RegExp([BEING_RE.source, ACTIVITY_RE.source, REENTRY_TOPIC_RE.source, DRY_RE.source, /\bsafe\b|\bgo\s+(?:out|outside|back)\b|\blet\s+\w+\s+out\b/.source].join('|'));
+// Weather-only wording ("will this weather affect the treatment?", "the wet grass ok?", "humid today, will it still work?")
+// asks the rain kind when it has a question shape or a treatment / spray / application / work / effect context.
+const WEATHER_WORD_RE = /\b(?:weather|wet|storm\w*|forecast\w*|humid\w*|humidity|drizzl\w*|pour(?:s|ed|ing)?|downpour\w*|sprinkl\w*|damp|soaked|soaking|showers?|rain\w*)\b/;
+const TREATMENT_CONTEXT_RE = /\b(?:treatment|treated|spray|sprayed|spraying|application|applied|product|granules?|fertilizer|work|works|working|effect|affect|affected)\b/;
 const ASKED_RAIN_RE = new RegExp([RAIN_WORD_RE.source, RAINFAST_RE.source, /\bwater(?:ing)?\s+in\b/.source].join('|'));
+const asksWeather = (text) => WEATHER_WORD_RE.test(text) && (ASKED_QUESTION_RE.test(text) || TREATMENT_CONTEXT_RE.test(text));
 // "should I keep the dogs in when you arrive?" asks about access, not re-entry.
 const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:tech|technician|guy|team))\s+(?:arrive|arrives|come|comes|get|gets|show|stop|are\s+here|is\s+here)\b/;
 
@@ -873,7 +886,7 @@ function askedKindsOf(inboundText) {
   const text = canonText(inboundText).toLowerCase();
   if (!text) return { kinds: [], elliptical: false };
   if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return { kinds: [], elliptical: false };
-  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
+  return { kinds: [ASKED_REENTRY_RE.test(text) && 'reentry', (ASKED_RAIN_RE.test(text) || asksWeather(text)) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
 }
 
 /**
@@ -1108,7 +1121,7 @@ async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, t
 // section instead. Conservative: anything ambiguous reads as a different visit.
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_SRC = '(?:sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?';
-const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upcoming|every|each)\\s+${WEEKDAY_SRC}|${WEEKDAY_SRC}\\s+after\\s+next)\\b`, 'g');
+const QUALIFIED_WEEKDAY_RE = new RegExp(`\\b(?:(?:next|this|coming|following|upcoming|every|each|last|past|previous)\\s+${WEEKDAY_SRC}|${WEEKDAY_SRC}\\s+(?:after\\s+next|before\\s+last))\\b`, 'g');
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
@@ -1168,14 +1181,16 @@ const VISIT_REFERENCES = [
   { re: SAME_DAY_RE, differs: (m, v) => v.today !== v.date },
   { re: DAYS_AGO_RE, differs: (m, v) => isoAddDays(v.today, -(DAYS_AGO_WORDS[m[1]] ?? Number(m[1]))) !== v.date },
   // a QUALIFIED weekday ("next Friday", "this Friday", "this coming Friday", "the following Friday", "Friday after next",
-  // "every Friday") is future or ambiguous: another visit. Only a bare weekday reaches the 6-day rule below.
+  // "every Friday", "last Tuesday's", "past / previous Tuesday", "Tuesday before last") is future or ambiguous: another
+  // visit. Only a bare weekday reaches the 6-day rule below.
   { re: QUALIFIED_WEEKDAY_RE, differs: () => true },
   // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
   {
     re: WEEKDAY_ABBR_RE,
     differs: (m, v) => {
       const name = WEEKDAYS.find((w) => w.startsWith(m[1].slice(0, 3)));
-      return !name || name !== v.weekday || v.sinceVisit < 0 || v.sinceVisit > 6;
+      // (a bare weekday that is TODAY's weekday, with the visit today, could as well mean a week ago: ambiguous)
+      return !name || name !== v.weekday || v.sinceVisit < 1 || v.sinceVisit > 6;
     },
   },
   // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
