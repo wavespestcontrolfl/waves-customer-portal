@@ -112,7 +112,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
-const { normalizeState } = require('../utils/address-normalizer');
+const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1541,13 +1541,26 @@ function streetLevelFormAddressGateOn() {
   const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
   return typeof reader === 'function' && reader() === true;
 }
-// The street NAME of a line (house number and suffix dropped): "1234 Sample
-// Palm Dr" and Google's route "Sample Palm Drive" reduce to the same key. An
-// empty result means no comparable street.
+// The street a line names, house number dropped: suffix spellings collapse to
+// one form ("Dr" / "Drive", "Ave E" / "Avenue East") but DISTINCT street types
+// stay distinct ("Sample Palm Drive" is not "Sample Palm Court"). An empty
+// result means no comparable street.
+const DIRECTIONAL_ABBREV = {
+  north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
 function streetNameKey(line) {
   const bare = String(line || '').trim().replace(/^\d+[a-z]?\s+(?=\S)/i, '');
-  const key = streetCompareKey(`1 ${bare}`);
-  return key.startsWith('1 ') ? key.slice(2).trim() : '';
+  return normalizeStreetLine(bare).toLowerCase().replace(/[.,#]/g, ' ').split(/\s+/).filter(Boolean)
+    .map((t) => DIRECTIONAL_ABBREV[t] || t).join('').replace(/[^a-z0-9]/g, '');
+}
+// True when the typed form address BEGINS with the street named by `name`
+// (a street line, or a whole line with the city and ZIP after it).
+function typedAddressStartsWithStreet(typed, name) {
+  const tokens = String(typed || '').trim().split(/\s+/).filter(Boolean);
+  for (let n = tokens.length; n >= 2; n -= 1) {
+    if (streetNameKey(tokens.slice(0, n).join(' ')) === name) return true;
+  }
+  return false;
 }
 const zip5Of = (zip) => (String(zip || '').match(/^\d{5}/) || [''])[0];
 // True when the customer's on-file street is what their own web form typed:
@@ -1572,8 +1585,7 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       const typed = String(row.address || '').trim();
       if (!typed || (typed.match(/^\d+/) || [''])[0] !== house) return false;
       if (row.zip && zip5Of(row.zip) !== zip) return false;
-      const rest = streetCompareKey(typed).replace(/^\d+\s*/, '');
-      return ` ${rest} `.startsWith(` ${name} `);
+      return typedAddressStartsWithStreet(typed, name);
     });
   } catch (err) {
     logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.message}`);

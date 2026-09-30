@@ -214,10 +214,36 @@ describe('streetLevelMatch (pure)', () => {
     gateOn();
     const known = lead({ address_line1: '4021 14th Ave E' });
     const n = (street) => ({ street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' });
-    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Avenue East') }))).toBeNull();   // directional word is part of the name: fail closed
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Avenue East') }))).toMatchObject({ granularity: 'ROUTE' });
     expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Ave E') }))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Avenue West') }))).toBeNull();
     expect(streetLevelMatch(known, routeLevel({ normalized: n('4th Ave E') }))).toBeNull();
     expect(streetLevelMatch(known, routeLevel({ normalized: n('114th Ave E') }))).toBeNull();
+  });
+});
+
+describe('street type is part of the street (codex pre-push P1)', () => {
+  test('Dr / Drive are one street; Drive is not Court, Lane or Way', async () => {
+    gateOn();
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const n = (street) => ({ street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('Sample Palm Drive') }))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('Sample Palm Dr') }))).toMatchObject({ granularity: 'ROUTE' });
+    for (const other of ['Sample Palm Court', 'Sample Palm Ct', 'Sample Palm Lane', 'Sample Palm Way', 'Sample Palm']) {
+      expect(streetLevelMatch(known, routeLevel({ normalized: n(other) }))).toBeNull();
+    }
+    const out = await trustValidatedNewLeadAddress(known, { validate: async () => routeLevel({ normalized: n('Sample Palm Court') }), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+    expect(yesForm).not.toHaveBeenCalled();
+  });
+
+  test('the form-provenance check keeps the street type too', async () => {
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, limit: async () => [{ address, zip: '34219' }] });
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Drive, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Dr Parrish FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Court, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Ct Parrish FL 34219'))).toBe(false);
   });
 });
 
