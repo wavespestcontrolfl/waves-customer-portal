@@ -107,6 +107,7 @@ describe('resolveLiveEtaFact — fail-closed data source', () => {
       trackUrl: expect.stringContaining('/track/abc123token'),
       // Codex round-11 P2: the GPS fix's own tracker-staleness deadline.
       fixExpiresAtMs: expect.any(Number),
+      fixAtMs: expect.any(Number),
     });
     expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1' }));
     expect(calculateBoundedTrackingEta).toHaveBeenCalledWith(expect.objectContaining({
@@ -302,6 +303,49 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     expect(after.minutes).toBe(19);
     expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
     expect(resolveFreshTechPosition.mock.calls[1][0].bouncieImei).toBe('999999999999999');
+  });
+  // Codex round-24 P2: tech_status has no device identity, so the resolver hands
+  // the lookup the technician row's last-edit time as a floor for cached fixes.
+  test('the cached-fix floor is the technician row\'s last edit; an unreadable edit time bypasses the cache entirely', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const edited = '2026-09-30T10:00:00.000Z';
+    await resolveLiveEtaFact(baseRow({ tech_updated_at: edited, tech_bouncie_imei: 'DEV-A' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBe(edited);
+    const before = Date.now();
+    await resolveLiveEtaFact(baseRow({ tech_updated_at: undefined, tech_bouncie_imei: 'DEV-B' }), baseCustomer());
+    const floor = resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore;
+    expect(floor).toBeInstanceOf(Date);
+    expect(floor.getTime()).toBeGreaterThanOrEqual(before);
+  });
+  test('resolveLiveEtaMinutesUncached (used by the send-time recompute) reads the configured device and its own edit floor, google results only', async () => {
+    const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6 });
+    const edited = '2026-09-30T10:00:00.000Z';
+    const fact = await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_updated_at: edited }, { lat: 27.4, lng: -82.5 });
+    expect(fact.minutes).toBe(6);
+    expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', bouncieImei: 'DEV-A', cachedNotBefore: edited }));
+    calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6, source: 'haversine' });
+    expect(await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_updated_at: edited }, { lat: 27.4, lng: -82.5 })).toBeNull();
+  });
+  test('the group and snapshot carry the fix timestamp', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: ['k'], uniqueLiveEtaKeys: ['k'], liveEtaResultByKey: new Map([['k', { minutes: 9, fixAtMs: 1234567890123, fixExpiresAtMs: 1234567990123 }]]), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.fixAtMs).toBe(1234567890123);
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [g] }).entries[0].fixAtMs).toBe(1234567890123);
+  });
+
+  test.each([
+    "I'll call in 20 minutes.", 'We will text in 20 minutes.', 'Someone from the office will call in 20 minutes.', 'The office will email in 20 minutes.', "I'll call you in 20 minutes.",
+  ])('%p is an office callback duration, never a tech ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+  });
+  test.each(['The tech will call in 20 minutes.', 'The technician will text in 20 minutes when he arrives.'])('%p — a technician subject stays ETA-ish', (reply) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(20);
   });
   test('the dedupe key carries the device fingerprint: same tech + destination + different device never merge', () => {
     const customer = baseCustomer();

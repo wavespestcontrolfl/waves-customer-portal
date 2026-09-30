@@ -688,6 +688,13 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
     const position = await resolveFreshTechPosition({
       techId: row.technician_id,
       bouncieImei: row.tech_bouncie_imei,
+      // Round-24 P2: tech_status carries no device identity, so a cached fix
+      // reported before the technician's tracker mapping was last edited (the
+      // admin geofence PUT stamps technicians.updated_at) may be the OLD
+      // vehicle's. Such a fix is bypassed for the configured device's own
+      // position. An unreadable edit time cannot prove the device -> bypass the
+      // cache entirely (fail closed: the Bouncie lookup by IMEI or no fact).
+      cachedNotBefore: Number.isFinite(new Date(row.tech_updated_at).getTime()) ? row.tech_updated_at : new Date(),
       logPrefix: 'sms-shadow-live-eta',
     });
     if (!position) return null;
@@ -783,6 +790,9 @@ async function resolveLiveEtaFact(row, customer) {
     // (sms-eta-freshness.js) rejects a minutes claim once min(15-minute
     // draft window, this instant) passes, never only the draft window.
     fixExpiresAtMs: minutesFact.fixAtMs + STALE_TECH_STATUS_MS,
+    // The fix's own timestamp, persisted so send time can refuse a draft a newer
+    // GPS ping has superseded (round-24 P2).
+    fixAtMs: minutesFact.fixAtMs,
   };
 }
 
@@ -845,7 +855,7 @@ const UPCOMING_SERVICE_COLUMNS = [
   // tracking page requires for a live vehicle, never raw status alone,
   // or it can advertise "Track live" for a stop the tracking page
   // itself still renders as scheduled. See customerTrackState below.
-  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
+  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei', 'tech.updated_at as tech_updated_at',
   'ss.lat as service_lat', 'ss.lng as service_lng',
   'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
 ];
@@ -938,6 +948,7 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     // refuses when staff moved the appointment to another property.
     destinations: members.map((m) => liveEtaDestinationIdentity(m, customer)),
     ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
+    ...(result && Number.isFinite(result.fixAtMs) ? { fixAtMs: result.fixAtMs } : {}),
   };
 }
 function liveEtaOnSite(row, todayStr = etDateString()) {
@@ -1651,6 +1662,7 @@ module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
 module.exports.authorizedDuesCents = authorizedDuesCents;
 module.exports.resolveAnnualCoverageState = resolveAnnualCoverageState;
 module.exports.resolveLiveEtaFact = resolveLiveEtaFact;
+module.exports.resolveLiveEtaMinutesUncached = resolveLiveEtaMinutesUncached;
 module.exports.liveEtaDestination = liveEtaDestination;
 module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;

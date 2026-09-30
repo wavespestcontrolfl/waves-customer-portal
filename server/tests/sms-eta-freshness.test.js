@@ -31,6 +31,9 @@ jest.mock('../services/track-transitions', () => ({
   customerTrackState: jest.fn((row) => row?.track_state || null),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Round-24: the send-time recompute of a superseded fix reuses the aggregator's own
+// uncached resolver; tests script its answer.
+jest.mock('../services/context-aggregator', () => ({ resolveLiveEtaMinutesUncached: jest.fn() }));
 
 const { findEtaMinutesClaims } = require('../services/sms-shadow-drafter');
 const { customerTrackState } = require('../services/track-transitions');
@@ -1600,6 +1603,74 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       });
       test('an entry that recorded no device keeps the previous behavior', async () => {
         expect(await runD({ bouncie_imei: '999999999999999' }, 'The tech is 9 minutes away.', snap())).toBeNull();
+      });
+    });
+    describe('superseded GPS fix (round 24): recompute on a newer ping', () => {
+      const { resolveLiveEtaMinutesUncached } = require('../services/context-aggregator');
+      const FIX = Date.parse('2026-09-29T14:28:00.000Z');
+      const fDest = { ...dest, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } };
+      const fSnap = () => snap({ fixAtMs: FIX, destinations: [fDest] });
+      const TECH = { bouncie_imei: '356938035643809', updated_at: new Date('2026-09-01T00:00:00Z') };
+      const dbWithStatus = (rows, status, tech = TECH) => (table) => {
+        if (table === 'tech_status') return { where: () => ({ first: async () => status }) };
+        if (table === 'technicians') return { where: () => ({ first: async () => tech }) };
+        return { whereIn: () => ({ select: async () => rows }) };
+      };
+      const runF = (status, body = 'The tech is 9 minutes away.', snapshot = fSnap()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: dbWithStatus([row()], status) });
+      beforeEach(() => resolveLiveEtaMinutesUncached.mockReset());
+
+      test('the same fix (or an older one): no recompute, current behavior', async () => {
+        expect(await runF({ location_updated_at: new Date(FIX) })).toBeNull();
+        expect(await runF({ location_updated_at: new Date(FIX - 60e3) })).toBeNull();
+        expect(resolveLiveEtaMinutesUncached).not.toHaveBeenCalled();
+      });
+      test('a newer ping + the recomputed minutes still match the claim: sends, recomputed for the same device and destination', async () => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9, fixAtMs: FIX + 30e3 });
+        expect(await runF({ location_updated_at: new Date(FIX + 30e3) })).toBeNull();
+        expect(resolveLiveEtaMinutesUncached).toHaveBeenCalledWith(
+          expect.objectContaining({ technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', tech_updated_at: TECH.updated_at }),
+          { lat: 27.4, lng: -82.5 },
+        );
+      });
+      test('a newer ping + different recomputed minutes: blocked', async () => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 14, fixAtMs: FIX + 30e3 });
+        expect(await runF({ location_updated_at: new Date(FIX + 30e3) })).toBe('eta_claim_superseded_fix');
+      });
+      test('a newer ping + recomputed minutes drifted within tolerance (max 2 min / 20%): sends; just outside: blocked', async () => {
+        const newer = { location_updated_at: new Date(FIX + 30e3) };
+        for (const m of [7, 8, 10, 11]) {
+          resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: m, fixAtMs: FIX + 30e3 });
+          expect(await runF(newer)).toBeNull();
+        }
+        for (const m of [6, 12]) {
+          resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: m, fixAtMs: FIX + 30e3 });
+          expect(await runF(newer)).toBe('eta_claim_superseded_fix');
+        }
+      });
+      test('a newer ping + recompute unavailable (null, throws, no technician row, no recorded destination): blocked', async () => {
+        const newer = { location_updated_at: new Date(FIX + 30e3) };
+        resolveLiveEtaMinutesUncached.mockResolvedValue(null);
+        expect(await runF(newer)).toBe('eta_claim_superseded_fix');
+        resolveLiveEtaMinutesUncached.mockRejectedValue(new Error('provider down'));
+        expect(await runF(newer)).toBe('eta_claim_superseded_fix');
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9 });
+        expect(await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWithStatus([row()], newer, null) })).toBe('eta_claim_superseded_fix');
+        expect(await runF(newer, 'The tech is 9 minutes away.', snap({ fixAtMs: FIX }))).toBe('eta_claim_superseded_fix');
+      });
+      test('a missing or unreadable tech_status row blocks without a recompute', async () => {
+        resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9 });
+        expect(await runF(undefined)).toBe('eta_claim_superseded_fix');
+        expect(await runF({ location_updated_at: null })).toBe('eta_claim_superseded_fix');
+        expect(await runF({ location_updated_at: 'not a date' })).toBe('eta_claim_superseded_fix');
+        expect(resolveLiveEtaMinutesUncached).not.toHaveBeenCalled();
+      });
+      test('a status-only claim (no minutes figure) is not held to the fix and never recomputes', async () => {
+        expect(await runF({ location_updated_at: new Date(FIX + 30e3) }, 'Your technician is en-route.')).toBeNull();
+        expect(resolveLiveEtaMinutesUncached).not.toHaveBeenCalled();
+      });
+      test('an entry with no recorded fix keeps the previous behavior', async () => {
+        expect(await etaClaimBlockReason({ liveEtaSnapshot: snap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWithStatus([row()], { location_updated_at: new Date(FIX + 30e3) }) })).toBeNull();
+        expect(resolveLiveEtaMinutesUncached).not.toHaveBeenCalled();
       });
     });
     test('a recorded destination whose visit row cannot be read blocks', async () => {

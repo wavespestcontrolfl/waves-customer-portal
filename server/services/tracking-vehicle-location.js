@@ -17,7 +17,12 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
-async function readTechStatusPosition(techId) {
+// `notBefore` (Codex round-24 P2): tech_status is keyed by technician and stores
+// no device identity, so after an admin repoints the technician at another
+// tracker a cached row may hold the OLD vehicle's coordinates. A caller that
+// needs the position to belong to the CURRENT mapping passes the instant the
+// mapping was last edited; a cached fix reported before it is not trusted.
+async function readTechStatusPosition(techId, notBefore = null) {
   const ts = await db('tech_status')
     .where({ tech_id: techId })
     .first('lat', 'lng', 'location_updated_at', 'updated_at');
@@ -27,6 +32,7 @@ async function readTechStatusPosition(techId) {
   const lng = finiteNumber(ts.lng);
   const lastReportedAt = ts.location_updated_at;
   if (lat == null || lng == null || !isFreshTimestamp(lastReportedAt)) return null;
+  if (notBefore != null && !(new Date(lastReportedAt).getTime() >= new Date(notBefore).getTime())) return null;
 
   return {
     lat,
@@ -106,11 +112,12 @@ async function resolveFreshTechPosition({
   allowBouncieFallback = true,
   timeoutMs = BOUNCIE_LOCATION_FALLBACK_TIMEOUT_MS,
   logPrefix = 'tracking-vehicle-location',
+  cachedNotBefore = null,
 } = {}) {
   if (!techId) return null;
 
   try {
-    const statusPosition = await readTechStatusPosition(techId);
+    const statusPosition = await readTechStatusPosition(techId, cachedNotBefore);
     if (statusPosition) return statusPosition;
   } catch (err) {
     logger.warn(`[${logPrefix}] tech_status lookup failed: ${err.message}`);

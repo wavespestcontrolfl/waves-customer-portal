@@ -941,7 +941,14 @@ function replaceQuantity(text, re, convert) {
 // duration that IS an SLA phrase with no arrival verb anywhere in the
 // sentence is office timing too. Shared by every ETA check (claim
 // tokenizers, leftover-word checks, vague phrases) so they cannot drift.
-const OFFICE_FOLLOWUP_VERB_RE = /\b(?:confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base)\b/gi;
+// Round-24 P2: OBJECTLESS office callbacks ("I'll call in 20 minutes", "someone
+// from the office will text shortly") count too, but ONLY behind an office
+// subject (I / we / the office / someone from the office) — "The tech will call
+// in 20 minutes" has a technician subject, matches no office verb, and stays an
+// ETA-ish claim (conservative).
+const OFFICE_SUBJECT_CALLBACK = "(?:i|we|someone|somebody|(?:our|the)\\s+office|(?:someone|somebody|a\\s+(?:person|team\\s+member))\\s+(?:from|at)\\s+(?:the|our)\\s+office)(?:'ll|\\s+(?:will|can|shall|should|would))?\\s+(?:call|text|email|message|ping|phone)(?:ing)?(?:\\s+back)?";
+const OFFICE_FOLLOWUP_VERBS = /confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base/.source;
+const OFFICE_FOLLOWUP_VERB_RE = new RegExp(`\\b(?:${OFFICE_SUBJECT_CALLBACK}|${OFFICE_FOLLOWUP_VERBS})\\b`, 'gi');
 const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
 // Characters between a verb match and the figure [a, b); 0 when they overlap.
 function nearestVerbGap(local, verbRe, a, b) {
@@ -1532,6 +1539,9 @@ function buildLiveEtaSnapshot(context) {
       // minutes claim at min(15-minute draft window, this). Omitted when
       // unknown, so an entry without it keeps the draft-window-only rule.
       ...(Number.isFinite(g.fixExpiresAtMs) ? { fixExpiresAtMs: g.fixExpiresAtMs } : {}),
+      // The GPS fix timestamp the figure used (round-24 P2): send time refuses when
+      // a newer fix has landed in tech_status.
+      ...(Number.isFinite(g.fixAtMs) ? { fixAtMs: g.fixAtMs } : {}),
     }))
     .filter((g) => g.scheduledServiceIds.length);
   return entries.length ? { entries } : null;

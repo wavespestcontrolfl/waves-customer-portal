@@ -383,7 +383,7 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // link belong to the SAME bound visit(s) — never let a mismatched or stale
   // link ride along on an otherwise-valid claim.
   if (claim.hasTrackLink && !entriesForTokens(bound.entries, claim.trackTokens).length) return 'eta_claim_untracked_link';
-  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, requireOnSite: claim.arrivedClaim, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
+  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, requireOnSite: claim.arrivedClaim, checkFix: claim.claims.length > 0 || claim.timedArrivalClaim, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
 }
 
 // Shared "is the bound entry's visit still customer-facing live" recheck —
@@ -450,8 +450,38 @@ async function destinationChanged(boundEntries, rows, dbh) {
 // is off for a link-only share, which names no technician or vehicle (the
 // destination still applies: the link routes to the visit's current address).
 // Returns the block reason or null.
-async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson }) {
-  const rowById = new Map(rows.map((row) => [row.id, row]));
+// The ETA for one snapshot entry recomputed NOW: same resolution as the
+// drafter (context-aggregator.resolveLiveEtaMinutesUncached -> fresh position of
+// the technician's configured device -> bounded route-provider ETA, google
+// results only) for the destination the entry recorded (already verified
+// unchanged by destinationChanged). null when anything is unavailable.
+// A moving truck's ETA drifts between draft and send, so a newer fix is
+// accepted when the recomputed figure is still close to the claimed one:
+// within max(2 min, 20% of the claim). Unavailable recompute => no match.
+const RECOMPUTE_TOLERANCE_MIN = 2;
+const RECOMPUTE_TOLERANCE_PCT = 0.2;
+function recomputedStillMatches(claimed, recomputed) {
+  if (!Number.isFinite(claimed) || !Number.isFinite(recomputed)) return false;
+  const tolerance = Math.max(RECOMPUTE_TOLERANCE_MIN, Math.round(claimed * RECOMPUTE_TOLERANCE_PCT));
+  return Math.abs(recomputed - claimed) <= tolerance;
+}
+async function recomputedLiveEtaMinutes(entry, dbh) {
+  try {
+    const dest = (entry.destinations || []).map((d) => d?.resolved).find((r) => r && Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lng)) && r.lat != null && r.lng != null);
+    if (!dest) return null;
+    const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'updated_at');
+    if (!tech) return null;
+    const fact = await require('./context-aggregator').resolveLiveEtaMinutesUncached(
+      { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_updated_at: tech.updated_at },
+      { lat: Number(dest.lat), lng: Number(dest.lng) },
+    );
+    return fact && Number.isFinite(fact.minutes) ? fact.minutes : null;
+  } catch (err) {
+    logger.warn(`[sms-eta-freshness] live ETA recompute failed: ${err.message}; blocking send`);
+    return null;
+  }
+}
+async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, checkFix = false }) {
   if (checkPerson) {
     const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
     // Round-18: only entries that recorded a technicianId are checked.
@@ -467,9 +497,29 @@ async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson }) {
     }
   }
   if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';
+  // Round-24: a MINUTES figure is about one GPS fix. If the tracker has since
+  // stored a NEWER fix (tech_status.location_updated_at), the public tracker has
+  // recomputed from different coordinates — but pings arrive every few seconds
+  // while driving, so refusing on any newer ping would make a reviewed/scheduled
+  // ETA reply almost never sendable. Instead the ETA is RECOMPUTED right now
+  // with the aggregator's own resolution (same technician, configured device,
+  // recorded destination, real route-provider result only) and the send proceeds
+  // only if the fresh figure still EQUALS the claimed one (the same exact-match
+  // rule the draft-time guard and the entry binding use). No newer ping -> no
+  // recompute. An unreadable tech_status row or a recompute that fails/is
+  // unavailable -> block. 1 s tolerance absorbs timestamp precision differences.
+  if (checkFix) {
+    for (const entry of boundEntries) {
+      if (!Number.isFinite(entry.fixAtMs) || entry.technicianId == null) continue;
+      const status = await dbh('tech_status').where({ tech_id: entry.technicianId }).first('location_updated_at');
+      const latest = status && status.location_updated_at ? new Date(status.location_updated_at).getTime() : NaN;
+      if (!Number.isFinite(latest)) return 'eta_claim_superseded_fix';
+      if (latest > entry.fixAtMs + 1000 && !recomputedStillMatches(entry.minutes, await recomputedLiveEtaMinutes(entry, dbh))) return 'eta_claim_superseded_fix';
+    }
+  }
   return null;
 }
-async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, dbh, trackTokensToVerify = [] }) {
+async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, checkFix = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
@@ -496,7 +546,7 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
     // Round-18/20/22: technician, tracker device and destination identity, in
     // one comparison (see entryIdentityReason). A link-only share names no
     // technician or vehicle, so only the destination applies there.
-    const identityReason = await entryIdentityReason(boundEntries, rows, dbh, { checkPerson: !allowOnSite });
+    const identityReason = await entryIdentityReason(boundEntries, rows, dbh, { checkPerson: !allowOnSite, checkFix });
     if (identityReason) return identityReason;
     // Recorded-state recheck (no classified claim): each entry's visits must
     // still be in the exact state the draft carried — on site stays on site,
