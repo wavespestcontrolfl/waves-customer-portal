@@ -3525,8 +3525,11 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         refuseWhenCollectionHold: true,
       });
     } catch (err) {
-      logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
-      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });
+      // A collections dispute hold (B10) is a pre-charge, office-review
+      // refusal — reported as such, never as a failed/declined charge.
+      const onHold = err?.code === 'INVOICE_COLLECTION_STOPPED';
+      logger.error(`[appt-card-request] recap completion charge ${onHold ? 'withheld (collections hold)' : 'failed'} for visit ${scheduledServiceId}: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: onHold ? 'collection_hold' : 'charge_failed' });
       // Awaited so a rejected audit write is caught here, never an
       // unhandled rejection (pre-push r2 P1 — floating-promise rule).
       try {
@@ -3534,7 +3537,7 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
           details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId, error: err.message },
         });
       } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
-      return { charged: false, reason: 'charge_failed', error: err.message };
+      return { charged: false, reason: onHold ? 'collection_hold' : 'charge_failed', error: err.message };
     }
     try {
       await require('./autopay-log').logAutopay(svc.customer_id, 'charge_success', {

@@ -28,6 +28,14 @@
  * that commits before the charge locks is seen by the check that follows the
  * lock; one that arrives later waits until the charge transaction ends.
  *
+ * LOCK ORDER (deadlock rule): the hold writer takes the exclusive advisory
+ * lock and THEN inserts collections_flags, whose customer_id FK needs a
+ * key-share lock on the customers row. So every caller of
+ * customerHasActiveCollectionHoldLocked must take it BEFORE any lock on the
+ * customers row (FOR UPDATE) — never after, or the two deadlock and the
+ * dispute-hold write can be the victim. Invoice-row locks are fine (the
+ * writer never touches invoices).
+ *
  * Every function here THROWS on a read failure and never swallows it: callers
  * treat a thrown lookup as "cannot prove there is no hold" and refuse.
  */

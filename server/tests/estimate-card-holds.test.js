@@ -1546,6 +1546,14 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  it('B10: a collections dispute hold refusal is retryable (collection_hold), never charge_failed — and the recap flow still alerts the office', async () => {
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' }));
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
+    expect(r.reason).toBe('collection_hold');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1); // the recap flow has no pay-link fallback — silence would strand the visit
+  });
+
   it('does NOT charge a re-completed NOT-performed visit — routes to review', async () => {
     stubDb([HELD]); // heldCard, then the priorNonPerformed gate fires before any lookup
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1', priorNonPerformed: true });

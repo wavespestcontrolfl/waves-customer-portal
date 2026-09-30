@@ -1393,6 +1393,7 @@ describe('termite annual renewal charge', () => {
     const outerInvoiceFirst = jest.fn().mockResolvedValueOnce(eligibilityInvoice);
     outerInvoiceFirst.mockImplementation(() => (freshInvoiceError ? Promise.reject(freshInvoiceError) : Promise.resolve(freshInvoice)));
     const deferredUpdate = jest.fn().mockResolvedValue(1);
+    const fenceReleaseUpdate = jest.fn().mockResolvedValue(1);
     const parentReads = outerParentReads ? [...outerParentReads] : null;
     const outerParent = () => (parentReads && parentReads.length > 1 ? parentReads.shift() : (parentReads ? parentReads[0] : parent));
     const conn = jest.fn((table) => {
@@ -1414,6 +1415,11 @@ describe('termite annual renewal charge', () => {
               return Promise.resolve(parent && filter?.id === parent.id ? outerParent() : undefined);
             }),
             update: deferredUpdate,
+            // B10: the collection-hold refusal hands the claimed fence back.
+            whereNotNull: jest.fn((col) => {
+              expect(col).toBe('renewal_charge_attempted_at');
+              return { whereNull: jest.fn((c2) => { expect(c2).toBe('renewal_charge_claim_retired_at'); return { update: fenceReleaseUpdate }; }) };
+            }),
             whereNull: jest.fn((col) => {
               if (col === 'renewal_charge_never_reached_stripe_belled_at') return { update: handledStampUpdate };
               // Codex #4971 r15 P2: the charge-failed customer notice's own
@@ -1430,7 +1436,7 @@ describe('termite annual renewal charge', () => {
       throw new Error(`unexpected table ${table} on outer conn`);
     });
     conn.transaction = jest.fn(async (cb) => cb(trx));
-    return { conn, trx, claimUpdate, skipStampUpdate, handledStampUpdate, noticeStampUpdate, deferredUpdate };
+    return { conn, trx, claimUpdate, skipStampUpdate, handledStampUpdate, noticeStampUpdate, deferredUpdate, fenceReleaseUpdate };
   }
 
   function mockSignatureChargePrivate({ classifyChargeErrorImpl, classifyVerifiedChargeImpl } = {}) {
@@ -1923,6 +1929,48 @@ describe('termite annual renewal charge', () => {
       }));
       await Promise.resolve();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('B10: a collection hold that lands AFTER the preflight (binding refusal under the charge locks) is RETRYABLE — fence handed back, no decline, no payer refusal, no pay link, not stamped handled', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({
+        resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })),
+      }));
+      // The shared classifier would map a 'deferred' outcome to payer_refused — it must NOT be consulted.
+      const classifyChargeErrorImpl = jest.fn(() => ({ status: 'deferred', reason: 'payer_billed_guard' }));
+      mockSignatureChargePrivate({ classifyChargeErrorImpl });
+      const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' });
+      const chargeInvoiceWithSavedCard = jest.fn(async () => { throw holdErr; });
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn(async () => ({ total: 249 })) }));
+      const sendCustomerMessage = jest.fn();
+      jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = baseSuccessor();
+      const { conn, handledStampUpdate, fenceReleaseUpdate, deferredUpdate } = makeDecideConn({ successor });
+      const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+      expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+      expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
+      // fence + write-ahead outcome handed back so leg 7a re-decides after release
+      expect(fenceReleaseUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        renewal_charge_attempted_at: null, renewal_charge_failure_kind: null, renewal_charge_failure_handled_at: null,
+      }));
+      expect(deferredUpdate).toHaveBeenCalled(); // sweep-deferred rotation
+      // never recorded as a decline / payer refusal / handled outcome
+      expect(classifyChargeErrorImpl).not.toHaveBeenCalled();
+      expect(handledStampUpdate).not.toHaveBeenCalled();
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(notifyAdmin).not.toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
+        dedupeKey: expect.stringMatching(/:(payer_billed|declined|refused)$/),
+      }));
     });
 
     test('an ambiguous outcome (isAmbiguousSavedMethodChargeError) bells "ambiguous" and NEVER delivers a pay link — money may be moving', async () => {

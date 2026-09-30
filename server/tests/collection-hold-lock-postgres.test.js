@@ -46,9 +46,21 @@ describeOrSkip('collection_hold advisory lock — real Postgres', () => {
     schema = `hold_lock_${randomUUID().replace(/-/g, '')}`;
     db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 8 } });
     await db.raw('CREATE SCHEMA ??', [schema]);
+    // The REAL foreign key matters: the hold writer's insert takes a
+    // key-share lock on the customers row, which is what the lock-order
+    // deadlock (below) runs through.
+    await db.raw(`CREATE TABLE customers (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      auto_apply_account_credit boolean NOT NULL DEFAULT true
+    )`);
+    await db.raw(`CREATE TABLE invoices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid NOT NULL REFERENCES customers(id),
+      status text DEFAULT 'sent'
+    )`);
     await db.raw(`CREATE TABLE collections_flags (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      customer_id uuid NOT NULL,
+      customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
       flag varchar(40) NOT NULL,
       reason text,
       created_by varchar(80),
@@ -69,7 +81,11 @@ describeOrSkip('collection_hold advisory lock — real Postgres', () => {
     await db.destroy();
   });
 
-  beforeEach(() => { customerId = randomUUID(); });
+  const newCustomer = async () => {
+    const [row] = await db('customers').insert({}).returning('id');
+    return row.id;
+  };
+  beforeEach(async () => { customerId = await newCustomer(); });
 
   const holdRows = () => db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at');
 
@@ -167,9 +183,44 @@ describeOrSkip('collection_hold advisory lock — real Postgres', () => {
       await stripeCall.promise;
     });
     await sleep(150);
-    const write = flags.writeFlag({ customerId: randomUUID(), flag: 'collection_hold' });
+    const write = flags.writeFlag({ customerId: await newCustomer(), flag: 'collection_hold' });
     expect(await settledWithin(write, 600)).toBe('settled');
     stripeCall.open();
     await charge;
+  });
+
+  test('LOCK ORDER (real FK): a credit apply racing a hold write never deadlocks — the advisory lock comes before the customers row lock', async () => {
+    // Stall the writer AFTER it holds the exclusive advisory lock (its insert
+    // waits on the collections_flags table lock), start the credit apply,
+    // then let the writer go. If the credit apply took customers FOR UPDATE
+    // before the advisory lock, the writer's FK key-share lock on customers
+    // would wait on it while it waits on the writer's advisory lock: a
+    // deadlock that aborts one of them (here, after deadlock_timeout).
+    const [invoice] = await db('invoices').insert({ customer_id: customerId }).returning('id');
+    const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+
+    const tableLock = gate();
+    const holder = db.transaction(async (trx) => {
+      await trx.raw('LOCK TABLE collections_flags IN ACCESS EXCLUSIVE MODE');
+      await tableLock.promise;
+    });
+    await sleep(200);
+
+    const write = flags.writeFlag({ customerId, flag: 'collection_hold', reason: 'dispute on call' });
+    await sleep(400); // writer now holds the advisory lock and waits on the table lock
+    const apply = applyAccountCreditToInvoice({ invoiceId: invoice.id, refuseWhenCollectionHold: true });
+    let settled;
+    try {
+      settled = await settledWithin(apply, 500);
+    } finally {
+      tableLock.open();
+    }
+    await holder;
+    expect(settled).toBe('pending'); // blocked on the advisory lock, not holding customers
+
+    const [writeResult, applyResult] = await Promise.all([write, apply]);
+    expect(writeResult).toEqual({ ok: true, created: true }); // the dispute-hold write was not the deadlock victim
+    expect(applyResult).toEqual({ applied: 0, skipped: 'dunning_stopped' });
+    expect(await holdRows()).toHaveLength(1);
   });
 });

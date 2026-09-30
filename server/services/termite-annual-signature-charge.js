@@ -232,8 +232,6 @@ function classifyChargeError(err) {
   // A payer assigned after the mint: the homeowner's card must not pay it,
   // and neither may the homeowner's pay link — staff route it.
   if (err?.code === 'PAYER_BILLED_GUARD') return { status: 'deferred', reason: 'payer_billed_guard' };
-  // Collections dispute hold (B10): held for staff, never a decline and never a pay link.
-  if (err?.code === 'INVOICE_COLLECTION_STOPPED') return { status: 'deferred', reason: 'collection_hold' };
   // A 3DS step-up leaves the off-session intent alive in requires_action —
   // a pay link beside it would be a second collection rail.
   if (err?.wavesCardDecline?.declineCode === 'authentication_required') return { status: 'ambiguous', reason: 'authentication_required' };
@@ -370,6 +368,16 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
       ...(trigger === 'signature' ? {} : { refuseWhenCollectionHold: true }),
     });
   } catch (err) {
+    // A collections dispute hold (B10) that landed after the preflight and
+    // was caught by the binding check under the charge locks: the refusal is
+    // pre-Stripe (the attempt row is released, nothing charged), so it is
+    // RETRYABLE, never a terminal outcome — hand the claim back so the daily
+    // sweep resumes once the office releases the hold. Not a decline, not a
+    // payer refusal, no pay link.
+    if (err?.code === 'INVOICE_COLLECTION_STOPPED') {
+      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold; the daily sweep will retry once the office releases it' });
+      return { release: true, reason: 'collection_hold' };
+    }
     return classifyChargeError(err);
   }
   // The charge committed once the call returned — a failed re-read is

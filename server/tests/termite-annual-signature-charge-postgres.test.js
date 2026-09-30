@@ -476,6 +476,28 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
   });
 
+  test('B10: a hold that lands BETWEEN the preflight and the submission (binding refusal) RELEASES the claim — not terminal, no pay link; the sweep resumes after release', async () => {
+    const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' });
+    let refuse = true;
+    const { run, chargeInvoiceWithSavedCard, db, notifyAdmin } = load({
+      chargeImpl: async (invoiceId) => {
+        if (refuse) throw holdErr;
+        await fixture.db('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+        return { id: 'payment-1' };
+      },
+    });
+    // No hold at preflight time; the hold commits before the locked check.
+    const first = await run({ trigger: 'sweep' });
+    expect(first).toMatchObject({ status: 'deferred', reason: 'collection_hold', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalled();
+    expect(await chargeState(db)).toBeNull(); // claim handed back — NOT a persisted terminal deferred/declined outcome
+
+    refuse = false; // office released the hold
+    expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'paid', deliverPayLink: false });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(2);
+  });
+
   test('B10: the sweep fails closed when the hold lookup fails — nothing charged, claim released', async () => {
     const { run, chargeInvoiceWithSavedCard, db } = load();
     await db.raw('DROP TABLE collections_flags');

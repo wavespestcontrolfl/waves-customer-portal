@@ -2232,7 +2232,11 @@ const StripeService = {
         // to the end of this transaction (Stripe call included), so a hold
         // cannot commit between check and charge — see
         // collections/collection-hold.js. A lookup failure throws and rolls
-        // the charge back (fail closed).
+        // the charge back (fail closed). LOCK ORDER: this advisory lock must
+        // precede EVERY customers-row lock in this transaction (the
+        // requireAutopayForCustomerId FOR UPDATE below, the credit apply) —
+        // the hold writer holds it while inserting a row whose FK needs a
+        // key-share lock on the customers row (deadlock otherwise).
         if ((refuseWhenDunningStopped || refuseWhenCollectionHold)
           && await customerHasActiveCollectionHoldLocked(trx, lockedInvoice.customer_id)) {
           throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {

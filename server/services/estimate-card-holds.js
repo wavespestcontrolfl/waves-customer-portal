@@ -1007,6 +1007,13 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
     // Genuine pre-charge failure (no money moved) — safe to retry later.
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
+    // A collections dispute hold (B10) refusal is the same retryable
+    // posture (hold back to 'held', nothing terminal recorded), reported as
+    // its own reason so it never reads as a failed/declined card.
+    if (err.code === 'INVOICE_COLLECTION_STOPPED') {
+      logger.warn('[estimate-card-holds] completion charge withheld — customer has an active collections hold; card hold left held', { scheduledServiceId });
+      return { charged: false, reason: 'collection_hold', error: err.message };
+    }
     logger.error('[estimate-card-holds] completion charge FAILED — hold left for retry', { scheduledServiceId, error: err.message });
     return { charged: false, reason: 'charge_failed', error: err.message };
   }
@@ -1173,7 +1180,7 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
   const result = await chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId });
   // Surface a declined / ambiguous card charge — the recap flow has no pay-link
   // state to fall back on, so without this a stranded draft goes unnoticed.
-  if (['charge_failed', 'charge_review', 'charge_in_progress'].includes(result?.reason)) {
+  if (['charge_failed', 'charge_review', 'charge_in_progress', 'collection_hold'].includes(result?.reason)) {
     await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: result.reason });
   }
   return result;

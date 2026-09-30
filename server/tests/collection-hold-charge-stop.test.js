@@ -203,6 +203,8 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
           return chain;
         });
       });
+      const plainForUpdate = chain.forUpdate;
+      chain.forUpdate = jest.fn((...a) => { if (table === 'customers') events.push('customers-lock'); return plainForUpdate(...a); });
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -282,6 +284,15 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
     const readAt = events.indexOf('flags-read');
     expect(lockAt).toBeGreaterThanOrEqual(0);
     expect(readAt).toBeGreaterThan(lockAt);
+  });
+
+  test('P1 lock order: the hold advisory lock precedes EVERY customers-row lock in the charge transaction (writer FK key-share deadlock)', async () => {
+    const { StripeService, events } = setup({ holdRows: [] });
+    await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true, requireAutopayForCustomerId: 'cust-1' }).catch(() => {});
+    const lockAt = events.findIndex((e) => e.startsWith('raw:SELECT pg_advisory_xact_lock_shared'));
+    const customerLockAt = events.indexOf('customers-lock');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(customerLockAt).toBeGreaterThan(lockAt);
   });
 
   test('callers that did not opt in (admin charge-card) are unchanged by a hold', async () => {

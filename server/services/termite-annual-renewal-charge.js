@@ -2113,6 +2113,37 @@ async function renewalChargeCeiling(successor, method, feeCents) {
   return { options: { expectedTotal: cashCents / 100, maxAuthorizedTotalCents: feeCents - creditCents } };
 }
 
+// A collections dispute hold (B10) defers the renewal charge. Nothing reached
+// Stripe (the saved-card flow releases its attempt row on a pre-charge
+// refusal), so this is RETRYABLE and must stay eligible for recovery: it is
+// neither a decline, nor a payer refusal, nor a handled outcome. When the
+// refusal came from the binding check the Stripe-attempt fence was already
+// claimed — hand it back (attempted_at and the write-ahead outcome cleared)
+// so leg 7a re-decides the term after the office releases the hold; leg 7b
+// would otherwise treat the claimed-never-submitted attempt as a crash and
+// send a pay link to the disputing customer.
+async function deferRenewalForCollectionHold(successor, conn, { releaseFence }) {
+  if (releaseFence) {
+    try {
+      await conn('annual_prepay_terms')
+        .where({ id: successor.id, status: PAYMENT_PENDING_STATUS, renewal_charge_failure_kind: CHARGE_OUTCOME_PENDING })
+        .whereNotNull('renewal_charge_attempted_at')
+        .whereNull('renewal_charge_claim_retired_at')
+        .update({
+          renewal_charge_attempted_at: null,
+          renewal_charge_failure_kind: null,
+          renewal_charge_failure_reason: null,
+          renewal_charge_failure_handled_at: null,
+        });
+    } catch (err) {
+      logger.error(`[termite-annual-renewal] failed to release the charge fence for term ${successor.id} after a collection-hold refusal: ${err.message}`);
+    }
+  }
+  await ringRenewalBell(successor, 'ineligible', 'the customer has an active collections billing hold (or it could not be checked); the charge will be retried after the office releases it');
+  await stampSweepDeferred(successor, conn);
+  return { status: 'deferred', reason: 'collection_hold' };
+}
+
 async function decideAndCharge(successor, parentTerm, conn = db) {
   const upfront = await checkStillEligibleForRenewalAction(successor.id, conn);
   if (!upfront.eligible) return handleChargeRefusal(successor, upfront, conn);
@@ -2141,11 +2172,7 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     } catch (err) {
       logger.warn(`[termite-annual-renewal] collection-hold lookup failed for term ${successor.id} — deferring: ${err.message}`);
     }
-    if (held) {
-      await ringRenewalBell(successor, 'ineligible', 'the customer has an active collections billing hold (or it could not be checked); the charge will be retried after the office releases it');
-      await stampSweepDeferred(successor, conn);
-      return { status: 'deferred', reason: 'collection_hold' };
-    }
+    if (held) return deferRenewalForCollectionHold(successor, conn, { releaseFence: false });
   }
   if (!method) {
     await deliverInvoiceAndStampSkip(successor, 'no_method', 'No consented, chargeable saved payment method was found on file.', conn);
@@ -2238,6 +2265,10 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     // method changed, payer-billed) also leaves behind. This failure path
     // has already belled staff and, where allowed, sent the pay link, so
     // once it did, mark the leg handled; otherwise 7b retries it.
+    // A collections dispute hold (B10) caught by the binding check under the
+    // charge locks is a pre-Stripe, RETRYABLE refusal — never a decline, a
+    // payer refusal or a handled outcome (see deferRenewalForCollectionHold).
+    if (err?.code === 'INVOICE_COLLECTION_STOPPED') return deferRenewalForCollectionHold(successor, conn, { releaseFence: true });
     if (await handleChargeFailure(successor, err, conn)) await stampNeverReachedStripeHandled(successor, conn);
     return { status: 'failed', reason: err.message };
   }
