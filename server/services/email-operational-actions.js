@@ -69,8 +69,15 @@ function overdueBody(kind, whenAt) {
   return BODY[kind] || BODY.open;
 }
 
+// The email's grounded source is its subject AND its body: a request or
+// promise may sit only in the subject ("Please reschedule Friday"), so an
+// empty body with a subject is still eligible, and the receipt hash covers
+// both so a changed subject re-extracts (Codex, 2026-09-30).
+const subjectOf = (email) => String(email?.subject || '').trim();
+const sourceHash = (email) => hashExtractionSource(JSON.stringify([subjectOf(email), emailPlainText(email)]));
+
 function eligibleAskEmail(email) {
-  return !!email.customer_id && !!emailPlainText(email).trim() && CLASSIFICATIONS.includes(email.classification);
+  return !!email.customer_id && !!(emailPlainText(email).trim() || subjectOf(email)) && CLASSIFICATIONS.includes(email.classification);
 }
 
 // Stable identity across passes, mirroring sms-operational-actions.js's
@@ -95,7 +102,7 @@ async function loadActiveProperties(conn, customerId) {
 
 async function extractForEmail(email, { direction, properties = [] }) {
   const strippedBody = stripQuotedAndSignature(emailPlainText(email));
-  if (!strippedBody) return { obligations: [], facts: [], additional_properties: [], dropped: 0 };
+  if (!strippedBody && !subjectOf(email)) return { obligations: [], facts: [], additional_properties: [], dropped: 0 };
   // subject rides on the message object itself (a `subject` key), not as a
   // separate prompt-text param — buildPrompt puts it inside the scrubbed
   // JSON payload, never the raw prompt text (coordinator security finding
@@ -103,7 +110,7 @@ async function extractForEmail(email, { direction, properties = [] }) {
   // JSON below is untrusted conversation data, never instructions").
   const message = { id: email.id, customer_id: email.customer_id, direction,
     message_body: strippedBody, created_at: email.received_at, from_phone: null, to_phone: null,
-    subject: email.subject || null };
+    subject: subjectOf(email) || null };
   return extractSmsOperations({ message, history: [], properties, captureCommitments: true,
     captureAdditionalProperties: false, channel: 'email' });
 }
@@ -125,8 +132,8 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     // classification; a staff send's re-resolved recipient link).
     if (!enabled()) return { skipped: 'gate_off' };
     const source = await trx('emails').where({ id: email.id }).forUpdate()
-      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address');
-    if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email)) return { skipped: 'source_changed' };
+      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address', 'subject');
+    if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email) || subjectOf(source) !== subjectOf(email)) return { skipped: 'source_changed' };
     const stillOwned = direction === 'outbound'
       ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
       : eligibleAskEmail(source) && String(source.customer_id) === String(customer.id);
@@ -174,7 +181,7 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
       operational_analysis: { version: VERSION, processed_at: new Date().toISOString(), dropped: extracted.dropped },
     });
     await recordExtractionAttempt({ trx, source_type: RECEIPT_SOURCE_TYPE, source_id: email.id,
-      extractor_version: VERSION, source_hash: hashExtractionSource(emailPlainText(email)),
+      extractor_version: VERSION, source_hash: sourceHash(email),
       status: 'ok', proposal_count: obligations.length });
     return { recorded: obligations.length };
   });
@@ -254,7 +261,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
     for (const email of askCandidates) {
       if (!enabled()) break;
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
-        source_hash: hashExtractionSource(emailPlainText(email)) };
+        source_hash: sourceHash(email) };
       if (!eligibleAskEmail(email)) {
         await recordExtractionAttempt({ ...source, trx: conn, status: 'no_fields' });
         skipped += 1; continue;
@@ -277,7 +284,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
     for (const email of promiseCandidates) {
       if (!enabled()) break;
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
-        source_hash: hashExtractionSource(emailPlainText(email)) };
+        source_hash: sourceHash(email) };
       let resolvedCustomerId = null;
       try {
         const skip = await shouldSkipExtraction({ ...source, trx: conn });

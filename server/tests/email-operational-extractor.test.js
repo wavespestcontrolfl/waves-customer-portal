@@ -7,7 +7,7 @@
 // ceiling, laneId and promptVersion.
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 
-const { buildPrompt, extractSmsOperations, VERSION } = require('../services/sms-operational-extractor');
+const { buildPrompt, groundExtraction, extractSmsOperations, VERSION } = require('../services/sms-operational-extractor');
 const { dispatchWithFallback } = require('../services/llm/call');
 
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000201';
@@ -100,6 +100,50 @@ describe('sms-operational-extractor channel param', () => {
     const [, options] = dispatchWithFallback.mock.calls[0];
     expect(options.laneId).toBe('sms-operational-actions');
     expect(options.promptVersion).toBe(VERSION);
+  });
+
+  describe('subject as part of the grounded source (email channel only)', () => {
+    const ask = (quote, description) => ({ obligations: [{ party: 'waves', kind: 'other', description, quote, basis: 'request',
+      property_id: null, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }],
+    facts: [], additional_properties: [] });
+
+    test('email: a quote grounded in the subject survives when the body is empty or does not hold it', () => {
+      const empty = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('', { subject: 'Please reschedule Friday' }), channel: 'email' });
+      expect(empty.obligations).toHaveLength(1);
+      const other = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('Thanks so much', { subject: 'Please reschedule Friday' }), channel: 'email' });
+      expect(other.obligations).toHaveLength(1);
+    });
+
+    test('email: a quote in neither the subject nor the body is dropped', () => {
+      const result = groundExtraction(ask('Please cancel service', 'cancel service'),
+        { message: baseMessage('Thanks', { subject: 'Please reschedule Friday' }), channel: 'email' });
+      expect(result.obligations).toHaveLength(0);
+    });
+
+    test('email: the negation check reads the source the quote came from', () => {
+      const result = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('Not sure yet, will let you know', { subject: 'Please reschedule Friday' }), channel: 'email' });
+      expect(result.obligations).toHaveLength(1);
+      const negated = groundExtraction(ask('reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('Thanks', { subject: 'Do not reschedule Friday' }), channel: 'email' });
+      expect(negated.obligations).toHaveLength(0);
+    });
+
+    test('SMS: a subject key is never a grounding source', () => {
+      const result = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('Thanks', { subject: 'Please reschedule Friday' }) });
+      expect(result.obligations).toHaveLength(0);
+    });
+
+    test('the email prompt tells the model the subject is quotable, without naming any subject text; SMS prompt has no such line', () => {
+      const message = baseMessage('', { subject: 'Please reschedule Friday' });
+      const email = buildPrompt({ message, properties: [], channel: 'email' });
+      expect(email).toContain('a request or promise stated only in the subject may be quoted from the subject');
+      expect(email.slice(0, email.indexOf('Return only JSON'))).not.toContain('Please reschedule Friday');
+      expect(buildPrompt({ message: baseMessage('Hi'), properties: [] })).not.toContain('subject may be quoted');
+    });
   });
 });
 

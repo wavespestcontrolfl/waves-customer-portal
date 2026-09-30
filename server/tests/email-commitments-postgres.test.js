@@ -702,6 +702,52 @@ postgres('Email commitments on PostgreSQL', () => {
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
   });
 
+  test('subject-only ask: an empty body with an actionable subject is eligible, and the quote grounds in the subject', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'reschedule Friday', quote: 'Please reschedule Friday', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    const row = await mockPg('call_commitments').first();
+    expect(row).toMatchObject({ email_id: email.id, party: 'waves', channel: 'email', description: 'reschedule Friday' });
+    // The subject rode inside the JSON payload, never the prompt text.
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).toContain('"subject":"Please reschedule Friday"');
+    expect(prompt.slice(0, prompt.indexOf('Return only JSON'))).not.toContain('Please reschedule Friday');
+  });
+
+  test('subject-only ask: a quote grounded in neither the subject nor the body is still dropped', async () => {
+    await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: 'Please reschedule Friday' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'send the estimate', quote: 'Please send the estimate', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(await mockPg('call_commitments').count('* as n').first()).toMatchObject({ n: '0' });
+  });
+
+  test('the extraction receipt hash covers subject and body: same body, different subject = a different source', async () => {
+    const { VERSION } = require('../services/email-operational-actions');
+    const { hashExtractionSource } = require('../services/data-hygiene/source-extraction-store');
+    const one = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: 'Thanks', subject: 'Please reschedule Friday' });
+    const two = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: 'Thanks', subject: 'Please reschedule Monday' });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { obligations: [], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    const hashOf = (id) => mockPg('data_hygiene_source_extractions').where({ source_id: id, extractor_version: VERSION }).first('source_hash').then((r) => r.source_hash);
+    const [h1, h2] = [await hashOf(one.id), await hashOf(two.id)];
+    expect(h1).not.toBe(h2);
+    expect(h1).not.toBe(hashExtractionSource('Thanks')); // not the body alone
+    dispatchWithFallback.mockReset();
+  });
+
+  test('an email with neither a body nor a subject is not eligible', async () => {
+    await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: '' });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('D1 reverse: an SMS reply closes an email-sourced general ask (through refreshEmailCommitments end-to-end)', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Did you come to my house today?' });
