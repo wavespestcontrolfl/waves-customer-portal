@@ -135,24 +135,33 @@ function isV12PromptVersion(promptVersion) {
 }
 
 // Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
-// prompt version, not just the base v12 lines. No category gate adds its own
-// fact to the block — billing disputes/chemical-medical/legal only change
-// PROMPT WORDING via realAnswersHandoffBullets, and complaints' old FREE
-// RE-SERVICE marker moved to the base contract above (2026-09-29) — so the
-// contract for every v12 variant, tagged or not, is simply the base set
-// (the CATEGORY_FACT_MARKERS map this once read from was always empty in
-// practice; removed 2026-09-29 rather than kept for a category fact that
-// has never materialized).
+// prompt version, not just the base v12 lines.
+//
+// Codex round-20 P2 (PR #5336): TWO contracts, split by identity. FREE
+// RE-SERVICE joined the BASE contract only with the identity minted for that
+// change (house_voice_v12_real_answers2 and later — every v12 identity except the
+// bare historical one). Every earlier v12
+// identity (the bare house_voice_v12_real_answers, tagged or not) keeps its
+// HISTORICAL contract: SLA line always; FREE RE-SERVICE only with the
+// complaints ("c") tag, and ABSENT otherwise — so an exam created before the
+// deploy and resumed after it still grades the frozen items it was compatible
+// with, instead of having them all marked ungradable.
+const HISTORICAL_CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
+// The one pre-deploy v12 identity (bare, optionally category-tagged); every other v12 identity is current.
+const HISTORICAL_V12_IDENTITY = 'house_voice_v12_real_answers';
+function usesCurrentFactContract(promptVersion) {
+  return isV12PromptVersion(promptVersion) && String(promptVersion).split('+')[0] !== HISTORICAL_V12_IDENTITY;
+}
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
-  return V12_BASE_FACT_MARKERS;
+  if (usesCurrentFactContract(promptVersion)) return V12_BASE_FACT_MARKERS;
+  const tags = String(promptVersion).split('+')[1] || '';
+  return [V12_FACTS_MARKER, ...[...tags].map((t) => HISTORICAL_CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
-// carry must be ABSENT too — an item frozen before FREE RE-SERVICE rendered
-// unconditionally (pre 2026-09-29, complaints gate off) lacks it and must
-// not grade the current base contract, which now requires it. Every version
-// has one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must
-// not replay items frozen with the v12 SLA or re-service lines either.
+// carry must be ABSENT too. Every version has one (Codex #5194 r7 P1): a v11
+// exam after the gate is rolled back must not replay items frozen with the
+// v12 SLA or re-service lines either.
 const CONTRACT_FACT_MARKERS = V12_BASE_FACT_MARKERS;
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));

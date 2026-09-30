@@ -1000,10 +1000,16 @@ function reportedPestLane({ inboundMessage, context, lanes }) {
 // Codex round-18 P2 (PR #5336): an ELIGIBLE pest report — the inbound reads as a pest report and its
 // lane is bookable — whose reply neither offers the covered free re-service nor carries the link
 // action must be revised, not accepted. Not forced when the lane is already booked / not eligible
-// (the facts then don't list it), and a draft that escalates to a person keeps its hand-off (a
+// (the facts then don't list it), and an independently established hand-off keeps it (a
 // complaint that also mentions pests is held for a human, never offered a link).
-function reserviceOfferOwed({ inboundMessage, lanes, actions, context }) {
-  if (actions.some((a) => a && a.type === 'escalate')) return false;
+// Codex round-20 P2: the owed offer is suppressed ONLY for a true hand-off the customer's OWN WORDS establish —
+// never the model's own escalate action, and never the classified intent (a COMPLAINT intent is exactly
+// where the COMPLAINTS rule offers the re-service, and "the ants came back" classifies as a customer
+// issue). Cancellation, refund, dispute/chargeback/wrong charge, legal, damage, chemical/medical
+// exposure. Plain frustration (upset, frustrated, angry, disappointed) does NOT suppress it.
+const RESERVICE_HANDOFF_TEXT_RE = /\b(?:cancel\w*|refund\w*|disput\w*|chargeback|charged\s+(?:me\s+)?(?:wrong|twice|again|incorrect\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\w*|legal\w*|lawyer|attorney|lawsuit|sue|suing|damag\w*|chemical\w*|toxic|poisoned|poisoning|allerg\w*|hospital|medical|exposure|exposed|sick(?!\s+(?:of|and\s+tired)\b))\b/i;
+function reserviceOfferOwed({ inboundMessage, lanes, context }) {
+  if (RESERVICE_HANDOFF_TEXT_RE.test(String(inboundMessage || ''))) return false;
   return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
@@ -1019,7 +1025,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
   const promise = isReserviceOfferPromise(text);
   if (!promise && !reserviceCarriesLinkAction(actions)) {
-    return reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), actions, context })
+    return reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), context })
       ? { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] }
       : { ok: true, violations: [] };
   }

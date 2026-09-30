@@ -696,6 +696,8 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // ordinary draft with no re-service promise.
     const reserviceLanesSnapshot = drafter.validateReserviceOffer({
       reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage: body,
+      // The SAME context the verification ran with, so a pronoun-only pest report resolves the same lane (Codex round-20 P2).
+      context,
     }).promisedLanes || null;
     return {
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,

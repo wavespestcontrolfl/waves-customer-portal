@@ -2790,6 +2790,27 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(out.violations[0]).toMatch(/offer the covered free re-service/);
       });
 
+      test('a model-emitted escalate (reply "" + followup_promised) does NOT satisfy the owed offer (Codex round-20 P2)', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        for (const reply of ['', 'So sorry to hear that.']) {
+          for (const intendedActions of [[{ type: 'escalate', note: 'followup_promised' }], [{ type: 'escalate' }]]) {
+            const out = validateReserviceOffer({ reply, factsBlock: facts(['pest']), intendedActions, inboundMessage: report });
+            expect(out.ok).toBe(false);
+            expect(out.violations[0]).toMatch(/offer the covered free re-service/);
+          }
+        }
+        // a plain pest-report intent doesn't suppress it either
+        expect(validateReserviceOffer({ reply: '', factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate', note: 'followup_promised' }], inboundMessage: report }).ok).toBe(false);
+      });
+
+      // Codex round-20 P2: only the customer's own true hand-off words suppress the offer — never intent, never frustration.
+      test('plain frustration and pest wording keep the offer owed; refund/cancel/damage/legal/chemical wording suppresses it', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (inboundMessage) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage }).ok === false;
+        for (const m of ['the ants came back', "I'm frustrated, the roaches are back", 'so upset, ants are back again', 'angry and disappointed, the ants are still showing up', "I'm sick of these roaches, they're back", 'sick and tired of the ants coming back', 'the roach poison is not working, they are back']) expect(owed(m)).toBe(true);
+        for (const m of ['the ants came back, I want a refund', 'roaches are back, cancel my service', 'ants are back and you charged me twice', 'the ants are back, I am calling my lawyer', 'your spray killed my plants, the ants are back and there is damage', 'ants are back and my dog got sick from the chemical']) expect(owed(m)).toBe(false);
+      });
+
       // Codex round-19 P2: a pronoun-only report ("they're back") from a customer with a pest relationship
       // is a pest report when the facts list the pest lane — the same signal needsOpenTimes uses.
       test('pronoun-only report + pest relationship + pest lane in the facts → offer owed; without either, not', () => {
@@ -2826,7 +2847,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(true);
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([]), intendedActions: [], inboundMessage: report }).ok).toBe(true);
-        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate' }], inboundMessage: report }).ok).toBe(true);
+        // Codex round-20 P2: a MODEL-emitted escalate is not a hand-off — only an independent complaint/intent is.
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'the ants are back again, I want a refund' }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'the ants are back and I am thinking of cancelling' }).ok).toBe(true);
         expect(validateReserviceOffer({ reply: 'Thanks!', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'thanks, no bugs since!' }).ok).toBe(true);
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: report }).ok).toBe(true);
       });

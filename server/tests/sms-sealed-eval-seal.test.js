@@ -187,7 +187,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   const v12cand = (id, createdAt) => ({ ...cand(id, 'SCHEDULING', createdAt), facts_block: `CUSTOMER: x\n${MARKER} within the hour\n${RESERVICE_MARKER} not eligible\n` });
 
   test('v12: a pool FULL of pre-v12 items still seals compatible candidates and retires the displaced oldest pre-v12 items', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+b');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2+b');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01'), v12cand('b', '2026-08-02'), v12cand('c', '2026-08-03')] });
     const out = await sealEvalItems({ target: 100, dbi });
     expect(out.sealed).toBe(3);
@@ -208,7 +208,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('v12: an OVERSIZED pool with enough compatible items seals nothing but still prunes the pre-v12 overflow (Codex r4)', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2');
     const dbi = makeV12FakeDb({ activeCount: 200, compatibleCount: 100, candidates: [] });
     const out = await sealEvalItems({ target: 100, dbi });
     expect(out.sealed).toBe(0);
@@ -220,7 +220,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('v12: a pool with enough compatible items seals nothing', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 100, candidates: [v12cand('a', '2026-08-01')] });
     const out = await sealEvalItems({ target: 100, dbi });
     expect(out.sealed).toBe(0);
@@ -229,7 +229,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
@@ -263,7 +263,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   // current contract matches come back; the anti-join never re-seals them.
   describe('reactivation of previously-retired items', () => {
     test('the finding\'s scenario: a plain-v12 pool full of items missing the (now base-contract) FREE RE-SERVICE marker reactivates retired plain items instead of sourcing new drafts', async () => {
-      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2');
       // FREE RE-SERVICE moved into V12_BASE_FACT_MARKERS 2026-09-29 (decoupled
       // from the complaints tag — CATEGORY_FACT_MARKERS is now empty, so "+c"
       // carries no fact-marker semantics of its own any more). Every active
@@ -301,7 +301,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     });
 
     test('a partial restore leaves the rest to be sourced from new drafts (the candidate cap is the leftover, not the whole shortfall)', async () => {
-      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2');
       const candidates = Array.from({ length: 25 }, (_, i) => v12cand(`n${i}`, `2026-08-${String(i + 1).padStart(2, '0')}`));
       // shortfall = target(100) - compatibleCount(70) = 30; only 10 restore
       const dbi = makeV12FakeDb({ activeCount: 90, compatibleCount: 70, candidates, restorable: 10 });
@@ -343,7 +343,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 // BOTH lines.
 test('v12 without +c: the compatibility SQL requires BOTH the SLA line and the FREE RE-SERVICE line', async () => {
   const drafter = require('../services/sms-shadow-drafter');
-  const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+  const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers2');
   try {
     const calls = [];
     const dbi = (table) => {

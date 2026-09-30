@@ -591,6 +591,35 @@ describe('processInboundSms — intended actions persist on the estimate-review 
     ]);
   });
 
+  // Codex round-20 P2 (PR #5336): the snapshot rebuild must resolve the SAME lane the verification did — a
+  // pronoun-only pest report ("they're back") needs the customer context, or the lane is lost and the
+  // card is later rejected with "no promised re-service lane on record".
+  test('the re-service snapshot rebuild gets the same context the draft was verified with (pronoun-only report keeps its lane)', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    const ctx = { summary: 'ctx', flags: [], customer: { id: 'cust-1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+    const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+    validateReserviceOffer.mockClear();
+    validateReserviceOffer.mockImplementation(({ context }) => (context && context.serviceHistory
+      ? { ok: true, violations: [], promisedLanes: ['pest'] }
+      : { ok: false, violations: ['no lane'] }));
+    generateGroundedDraft.mockResolvedValue({
+      parsed: {
+        reply: "So sorry! I'm sending your free re-service booking link now.",
+        intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }],
+        auto_send_safe: false, missing_info: null,
+      },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers2',
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: "they're back", smsLogId: 'sms-in-pronoun-1' });
+    const call = validateReserviceOffer.mock.calls[validateReserviceOffer.mock.calls.length - 1][0];
+    expect(call.context).toBe(ctx);
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot.reservice_lanes_snapshot).toEqual(['pest']);
+    validateReserviceOffer.mockImplementation(() => ({ ok: true, violations: [], promisedLanes: undefined }));
+  });
+
   test('a template (non-LLM) draft carries no intended_actions key', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     seedActiveSchedulingThread();

@@ -108,6 +108,22 @@ describe('generateGroundedDraft — convergence loop', () => {
       expect(r.converged).toBe(true);
     });
 
+    test('empty reply + a model-emitted followup_promised escalate is still owed the offer (Codex round-20 P2)', async () => {
+      const bad = { reply: '', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null };
+      const client = makeClient([bad, bad, bad]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.converged).toBe(false);
+    });
+
+    test('the classified intent never suppresses the owed offer ("the ants came back" is a customer issue / COMPLAINT)', async () => {
+      const empty = { reply: '', intended_actions: [], missing_info: null };
+      for (const intent of ['customer_issue_needs_review', 'COMPLAINT']) {
+        const client = makeClient([empty, empty, empty]);
+        const r = await generateGroundedDraft({ ...args(client), inboundMessage: 'the ants came back', intent: { intent } });
+        expect(r.converged).toBe(false);
+      }
+    });
+
     test('an empty reply that is never fixed does not converge', async () => {
       const empty = { reply: '', intended_actions: [], missing_info: null };
       const client = makeClient([empty, empty, empty]);
