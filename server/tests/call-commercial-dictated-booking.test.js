@@ -284,6 +284,19 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(grounded(extraction({ service: { price_is_final: false } }), t).reason).toBe('price_not_final');
   });
 
+  test('a multi-term accepted price ("$150 to start plus $50/month") goes to the office (codex #5377 r3 P1)', () => {
+    const prices = [
+      { amount_usd: 150, accepted: true, caller_response: 'accepted', unit: 'one_time' },
+      { amount_usd: 50, accepted: true, caller_response: 'accepted', unit: 'per_month' },
+    ];
+    const multi = extraction({ service: { price: prices[0], prices } });
+    expect(grounded(multi)).toEqual({ ok: false, reason: 'price_has_multiple_terms' });
+    expect(route(multi).allowed).toBe(false);
+    // One accepted term alone still books.
+    const single = extraction({ service: { price: prices[0], prices: [prices[0]] } });
+    expect(grounded(single).ok).toBe(true);
+  });
+
   test('an accepted price entry without quoted_price_usd is not enough: booking stamps only the accepted total', () => {
     const entry = extraction({ service: { quoted_price_usd: null, price: { amount_usd: 150, accepted: true, caller_response: 'accepted', unit: 'per_quarter' } } });
     expect(grounded(entry)).toEqual({ ok: false, reason: 'no_quoted_total' });

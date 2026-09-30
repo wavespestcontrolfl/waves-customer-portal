@@ -99,6 +99,10 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt } = {
   const agreed = resolveCallAgreedPrice(v2);
   if (!agreed) return fail('no_price_agreed');
   if (agreed.amountMax != null || (agreed.additionalTerms || []).some((t) => t.amountMax != null)) return fail('price_is_a_range');
+  // More than one accepted term ("$150 to start plus $50/month") is not one
+  // price either: booking stamps quoted_price_usd only, so the extra accepted
+  // charge would never reach the appointment. The office books it.
+  if ((agreed.additionalTerms || []).length) return fail('price_has_multiple_terms');
   // Booking stamps the visit price from quoted_price_usd alone (one accepted
   // total, extraction-compat's quoted_price); an accepted price entry with a
   // billing unit and no quoted total would unlock the booking without that
