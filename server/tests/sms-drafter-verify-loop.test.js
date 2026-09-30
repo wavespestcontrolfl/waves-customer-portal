@@ -589,7 +589,7 @@ describe('generateGroundedDraft — banned compliance copy never converges', () 
     const drafter = require('../services/sms-shadow-drafter');
     const client = makeClient([
       { reply: 'Yes — the treatment is totally pet-safe once we leave.', intended_actions: [], missing_info: null },
-      { reply: 'Keep pets off treated areas until they are dry — it is safe once dry, and your technician will confirm the timing at the visit.', intended_actions: [], missing_info: null },
+      { reply: 'It is safe once dry, and your technician will confirm the timing at the visit.', intended_actions: [], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));

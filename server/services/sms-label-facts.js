@@ -247,7 +247,7 @@ const UNTIL_DRY_RE = /\buntil\b[^.]{0,30}\bdr(?:y|ied)\b/i;
 // overnight, next day, weeks) makes rei_hours = 0 untrustworthy: unknown.
 const STATED_DURATION_RE = /\d\s*-?\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\b|\bovernight\b|\bnext\s+day\b|\bweeks?\b/i;
 function statesOwnDuration(product) {
-  return [product.reentrySummary, product.reentryText].some((t) => t && (STATED_DURATION_RE.test(String(t)) || new RegExp(SPELLED_TIME_RE.source, 'i').test(String(t))));
+  return [product.reentrySummary, product.reentryText].some((t) => t && (STATED_DURATION_RE.test(String(t)) || new RegExp(SPELLED_QTY_RE.source, 'i').test(String(t))));
 }
 function reentryLevelHours(product) {
   if (Number.isFinite(product.reiHours) && product.reiHours > 0) return product.reiHours;
@@ -304,7 +304,7 @@ function labelFactsSectionFrom(factsBlock) {
 // "3 hours", "3-hour", "30 min", "1-2 hours", "1.5 hrs" (digits only: a
 // spelled-out figure never grounds, so it stays banned and the reply is
 // revised to digits).
-const TIME_EXPR_RE = /(?<![\w.])(\d+(?:\.\d+)?)(?:\s*(?:-|–|to)\s*(\d+(?:\.\d+)?))?\s*-?\s*(minutes?|mins?|hours?|hrs?|days?)\b/gi;
+const TIME_EXPR_RE = /(?<![\w./])(\d+(?:\.\d+)?)(?:\s*(?:-|–|to|or)\s*(\d+(?:\.\d+)?))?\s*-?\s*(minutes?|mins?|hours?|hrs?|days?)\b/gi;
 function timeKey(match) {
   const unit = /^h/i.test(match[3]) ? 'h' : (/^d/i.test(match[3]) ? 'd' : 'm');
   return `${Number(match[1])}${match[2] ? `-${Number(match[2])}` : ''}${unit}`;
@@ -336,9 +336,68 @@ function groundedTimeKeys(sectionText) {
   return { rain, reentry };
 }
 
-// A spelled-out figure ("three hours", "an hour", "half an hour", "a couple of
-// hours") states the same time as digits and never grounds.
-const SPELLED_TIME_RE = /\b(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|forty-five|sixty|ninety|half(?:\s+an?)?|couple(?:\s+of)?|few)\s+(?:more\s+)?(?:minutes?|hours?|hrs?|days?)\b/gi;
+// Every quantity a reply can attach to a time unit, not a whitelist of
+// numbers: a spelled number word (zero-nineteen, the tens with an optional
+// hyphen/space unit, hundred), an "a"/"an", a fraction or "half", a range, and
+// the vague quantities (a couple, a few, several, a day or two, overnight, the
+// next day). A quantity converts to the same "<number><unit>" key a digit
+// figure has, or to null when it cannot be converted exactly; null is never
+// grounded. Digits are matched by TIME_EXPR_RE above; this covers the rest.
+const ONES_SRC = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
+const TENS_SRC = 'twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety';
+const NUM_WORD_SRC = `(?:(?:${TENS_SRC})(?:[-\\s]+(?:${ONES_SRC}))?|${ONES_SRC}|hundred)`;
+const NUM_SEQ_SRC = `${NUM_WORD_SRC}(?:[-\\s]+(?:and\\s+)?${NUM_WORD_SRC})*`;
+const FRACTION_SRC = '(?:\\d+\\s*\\/\\s*\\d+|[\\u00BC-\\u00BE\\u2150-\\u215E])';
+const QTY_SRC = `(?:${NUM_SEQ_SRC}(?:\\s+and\\s+a\\s+half)?|(?:\\d+\\s*)?${FRACTION_SRC}|half(?:\\s+an?)?|an?\\s+half|(?:an?\\s+)?(?:couple|few|several|handful|bunch|dozen)(?:\\s+of)?(?:\\s+more)?|an?)`;
+const TIME_UNIT_SRC = '(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|nights?|weeks?)';
+const VAGUE_WHOLE_SRC = '(?:overnight|over\\s+night|(?:the\\s+)?next\\s+(?:day|morning)|all\\s+(?:day|night)|an?\\s+(?:day|night|hour|week)\\s+(?:or\\s+(?:two|three|so|more)|and\\s+a\\s+half))';
+const SPELLED_QTY_RE = new RegExp(`(?<![\\w-])(?:${VAGUE_WHOLE_SRC}|(${QTY_SRC})(?:\\s*(?:-|\\u2013|to|or)\\s*(${QTY_SRC}))?[\\s-]*(?:more\\s+)?(${TIME_UNIT_SRC}))\\b`, 'gi');
+const NUM_WORD_VALUES = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+// The exact value of one quantity phrase, or null (vague / unparseable).
+function quantityValue(raw) {
+  const t = String(raw || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (/^(?:an?|half(?: an?)?|an? half)$/.test(t)) return /^an?$/.test(t) ? 1 : 0.5;
+  if (/^[¼-¾⅐-⅞]$/.test(t)) return null;
+  const frac = t.match(/^(?:(\d+)\s*)?(\d+)\s*\/\s*(\d+)$/);
+  if (frac) return Number(frac[3]) ? Number(frac[1] || 0) + Number(frac[2]) / Number(frac[3]) : null;
+  const words = t.replace(/\s+and\s+a\s+half$/, '').split(/[-\s]+/).filter((w) => w && w !== 'and');
+  if (!words.length) return null;
+  let total = 0;
+  let current = 0;
+  for (const w of words) {
+    if (w === 'hundred') { current = (current || 1) * 100; continue; }
+    if (!(w in NUM_WORD_VALUES)) return null;
+    current += NUM_WORD_VALUES[w];
+  }
+  total = current + (/\s+and\s+a\s+half$/.test(t) ? 0.5 : 0);
+  return total;
+}
+function spelledKey(match) {
+  if (!match[3]) return null; // overnight / next day / a day or two: never exact
+  const first = quantityValue(match[1]);
+  const second = match[2] ? quantityValue(match[2]) : undefined;
+  if (first == null || second === null) return null;
+  const unit = /^h/i.test(match[3]) ? 'h' : (/^d/i.test(match[3]) ? 'd' : (/^m/i.test(match[3]) ? 'm' : null));
+  if (!unit) return null; // seconds / nights / weeks have no label figure
+  return `${first}${second !== undefined ? `-${second}` : ''}${unit}`;
+}
+// Every time quantity in `text`, digit or spelled or vague, in order, with the
+// key it converts to (null = cannot be grounded).
+function timeQuantities(text) {
+  const src = String(text || '');
+  const out = [];
+  for (const m of src.matchAll(TIME_EXPR_RE)) out.push({ index: m.index, length: m[0].length, key: timeKey(m), spelled: false });
+  for (const m of src.matchAll(SPELLED_QTY_RE)) {
+    if (out.some((q) => m.index < q.index + q.length && q.index < m.index + m[0].length)) continue;
+    out.push({ index: m.index, length: m[0].length, key: spelledKey(m), spelled: true });
+  }
+  return out.sort((x, y) => x.index - y.index);
+}
 
 // The sentence around index i (a "." between digits is a decimal point).
 function sentenceAt(text, i) {
@@ -427,15 +486,67 @@ function neutralizeGroundedTimes(text, sectionText) {
   const src = String(text || '');
   const { rain, reentry } = groundedTimeKeys(sectionText);
   if (!rain.size && !reentry.size) return src;
-  return src.replace(TIME_EXPR_RE, (whole, _a, _b, _u, offset) => {
-    const key = timeKey([whole, _a, _b, _u]);
-    const kind = timeKind(src, offset, whole.length);
+  let out = '';
+  let at = 0;
+  for (const q of timeQuantities(src)) {
+    const kind = timeKind(src, q.index, q.length);
     // Only a duration classified as that kind may consume that kind's keys: a
     // null / schedule duration ("give it 4 hours", "the tech arrives in 4
     // hours") is left visible to the older compliance screens.
-    const grounded = (kind === 'rain' && rain.has(key)) || (kind === 'reentry' && reentry.has(key));
-    return grounded ? 'LABELTIME' : whole;
-  });
+    const grounded = q.key != null && ((kind === 'rain' && rain.has(q.key)) || (kind === 'reentry' && reentry.has(q.key)));
+    if (!grounded) continue;
+    out += `${src.slice(at, q.index)}LABELTIME`;
+    at = q.index + q.length;
+  }
+  return out + src.slice(at);
+}
+
+// What kinds of label line the section actually carries (not its figures):
+// a rainfast line, a re-entry line, and whether that re-entry line is "until dry".
+function groundedLineKinds(sectionText) {
+  const kinds = { rain: false, reentry: false, reentryUntilDry: false };
+  for (const line of String(sectionText || '').split('\n')) {
+    if (!line.startsWith('- ')) continue;
+    const body = line.slice(2);
+    const colon = body.indexOf(': ');
+    if (colon < 0) continue;
+    for (const clause of body.slice(colon + 2).split(';')) {
+      const c = clause.trim();
+      if (/^rainfast\b/i.test(c)) kinds.rain = true;
+      else if (/^re-?entry\b/i.test(c)) {
+        kinds.reentry = true;
+        if (/\buntil dry\b/i.test(c) && !timeKeysIn(c).size) kinds.reentryUntilDry = true;
+      }
+    }
+  }
+  return kinds;
+}
+
+// A claim with no number in it. Structural rule instead of a phrase list: a
+// sentence that is ABOUT re-entry (the REENTRY_TRIGGER topic words, "wait"
+// only when paired with drying, or a person / pet paired with drying) is a
+// re-entry claim, and one that says rainfast / wash-off is a rain claim. The
+// claim is ungrounded unless LABEL FACTS has a line of that kind, and an
+// "until dry" re-entry claim is grounded only by a re-entry line that itself
+// says "until dry". A sentence that carries a quantity is decided by the
+// quantity path above, and the sanctioned "safe once dry" idiom is not a claim.
+const REENTRY_TOPIC_NO_WAIT_RE = new RegExp(REENTRY_TRIGGER_RE.source.replace('|\\bwait(?:ing)?\\b', ''), 'i');
+const WAIT_RE = /\bwait(?:ing)?\b/i;
+const BEING_RE = /\b(?:pets?|dogs?|cats?|pups?|puppies|kids?|children|people|family|everyone|anyone|humans?|toddlers?)\b/i;
+const SAFE_ONCE_DRY_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/gi;
+function hasUngroundedNonNumericClaim(text, sectionText) {
+  const kinds = groundedLineKinds(sectionText);
+  const rainRe = new RegExp(RAIN_TRIGGER_RE.source, 'i');
+  const dryRe = new RegExp(DRY_TRIGGER_RE.source, 'i');
+  for (const raw of String(text || '').split(/[!?\n]+|\.(?!\d)/)) {
+    if (!raw.trim() || timeQuantities(raw).length) continue;
+    const sentence = raw.replace(SAFE_ONCE_DRY_RE, ' ');
+    const dry = dryRe.test(sentence);
+    const reentryClaim = REENTRY_TOPIC_NO_WAIT_RE.test(sentence) || (dry && (WAIT_RE.test(sentence) || BEING_RE.test(sentence)));
+    if (reentryClaim && (!kinds.reentry || (dry && !kinds.reentryUntilDry))) return true;
+    if (rainRe.test(sentence) && !kinds.rain) return true;
+  }
+  return false;
 }
 
 /**
@@ -451,19 +562,19 @@ function neutralizeGroundedTimes(text, sectionText) {
 function hasUngroundedLabelTime(text, sectionText) {
   const src = String(text || '');
   const { rain, reentry } = groundedTimeKeys(sectionText);
-  for (const m of src.matchAll(TIME_EXPR_RE)) {
-    const key = timeKey(m);
-    const k = timeKind(src, m.index, m[0].length);
+  for (const q of timeQuantities(src)) {
+    const k = timeKind(src, q.index, q.length);
+    if (k === 'schedule') continue;
+    // A quantity in label context (dry / rain / re-entry wording) is held
+    // unless it converts EXACTLY to a figure the section states for that
+    // kind; a vague or unconvertible one ("a couple of hours", "overnight",
+    // "thirteen hours" with no 13-hour line) has no key and is always held.
     if (k === 'dry') return true; // no label states a drying time
-    if (k === 'rain' && !rain.has(key)) return true;
-    if (k === 'reentry' && !reentry.has(key)) return true;
+    if (k === 'rain' && !(q.key != null && rain.has(q.key))) return true;
+    if (k === 'reentry' && !(q.key != null && reentry.has(q.key))) return true;
     // no trigger at all: a figure that is only ever the RAINFAST time must not
     // be used as some other time ("give it 2 hours and the pups are good to go")
-    if (k === null && rain.has(key) && !reentry.has(key)) return true;
-  }
-  for (const m of src.matchAll(SPELLED_TIME_RE)) {
-    const k = timeKind(src, m.index, m[0].length);
-    if (k && k !== 'schedule') return true;
+    if (k === null && q.key != null && rain.has(q.key) && !reentry.has(q.key)) return true;
   }
   // Label facts are durations, so no clock time ("after 2 PM", "by 5", "until
   // noon") is groundable: one attached to rain / drying / re-entry wording is held.
@@ -471,7 +582,7 @@ function hasUngroundedLabelTime(text, sectionText) {
     const k = timeKind(src, m.index, m[0].length);
     if (k && k !== 'schedule') return true;
   }
-  return false;
+  return hasUngroundedNonNumericClaim(src, sectionText);
 }
 
 module.exports = {
@@ -490,5 +601,6 @@ module.exports = {
   renderLabelFactsSection,
   labelFactsSectionFrom,
   groundedTimeKeys,
+  groundedLineKinds,
   neutralizeGroundedTimes,
 };

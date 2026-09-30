@@ -379,7 +379,9 @@ describe('compliance grounding', () => {
 
   test('allows the grounded re-entry time as re-entry, and "until dry"', () => {
     expect(check('Please keep the dogs off the treated areas for 4 hours.').ok).toBe(true);
-    expect(check('Keep people and pets off treated areas until dry.').ok).toBe(true);
+    // "until dry" is grounded only by a re-entry line that itself says "until dry"
+    expect(check('Keep people and pets off treated areas until dry.', factsWith([product({ rainfastMinutes: 180 })])).ok).toBe(true);
+    expect(check('Keep people and pets off treated areas until dry.').ok).toBe(false); // this visit's line is 4 hours
   });
 
   test('rejects an ungrounded time', () => {
@@ -400,7 +402,7 @@ describe('compliance grounding', () => {
   test('two-product visit: only the visit-level 4 hours grounds; a different product-specific figure is rejected', () => {
     const f = factsWith([product({ phrase: 'a weed control', reiHours: 4, reentrySummary: null }), product({ phrase: 'an insecticide', reiHours: 0 })]);
     expect(check('Please keep pets off the treated areas for 4 hours.', f).ok).toBe(true);
-    expect(check('Keep pets off the treated areas until dry.', f).ok).toBe(true);
+    expect(check('Keep pets off the treated areas until dry.', f).ok).toBe(false); // the line is 4 hours, not "until dry"
     // the pest spray's own (shorter) figure, or any other product-specific number, is not a fact of the section
     expect(check('The pest spray is dry in 30 minutes.', f).ok).toBe(false);
     expect(check('You can go back out after 2 hours.', f).ok).toBe(false);
@@ -489,7 +491,7 @@ describe('compliance grounding', () => {
       "We'll be there at 2 PM, rain is expected.",
       'The tech arrives by 5 PM, and rain will be fine then.',
       'Your appointment is at 9 am, rain or shine.',
-      'Keep people and pets off treated areas until dry.',
+      'Keep people and pets off treated areas for 4 hours.',
       'It is rainfast after 3 hours.',
     ]) expect(check(reply, withRain).ok).toBe(true);
     // a unit after the number is a duration, not a clock time
@@ -501,7 +503,7 @@ describe('compliance grounding', () => {
     expect(check("It'll be dry in 4 hours.", f).ok).toBe(false);
     expect(check('Drying takes about 4 hours.', f).ok).toBe(false);
     expect(check('Keep the pets off for 4 hours until it is dry.', f).ok).toBe(true); // stay-off is nearest
-    expect(check('Keep people and pets off treated areas until dry.', f).ok).toBe(true);
+    expect(check('Keep people and pets off treated areas for 4 hours.', f).ok).toBe(true);
   });
 
   test('clause scoping: an explicit rainfast time next to a stay-off time, and "we\'ll be back out" scheduling', () => {
@@ -511,8 +513,11 @@ describe('compliance grounding', () => {
     expect(check("We'll be back out in 3 days, keep the dogs off the lawn until then.", f).ok).toBe(true);
   });
 
-  test('a spelled-out figure never grounds', () => {
-    expect(check('It is rainfast after three hours.').ok).toBe(false);
+  test('a spelled-out figure grounds only when it converts exactly to the stated figure', () => {
+    expect(check('It is rainfast after three hours.').ok).toBe(true); // 3 hours is the rainfast line
+    expect(check('It is rainfast after four hours.').ok).toBe(false); // 4 hours is only the re-entry time
+    expect(check('It is rainfast after thirteen hours.').ok).toBe(false);
+    expect(check('It is rainfast after three hours.', buildFactsBlock(context, { now: NOW })).ok).toBe(false);
   });
 
   test('no LABEL FACTS section in the facts -> every numeric time stays banned', () => {
@@ -853,5 +858,121 @@ describe('rain question with no rainfast time reads naturally', () => {
       const facts = buildFactsBlock(context, { now: NOW, ...extras });
       expect(validateComplianceCopy({ reply: 'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.', factsBlock: facts }).ok).toBe(true);
     }
+  });
+});
+
+// Codex round 3: structural reply guard. Every re-entry / rain claim and every
+// quantity next to a time unit is judged by the KIND of line LABEL FACTS
+// carries, not by a list of phrasings.
+describe('reply guard — claim kinds and quantities (round 3)', () => {
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  const factsWith = (products) => buildFactsBlock(context, { now: NOW, labelFacts: labelFacts(products) });
+  const check = (reply, factsBlock) => validateComplianceCopy({ reply, factsBlock });
+  const none = () => buildFactsBlock(context, { now: NOW });
+  const rainOnly = () => factsWith([product({ rainfastMinutes: 180, reiHours: null, reentrySummary: null })]); // no re-entry line
+  const untilDry = () => factsWith([product({ rainfastMinutes: 180, reiHours: 0 })]);
+  const fourHours = () => factsWith([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]);
+  const day = () => factsWith([product({ rainfastMinutes: null, reiHours: 24, reentrySummary: null })]);
+
+  test('the fixture sections carry the lines the tests assume', () => {
+    const kinds = (f) => labelFactsLib.groundedLineKinds(labelFactsLib.labelFactsSectionFrom(f));
+    expect(kinds(none())).toEqual({ rain: false, reentry: false, reentryUntilDry: false });
+    expect(kinds(rainOnly())).toEqual({ rain: true, reentry: false, reentryUntilDry: false });
+    expect(kinds(untilDry())).toEqual({ rain: true, reentry: true, reentryUntilDry: true });
+    expect(kinds(fourHours())).toEqual({ rain: true, reentry: true, reentryUntilDry: false });
+  });
+
+  test('a non-numeric re-entry / stay-off claim needs a re-entry line', () => {
+    for (const reply of [
+      'Keep people and pets off treated areas until dry.',
+      'Please keep the pets off the treated areas until it has dried.',
+      'The kids can go back out on the lawn once it is dry.',
+      'Best to stay off the grass for now.',
+    ]) {
+      expect(check(reply, none()).ok).toBe(false);
+      expect(check(reply, rainOnly()).ok).toBe(false); // a rainfast line grounds no re-entry claim
+    }
+    expect(check('Keep the dogs off the lawn for now.', fourHours()).ok).toBe(true); // a re-entry line exists, no "until dry" claim
+  });
+
+  test('a non-numeric "until dry" claim is grounded only by a re-entry line that is itself "until dry"', () => {
+    expect(check('Keep people and pets off treated areas until dry.', untilDry()).ok).toBe(true);
+    expect(check('The kids can go back out on the lawn once it is dry.', untilDry()).ok).toBe(true);
+    expect(check('Keep people and pets off treated areas until dry.', fourHours()).ok).toBe(false);
+    expect(check('Keep people and pets off treated areas for 4 hours.', fourHours()).ok).toBe(true);
+    expect(check('Keep people and pets off treated areas for 4 hours.', untilDry()).ok).toBe(false);
+  });
+
+  test('a rainfast / wash-off claim needs a rainfast line, numeric or not', () => {
+    for (const reply of ['It is rainfast once it is set.', 'Rain will not wash it off.', 'It will not wash away in a storm.']) {
+      expect(check(reply, none()).ok).toBe(false);
+      expect(check(reply, day()).ok).toBe(false); // a re-entry line grounds no rain claim
+      expect(check(reply, rainOnly()).ok).toBe(true);
+    }
+  });
+
+  test('the intended none-on-file replies still pass', () => {
+    for (const reply of [
+      'A treatment needs to dry and bond to surfaces; after that it holds up to weather.',
+      'Rain after the treatment has dried and bonded is not a concern; it holds up to weather.',
+      'It is safe once dry, and the technician confirms timing.',
+      'Your technician will confirm timing for your yard.',
+    ]) expect(check(reply, none()).ok).toBe(true);
+  });
+
+  test('a spelled number is judged like a digit: any word, not a whitelist', () => {
+    // 4 hours is the stated re-entry time
+    expect(check('Keep pets off for four hours.', fourHours()).ok).toBe(true);
+    for (const word of ['one', 'two', 'thirteen', 'fourteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty-one', 'thirty-five', 'sixty-five', 'seventy', 'eighty', 'ninety', 'a hundred']) {
+      expect(check(`Keep pets off for ${word} hours.`, fourHours()).ok).toBe(false);
+      expect(check(`Keep pets off for ${word} hours.`, none()).ok).toBe(false);
+    }
+    expect(check('Keep pets off for thirteen hours.', none()).ok).toBe(false);
+    expect(check('Keep pets off for thirteen hours.', untilDry()).ok).toBe(false);
+  });
+
+  test('a spelled number that converts exactly to the grounded figure passes; a different one does not', () => {
+    expect(check('Keep pets off for twenty-four hours.', day()).ok).toBe(true);
+    expect(check('Keep pets off for twenty four hours.', day()).ok).toBe(true);
+    expect(check('Keep pets off for twenty-four hours.', fourHours()).ok).toBe(false);
+    expect(check('Keep pets off for twenty-three hours.', day()).ok).toBe(false);
+    expect(check('Keep pets off for twenty-four hours.', none()).ok).toBe(false);
+    expect(check('It is rainfast after three hours.', fourHours()).ok).toBe(true);
+    // the same figure as the other kind is still the wrong kind
+    expect(check('It is rainfast after four hours.', fourHours()).ok).toBe(false);
+  });
+
+  test('vague quantities are always held in label context, even next to a grounded figure', () => {
+    for (const reply of [
+      'Keep pets off for a couple of hours.',
+      'Keep the dogs off the lawn for a few hours.',
+      'Keep pets off for several hours.',
+      'Keep the kids off for a day or two.',
+      'Keep pets off overnight.',
+      'Stay off the lawn until the next day.',
+      'Keep pets off for half an hour.',
+      'Keep pets off for 1/2 hour.',
+      'It will not wash off after a couple of hours.',
+      'Rain is fine after a few hours.',
+    ]) {
+      expect(check(reply, none()).ok).toBe(false);
+      expect(check(reply, fourHours()).ok).toBe(false);
+      expect(check(reply, untilDry()).ok).toBe(false);
+    }
+  });
+
+  test('a quantity outside label context (scheduling) is not held', () => {
+    expect(check("We'll be back out in a couple of days to check on it.", none()).ok).toBe(true);
+    expect(check('The tech arrives in twenty minutes.', none()).ok).toBe(true);
+    expect(check('Your appointment is a day or two away.', none()).ok).toBe(true);
+  });
+
+  test('the module backstop reads spelled and vague quantities directly', () => {
+    const sec = labelFactsLib.labelFactsSectionFrom(day());
+    expect(labelFactsLib.hasUngroundedLabelTime('Keep pets off for thirteen hours.', sec)).toBe(true);
+    expect(labelFactsLib.hasUngroundedLabelTime('Keep pets off for twenty-four hours.', sec)).toBe(false);
+    expect(labelFactsLib.hasUngroundedLabelTime('Keep pets off for a couple of hours.', sec)).toBe(true);
+    expect(labelFactsLib.neutralizeGroundedTimes('Keep pets off for twenty-four hours.', sec)).toBe('Keep pets off for LABELTIME.');
+    expect(labelFactsLib.neutralizeGroundedTimes('Keep pets off for thirteen hours.', sec)).toBe('Keep pets off for thirteen hours.');
   });
 });
