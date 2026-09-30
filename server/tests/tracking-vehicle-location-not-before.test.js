@@ -1,147 +1,149 @@
 /**
- * resolveFreshTechPosition `cachedNotBefore` (Codex round-24 P2, PR #5334):
- * tech_status is keyed by technician and stores no device identity, so a cached
- * fix reported BEFORE the technician's tracker mapping was last edited may be
- * the old vehicle's. Such a fix is bypassed for the configured device's own
- * Bouncie position; without the option the behavior is unchanged.
+ * resolveFreshTechPosition reads the technician's CURRENT tracker mapping itself, in the same
+ * statement as the tech_status cache (technicians LEFT JOIN tech_status), and derives the cache
+ * cutoff from that current row (Codex round-44 P2 — the 5th/6th remap race). tech_status stores
+ * no device identity, so a cached fix is trusted only if reported STRICTLY AFTER the mapping's last
+ * change; a caller-passed `cachedNotBefore` can only tighten. The Bouncie fallback fetches for the
+ * CURRENT IMEI and serves the point only if the row-locked guarded write RETURNS a row — a null, a
+ * timeout or an error all mean "unverifiable": no position. Synthetic data only.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/tech-status', () => ({ pingTechLocation: jest.fn(() => Promise.resolve()) }));
+jest.mock('../services/tech-status', () => ({ pingTechLocation: jest.fn() }));
 
 const db = require('../models/db');
+const { pingTechLocation } = require('../services/tech-status');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 
 const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
+const fixRow = (minutes = 1) => ({ lat: '27.1', lng: '-82.2', location_updated_at: minutesAgo(minutes) });
 
-// `mapped`: what technicians.bouncie_imei reads at the mapping recheck (round-38 P2).
-// `undefined` (default) = the same IMEI the caller passed, so existing cases are unaffected.
-function mockTechStatus(row, mapped) {
+// A mutable world the single joined query reads at call time.
+let world;
+let queries;
+function install({ imei = 'DEV-A', changedAt = null, ts = null } = {}) {
+  world = { tech: { bouncie_imei: imei, bouncie_imei_changed_at: changedAt }, ts };
+  queries = [];
   db.mockImplementation((table) => {
-    if (table === 'tech_status') return { where: () => ({ first: async () => row }) };
-    if (table === 'technicians') return { where: () => ({ first: async () => (typeof mapped === 'function' ? mapped() : { bouncie_imei: mapped === undefined ? 'NEW' : mapped }) }) };
-    throw new Error(`unexpected table ${table}`);
+    queries.push(table);
+    if (table !== 'technicians as t') throw new Error(`unexpected table ${table}`);
+    return {
+      leftJoin: (joined, l, r) => {
+        queries.push(`join:${joined}:${l}=${r}`);
+        return { where: () => ({ first: async (...cols) => { queries.push(`cols:${cols.join(',')}`); return world.tech ? { ...world.tech, lat: null, lng: null, location_updated_at: null, ...(world.ts || {}) } : undefined; } }) };
+      },
+    };
   });
 }
-const bouncie = (loc) => ({ getLocationByImei: jest.fn(async () => loc) });
+const bouncie = (loc, onCall) => ({ getLocationByImei: jest.fn(async (imei) => { if (onCall) onCall(imei); return loc; }) });
+const freshLoc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() });
 
-beforeEach(() => db.mockReset());
+beforeEach(() => { db.mockReset(); pingTechLocation.mockReset(); });
 
-test('no cachedNotBefore: a fresh tech_status fix is returned as before', async () => {
-  mockTechStatus({ lat: '27.1', lng: '-82.2', location_updated_at: minutesAgo(1) });
-  const svc = bouncie(null);
-  const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'NEW', bouncieService: svc });
-  expect(out.source).toBe('tech_status');
-  expect(svc.getLocationByImei).not.toHaveBeenCalled();
-});
-
-test('a cached fix reported before the mapping edit is bypassed: the configured device is read instead', async () => {
-  mockTechStatus({ lat: '27.1', lng: '-82.2', location_updated_at: minutesAgo(3) });
-  const svc = bouncie({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.2).toISOString() });
-  const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'NEW', bouncieService: svc, cachedNotBefore: minutesAgo(2) });
-  expect(out.source).toBe('bouncie_api');
-  expect(out.lat).toBe(28.0);
-  expect(svc.getLocationByImei).toHaveBeenCalledWith('NEW');
-});
-
-test('a cached fix reported after the mapping edit is trusted', async () => {
-  mockTechStatus({ lat: '27.1', lng: '-82.2', location_updated_at: minutesAgo(1) });
-  const svc = bouncie(null);
-  const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'NEW', bouncieService: svc, cachedNotBefore: minutesAgo(2) });
-  expect(out.source).toBe('tech_status');
-});
-
-test('bypassed cache + the configured device unreadable: no position (fails closed)', async () => {
-  mockTechStatus({ lat: '27.1', lng: '-82.2', location_updated_at: minutesAgo(3) });
-  const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'NEW', bouncieService: bouncie(null), cachedNotBefore: minutesAgo(2) });
-  expect(out).toBeNull();
-});
-
-// Codex round-37/38 P2: an in-flight Bouncie fetch from a device that was remapped
-// meanwhile must neither write the old vehicle's point into the tech-keyed tech_status
-// row NOR be returned to the caller.
-describe('fallback is compare-and-write AND revalidated before the coordinates are returned', () => {
-  const { pingTechLocation } = require('../services/tech-status');
-  beforeEach(() => pingTechLocation.mockClear());
-  const loc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() });
-  const guardedStore = (store) => pingTechLocation.mockImplementation(async (args) => {
-    if (args.requireBouncieImei != null && store.mappedImei !== args.requireBouncieImei) return null;
-    store.techStatus = { lat: args.lat, lng: args.lng };
-    return store.techStatus;
+describe('one statement: current mapping + cache', () => {
+  test('the query joins technicians to tech_status and selects the mapping columns with the cache columns', async () => {
+    install({ ts: fixRow(1) });
+    await resolveFreshTechPosition({ techId: 't1' });
+    expect(queries).toEqual(['technicians as t', 'join:tech_status as ts:ts.tech_id=t.id', 'cols:t.bouncie_imei,t.bouncie_imei_changed_at,ts.lat,ts.lng,ts.location_updated_at']);
   });
-
-  test('the fallback write carries the IMEI the point was fetched from', async () => {
-    mockTechStatus(undefined, 'OLD-DEVICE');
-    await resolveFreshTechPosition({ techId: 't1', bouncieImei: '  OLD-DEVICE ', bouncieService: bouncie(loc()) });
-    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 't1', requireBouncieImei: 'OLD-DEVICE' }));
+  test('never remapped (NULL change time): a fresh cached fix is trusted, no fallback call', async () => {
+    install({ ts: fixRow(1) });
+    const svc = bouncie(null);
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: svc });
+    expect(out.source).toBe('tech_status');
+    expect(svc.getLocationByImei).not.toHaveBeenCalled();
   });
-
-  test('race: the mapping changes while the old device is being fetched -> the point is DISCARDED (null) and never cached', async () => {
-    const store = { mappedImei: 'OLD-DEVICE', techStatus: null };
-    guardedStore(store);
-    mockTechStatus(undefined, () => ({ bouncie_imei: store.mappedImei }));
-    const svc = { getLocationByImei: jest.fn(async () => { store.mappedImei = 'NEW-DEVICE'; return loc(); }) };
-    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: svc });
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(out).toBeNull(); // fails closed: no map point, no ETA
-    expect(store.techStatus).toBeNull();
-    expect(pingTechLocation).not.toHaveBeenCalled();
-  });
-
-  test('no remap in flight: the coordinates are returned and the guarded write lands', async () => {
-    const store = { mappedImei: 'OLD-DEVICE', techStatus: null };
-    guardedStore(store);
-    mockTechStatus(undefined, () => ({ bouncie_imei: store.mappedImei }));
-    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) });
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(out.source).toBe('bouncie_api');
-    expect(store.techStatus).toEqual({ lat: 28.0, lng: -81.0 });
-  });
-
-  test('the mapping cannot be verified (read fails / technician row missing): the fetched point is discarded', async () => {
-    mockTechStatus(undefined, () => { throw new Error('db down'); });
-    expect(await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).toBeNull();
-    mockTechStatus(undefined, () => null);
-    expect(await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).toBeNull();
-    expect(pingTechLocation).not.toHaveBeenCalled();
-  });
-});
-
-// Codex round-43 P2: the guarded write is AWAITED; a remap committing between the mapping recheck and the
-// write's row lock makes it match no row (null) and the fetched point is discarded.
-describe('the guarded fallback write decides whether the fetched point is served', () => {
-  const { pingTechLocation } = require('../services/tech-status');
-  beforeEach(() => pingTechLocation.mockReset());
-  const loc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() });
-
-  test('remap lands AFTER the mapping read but BEFORE the write: the guarded write returns null -> the point is discarded', async () => {
-    mockTechStatus(undefined, 'OLD-DEVICE'); // the recheck read still sees the old mapping
-    pingTechLocation.mockResolvedValue(null); // ...but by the write's row lock the mapping moved
-    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) });
-    expect(out).toBeNull();
-    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ requireBouncieImei: 'OLD-DEVICE' }));
-  });
-
-  test('the write landed (a row comes back): the point is served; a mock resolving undefined is not a mismatch', async () => {
-    mockTechStatus(undefined, 'OLD-DEVICE');
+  test('a fix reported AFTER the mapping change is trusted; one at/before it is bypassed for the device itself', async () => {
+    install({ changedAt: minutesAgo(3), ts: fixRow(1) });
+    expect((await resolveFreshTechPosition({ techId: 't1' })).source).toBe('tech_status');
+    install({ changedAt: minutesAgo(2), ts: fixRow(3) });
     pingTechLocation.mockResolvedValue({ tech_id: 't1' });
-    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
-    pingTechLocation.mockResolvedValue(undefined);
-    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
+    const svc = bouncie(freshLoc());
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: svc });
+    expect(out.source).toBe('bouncie_api');
+    expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-A');
+    // strict: equal instants are not "after"
+    const t = minutesAgo(1);
+    install({ changedAt: t, ts: { ...fixRow(1), location_updated_at: t } });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    expect((await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) })).source).toBe('bouncie_api');
   });
+  test('a present-but-unreadable change time fails closed (cache bypassed)', async () => {
+    install({ changedAt: 'garbage', ts: fixRow(1) });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    expect((await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) })).source).toBe('bouncie_api');
+  });
+  test('a caller-passed cachedNotBefore is only an EXTRA floor: it tightens, never loosens', async () => {
+    install({ changedAt: minutesAgo(10), ts: fixRow(3) });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    // caller floor newer than the fix -> bypassed even though the current mapping allows it
+    expect((await resolveFreshTechPosition({ techId: 't1', cachedNotBefore: minutesAgo(2), bouncieService: bouncie(freshLoc()) })).source).toBe('bouncie_api');
+    // a caller floor OLDER than the current mapping change cannot loosen it
+    install({ changedAt: minutesAgo(2), ts: fixRow(3) });
+    expect((await resolveFreshTechPosition({ techId: 't1', cachedNotBefore: minutesAgo(30), bouncieService: bouncie(freshLoc()) })).source).toBe('bouncie_api');
+  });
+  test('the A->B remap AFTER the caller read its own row: the lookup uses the CURRENT change time, not the caller\'s stale one', async () => {
+    // caller believed "never remapped" (passes null) but the mapping changed 30 s ago; the cached point is 2 min old (device A's)
+    install({ imei: 'DEV-B', changedAt: new Date(Date.now() - 30e3), ts: fixRow(2) });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    const svc = bouncie(freshLoc());
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'DEV-A', cachedNotBefore: null, bouncieService: svc });
+    expect(out.source).toBe('bouncie_api');
+    expect(svc.getLocationByImei).toHaveBeenCalledWith('DEV-B'); // the CURRENT imei, never the caller's DEV-A
+  });
+  test('cache-only callers (allowBouncieFallback false) get null rather than a stale point', async () => {
+    install({ changedAt: minutesAgo(1), ts: fixRow(3) });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).toBeNull();
+  });
+  test('no technician row, or a failed read, means no position (cannot prove the vehicle)', async () => {
+    install(); world.tech = null;
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) })).toBeNull();
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) })).toBeNull();
+  });
+  test('a technician with no tracker configured has no fallback device', async () => {
+    install({ imei: '  ', ts: null });
+    const svc = bouncie(freshLoc());
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: svc })).toBeNull();
+    expect(svc.getLocationByImei).not.toHaveBeenCalled();
+  });
+});
 
-  test('latency is bounded: a write that never settles does not hold the response past timeoutMs', async () => {
-    mockTechStatus(undefined, 'OLD-DEVICE');
+describe('the fallback is served only when the guarded write returns a row', () => {
+  test('the write carries the IMEI the point was fetched from', async () => {
+    install({ imei: ' DEV-A ', ts: null });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1' });
+    await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) });
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 't1', requireBouncieImei: 'DEV-A' }));
+  });
+  test('write returned a row: the point is served', async () => {
+    install({ ts: null });
+    pingTechLocation.mockResolvedValue({ tech_id: 't1', lat: 28 });
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) });
+    expect(out).toMatchObject({ source: 'bouncie_api', lat: 28.0, lng: -81.0 });
+  });
+  test('remap lands during the fetch: the guarded write returns null -> no position', async () => {
+    install({ ts: null });
+    pingTechLocation.mockImplementation(async (a) => (world.tech.bouncie_imei === a.requireBouncieImei ? { tech_id: 't1' } : null));
+    const svc = bouncie(freshLoc(), () => { world.tech.bouncie_imei = 'DEV-B'; });
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: svc })).toBeNull();
+  });
+  test('the guarded write times out (waiting on the technician row): no position, never the fetched point', async () => {
+    install({ ts: null });
     pingTechLocation.mockReturnValue(new Promise(() => {}));
     const started = Date.now();
-    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()), timeoutMs: 40 });
-    expect(out.source).toBe('bouncie_api');
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()), timeoutMs: 40 })).toBeNull();
     expect(Date.now() - started).toBeLessThan(1000);
   });
-
-  test('a thrown write error (DB hiccup) is logged and the point already verified by the mapping read is still served', async () => {
-    mockTechStatus(undefined, 'OLD-DEVICE');
+  test('the guarded write throws: no position', async () => {
+    install({ ts: null });
     pingTechLocation.mockRejectedValue(new Error('db down'));
-    expect((await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie(loc()) })).source).toBe('bouncie_api');
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(freshLoc()) })).toBeNull();
+  });
+  test('the device returns nothing / a stale reading: no position and no write', async () => {
+    install({ ts: null });
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie(null) })).toBeNull();
+    expect(await resolveFreshTechPosition({ techId: 't1', bouncieService: bouncie({ lat: 1, lng: 2, updatedAt: minutesAgo(30).toISOString() }) })).toBeNull();
+    expect(pingTechLocation).not.toHaveBeenCalled();
   });
 });

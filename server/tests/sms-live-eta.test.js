@@ -1960,6 +1960,27 @@ describe('round 42 P2: tech_names plumbing (source pins)', () => {
   });
 });
 
+// Codex round-44 P2 (PR #5334): unit / apartment / suite identifiers are address numbers.
+describe('round 44 P2: unit identifiers are not ETA minutes', () => {
+  test.each([
+    'The technician is on the way to unit 12', 'He is heading to Apt 4 today.', 'Your tech is on the way to Suite 200.', 'On the way to bldg 3', 'We are at lot 15.',
+    'Your tech is at building 7.', 'The tech is on the way to #12.', 'Heading to apartment 9.', 'The tech is on the way to ste 14', 'The tech is at room 10.', 'Go to No. 12.',
+  ])('%p: 12-style unit numbers are never read as minutes', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(bodyHasTimedArrivalPhrase(reply, { unclassifiedSignalOnly: true })).toBe(false);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).violations.join(' ')).not.toMatch(/minute\(s\) away/);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech is 12 minutes away', 12], ['He is on the way to unit 5, 12 minutes out', 12], ['Your tech is about 15 minutes away from unit 4', 15],
+  ])('%p: a real ETA beside a unit number is still read (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+});
+
 // Codex round-41 P2 (PR #5334): the tracker-remap GENERATION is part of the memo key and of the
 // persisted identity, so A->B->A invalidates earlier ETA facts although the device returns to A.
 describe('round 41 P2: mapping generation (bouncie_imei_changed_at) in the memo key and entry identity', () => {

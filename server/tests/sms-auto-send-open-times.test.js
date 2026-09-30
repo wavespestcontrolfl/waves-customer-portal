@@ -59,6 +59,7 @@ function chain(overrides = {}) {
   q.first = jest.fn(async () => null);
   q.returning = jest.fn(async () => [{ id: 'claim-1' }]);
   q.update = jest.fn(async () => 1);
+  q.del = jest.fn(async () => 1);
   return Object.assign(q, overrides);
 }
 
@@ -238,5 +239,32 @@ describe('auto-send persists the draft\'s technician names with the claimed deci
   test('no names -> the field is absent (older-decision shape)', async () => {
     await attempt({ reply: 'Sounds good, thanks!' });
     expect('tech_names' in insertedSnapshot()).toBe(false);
+  });
+});
+
+// Codex round-44 P2 (PR #5334): an unreadable live-ETA recheck is NON-terminal at the auto-send
+// executor — the claim is released (never failed), the reservation settled, parked cards reopen.
+describe('auto-send: an unreadable ETA recheck releases the claim instead of failing it', () => {
+  const SNAP = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  afterEach(() => { drafter.findEtaMinutesClaims.mockReturnValue([]); });
+
+  test('infrastructure failure -> sent:false, retryable, claim row released (deleted), NOT marked auto_send_failed, nothing sent', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    // freshness reads scheduled_services through the same mocked db; an unusable handle makes the read throw
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    expect(r).toMatchObject({ sent: false, reason: 'eta_claim_recheck_failed', retryable: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '33333333-3333-4333-8333-333333333333' });
+  });
+
+  test('a real verdict (no snapshot behind an ETA claim) still FAILS the claim as before', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    const r = await attempt({ reply: 'The tech is 9 minutes away.' });
+    expect(r).toMatchObject({ sent: false, reason: 'eta_claim_no_snapshot' });
+    expect(r.retryable).toBeUndefined();
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
   });
 });

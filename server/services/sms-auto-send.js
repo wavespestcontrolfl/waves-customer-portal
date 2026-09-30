@@ -485,6 +485,17 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 }
 
 /** Mark a claim whose send was blocked/failed/errored. The draft stays 'shadow'. */
+// Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
+// was inserted as CLAIM_STATUS by claimAutoSend moments ago, so removing it restores the
+// pre-claim state). Only while still CLAIM_STATUS; errors are logged, never thrown.
+async function releaseClaim(decisionId) {
+  try {
+    await db('agent_decisions').where({ id: decisionId, status: CLAIM_STATUS }).del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] releaseClaim errored (decision ${decisionId}): ${err.message}`);
+  }
+}
+
 async function failClaim(decisionId, reason) {
   try {
     await db('agent_decisions')
@@ -862,6 +873,18 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
       techNames: claim.techNames,
       outgoingBody: reply,
     });
+    if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {
+      // The recheck could not READ the live state (Codex round-44 P2) — nothing is known to
+      // be stale, so the claim is RELEASED instead of failed: the freshly inserted claim row
+      // is removed and its reservation settled (nothing was sent), parked siblings reopen, and
+      // the verified draft falls through to a human-visible suggestion that the reviewer-send
+      // seam rechecks again. The decision is never recorded as a failed auto-send.
+      logger.warn(`[sms-auto-send] live ETA recheck unreadable (decision ${claim.decisionId}): ${etaReason}; releasing the claim (retryable)`);
+      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+      await releaseClaim(claim.decisionId);
+      await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+      return { sent: false, reason: etaReason, retryable: true };
+    }
     if (etaReason) {
       logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
       const outcome = await notSent(etaReason);

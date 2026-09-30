@@ -777,6 +777,7 @@ function isListMarker(str, index, length) {
 // A number that is plainly NOT a duration/ETA figure: ordinal, percentage,
 // money, time of day / address / phone token, or a date. Shared by
 // classifyBareEtaNumber and the unclassified-ETA backstop.
+const UNIT_IDENTIFIER_BEFORE_RE = /(?:\b(?:(?:unit|apt|apartment|suite|ste|bldg|building|lot|room|rm)\.?|no\.)\s*#?\s*|#\s*)$/i;
 function isNonDurationNumber(str, index, length) {
   // A numbered-list marker ("1. Check the invoice", "2) Call us") at the start
   // of a line is structure, never a duration (round-21 P2).
@@ -787,6 +788,9 @@ function isNonDurationNumber(str, index, length) {
   // otherwise also match the generic trailing-word check.
   if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return true;
   if (PERCENT_SIGN_AFTER_RE.test(after)) return true;
+  // A unit / apartment / suite / building / lot / room identifier ("on the way to unit 12",
+  // "apt 4", "Suite 200", "Bldg 3", "#7") is an address number, never minutes (round-44 P2).
+  if (UNIT_IDENTIFIER_BEFORE_RE.test(before)) return true;
   // Money ("$20", "20 dollars").
   if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return true;
   // Time of day / address / phone-like token — the shared helper above.
