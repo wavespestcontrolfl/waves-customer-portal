@@ -1081,7 +1081,7 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
     }
     const wateringPatch = postApplicationWateringPatch(
       req.body,
-      req.adminUser?.email || req.adminUser?.name || req.adminUser?.id || null,
+      req.technician?.name || req.technicianId || null,
     );
     if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
     if (!wateringPatch.skip) update.post_application_watering = wateringPatch.value;
@@ -3495,7 +3495,7 @@ router.put('/:id', async (req, res, next) => {
     }
     const wateringPatch = postApplicationWateringPatch(
       req.body,
-      req.adminUser?.email || req.adminUser?.name || req.adminUser?.id || null,
+      req.technician?.name || req.technicianId || null,
     );
     if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
     if (!wateringPatch.skip) upd.post_application_watering = wateringPatch.value;

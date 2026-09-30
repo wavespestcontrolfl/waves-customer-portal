@@ -16,7 +16,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.adminUser = { id: 'admin-1', email: 'owner@example.test', name: 'Owner' }; next(); },
+  adminAuthenticate: (req, _res, next) => { req.technician = { id: 'admin-1', name: 'Owner' }; req.technicianId = 'admin-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
   requireAdmin: (_req, _res, next) => next(),
 }));
@@ -100,7 +100,7 @@ describe.each([
     });
     expect(updates).toHaveLength(1);
     const stored = JSON.parse(updates[0].post_application_watering);
-    expect(stored).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'owner@example.test' });
+    expect(stored).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'Owner' });
     expect(Date.parse(stored.verified_at)).not.toBeNaN();
   });
 
