@@ -13218,6 +13218,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // single-visit price guard and both 'following' guard calls, so no
     // guard judges the edited visit on a narrower overlay (pre-push audits
     // found the date, start time, service, then the 'following' path).
+    // Series siblings the cadence rewrite will re-date (Codex pre-push P1 on
+    // #5387): not repriced, but their NEW dates change which visits take a
+    // term's sold slots, so they join the coverage pass as context rows
+    // (_coverageContext — candidates, never themselves marked). Read on the
+    // guard's trx; the rewrite's own destination guard aborts on drift.
+    const cadenceCoverageContext = async (conn, cols) => {
+      const targets = plannedRecurrenceDates.cadenceTargetById;
+      const ids = [...(targets?.keys() || [])].filter((id) => id !== String(req.params.id));
+      if (ids.length === 0) return [];
+      const select = ['id', ...SECURE_PREPAY_COVERAGE_COLUMNS.filter((col) => cols && col in cols)];
+      const rows = await conn('scheduled_services').whereIn('id', ids).select(select);
+      return rows.map((row) => ({ ...row, _proposed: { scheduled_date: targets.get(String(row.id)) } }));
+    };
     const saveCoverageProposed = () => {
       const proposed = {};
       for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
@@ -13624,7 +13637,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // is overlaid on the locked row (_proposed), never one column at a
           // time: pre-push audits found the date, then the start time, then
           // the service identity missing from narrower overlays.
-          if (priceGuardRow) priceGuardRow._proposed = saveCoverageProposed();
+          if (priceGuardRow) {
+            priceGuardRow._proposed = saveCoverageProposed();
+            priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
+          }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
             : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
@@ -13740,7 +13756,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (earlyGroups.changed) {
             await lockAndGuardFollowingSiblings(trx, {
               editedId: req.params.id,
-              editedRow: { ...earlyBeforeRow, _proposed: saveCoverageProposed() },
+              editedRow: {
+                ...earlyBeforeRow,
+                _proposed: saveCoverageProposed(),
+                _coverageContext: await cadenceCoverageContext(trx, earlyBeforeRow),
+              },
               parentId: earlyBeforeRow.recurring_parent_id || req.params.id,
               fromDateStr: earlyBeforeRow.recurring_parent_id
                 ? (dateOnly(earlyBeforeRow.scheduled_date) || etDateString())
@@ -14670,7 +14690,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // sibling update loop): the edited visit's own live invoice
             // refuses a 'following' save exactly like a sibling's would
             // (Codex #3505 r8 P1).
-            editedRow: priceServiceBeforeRow ? { ...priceServiceBeforeRow, _proposed: saveCoverageProposed() } : priceServiceBeforeRow,
+            editedRow: priceServiceBeforeRow ? {
+              ...priceServiceBeforeRow,
+              _proposed: saveCoverageProposed(),
+              _coverageContext: await cadenceCoverageContext(trx, priceServiceBeforeRow),
+            } : priceServiceBeforeRow,
             proposedDateById: plannedRecurrenceDates.cadenceTargetById,
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
@@ -17981,7 +18005,15 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   for (const [customerId, terms] of termsByCustomer) {
     const customerVisits = visits.filter((v) => String(customerIdFor(v)) === customerId);
     if (customerVisits.length === 0) continue;
-    const candidateRows = customerVisits.map((v) => ({ ...v, ...(v._proposed || {}) }));
+    const judgedIds = new Set(customerVisits.map((v) => String(v.id)));
+    const contextRows = [];
+    for (const v of customerVisits) {
+      for (const row of v._coverageContext || []) {
+        if (judgedIds.has(String(row.id)) || contextRows.some((c) => String(c.id) === String(row.id))) continue;
+        contextRows.push(row);
+      }
+    }
+    const candidateRows = [...customerVisits, ...contextRows].map((v) => ({ ...v, ...(v._proposed || {}) }));
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, {
         extraCandidateRows: candidateRows,

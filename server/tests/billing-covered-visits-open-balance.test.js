@@ -644,6 +644,19 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(covered.get('v1')).toMatch(/annual prepay paid at the old price/);
   });
 
+  test('a cadence-rewritten sibling joins the pass as CONTEXT: moving it later frees the slot for the repriced visit, and it is never marked itself (Codex pre-push P1 on #5387)', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-06-15' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-10' });
+    const conn = fixture({ visits: [v2, v1] });
+    const alone = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(alone.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _coverageContext: [{ ...v2, _proposed: { scheduled_date: '2026-08-01' } }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+    expect(covered.has('v2')).toBe(false);
+  });
+
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
     const v1 = visit();
     const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });
