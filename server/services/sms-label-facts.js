@@ -1035,6 +1035,12 @@ const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
 const MONTH_ALONE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g;
 const MAY_ALONE_RE = /\b(?:(?:in|back\s+in|since|during|last|that|the|this|from|early|late|mid)\s+May\b|May\s+(?:treatment|visit|service|spray|spraying|application|appointment)\b)/g;
 const SEASON_RE = /\b(?:last|this|the|in|during|early|late|next|every|that|past|previous)\s+(?:spring|summer|fall|autumn|winter)(?:time)?\b/g;
+// A year named on its own ("my 2025 treatment", "back in 2024", "the 2025 spray"): only with a preposition or
+// determiner before it, or a visit word after it, so prices, house numbers, phone / zip fragments and "2025 hours"
+// never count. "last year" is in OLDER_VISIT_RE. A year other than the visit's is another visit.
+const STREET_WORD_SRC = 'st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|cir|circle|pl|place|pkwy|hwy|trl|trail|sq|square|hours?|minutes?|days?|dollars?|percent|feet|ft|gallons?';
+const YEAR_AFTER_WORD_RE = new RegExp(`\\b(?:in|back\\s+in|since|during|from|my|the|that|of|your|this|early|late)\\s+(20\\d{2})\\b(?![-/.,:]?\\d)(?!\\s+(?:\\w+\\s+)?(?:${STREET_WORD_SRC})\\b)`, 'g');
+const YEAR_BEFORE_VISIT_RE = /(?<![\d$#/.,:-])\b(20\d{2})\s+(?:(?:pest|lawn|tree|spring|summer|fall|winter)\s+)?(?:treatment|visit|service|spray|spraying|application|appointment|round)\b/g;
 const FUTURE_OR_OLDER_RE = new RegExp(`${FUTURE_VISIT_RE.source}|${OLDER_VISIT_RE.source}`, 'g');
 const yearOf = (m, vy) => (m ? (m.length === 2 ? 2000 + Number(m) : Number(m)) : vy);
 const monthNumber = (name) => MONTH_NAMES.findIndex((n) => n.startsWith(name.slice(0, 3))) + 1;
@@ -1065,6 +1071,8 @@ const VISIT_REFERENCES = [
   { re: MONTH_ALONE_RE, differs: (m, v) => monthNumber(m[1]) !== v.month },
   { re: MAY_ALONE_RE, raw: true, differs: (m, v) => v.month !== 5 },
   { re: SEASON_RE, differs: () => true },
+  { re: YEAR_AFTER_WORD_RE, differs: (m, v) => Number(m[1]) !== v.year },
+  { re: YEAR_BEFORE_VISIT_RE, differs: (m, v) => Number(m[1]) !== v.year },
   // (a year written after the date must match too: "September 29, 2025" is not the 2026 visit)
   { re: MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[1]), Number(m[2]), tailYear(m[3], m[4])) },
   { re: DAY_MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[2]), Number(m[1]), tailYear(m[3], m[4])) },

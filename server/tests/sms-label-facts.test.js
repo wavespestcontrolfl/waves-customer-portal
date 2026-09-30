@@ -1224,6 +1224,27 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
   });
 });
 
+describe('r16: a year named on its own is another visit unless it is the visit year', () => {
+  const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, '2026-09-29', '2026-09-30');
+  test('a different year with a preposition or a visit word is another visit; "last year" always is', () => {
+    for (const text of [
+      'How long after my 2025 treatment can the dogs go out?', 'the 2025 spray, rain?', 'back in 2024 you sprayed', 'in 2025 you treated, kids ok?', 'since 2024, is it dry?',
+      'the 2025 pest treatment - dogs?', 'during 2025 you came', 'from 2025, pets?', "last year's treatment", 'last year', 'you sprayed last year, will rain wash it off?',
+    ]) expect([text, other(text)]).toEqual([text, true]);
+  });
+  test("the visit's own year keeps the facts", () => {
+    for (const text of ['How long after my 2026 treatment can the dogs go out?', 'the 2026 spray, rain?', 'since 2026 you sprayed', 'in 2026 you treated, kids ok?']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+  });
+  test('prices, addresses, phone and zip fragments, quantities are not years', () => {
+    for (const text of [
+      'it costs $2025', 'I live at 2025 Main St, can the dogs go out?', 'send it to 2025 Oak Avenue', 'the price in 2025 dollars', 'call 941-555-2025', 'zip 34211 - dogs ok?',
+      'I paid 2025 for it', 'in 2025 hours', 'my 20250 treatment', 'invoice #2025 - is it dry?', 'the 2025 sq ft lawn',
+    ]) expect([text, other(text)]).toEqual([text, false]);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -1693,10 +1714,11 @@ describe('C: the section is for the latest visit only - a text about another vis
       return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(queue.shift()) }] }) } };
     };
     const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
-    const run = (inboundMessage, replies, smsHistory = []) => generateGroundedDraft({
+    const PHONE = '+19415550100';
+    const run = (inboundMessage, replies, smsHistory = [], inboundPhone = PHONE) => generateGroundedDraft({
       client: makeClient([...replies, { supported: true, violations: [] }]),
       context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], smsHistory },
-      inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+      inboundMessage, inboundPhone, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
     });
     const RE = 'For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.';
     beforeEach(() => {
@@ -1723,7 +1745,7 @@ describe('C: the section is for the latest visit only - a text about another vis
 
     test('r13: an elliptical follow-up after a question about another visit gets none on file, and the sentence is then held', async () => {
       const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
-      const thread = [{ direction: 'inbound', body: 'What about the May treatment?', date: ago(1) }];
+      const thread = [{ direction: 'inbound', body: 'What about the May treatment?', date: ago(1), fromPhone: PHONE }];
       const r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], thread);
       expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
       expect(r.converged).toBe(false);
@@ -1735,23 +1757,49 @@ describe('C: the section is for the latest visit only - a text about another vis
     test('r12: a follow-up like "is it okay now?" inherits the label kind of the recent thread; a bare "Yes." is held', async () => {
       const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
       const thread = [
-        { direction: 'inbound', body: 'Is it okay now?', date: ago(0) },
+        { direction: 'inbound', body: 'Is it okay now?', date: ago(0), fromPhone: PHONE },
         { direction: 'outbound', body: 'Happy to help - are the dogs out there?', date: ago(1) },
-        { direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(2) },
+        { direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(2), fromPhone: PHONE },
       ];
       const yes = draft('Yes.');
       let r = await run('Is it okay now?', [yes, yes, yes], thread);
       expect(r.converged).toBe(false);
       // the same follow-up on a thread about something else is elliptical with nothing classifiable: still both kinds asked
-      r = await run('Is it okay now?', [yes, yes, yes], [{ direction: 'inbound', body: 'What time are you coming Thursday?', date: ago(1) }]);
+      r = await run('Is it okay now?', [yes, yes, yes], [{ direction: 'inbound', body: 'What time are you coming Thursday?', date: ago(1), fromPhone: PHONE }]);
       expect(r.converged).toBe(false);
       // an old (over 24 h) pet question does not carry; a non-elliptical message about something else is not a label question
-      r = await run('What time are you coming Thursday?', [draft('Sure, Thursday works.')], [{ direction: 'inbound', body: 'Can the dogs go out?', date: ago(30) }]);
+      r = await run('What time are you coming Thursday?', [draft('Sure, Thursday works.')], [{ direction: 'inbound', body: 'Can the dogs go out?', date: ago(30), fromPhone: PHONE }]);
       expect(r.converged).toBe(true);
       // the authorized sentence answers it
       r = await run('Is it okay now?', [draft(RE)], thread);
       expect(r.converged).toBe(true);
       expect(r.labelFactsSnapshot.asked).toEqual(['reentry']);
+    });
+
+    test('r16: only messages from the CURRENT inbound phone are inherited (a spouse or tenant on another number is not this thread)', async () => {
+      const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+      const OTHER = '+19415550199';
+      const yes = draft('Yes.');
+      const other = [{ direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(1), fromPhone: OTHER }];
+      // the pet question came from ANOTHER number: nothing to inherit, the elliptical follow-up asks both kinds and "Yes." is still held
+      let r = await run('Is it okay now?', [yes, yes, yes], other);
+      expect(r.converged).toBe(false);
+      // a self-contained message from this phone is judged on its own, the other number's thread never leaks in
+      r = await run('What time are you coming Thursday?', [draft('Sure, Thursday works.')], other);
+      expect(r.converged).toBe(true);
+      // another number's other-visit reference does not void this sender's facts; this sender's own does
+      const may = { direction: 'inbound', body: 'What about the May treatment?', date: ago(1) };
+      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: OTHER }]);
+      expect(r.factsBlock).toContain(`- ${RE}`);
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: PHONE }]);
+      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
+      // the same person in another format still matches; a row with no phone, or no known current phone, is left out
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: '(941) 555-0100' }]);
+      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
+      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: null }]);
+      expect(r.factsBlock).toContain(`- ${RE}`);
+      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: PHONE }], null);
+      expect(r.factsBlock).toContain(`- ${RE}`);
     });
 
     test('a text in another language gets the none-on-file section (the sentences are English); a Spanish paraphrase is held', async () => {

@@ -28,6 +28,7 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
+const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const { etParts } = require('../utils/datetime-et');
@@ -1403,10 +1404,14 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // inbound messages of the thread window the drafter shows (a follow-up like "is it ok now?" asks whatever
 // the thread was about). Inbound only, newest first, last 24 hours (an unreadable date is kept: fail closed).
 const ASKED_THREAD_WINDOW_MS = 24 * 60 * 60 * 1000;
-function recentInboundTexts(context, inboundMessage) {
+// Only messages from the CURRENT inbound phone are inherited: a customer can have several numbers (a spouse, a
+// tenant), and their messages are not this sender's thread. A row with no phone, or no known current phone,
+// is left out (an elliptical follow-up with no thread then asks both kinds: fail closed).
+function recentInboundTexts(context, inboundMessage, inboundPhone) {
   const cutoff = Date.now() - ASKED_THREAD_WINDOW_MS;
-  const thread = (context?.smsHistory || []).slice(0, 10)
-    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff))
+  const sender = phoneIdentityKey(inboundPhone);
+  const thread = !sender ? [] : (context?.smsHistory || []).slice(0, 10)
+    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff) && phoneIdentityKey(m.fromPhone) === sender)
     .map((m) => m.body);
   return [String(inboundMessage ?? ''), ...thread];
 }
@@ -2244,7 +2249,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -2346,7 +2351,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // The label sentences are English: a text in another language gets none on
   // file too (a paraphrase in that language would slip past the English guard;
   // the guard also holds that language's timing words, sms-label-facts).
-  const askedTexts = recentInboundTexts(context, inboundMessage);
+  const askedTexts = recentInboundTexts(context, inboundMessage, inboundPhone);
   const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
@@ -2648,7 +2653,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
       openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
-      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
+      client, context, inboundMessage, inboundPhone: fromPhone, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
