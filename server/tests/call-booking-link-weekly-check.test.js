@@ -36,6 +36,18 @@ describe('composeWeeklyCheck', () => {
     expect(out.problem).toBe(false);
   });
 
+  test('a send is counted in the week it went out, not the week of its call', () => {
+    const lastWeekCall = new Date(NOW.getTime() - 7 * 24 * 3600 * 1000 - 60 * 60 * 1000).toISOString();
+    const rows = [
+      { status: 'sent', reason: null, created_at: lastWeekCall, sent_at: new Date(NOW.getTime() - 6 * 24 * 3600 * 1000).toISOString() },
+      { status: 'sent', reason: null, created_at: lastWeekCall, sent_at: new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString() },
+      { status: 'skipped', reason: 'existing_customer', created_at: lastWeekCall },
+    ];
+    const out = composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW);
+    expect(out.headline).toBe('Booking-link texts: 1 sent this week');
+    expect(out.summary).toBe('No new-lead calls to check');
+  });
+
   test('no sends: "none sent this week"', () => {
     const out = composeWeeklyCheck({ rows: skipped('existing_customer', 3), job: FRESH_JOB }, NOW);
     expect(out.headline).toBe('Booking-link texts: none sent this week');

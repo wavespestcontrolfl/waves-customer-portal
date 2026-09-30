@@ -73,15 +73,25 @@ function reasonLabel(reason) {
   return r.replace(/_/g, ' ');
 }
 
+// A send can land up to a day or so after its call (2h delay, next-morning
+// window, retries), so the query reaches back further than the week and
+// compose sorts the rows: calls checked by call time, sends by send time.
+const LOOKBACK_EXTRA_MS = 3 * 24 * 60 * 60 * 1000;
+
+function windowStart(now) {
+  return new Date(now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+}
+
 async function loadWeek(now = new Date()) {
-  const since = new Date(now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const rows = await db('call_log')
-    .where('created_at', '>=', since)
+    .where('created_at', '>=', new Date(windowStart(now).getTime() - LOOKBACK_EXTRA_MS))
     .whereRaw('metadata->? IS NOT NULL', [METADATA_KEY])
     .select(
+      'created_at',
       db.raw('metadata->?->>? AS status', [METADATA_KEY, 'status']),
       db.raw('metadata->?->>? AS reason', [METADATA_KEY, 'reason']),
       db.raw('metadata->?->>? AS send_at', [METADATA_KEY, 'send_at']),
+      db.raw('metadata->?->>? AS sent_at', [METADATA_KEY, 'sent_at']),
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
   return { rows, job };
@@ -146,9 +156,16 @@ function healthySummary(checkedCount, topSkips) {
 
 // Pure: the week's numbers → bell headline/summary + detail text.
 function composeWeeklyCheck({ rows = [], job = null }, now = new Date()) {
-  // A call that predates the gate going live is not this week's news.
-  const live = rows.filter((r) => r.reason !== 'pre_activation');
+  const since = windowStart(now);
+  const inWindow = (at) => at && new Date(at).getTime() >= since.getTime() && new Date(at).getTime() <= now.getTime();
+  // A call that predates the gate going live is not this week's news. Rows
+  // without created_at (callers passing their own rows) count as this week.
+  const notPre = rows.filter((r) => r.reason !== 'pre_activation');
+  const live = notPre.filter((r) => !r.created_at || inWindow(r.created_at));
   const t = tally(live, now);
+  // Sends are counted by when they went out, so a text sent after the
+  // previous check for a call made before it is never missed.
+  t.sent = notPre.filter((r) => r.status === 'sent' && (r.sent_at ? inWindow(r.sent_at) : live.includes(r))).length;
   const sweep = sweepState(job, now);
   const problems = problemsFor(t, sweep, now);
 
