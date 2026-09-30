@@ -637,6 +637,8 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     expect(c).toMatchObject({ firstName: 'Joanne', zip: '34221', externalId: 'lead:lead-1' });
     expect(mapCompletedJobCandidate({ id: 'ea2', lead_id: 'lead-1', service_date: '2026-07-01' }).externalId).toBe('lead:lead-1');
     expect(mapCompletedJobCandidate({ id: 'ea3', customer_id: 'cust-9', service_date: '2026-07-01' }).externalId).toBe('cust-9');
+    // a deleted/missing lead (join null) mirrored only in estimate_data never keys external_id
+    expect(mapCompletedJobCandidate({ id: 'ea6', customer_id: 'cust-9', lead_id: null, estimate_data: { lead_id: 'gone-1' }, service_date: '2026-07-01' }).externalId).toBe('cust-9');
   });
   test('completed job booked by a different caller: name/address follow the uploaded lead contact, not the account holder', () => {
     const c = mapCompletedJobCandidate({

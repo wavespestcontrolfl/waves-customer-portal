@@ -462,7 +462,9 @@ function mapCompletedJobCandidate(row) {
     ...matchFields.identityForContact({ email: leadEmail || customerEmail, phone: leadPhone || customerPhone }, ...jobSources),
     // See mapLeadCandidate: re-picked after a consent phone swap, never sent.
     identitySources: jobSources,
-    externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId }),
+    // Only the LIVE joined lead (row.lead_id) keys external_id: a mirrored
+    // estimate lead_id may point at a deleted lead no Lead event shares.
+    externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId: row.lead_id }),
     conversionType: 'completed_job_revenue',
     sourceTable: 'estimate_actuals',
     sourceId: row.id,
