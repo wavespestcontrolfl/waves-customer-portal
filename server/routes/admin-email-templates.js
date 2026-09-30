@@ -841,6 +841,11 @@ router.get('/automations', async (req, res, next) => {
       .countDistinct('e.run_id as count')
       .whereIn('e.event_type', ['would_send', 'would_block'])
       .where('e.created_at', '>=', since)
+      // Shadow-ORIGIN runs only: a live-origin run that comes due after a
+      // rollback to shadow logs would_send/would_block too, but it is a
+      // dropped live send, not rollout evidence (codex #5418 r2). A promotion
+      // advances origin_mode to 'live', so this also drops promoted runs.
+      .whereRaw("r.context->>'origin_mode' = 'shadow'")
       // Shadow-period evidence only: once a live attempt promotes the run
       // (a LATER promoted_from_shadow event) it is a live run, so it stops
       // counting here and the three badges (would_send / would_block /

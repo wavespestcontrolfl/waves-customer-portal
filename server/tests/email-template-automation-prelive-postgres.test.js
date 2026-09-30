@@ -465,5 +465,36 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
         await new Promise((resolve) => server.close(resolve));
       }
     });
+    test('a LIVE-origin run finalized after a rollback to shadow is not counted as shadow evidence (codex #5418 r2)', async () => {
+      const automation = await makeAutomation({ delay_minutes: 30 });
+      mockGate.mode = 'live';
+      const sendRun = (await trigger(automation, `evt-${randomUUID().slice(0, 8)}`)).results[0].run.id;
+      const blockRun = (await trigger(automation, `evt-${randomUUID().slice(0, 8)}`)).results[0].run.id;
+
+      mockGate.mode = 'shadow';
+      await db('email_template_automation_runs').whereIn('id', [sendRun, blockRun]).update({ run_after: new Date(Date.now() - 60000) });
+      await Executor.processDueRuns({ runIds: [sendRun] });
+      mockPreflight.result = { ok: false, code: 'SUPPRESSED', reason: 'recipient suppressed' };
+      await Executor.processDueRuns({ runIds: [blockRun] });
+      mockPreflight.result = { ok: true };
+      // Both rows logged shadow outcomes but stay live-origin.
+      expect(await eventTypes(sendRun)).toContain('would_send');
+      expect((await db('email_template_automation_runs').where({ id: sendRun }).first()).context.origin_mode).toBe('live');
+
+      const express = require('express');
+      const router = require('../routes/admin-email-templates');
+      const app = express();
+      app.use('/admin/email-templates', router);
+      app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+      const server = app.listen(0);
+      try {
+        const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/email-templates/automations`);
+        const body = await res.json();
+        const row = body.automations.find((r) => r.automation_key === automation.automation_key);
+        expect(row).toMatchObject({ would_send_30d: 0, would_block_30d: 0 });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
   });
 });
