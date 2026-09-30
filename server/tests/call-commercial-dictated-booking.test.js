@@ -78,7 +78,7 @@ describe('commercial dictated booking: canAutoRoute', () => {
   });
 
   test('gate off (option absent or false) is the old behavior: the hold stays', () => {
-    const { commercialDictatedBooking, ...off } = opts();
+    const { commercialDictatedBooking: _on, ...off } = opts();
     for (const o of [off, { ...off, commercialDictatedBooking: false }, { ...off, commercialDictatedBooking: 'true' }]) {
       const r = canAutoRoute(extraction(), o);
       expect(r.allowed).toBe(false);
