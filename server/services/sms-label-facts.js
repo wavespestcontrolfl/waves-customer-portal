@@ -93,10 +93,16 @@ async function hasVisitToday(conn, customerId, today) {
 
 // A performed record that proves no application (see readLastVisitLabelFacts): an inspection service whose type names no treatment.
 const TREATMENT_WORD_RE = /\b(?:treat\w*|spray\w*|application|control|plan|program|service\s+plan|barrier|bait\w*|fertiliz\w*|lawn|pest)\b/i;
+function inspectionServiceRe() {
+  try {
+    return require('./supplies-consumption').INSPECTION_SERVICE_RE || /\binspection\b/i;
+  } catch {
+    return /\binspection\b/i; // (the same rule, if that module cannot be loaded here)
+  }
+}
 function isNonApplicationRecord(record) {
   const type = String((record && record.service_type) || '');
-  const { INSPECTION_SERVICE_RE } = require('./supplies-consumption');
-  return INSPECTION_SERVICE_RE.test(type) && !TREATMENT_WORD_RE.test(type);
+  return inspectionServiceRe().test(type) && !TREATMENT_WORD_RE.test(type);
 }
 
 // A visit AFTER (or on the same date as) the facts' own visit that the record chain has not caught up with: a scheduled visit
@@ -218,6 +224,35 @@ function productFromRow(row, frozen) {
  */
 async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString() } = {}) {
   if (!customerId) return null;
+  // ONE consistent read: the newest performed date, the stale-visit guards and the products must all come from the same snapshot, or a
+  // visit that lands between two queries leaves the facts describing a visit that is no longer the last one. A connection that can open
+  // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
+  // (the newest date and both guards must still hold, else none on file).
+  if (typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => readLastVisitLabelFactsOnce({ customerId, conn: trx, today }), { isolationLevel: 'repeatable read', readOnly: true });
+  }
+  const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today });
+  if (!facts) return null;
+  return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate }) ? facts : null;
+}
+
+// After a read on a connection without snapshot isolation: is the facts' date still the newest performed date, and is there still no
+// visit today and no unrecorded later visit?
+async function isStillTheLastVisit({ customerId, conn, today, serviceDate }) {
+  const performed = () => conn('service_records')
+    .where('service_records.customer_id', customerId)
+    .where('service_records.status', 'completed')
+    .whereRaw(
+      `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
+      NON_PERFORMED_VISIT_OUTCOMES,
+    );
+  const newest = await performed().max('service_records.service_date as service_date').first();
+  if (dateOnlyString(newest && newest.service_date) !== serviceDate) return false;
+  if (await hasVisitToday(conn, customerId, today)) return false;
+  return !(await hasUnrecordedVisitSince(conn, customerId, serviceDate, today));
+}
+
+async function readLastVisitLabelFactsOnce({ customerId, conn, today }) {
 
   if (await hasVisitToday(conn, customerId, today)) return null;
 
@@ -947,14 +982,33 @@ const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| i
 // "may not", "unsure") is not the idiom, and neither is any negation or hedge
 // in the sentence that carries the idiom or the clause.
 // (the real-answers prompt's follow-up deadline - the exact SLA_PHRASES of sms-followup-sla - may trail the confirmation)
-const CONFIRM_TIMING_RE = new RegExp(`(?<![\\w'-])(?:your|the|our)\\s+(?:technician|tech)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?(?:\\s+(?:${require('./sms-followup-sla').SLA_PHRASES.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?\\s*(?:[.!]|$)`, 'i');
+// The follow-up deadline phrases (the exact SLA_PHRASES of sms-followup-sla) are read when first needed, not at module load: a consumer that
+// mocks or partially loads that module (or loads this one first) must not break the import. Missing phrases mean no deadline tail is
+// accepted (stricter: fail closed).
+function slaPhrases() {
+  try {
+    const phrases = require('./sms-followup-sla').SLA_PHRASES;
+    return Array.isArray(phrases) ? phrases : [];
+  } catch {
+    return [];
+  }
+}
+let confirmTimingRe = null;
+function confirmTimingRegExp() {
+  if (!confirmTimingRe) {
+    const phrases = slaPhrases();
+    const deadline = phrases.length ? `(?:\\s+(?:${phrases.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?` : '';
+    confirmTimingRe = new RegExp(`(?<![\\w'-])(?:your|the|our)\\s+(?:technician|tech)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?${deadline}\\s*(?:[.!]|$)`, 'i');
+  }
+  return confirmTimingRe;
+}
 const NEGATION_HEDGE_RE = /\b(?:not|no|never|nothing|nobody|cannot|without|unable|unsure|uncertain|unclear|unknown|may|might|maybe|perhaps|possibly|probably|hopefully|depends?|depending|but|however|unless|although|though|except|neither|nor|hardly|barely)\b|\bcan\s+not\b|n't\b/i;
 function sanctionSafeOnceDry(text) {
   if (overCap(text, MAX_REPLY_CHARS)) return String(text || ''); // (not sanctioned; the reply guard holds an over-long reply)
   const t = String(text || '');
   const canon = canonText(t);
-  if (!SANCTIONED_SAFE_RE.test(t) || !CONFIRM_TIMING_RE.test(canon)) return t;
-  const hedged = canon.split(/(?<=[.!?])\s+/).some((sentence) => (SANCTIONED_SAFE_RE.test(sentence) || CONFIRM_TIMING_RE.test(sentence)) && NEGATION_HEDGE_RE.test(sentence));
+  if (!SANCTIONED_SAFE_RE.test(t) || !confirmTimingRegExp().test(canon)) return t;
+  const hedged = canon.split(/(?<=[.!?])\s+/).some((sentence) => (SANCTIONED_SAFE_RE.test(sentence) || confirmTimingRegExp().test(sentence)) && NEGATION_HEDGE_RE.test(sentence));
   return hedged ? t : t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
 }
 
@@ -980,7 +1034,14 @@ const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|
 const OK_WORD_RE = /\b(?:safe|ok|okay|fine|ready|usable|clear|allowed)\b/;
 // ("you" is not the one going in: "do you spray inside the house?" is a question about the service)
 const INDOOR_ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|us|our|my|me|they|them|he|she|kids?|family)\\b");
-const asksIndoorReentry = (text) => !STAFF_ENTRY_RE.test(text) && (
+// ("do I need to be home / here for the appointment?" is pre-visit access, not re-entry)
+const BE_HOME_ACCESS_RE = /\b(?:(?:need|have|got|supposed|required)\s+to|(?:should|must|do)\s+(?:i|we))\s+(?:to\s+)?be\s+(?:here|home|inside|there)\b/;
+// Deictic indoor stay ("can we sleep here tonight?", "is it okay to stay here?", "can the kids stay home today", "ok to be here?"): a being subject
+// (or an ok word) with a question shape. A plain statement ("we will be home Tuesday") and "will you be here Tuesday?" (no being subject) are not.
+const DEICTIC_STAY_RE = /\b(?:sleep(?:ing)?|stay(?:ing)?|be|being|live|living|remain(?:ing)?)\s+(?:in\s+here|here|at\s+home|home)\b/;
+const asksIndoorReentry = (text) => !STAFF_ENTRY_RE.test(text) && !BE_HOME_ACCESS_RE.test(text) && (
+  (DEICTIC_STAY_RE.test(text) && ASKED_QUESTION_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
+  ||
   (ENTRY_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
   || (INDOOR_PLACE_RE.test(text) && INDOOR_ASKER_RE.test(text) && (ASKED_QUESTION_RE.test(text) || OK_WORD_RE.test(text)))
   || (INDOOR_PLACE_RE.test(text) && OK_WORD_RE.test(text) && ASKED_QUESTION_RE.test(text)));
@@ -1225,7 +1286,7 @@ function copiesDoNotAnswerAskedKinds(sentences, asked) {
 // never read as a label time), and never makes any other sentence pass ("Go ahead within the hour." keeps the phrase and is held).
 function stripHandoffDeadlines(text) {
   if (overCap(text, MAX_REPLY_CHARS)) return String(text || '');
-  const { SLA_PHRASES } = require('./sms-followup-sla');
+  const SLA_PHRASES = slaPhrases();
   return String(text || '').split(/([.!?\n]+)/).map((piece, i) => {
     if (i % 2) return piece;
     const lower = piece.trim().toLowerCase();

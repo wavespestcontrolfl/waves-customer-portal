@@ -2359,7 +2359,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const fetchedLabelFacts = presetFactsBlock ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
+  // (the LABEL FACTS section exists only with real answers on: with the gate off no label query runs at all)
+  const fetchedLabelFacts = presetFactsBlock || !realAnswersApplied ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
   // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
   // pointing at another visit (a coming one, an older one, another day) gets
   // the none-on-file section for that draft. Ambiguity reads as another visit.

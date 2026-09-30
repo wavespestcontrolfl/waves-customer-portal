@@ -324,7 +324,7 @@ describe('label row selection (mock knex)', () => {
     expect(selected).not.toMatch(/rainfast_minutes|rei_hours|reentry_|label_verified_at/);
     // performed = completed + not a non-performed outcome; report posture is NOT part of the selection
     const performedQ = conn.calls.filter((q) => q.table === 'service_records' && q.ops.some((o) => o[0] === 'max' || (o[0] === 'select' && o[1] === 'service_records.id')));
-    expect(performedQ).toHaveLength(2);
+    expect(performedQ).toHaveLength(3); // the newest-date read, the records read, and the consistency re-check of the newest date (a connection without transactions)
     for (const q of performedQ) {
       expect(q.ops).toContainEqual(['where', 'service_records.status', 'completed']);
       expect(q.ops.some((o) => o[0] === 'whereRaw' && /visitOutcome/.test(o[1]) && !/typedReportDelivery/.test(o[1]))).toBe(true);
@@ -1720,6 +1720,15 @@ describe('r25 item 1: every same-sender row the model is shown is read for a vis
   });
   const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
   const NONE = 'LABEL FACTS (none on file for the last visit):';
+  test('r34: gate off - the label lookup is never run, even for a customer with history (no label queries at all)', async () => {
+    delete process.env[GATE];
+    const r = await run('Can the dogs go out now?', [{ direction: 'inbound', body: 'Hello', date: days(1), fromPhone: PHONE }]);
+    expect(mockFetchLabelFacts).not.toHaveBeenCalled();
+    expect(r.factsBlock).not.toContain('LABEL FACTS');
+    process.env[GATE] = 'true';
+    await run('Can the dogs go out now?', []);
+    expect(mockFetchLabelFacts).toHaveBeenCalledTimes(1);
+  });
   test('a 3-day-old "the May treatment" row (past the 24 h inheritance window) still voids the facts, for an elliptical or a self-contained message', async () => {
     const may = { direction: 'inbound', body: 'What about the May treatment?', date: days(3), fromPhone: PHONE };
     expect((await run('Is it okay now?', [may])).factsBlock).toContain(NONE);
@@ -1877,7 +1886,8 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     'and a half': rep('one and a half '), 'keep off': rep('keep off '), 'keep the dogs': rep('keep the dogs '), 'wait for': rep('wait for '), 'give it a': rep('give it a '), 'let the dog': rep('let the dog '),
     'dry and': rep('dry and '), 'trigger words': rep('rain pets dogs kids lawn stay off until dry '), 'for 2 hours or': rep('for 2 hours or '), dashes: rep('- '), dots: rep('. '), commas: rep(', '), 'question marks': rep('? '),
     'let the cat': rep('let the cat '), 'go back in': rep('go back in '), 'come back inside': rep('come back inside '), 'sleep in the': rep('sleep in the '), 'use the kitchen': rep('use the kitchen '),
-    'inside house home': rep('inside house home '), 'water the': rep('water the '), 'turn the water back on': rep('turn the water back on '), 'run the sprinklers': rep('run the sprinklers '), 'water in': rep('water in the '), 'hand-off deadline': rep('Your technician will confirm the timing within the hour. '), 'you can go': rep('you can go back in '), 'free to': rep('they are free to '), 'feel free': rep('feel free to head back '), 'come home': rep('come home '), 'return to the': rep('return to the house '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
+    'inside house home': rep('inside house home '), 'water the': rep('water the '), 'turn the water back on': rep('turn the water back on '), 'run the sprinklers': rep('run the sprinklers '), 'water in': rep('water in the '), 'hand-off deadline': rep('Your technician will confirm the timing within the hour. '), 'sleep here': rep('we can sleep here '), 'stay home': rep('kids stay home '), 'be in here': rep('can we be in here '),
+    'you can go': rep('you can go back in '), 'free to': rep('they are free to '), 'feel free': rep('feel free to head back '), 'come home': rep('come home '), 'return to the': rep('return to the house '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
     'zero width': rep('\u200b '), apostrophes: rep("don't "), 'may in': rep('may in '), 'next fri': rep('next fri '), years: rep('in 2025 '), 'am pm': rep('9 am '), clocks: rep('9:00 '), 'by 5': rep('by 5 '), colons: rep('a: '),
   };
   const SECTION = 'LABEL FACTS (Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas for 4 hours.\n';
@@ -2097,6 +2107,82 @@ describe('r33: return / come home inbound verbs; permission-to-go-now outgoing s
       await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: reply, inbound: q, conn: () => { throw new Error('must not read'); } })).resolves.toBe('label_facts_unauthorized_claim');
     }
     expect(labelFactsLib.replyClaimsUngroundedLabelTiming("I'll have the office confirm within the hour.", '', asked(q))).toBe(false);
+  });
+});
+
+describe('r34: deictic indoor stay; one consistent read of the last visit; the import survives a mocked SLA module', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  test('a being subject + stay / sleep / be / live here or home asks re-entry; staff presence and plain statements do not', () => {
+    for (const text of ['Can we sleep here tonight?', 'Is it okay to stay here?', 'can the kids stay home today', 'ok to be here?', 'can we be in here', 'can we stay at home today', 'are we ok to live here']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, true]);
+    }
+    for (const text of ['will you be here Tuesday?', 'we will be home Tuesday', 'do I need to be home for the appointment', 'will the tech be here Tuesday', 'should I be home when you come', 'is someone home Tuesday']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+    }
+  });
+
+  describe('consistent read (readLastVisitLabelFacts)', () => {
+    const TODAY = '2026-06-10';
+    const frozen = { productType: 'pesticide', name: 'Some Product', category: 'insecticide', rainfastMinutes: 180, reentryHours: 0, reentrySummary: 'Keep people and pets off treated areas until dry.', labelVerifiedAt: '2026-05-28' };
+    // a scriptable fake: `flip` says what the database looks like on the Nth read of the newest date / of scheduled_services
+    const makeConn = ({ newestDates, scheduledByCall = [] }) => {
+      const counters = { max: 0, sched: 0 };
+      const conn = (table) => {
+        const q = { ops: [] };
+        for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'max']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
+        q.first = () => Promise.resolve({ service_date: newestDates[Math.min(counters.max++, newestDates.length - 1)] });
+        q.select = () => {
+          if (table === 'scheduled_services') return Promise.resolve(scheduledByCall[Math.min(counters.sched++, scheduledByCall.length - 1)] || []);
+          if (table === 'service_products as sp') return Promise.resolve([{ id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide' }]);
+          if (q.ops.some((o) => o[0] === 'where' && ((o[1] === 'status') || (o[1] && typeof o[1] === 'object' && 'service_date' in o[1])))) return Promise.resolve([]); // today's records / linked-record reads: none
+          return Promise.resolve([{ id: 'r2', structured_notes: null, service_type: 'Quarterly Pest', service_data: { reportIdentitySnapshot: { version: 1, productFacts: { p1: frozen } } } }]);
+        };
+        return q;
+      };
+      conn.counters = counters;
+      return conn;
+    };
+    const read = (conn) => labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn });
+    test('a connection without transactions is re-checked: nothing changed -> facts; a newer performed date lands mid-read -> none on file', async () => {
+      const steady = makeConn({ newestDates: ['2026-06-05'] });
+      expect((await read(steady)).serviceDate).toBe('2026-06-05');
+      expect(steady.counters.max).toBe(2); // the read and the re-check
+      expect(await read(makeConn({ newestDates: ['2026-06-05', '2026-06-08'] }))).toBeNull();
+    });
+    test('an unrecorded completed visit that appears between the guards and the end of the read -> none on file', async () => {
+      const appearing = makeConn({ newestDates: ['2026-06-05'], scheduledByCall: [[], [], [{ id: 'ss9', status: 'completed', scheduled_date: '2026-06-09' }]] });
+      expect(await read(appearing)).toBeNull();
+      const openNow = makeConn({ newestDates: ['2026-06-05'], scheduledByCall: [[], [], [{ id: 'ss9', status: 'en_route', scheduled_date: '2026-06-10' }]] });
+      expect(await read(openNow)).toBeNull();
+    });
+    test('a knex-style connection reads inside ONE repeatable-read, read-only transaction (no separate re-check)', async () => {
+      const inner = makeConn({ newestDates: ['2026-06-05'] });
+      const conn = { transaction: jest.fn(async (work, config) => work(inner, config)) };
+      const out = await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn });
+      expect(out.serviceDate).toBe('2026-06-05');
+      expect(conn.transaction).toHaveBeenCalledTimes(1);
+      expect(conn.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+      expect(inner.counters.max).toBe(1);
+      // the send-time recheck reads through the same function
+      const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [], asked: [] };
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body: 'Thanks', conn: () => { throw new Error('must not read'); } })).resolves.toBeNull();
+    });
+    test('fetchLabelFacts keeps its time limit and fails safe when the transaction never settles', async () => {
+      const conn = { transaction: () => new Promise(() => {}) };
+      expect(await labelFactsLib.fetchLabelFacts({ customerId: 'c1', conn, timeoutMs: 20 })).toBeNull();
+    });
+  });
+
+  test('the label module imports with sms-followup-sla mocked without SLA_PHRASES (the CI break), and then accepts no deadline tail (stricter)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/sms-followup-sla', () => ({ replyPromisesFollowup: () => false }));
+      const isolated = jest.requireActual('../services/sms-label-facts');
+      expect(isolated.sanctionSafeOnceDry('It is safe once dry, and your technician will confirm the timing.')).not.toBe('It is safe once dry, and your technician will confirm the timing.');
+      const withDeadline = 'It is safe once dry, and your technician will confirm the timing within the hour.';
+      expect(isolated.sanctionSafeOnceDry(withDeadline)).toBe(withDeadline); // no phrases known: the deadline tail is not accepted
+      expect(isolated.stripHandoffDeadlines("I'll have the office confirm within the hour.")).toBe("I'll have the office confirm within the hour.");
+      jest.dontMock('../services/sms-followup-sla');
+    });
   });
 });
 
