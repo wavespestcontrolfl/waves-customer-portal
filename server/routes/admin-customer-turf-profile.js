@@ -209,7 +209,10 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
       const nextLawnSqft = fields.lawn_sqft == null ? null : Number(fields.lawn_sqft);
-      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)) {
+      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)
+        // Ships dark: before the service-areas migration there is no review
+        // to withdraw and the column predicate below would error.
+        && await require('../services/property-service-areas').hasAreaMeasurementsColumn(trx)) {
         // This older editor does not review service areas. A changed turf
         // amount withdraws the old review instead of keeping its stamp on
         // a different number. Same customer fence as the shared editor.

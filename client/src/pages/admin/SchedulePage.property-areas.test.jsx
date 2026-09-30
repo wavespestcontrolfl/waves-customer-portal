@@ -166,3 +166,63 @@ it.each([false, true])('a changed reviewed area clears untouched generated prose
   expect(screen.getByDisplayValue(manual ? notes : 'Original field notes.')).toBeInTheDocument();
   expect(!!screen.queryByText(/the draft\s+was cleared/)).toBe(!manual);
 });
+
+// ── Review round: soil drench, kind binding, explicit coverage, stale-version retry ──
+const sequestar = { id: 'sequestar', name: 'Sequestar', category: 'fertilizer', application_method: 'soil_drench', default_rate_per_1000: 1.5, rate_unit: 'lb' };
+const bedField = [{ key: 'bed_sqft_serviced', label: 'Beds serviced', type: 'number' }];
+function heldAreas() {
+  const original = fetch.getMockImplementation();
+  const held = { release: null };
+  fetch.mockImplementation((url, ...rest) => url.includes('property-areas')
+    ? new Promise(resolve => { held.release = resolve; }) : original(url, ...rest));
+  return held;
+}
+const respond = data => new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+it('an area-based soil drench takes the reviewed bed area and derives its total', async () => {
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } }}
+    products={[...products, sequestar]} onClose={() => {}} onSubmit={vi.fn()} />);
+  await add('Sequestar');
+  expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200);
+  expect(screen.getByPlaceholderText('Total')).toHaveValue(1.8);
+});
+
+it('a product area default is bound to its service-area kind and stops following after reclassification', async () => {
+  const view = mount(); await add('Snapshot 2.5TG');
+  expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200);
+  view.rerender(panel('Mosquito Control'));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(3600));
+  expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200);
+});
+
+it('bed coverage typed before the measurements load becomes the visit override', async () => {
+  const held = heldAreas();
+  mount('Tree & Shrub Care', bedField);
+  fireEvent.change((await screen.findByText(/Beds serviced/)).closest('div').parentElement.querySelector('input'), { target: { value: '700' } });
+  await act(async () => held.release(respond(measurements)));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(700));
+  expect(screen.getByText('1,200 sq ft')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use property area' })).toBeInTheDocument();
+});
+
+it('a completion refused as stale refetches the areas and retries with the new version and the kept override', async () => {
+  const onSubmit = vi.fn()
+    .mockRejectedValueOnce(Object.assign(new Error('Property areas changed.'), { status: 409, code: 'property_service_area_changed' }))
+    .mockResolvedValue({ success: true });
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={products} onClose={() => {}} onSubmit={onSubmit} />);
+  fireEvent.change(await screen.findByLabelText('Area treated today (sq ft)'), { target: { value: '600' } });
+  measurements = { ...measurements, version: 'b'.repeat(64) };
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][1].propertyServiceArea).toMatchObject({ version: 'a'.repeat(64), treatedSqft: 600, explicitVisitArea: true });
+  const complete = await screen.findByRole('button', { name: /complete & send recap/i });
+  await waitFor(() => expect(complete).toBeEnabled());
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('/visit-1/property-areas')).length).toBe(2));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(600));
+  fireEvent.click(complete);
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+  expect(onSubmit.mock.calls[1][1].propertyServiceArea).toMatchObject({ version: 'b'.repeat(64), treatedSqft: 600, explicitVisitArea: true });
+});

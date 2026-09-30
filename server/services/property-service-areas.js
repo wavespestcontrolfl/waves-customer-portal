@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { addressKey } = require('./customer-properties');
 const { gateEnvValue } = require('../config/feature-gates');
 const { technicianCurrentVisitFilter, lockOwnedLiveVisit } = require('./technician-visit-scope');
+const logger = require('./logger');
 
 const AREA_KEYS = ['beds', 'lawn', 'mosquito'];
 const AREA_SOURCES = ['imagery', 'field', 'recorded', 'computed'];
@@ -13,6 +14,18 @@ const fail = (message, status = 400) => Object.assign(new Error(message), {
   status, statusCode: status, isOperational: true,
   ...(status === 409 ? { code: 'property_service_area_changed' } : {}),
 });
+
+// A live lookup is a paid upstream call reachable by any assigned tech. Repeat
+// refreshes for one property inside this window are served from the lookup
+// cache (estimates only) instead of going back upstream.
+const LOOKUP_REFRESH_COOLDOWN_MS = 2 * 60 * 1000;
+const recentLookupRefresh = new Map();
+function claimLookupRefresh(propertyId, now = Date.now()) {
+  for (const [id, at] of recentLookupRefresh) if (now - at >= LOOKUP_REFRESH_COOLDOWN_MS) recentLookupRefresh.delete(id);
+  if (recentLookupRefresh.has(propertyId)) return false;
+  recentLookupRefresh.set(propertyId, now);
+  return true;
+}
 
 function areaNumber(value) {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 1000000 ? value : null;
@@ -41,6 +54,17 @@ async function primaryLawnArea(property, knex) {
   if (addressKey(customer) !== addressKey(property)) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: property.customer_id }).first();
   return areaNumber(profile?.lawn_sqft);
+}
+
+// Dark-shipped column: legacy writers (the turf-profile editor) run before
+// migration 20260927010000 on a fresh deploy. Only a positive answer is
+// cached; a negative one is re-checked so the first post-migration write works.
+let areaColumnKnown = false;
+async function hasAreaMeasurementsColumn(knex = db) {
+  if (areaColumnKnown) return true;
+  const present = await knex.schema.hasColumn('customer_properties', 'service_area_measurements').catch(() => false);
+  if (present) areaColumnKnown = true;
+  return present;
 }
 
 function validateAreaChanges(input) {
@@ -109,13 +133,21 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
   const lawnSqft = await primaryLawnArea(property, knex);
   const version = areaVersion(property, lawnSqft);
   let estimates = {};
+  // A repeat refresh inside the cooldown reuses the cached lookup.
+  const liveRefresh = refresh && claimLookupRefresh(property.id);
   if (refresh || AREA_KEYS.some(key => !saved[key])) {
     const address = [property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(', ');
     const performLookup = lookup || require('../routes/property-lookup-v2').performPropertyLookup;
     // A missing/offline cache cannot hide already saved measurements or
     // turn a successful review save into an apparent failure.
-    const result = await performLookup(address, refresh ? { refresh: true } : { cacheOnly: true, persist: false })
-      .catch(error => { if (refresh) throw error; return null; });
+    const result = await performLookup(address, liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false })
+      .catch(error => {
+        if (!liveRefresh) return null;
+        // Upstream messages can name providers, keys or URLs: log them here
+        // and give the client a fixed operational message.
+        logger.warn(`[property-service-areas] lookup refresh failed property=${property.id}: ${error?.message}`);
+        throw fail('Property lookup is unavailable right now. Try again in a few minutes.', 502);
+      });
     estimates = lookupSuggestions(result?.enriched);
     // A slow lookup cannot return the former property's values after an
     // address change or reassignment. The lookup owns its own address cache.
@@ -124,9 +156,15 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
   }
   const legacy = {};
   if (areaNumber(property.bed_sqft) !== null) legacy.beds = { sqft: property.bed_sqft, source: 'recorded', reviewedAt: null };
-  if (lawnSqft !== null) legacy.lawn = { sqft: lawnSqft, source: 'recorded', reviewedAt: null };
+  // The primary property's turf profile overrides; otherwise the property's
+  // own recorded lawn area (already part of the version hash) is the fallback.
+  const recordedLawn = lawnSqft !== null ? lawnSqft : areaNumber(property.property_sqft);
+  if (recordedLawn !== null) legacy.lawn = { sqft: recordedLawn, source: 'recorded', reviewedAt: null };
   const areas = Object.fromEntries(AREA_KEYS.map(key => [key, saved[key] || legacy[key] || estimates[key] || null]));
-  return { enabled: true, propertyId: property.id, customerId: property.customer_id, version, areas };
+  // addressKey lets the editor tell an address change on the same property
+  // row from an ordinary concurrent measurement edit (version mixes both).
+  return { enabled: true, propertyId: property.id, customerId: property.customer_id,
+    addressKey: addressKey(property), version, areas };
 }
 
 async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
@@ -169,7 +207,7 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
 
 /** Freeze visit coverage inside normal completion (which holds the customer
  * and visit locks), never into property totals. */
-async function snapshotVisitArea(input, service, req, knex = db) {
+async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvidence = true } = {}) {
   if (!input || !propertyServiceAreasEnabled()) return null;
   const { detectServiceLine } = require('./service-report/service-line-configs');
   const kind = { tree_shrub: 'beds', lawn: 'lawn', mosquito: 'mosquito' }[detectServiceLine(service.service_type)];
@@ -179,10 +217,17 @@ async function snapshotVisitArea(input, service, req, knex = db) {
   const property = await loadAreaProperty({ serviceId: service.id, propertyId: input.propertyId }, req, knex);
   if (input.version !== areaVersion(property, await primaryLawnArea(property, knex))) throw fail('Property areas changed. Reload and review the job coverage.', 409);
   const measured = reviewedAreas(property)[kind];
+  // An untreated (incomplete, no products) visit only records coverage the
+  // tech set for this visit (explicitVisitArea, or a value that differs from
+  // the reviewed default); it never freezes
+  // the default as if it had been treated.
+  if (!treatmentEvidence && input.explicitVisitArea !== true && measured?.sqft === input.treatedSqft) return null;
   return { propertyId: property.id, kind, treatedSqft: input.treatedSqft,
     propertyAreaSqft: measured?.sqft ?? null, measurementSource: measured?.source ?? null,
     reviewedAt: measured?.reviewedAt ?? null };
 }
 
 module.exports = { AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
-  validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea };
+  validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
+  hasAreaMeasurementsColumn, _resetLookupCooldown: () => recentLookupRefresh.clear(),
+  _resetAreaColumnCache: () => { areaColumnKnown = false; } };

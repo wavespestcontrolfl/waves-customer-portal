@@ -46,6 +46,36 @@ describe('property area review', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Property areas changed');
     expect(screen.getByLabelText('Ornamental beds square feet')).toHaveValue(850);
   });
+  it('keeps the correction, unchecked, after an ordinary concurrent edit of the same property', async () => {
+    adminFetch.mockResolvedValueOnce(measurements());
+    const reloaded = measurements(); reloaded.version = 'b'.repeat(64);
+    render(<PropertyServiceAreas {...props} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review areas' }));
+    fireEvent.change(screen.getByLabelText('Ornamental beds square feet'), { target: { value: '850' } });
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    adminFetch.mockRejectedValueOnce(Object.assign(new Error('Property areas changed.'), { status: 409 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save reviewed areas' }));
+    adminFetch.mockResolvedValueOnce(reloaded);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load latest saved areas' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Load latest saved areas' })).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Ornamental beds square feet')).toHaveValue(850);
+    expect(screen.getAllByRole('checkbox')[0]).not.toBeChecked();
+  });
+  it('discards the correction when the reload describes a different property', async () => {
+    const reloaded = measurements(); reloaded.propertyId = 'property-2'; reloaded.version = 'c'.repeat(64);
+    reloaded.areas.beds = { sqft: 300, source: 'field', reviewedAt: '2026-09-27' };
+    render(<PropertyServiceAreas {...props} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review areas' }));
+    fireEvent.change(screen.getByLabelText('Ornamental beds square feet'), { target: { value: '850' } });
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    adminFetch.mockRejectedValueOnce(Object.assign(new Error('The service property changed. Reload the job.'), { status: 409 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save reviewed areas' }));
+    adminFetch.mockResolvedValueOnce(reloaded);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load latest saved areas' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('property changed');
+    expect(screen.getByLabelText('Ornamental beds square feet')).toHaveValue(300);
+    expect(screen.getAllByRole('checkbox')[0]).not.toBeChecked();
+  });
   it('treats zero as a reviewed area, and today’s coverage never issues a property write', async () => {
     const data = measurements(); data.areas.beds = { sqft: 0, source: 'field', reviewedAt: '2026-09-27' };
     adminFetch.mockResolvedValue(data);

@@ -5764,7 +5764,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceType: (lockedSvcRow || svc).service_type || null,
             });
           const propertyAreaSnapshot = await require('./property-service-areas')
-            .snapshotVisitArea(propertyServiceArea, lockedSvcRow || svc, completionInput.actor, trx);
+            .snapshotVisitArea(propertyServiceArea, lockedSvcRow || svc, completionInput.actor, trx, {
+              // An incomplete visit with no products applied did not treat
+              // the reviewed default area; only an explicit override counts.
+              treatmentEvidence: !isIncompleteVisit
+                || (Array.isArray(products) && products.some((product) => product && product.productId)),
+            });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             visitOutcome,

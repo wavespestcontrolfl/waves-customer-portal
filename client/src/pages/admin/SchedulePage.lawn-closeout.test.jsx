@@ -1950,7 +1950,7 @@ it('shared reviewed area drives lawn defaults while a partial visit and manual t
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['8', '4']));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000 });
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000, explicitVisitArea: true });
   expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(2000);
   expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
 });

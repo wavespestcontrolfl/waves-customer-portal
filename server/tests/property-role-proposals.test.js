@@ -459,6 +459,21 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     }
   });
 
+  test('primary promotion leaves the turf row alone before the property-areas migration', async () => {
+    const { _resetAreaColumnCache } = require('../services/property-service-areas');
+    _resetAreaColumnCache();
+    const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    trx.schema = { hasColumn: async () => false };
+    const result = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: neu.id, old_primary_property_id: old.id }],
+    });
+    expect(result.applied).toBe(1);
+    expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual([]);
+  });
+
   test('canonical premise match repairs equivalent-spelling stamps: coords + missing locality (codex r6→r26)', async () => {
     const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
     const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };

@@ -7,6 +7,12 @@ const SOURCES = { imagery: 'Satellite estimate', field: 'Field measurement', rec
 const SERVICE_AREAS = { tree_shrub: 'beds', lawn: 'lawn', mosquito: 'mosquito' };
 const controlClass = 'min-h-11 text-14 normal-case tracking-normal';
 const displayArea = value => Number(value).toLocaleString('en-US');
+// Which property a response describes. `addressKey` is compared once the
+// server exposes it; until then a reassigned visit shows as a new propertyId.
+const identityOf = result => [result?.customerId ?? '', result?.propertyId ?? '', result?.addressKey ?? ''].join('|');
+const draftFrom = result => Object.fromEntries(Object.keys(AREA_LABELS).map(key => [key, {
+  sqft: result.areas[key]?.sqft ?? '', source: result.areas[key]?.source || 'field', reviewed: false,
+}]));
 
 /** Shared property editor. The parent owns this visit's coverage and product
  * actuals; only an explicit reviewed-area save writes the property. */
@@ -101,10 +107,19 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
       const result = await adminFetch(endpoint);
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
       setData(result); current.current.onMeasurements?.(result);
-      // Keep the correction, but require another review against the new
-      // saved values before replacing someone else's concurrent change.
-      setDraft(previous => Object.fromEntries(Object.entries(previous).map(([key, value]) => [key, { ...value, reviewed: false }])));
-      setStale(false); setError('');
+      let notice = '';
+      if (identityOf(result) !== identityOf(data)) {
+        // The visit now points at a different property (or address): the
+        // measurements typed for the former one must not be saved onto it.
+        setDraft(draftFrom(result));
+        notice = 'This visit\'s property changed. The areas shown are the current property\'s; review them before saving.';
+      } else {
+        // Ordinary concurrent measurement edit: keep the correction, but
+        // require another review against the new saved values before
+        // replacing someone else's change.
+        setDraft(previous => Object.fromEntries(Object.entries(previous).map(([key, value]) => [key, { ...value, reviewed: false }])));
+      }
+      setStale(false); setError(notice);
     } catch (err) {
       if (current.current.endpoint === startedFor && generation === epoch.current) setError(err.message || 'Could not reload the saved areas.');
     } finally { if (current.current.endpoint === startedFor && generation === epoch.current) setBusy(false); }

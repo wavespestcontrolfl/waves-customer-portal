@@ -1096,9 +1096,11 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
       await trx('customers').where({ id: customerId }).update(mirror);
-      const { reviewedAreas } = require('./property-service-areas');
+      const { reviewedAreas, hasAreaMeasurementsColumn } = require('./property-service-areas');
       const { withTurfProfileFence } = require('./customer-pricing-ai');
-      await withTurfProfileFence(trx, customerId, async fencedTrx => {
+      // Before the property-areas migration no property carries a reviewed
+      // lawn, so there is nothing to mirror and the turf row stays as is.
+      if (await hasAreaMeasurementsColumn(trx)) await withTurfProfileFence(trx, customerId, async fencedTrx => {
         // A promoted property's own reviewed lawn becomes the primary turf
         // mirror. An unknown lawn must clear the former home's measurement.
         // Persisted measurements survive the UI kill switch. Keep this
