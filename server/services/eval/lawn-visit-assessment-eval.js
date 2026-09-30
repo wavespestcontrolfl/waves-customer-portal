@@ -25,6 +25,7 @@
  *     Gemini 3.8 line and stability has to be measured, not assumed
  */
 
+const { DEFAULTS } = require('../../config/models');
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
 const { contextHash, normalizePhotoZone } = require('../lawn-visit-input');
@@ -42,9 +43,11 @@ const PRICES_PER_M = Object.freeze({
   'gpt-6-astra': { input: 10, output: 50, reasoningSeparate: false },
   // Backup leg + second opinion since 2026-09-29 (OpenAI pricing page, short context).
   'gpt-6-sol': { input: 2, output: 10, reasoningSeparate: false },
-  // Referee (claude-api skill price table, cached 2026-09-25). Anthropic's
-  // output_tokens already include thinking, so nothing is added separately.
-  'claude-fable-5-1': { input: 10, output: 50, reasoningSeparate: false },
+  // Referee: the code-default Fable 5.1 id (keyed off models.js DEFAULTS, the
+  // one place Anthropic ids may be spelled), $10/$50 per the claude-api skill
+  // price table (2026-09-25). Anthropic's output_tokens already include
+  // thinking. An overridden referee model has no price here (costUsd null).
+  [DEFAULTS.LAWN_ASSESSMENT_REFEREE]: { input: 10, output: 50, reasoningSeparate: false },
 });
 
 // A pg DATE arrives as a Date (local midnight) or 'YYYY-MM-DD'; either way the
