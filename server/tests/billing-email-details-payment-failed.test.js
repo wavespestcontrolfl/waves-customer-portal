@@ -182,7 +182,8 @@ describe('failure with a payments row', () => {
       payments: [chain({ first: row({ next_retry_at: null }) })],
       payment_methods: [chain({ first: { id: 'pm-1', method_type: 'card', card_brand: 'Mastercard', last_four: '4444' } })],
     }));
-    const payload = await sendFailed({ paymentIntent: failedIntent({ brand: 'visa', last4: '9999' }), failedAt: FAILED_AT });
+    // No intent card to contradict it (round 10: an owned intent's card would win).
+    const payload = await sendFailed({ failedAt: FAILED_AT });
     expect(payload.payment_method_label).toBe('Mastercard ending in 4444');
   });
 
@@ -322,7 +323,7 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
       payment: owned({ card_brand: 'Visa', card_last_four: '1111' }),
       customer: { ...CUSTOMER, stripe_customer_id: null },
     }));
-    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 1111');
+    expect((await sendFailed({ failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 1111');
   });
 
   test('a saved method owned by the customer needs no Stripe ids', async () => {
@@ -333,7 +334,7 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
       payments: [chain({ first: owned({ payment_method_id: 'pm-1' }) })],
       payment_methods: [chain({ first: { id: 'pm-1', method_type: 'card', card_brand: 'Mastercard', last_four: '4444' } })],
     }));
-    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Mastercard ending in 4444');
+    expect((await sendFailed({ failedAt: FAILED_AT })).payment_method_label).toBe('Mastercard ending in 4444');
   });
 
   test('known Stripe ids that differ blank even an owned snapshot', async () => {
@@ -347,7 +348,8 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
       payment: owned({ card_brand: 'Visa', card_last_four: '1111' }),
       customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' },
     }));
-    expect((await sendFailed({ paymentIntent: intent('cus_mine'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 1111');
+    // Owned intent: the CURRENT attempt's card (4242) beats the row's snapshot.
+    expect((await sendFailed({ paymentIntent: intent('cus_mine'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
   });
 
   test('gate off: the payload is untouched by the ownership check', async () => {
@@ -355,5 +357,114 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
     mockQueues(build({ payment: owned({ customer_id: 'someone-else', card_brand: 'Visa', card_last_four: '1111' }) }));
     const payload = await sendFailed({ paymentIntent: failedIntent(), failedAt: FAILED_AT });
     expect(payload.payment_method_label).toBe('Visa ending in 1111');
+  });
+});
+
+// Round 10: a customerless pay-page intent (save-card unchecked) is owned through
+// its server-stamped metadata (stripe.js createInvoicePaymentIntent stamps
+// waves_customer_id and waves_invoice_id), and a reused intent's current card
+// beats the payments row's previous-attempt card.
+describe('round 10: customerless intent ownership and reused-intent staleness', () => {
+  const owned = (over = {}) => ({
+    id: 'pay-1', customer_id: 'cust-1', payment_method_id: null, amount: '129.00',
+    payment_date: '2026-09-28', next_retry_at: null, stripe_payment_intent_id: 'pi_test', ...over,
+  });
+  const customerless = (metadata, card) => ({ ...failedIntent(card), customer: null, metadata });
+  const stamped = { waves_customer_id: 'cust-1', waves_invoice_id: 'inv-1' };
+  // invoices queue: read 1 = the failed invoice, read 2 = the metadata ownership lookup.
+  const build = ({ payment, ownershipLookup = INVOICE, customer = CUSTOMER, methods } = {}) => lifecycle({
+    customers: [chain({ first: customer })],
+    invoices: [chain({ first: INVOICE }), chain({ first: ownershipLookup || undefined })],
+    payments: [chain({ first: payment })],
+    payment_methods: [chain({ first: methods })],
+  });
+
+  test('customerless intent with matching metadata shows the card (invoice looked up customer-scoped)', async () => {
+    mockDetailsLive = true;
+    mockQueues(build());
+    const payload = await sendFailed({ paymentIntent: customerless(stamped), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('Visa ending in 4242');
+    const lookup = db.mock.results.filter((r, i) => db.mock.calls[i][0] === 'invoices').at(-1).value;
+    expect(lookup.where).toHaveBeenCalledWith({ id: 'inv-1', customer_id: 'cust-1' });
+  });
+
+  test('metadata with only the customer id (no invoice id) is enough', async () => {
+    mockDetailsLive = true;
+    mockQueues(build());
+    const payload = await sendFailed({ paymentIntent: customerless({ waves_customer_id: 'cust-1' }), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('Visa ending in 4242');
+  });
+
+  test('metadata naming ANOTHER customer is blank', async () => {
+    mockDetailsLive = true;
+    mockQueues(build());
+    const payload = await sendFailed({
+      paymentIntent: customerless({ waves_customer_id: 'someone-else', waves_invoice_id: 'inv-1' }), failedAt: FAILED_AT,
+    });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('missing or empty metadata is blank', async () => {
+    mockDetailsLive = true;
+    for (const metadata of [undefined, null, {}, { waves_customer_id: '' }]) {
+      mockQueues(build());
+      expect((await sendFailed({ paymentIntent: customerless(metadata), failedAt: FAILED_AT })).payment_method_label).toBe('');
+    }
+  });
+
+  test('a stamped invoice that is not this customer\'s (no row back) is blank', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ ownershipLookup: null }));
+    const payload = await sendFailed({ paymentIntent: customerless(stamped), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('a customerless intent never uses metadata when it DOES carry a differing Stripe customer', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    const payload = await sendFailed({
+      paymentIntent: { ...customerless(stamped), customer: 'cus_other' }, failedAt: FAILED_AT,
+    });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('reused intent: the current card beats the previous attempt\'s payments-row snapshot', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: owned({ card_brand: 'Visa', card_last_four: '1111' }) }));
+    const payload = await sendFailed({ paymentIntent: customerless(stamped, { brand: 'mastercard', last4: '4444' }), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('Mastercard ending in 4444');
+  });
+
+  test('reused intent: the current card beats the stale saved-method pointer', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({
+      payment: owned({ payment_method_id: 'pm-old' }),
+      methods: { id: 'pm-old', method_type: 'card', card_brand: 'Visa', last_four: '1111' },
+    }));
+    const payload = await sendFailed({ paymentIntent: customerless(stamped, { brand: 'amex', last4: '1005' }), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('American Express ending in 1005');
+  });
+
+  test('an intent that names no card falls back to the saved method', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({
+      payment: owned({ payment_method_id: 'pm-1' }),
+      methods: { id: 'pm-1', method_type: 'card', card_brand: 'Visa', last_four: '1111' },
+    }));
+    const payload = await sendFailed({
+      paymentIntent: { ...customerless(stamped), last_payment_error: { payment_method: { type: 'us_bank_account' } } },
+      failedAt: FAILED_AT,
+    });
+    expect(payload.payment_method_label).toBe('Visa ending in 1111');
+  });
+
+  test('an intent card we cannot confirm never overrides the row, and a differing row card is blank', async () => {
+    mockDetailsLive = true;
+    // Unconfirmed (no metadata) and the row's card differs: either may be stale.
+    mockQueues(build({ payment: owned({ card_brand: 'Visa', card_last_four: '1111' }) }));
+    expect((await sendFailed({ paymentIntent: customerless(undefined, { brand: 'mastercard', last4: '4444' }), failedAt: FAILED_AT })).payment_method_label).toBe('');
+    // Unconfirmed but the same card as the row: the row's own label stands.
+    mockQueues(build({ payment: owned({ card_brand: 'Visa', card_last_four: '4242' }) }));
+    expect((await sendFailed({ paymentIntent: customerless(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
   });
 });

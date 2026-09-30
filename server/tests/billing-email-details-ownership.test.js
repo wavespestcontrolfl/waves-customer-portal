@@ -376,6 +376,44 @@ describe('round 5: combined-packet labels are verified against customer, invoice
       expect(await Details.invoicePropertyAddress(adopted, HOME)).toBe('');
     });
 
+    // Round 10: with a packet id the packet verdict governs the date too. A
+    // rejected or empty packet must not fall back to the owner visit's date.
+    describe('round 10: the service date obeys the packet verdict', () => {
+      const undated = { ...adopted, service_type: 'Lawn Care', service_date: null };
+      const foreign = { member_customer_id: 'someone-else' };
+
+      test('verified packet: the date still comes from the owner record', async () => {
+        mockTables(tables([member(), member({ service_type: 'Pest Control' })]));
+        expect((await Details.invoiceServiceDetails(undated)).date).toBe('September 2, 2026');
+      });
+
+      test('a rejected member suppresses the direct-link date', async () => {
+        mockTables(tables([member(), member(foreign)]));
+        expect((await Details.invoiceServiceDetails(undated)).date).toBe('');
+      });
+
+      test('an empty packet suppresses the direct-link date', async () => {
+        mockTables(tables([]));
+        expect((await Details.invoiceServiceDetails(undated)).date).toBe('');
+      });
+
+      test('a failed packet lookup suppresses the direct-link date', async () => {
+        mockTables(tables([member()]));
+        const impl = db.getMockImplementation();
+        db.mockImplementation((table) => {
+          if (table === 'visit_completion_packet_items as i') throw new Error('db blip');
+          return impl(table);
+        });
+        expect((await Details.invoiceServiceDetails(undated)).date).toBe('');
+      });
+
+      test('a non-packet invoice keeps its direct-link date', async () => {
+        mockTables(tables([]));
+        const direct = { ...undated, visit_completion_packet_id: null };
+        expect((await Details.invoiceServiceDetails(direct)).date).toBe('September 2, 2026');
+      });
+    });
+
     test('the service label comes from the packet members, not the owner visit alone', async () => {
       mockTables(tables([member(), member({ service_type: 'Pest Control' })]));
       expect((await Details.invoiceServiceDetails(adopted)).label).toBe('Lawn Care, Pest Control');

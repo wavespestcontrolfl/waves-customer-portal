@@ -339,14 +339,20 @@ async function invoiceServiceDetails(invoice) {
   let date = invoiceDate;
   try {
     const isPacket = !!invoice?.visit_completion_packet_id;
-    if (isPacket && !label) {
+    let packetOk = true;
+    if (isPacket && (!label || !date)) {
       // Verified as a set against the customer, the invoice and the packet's
       // own visit (ownedPacketVisits): one rejected member drops the whole list.
-      const { members } = await ownedPacketVisits(invoice, ['s.service_type']);
-      const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
-      if (names.length) label = names.join(', ');
+      // A packet invoice's packet verdict governs EVERYTHING derived below: a
+      // rejected packet also suppresses the direct-link date fallback.
+      const { ok, members } = await ownedPacketVisits(invoice, ['s.service_type']);
+      packetOk = ok && members.length > 0;
+      if (!label) {
+        const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
+        if (names.length) label = names.join(', ');
+      }
     }
-    if (!label || !date) {
+    if (packetOk && (!label || !date)) {
       // Both rows come through the ownership-checked path; the completion
       // record is read whenever EITHER half still needs a fallback, so the
       // record's own date beats the visit's scheduled date.

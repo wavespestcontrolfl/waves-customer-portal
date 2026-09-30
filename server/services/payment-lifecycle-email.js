@@ -615,17 +615,35 @@ function paymentOwnershipAgrees({ emailedCustomerId, payment, invoice }) {
   return true;
 }
 
-// FAIL CLOSED: the failed PaymentIntent's card may be named only when BOTH
-// Stripe customer ids are known and equal (the intent's, and the emailed
-// customer's stripe_customer_id). Unknown on either side, or a lookup failure,
-// is "cannot confirm" and the row stays blank.
+// FAIL CLOSED: the failed PaymentIntent's card may be named only when its
+// ownership is positively confirmed, by EITHER
+//  (a) both Stripe customer ids known and equal (the intent's, and the emailed
+//      customer's stripe_customer_id), OR
+//  (b) the intent has NO Stripe customer (createInvoicePaymentIntent leaves
+//      piParams.customer unset unless the payer ticked "save card") and the
+//      server-stamped metadata names the emailed customer: waves_customer_id
+//      (stripe.js, the pay-page PaymentIntent's metadata) equals the emailed
+//      customer, and when waves_invoice_id is stamped too, that invoice belongs
+//      to the emailed customer (looked up customer-scoped).
+// Unknown on either side, a differing id, or a lookup failure is "cannot
+// confirm" and the row stays blank.
 async function intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent }) {
+  if (!emailedCustomerId || !paymentIntent) return false;
   const intentCustomer = intentStripeCustomerId(paymentIntent);
-  if (!emailedCustomerId || !intentCustomer) return false;
   try {
-    const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
-    const known = clean(row?.stripe_customer_id);
-    return !!known && known === intentCustomer;
+    if (intentCustomer) {
+      const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
+      const known = clean(row?.stripe_customer_id);
+      return !!known && known === intentCustomer;
+    }
+    const stamped = clean(paymentIntent.metadata?.waves_customer_id);
+    if (!stamped || stamped !== String(emailedCustomerId)) return false;
+    const stampedInvoice = clean(paymentIntent.metadata?.waves_invoice_id);
+    if (stampedInvoice) {
+      const owned = await db('invoices').where({ id: stampedInvoice, customer_id: emailedCustomerId }).first('id');
+      if (!owned) return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -731,17 +749,34 @@ async function sendPaymentFailed({
     if (!paymentOwnershipAgrees({ emailedCustomerId, payment, invoice })
       || await intentCustomerConflicts({ emailedCustomerId, paymentIntent })) {
       payload.payment_method_label = '';
-    } else if (!payload.payment_method_label) {
-      // A lookup blip must never throw out of the webhook: blank row instead.
-      const owner = payment?.customer_id || null;
-      const saved = owner && payment?.payment_method_id
-        ? await loadPaymentMethod(payment.payment_method_id, owner).catch(() => null)
-        : null;
-      const savedParts = saved ? methodParts(saved) : null;
-      if (savedParts?.last4) {
-        payload.payment_method_label = savedParts.label;
-      } else if (await intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent })) {
-        payload.payment_method_label = failedIntentCardLabel(paymentIntent);
+    } else {
+      // Pay-page PaymentIntents are reused after a failed attempt and the
+      // webhook only updates status / failure_reason on the existing payments
+      // row (stripe-webhook.js), so the row's card snapshot and saved-method
+      // pointer can be the PREVIOUS attempt's card. When the current intent
+      // names a card and its ownership is confirmed, that card wins. When it
+      // names a card we cannot confirm and the row's own card differs, either
+      // may be the stale one: blank rather than guess.
+      const intentLabel = failedIntentCardLabel(paymentIntent);
+      const intentOwned = intentLabel
+        ? await intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent })
+        : false;
+      if (intentOwned) {
+        payload.payment_method_label = intentLabel;
+      } else {
+        if (!payload.payment_method_label) {
+          // A lookup blip must never throw out of the webhook: blank row instead.
+          const owner = payment?.customer_id || null;
+          const saved = owner && payment?.payment_method_id
+            ? await loadPaymentMethod(payment.payment_method_id, owner).catch(() => null)
+            : null;
+          const savedParts = saved ? methodParts(saved) : null;
+          if (savedParts?.last4) payload.payment_method_label = savedParts.label;
+        }
+        if (intentLabel && payload.payment_method_label
+          && !payload.payment_method_label.endsWith(` ${clean(paymentIntent.last_payment_error.payment_method.card.last4)}`)) {
+          payload.payment_method_label = '';
+        }
       }
     }
     if (!payload.failed_payment_date) payload.failed_payment_date = displayDate(failedAt);
