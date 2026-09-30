@@ -1075,6 +1075,12 @@ const gates = {
   // button calls the same sync directly and is not gated here.
   linkLibrarySync: process.env.GATE_LINK_LIBRARY_SYNC !== 'false',
 
+  // Citation auditor — WEEKLY read-only GET of each seo_citations listing_url
+  // (services/seo/citation-auditor.js: SSRF-pinned, sequential, one request per
+  // row, nothing submitted or claimed) compared against config/locations.js NAP.
+  // No sends, no customer data. DEFAULT ON; kill switch GATE_CITATION_AUDIT=false.
+  citationAudit: process.env.GATE_CITATION_AUDIT !== 'false',
+
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
   // sent, per intent class (shadow_draft_judgments). LLM is called only
