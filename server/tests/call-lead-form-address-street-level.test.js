@@ -16,6 +16,7 @@ const {
   streetLevelMatch,
   buildStreetLevelHold,
   buildStreetLevelHoldAlert,
+  isStreetLevelHoldRow,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -439,9 +440,9 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
 
   test('the same outbound_booking_review card the voice agent files, with the originating lead id, in the booking transaction', () => {
     const s = src();
-    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: v2ApprovedExtraction || extracted,");
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
     expect(at).toBeGreaterThan(s.indexOf("const [created] = await trx('scheduled_services')"));
-    const block = s.slice(at, at + 1400);
+    const block = s.slice(at, at + 2000);
     expect(block).toContain('lead_id: leadId || null');
     // Same origin as the voice agent's card: the confirm hook never guesses a lead when lead_id is null.
     expect(block).toContain("origin: 'voice_agent',");
@@ -483,9 +484,11 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
     const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form Lead' };
     const a = buildStreetLevelHoldAlert({ hold, visitId: 'visit-9', callSid: 'CA1', scheduledDate: '2026-10-05T00:00:00.000Z', windowStart: '13:00:00' });
     expect(a.category).toBe('schedule');
-    expect(a.title).toBe('Confirm address before dispatch');
+    expect(a.title).toBe('Schedule — Confirm address before dispatch');
+    expect(a.title.length).toBeLessThanOrEqual(60);
+    expect(a.body.length).toBeLessThanOrEqual(110);
+    expect(a.body).toMatch(/Google matched the street only\.$/);
     expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, 2026-10-05 13:00');
-    expect(a.body).toMatch(/confirm the visit \(or correct its address, or cancel\)/i);
     expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/schedule?serviceId=visit-9' });
     expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
@@ -550,5 +553,65 @@ describe('shared ZIPs need Google\'s own county (owner ruling 2026-09-30)', () =
     gateOn();
     expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
     expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ normalized: n('34292', 'Venice') }))).toMatchObject({ areaBasis: 'google_zip' });
+  });
+});
+
+describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, form snapshot', () => {
+  const fs = require('fs');
+  const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
+  const src = () => read('../services/call-recording-processor.js');
+
+  test('the bell body stays within 110 characters and clips the address, never the tail', () => {
+    const hold = {
+      address_on_file: '123456 Sample Extremely Long Newbuild Boulevard Northwest, Lakewood Ranch, FL, 34202',
+      customer_name: 'Form Lead With A Rather Long Synthetic Name', google_street: null,
+    };
+    const a = buildStreetLevelHoldAlert({ hold, visitId: 'v1', scheduledDate: '2026-10-05', windowStart: '13:00:00' });
+    expect(a.body.length).toBeLessThanOrEqual(110);
+    expect(a.body).toContain('…');
+    expect(a.body).toMatch(/, 2026-10-05 13:00\. Google matched the street only\.$/);
+    expect(a.body.startsWith('Form Lead With A Rather Long Synthetic Name, 1234')).toBe(true);
+    // No visit time: still within budget.
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v1' }).body.length).toBeLessThanOrEqual(110);
+  });
+
+  test('the review card carries the durable street-level signal and the promised follow-up plan', () => {
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
+    expect(at).toBeGreaterThan(0);
+    const block = s.slice(at, at + 1800);
+    expect(block).toContain('street_level_address: true');
+    expect(block).toMatch(/follow_up_plan: \{ scheduled_date: callFollowUpPlan\.scheduledDate/);
+    expect(s).toContain('Book the promised follow-up visit');
+  });
+
+  test('isStreetLevelHoldRow: only a pending office-review row with the flagged card; fails closed on error', async () => {
+    const row = { id: 'v1', source_call_log_id: 'c1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false };
+    const conn = (found) => () => ({ where() { return this; }, whereRaw() { return this; }, first: async () => (found ? { id: 't1' } : undefined) });
+    expect(await isStreetLevelHoldRow(conn(true), row)).toBe(true);
+    expect(await isStreetLevelHoldRow(conn(false), row)).toBe(false);         // a plain voice-agent row
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed' })).toBe(false);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, source_action: 'ai_call_pipeline' })).toBe(false);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, source_call_log_id: null })).toBe(false);
+    expect(await isStreetLevelHoldRow(() => { throw new Error('db down'); }, row)).toBe(true);
+  });
+
+  test('a pipeline reuse never activates a street-level hold, and no follow-up child is created off it', () => {
+    const s = src();
+    expect(s).toContain('if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {');
+    const fu = s.indexOf('const ensureCallFollowUpVisit = async (primaryRow) => {');
+    const guard = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) return null;', fu);
+    expect(guard).toBeGreaterThan(fu);
+    expect(guard - fu).toBeLessThan(1200);
+    // Before any child insert.
+    expect(guard).toBeLessThan(s.indexOf("source_action: 'ai_call_pipeline_followup'", fu));
+  });
+
+  test('AI triage keeps the web form snapshot (stage and address) when it replaces extracted_data', () => {
+    const w = read('../routes/lead-webhook.js');
+    const triage = w.slice(w.indexOf('if (triageResult.extractedData) {'));
+    const block = triage.slice(0, triage.indexOf('if (Object.keys(updates).length > 0)'));
+    expect(block).toContain("'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage'");
+    expect(block).toContain("'address', COALESCE(extracted_data, '{}'::jsonb)->'address'");
   });
 });

@@ -1720,11 +1720,18 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
   const when = [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
   const who = hold.customer_name || 'New lead';
+  // Owner ruling 2026-09-30: headline "Area — what to do" (<= 60), body "why" (<= 110).
+  // The address gives way first when the line runs long; the tail never does.
+  const tail = '. Google matched the street only.';
+  const clip = (text, room) => (room <= 0 ? '' : text.length <= room ? text : `${text.slice(0, Math.max(room - 1, 0)).trimEnd()}…`);
+  const whenPart = when ? `, ${when}` : '';
+  const room = 110 - tail.length - whenPart.length - `${who}, `.length;
+  let body = `${who}, ${clip(hold.address_on_file, room)}${whenPart}${tail}`;
+  if (body.length > 110) body = `${clip(who, 110 - tail.length - whenPart.length)}${whenPart}${tail}`.slice(0, 110);
   return {
     category: 'schedule',
-    title: 'Confirm address before dispatch',
-    body: `${who}, ${hold.address_on_file}${when ? `, ${when}` : ''}. Google confirmed only the street, not the house number. `
-      + 'Confirm the address with the customer, then confirm the visit (or correct its address, or cancel). It stays pending until then.',
+    title: 'Schedule — Confirm address before dispatch',
+    body,
     opts: {
       icon: '📍',
       link: `/admin/schedule?serviceId=${encodeURIComponent(visitId)}`,
@@ -1733,6 +1740,25 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
       metadata: { scheduledServiceId: visitId, callSid, address_on_file: hold.address_on_file, google_street: hold.google_street },
     },
   };
+}
+// True when this row is a street-level address hold: a pending office-review
+// row whose outbound_booking_review card carries payload.street_level_address.
+// The card is the durable signal (no new source_action, no new column); it is
+// read whether open or resolved, so a denied card cannot release the hold. Fails
+// CLOSED (treated as a hold) on a lookup error.
+async function isStreetLevelHoldRow(conn, row) {
+  try {
+    if (!row?.id || !row.source_call_log_id || !isPendingOutboundReviewBooking(row)) return false;
+    const card = await conn('triage_items')
+      .where({ call_log_id: row.source_call_log_id, reason_code: 'outbound_booking_review' })
+      .whereRaw("payload->>'street_level_address' = 'true'")
+      .whereRaw("payload->>'scheduled_service_id' = ?", [String(row.id)])
+      .first('id');
+    return !!card;
+  } catch (err) {
+    logger.warn(`[call-proc] street-level hold lookup failed for ${row?.id}: ${err.message}`);
+    return true;
+  }
 }
 function dateOnlyISO(v) {
   if (!v) return null;
@@ -16335,6 +16361,11 @@ const CallRecordingProcessor = {
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
                   if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  // A street-level address hold has no visit 2 until the office
+                  // confirms the address: the promised follow-up rides on the review
+                  // card (payload.follow_up_plan) instead of a child at an unverified
+                  // address.
+                  if (await isStreetLevelHoldRow(trx, primaryRow)) return null;
                   // Any existing follow-up off this primary — whatever its
                   // status or origin (AI child OR a completion-CTA follow-up)
                   // — means dispatch already owns the outcome (a cancelled
@@ -17340,11 +17371,22 @@ const CallRecordingProcessor = {
                   // pending bookings file; no card, no booking (the insert
                   // rolls back), as in that lane.
                   if (streetLevelPending) {
+                    const cardBase = v2ApprovedExtraction || extracted;
+                    const cardExtraction = callFollowUpPlan
+                      ? {
+                        ...cardBase,
+                        meta: {
+                          ...(cardBase?.meta || {}),
+                          call_summary: `${cardBase?.meta?.call_summary || 'Booking on the web-form address (Google matched the street only).'} `
+                            + `Book the promised follow-up visit${callFollowUpPlan.scheduledDate ? ` (${dateOnlyISO(callFollowUpPlan.scheduledDate)})` : ''} once the address is confirmed.`,
+                        },
+                      }
+                      : cardBase;
                     const [card] = await trx('triage_items')
                       .insert(buildTriageItem({
                         callLogId: call.id,
                         flag: 'outbound_booking_review',
-                        extraction: v2ApprovedExtraction || extracted,
+                        extraction: cardExtraction,
                         severity: 'advisory',
                         extraPayload: {
                           // Same origin the voice agent's card carries: the confirm hook
@@ -17353,6 +17395,14 @@ const CallRecordingProcessor = {
                           scheduled_service_id: created.id,
                           lead_id: leadId || null,
                           keep_open_for_quote: !!callQuotePromised,
+                          // The durable signal that this pending row is a street-level
+                          // address hold (see isStreetLevelHoldRow): a pipeline reuse
+                          // of the row must not activate it, and no follow-up visit
+                          // is created off it until the office confirms.
+                          street_level_address: true,
+                          // The promised second treatment, if any, rides on the card
+                          // (as the held-attach cards do); the office books it on confirm.
+                          ...(callFollowUpPlan ? { follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } } : {}),
                         },
                       }))
                       .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore()
@@ -17545,7 +17595,9 @@ const CallRecordingProcessor = {
                   });
                 }
               }
-              if (scheduleWasReused && !disputeHeldReuse) {
+              if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
+                // (A street-level address hold is never activated by a pipeline
+                // reuse — only the office confirm activates it.)
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
                 // reuse branches convert its lead and the replay repair arms
@@ -21215,6 +21267,7 @@ CallRecordingProcessor._test = {
   streetLevelMatch,
   buildStreetLevelHold,
   buildStreetLevelHoldAlert,
+  isStreetLevelHoldRow,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
