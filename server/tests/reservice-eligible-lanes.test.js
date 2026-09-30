@@ -487,11 +487,32 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['my yard treatment did not work', false, 'lawn', false],
     // genuinely ambiguous
     ['ants in the yard and weeds in the lawn', false, null, false],
+    // Codex round-39 P2: "stopped / gone" resolve a sighting only when they bind to the PEST subject
+    ['Ants are back because the treatment stopped working', true, 'pest', false],
+    ['Ants are back since the rain stopped', true, 'pest', false],
+    ['Ants are back, the spray stopped working', true, 'pest', false],
+    ['ants are back, but the noise stopped', true, 'pest', false],
+    ['the ants stopped', false, null, false],
+    ['they stopped coming', false, null, false],
+    ['saw ants yesterday, now they are gone', false, null, false],
+    // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
+    ['Ants and chinch bugs are back', true, null, false],
   ];
   test.each(ROWS)('%s → active=%s lane=%s specialty=%s', (text, active, lane, specialty) => {
     expect(isActivePestReport(text)).toBe(active);
     expect(reportedReserviceLane(text)).toBe(lane);
     expect(reportedReserviceExcludedSpecialty(text)).toBe(specialty);
+  });
+
+  // Codex round-39 P2: the SET of reported lanes
+  test('reportedReserviceLanes preserves every reported lane (pest + lawn); an excluded specialty or a non-report is empty', () => {
+    const { reportedReserviceLanes } = require('../services/reservice-scheduler');
+    expect(reportedReserviceLanes('Ants and chinch bugs are back')).toEqual(['pest', 'lawn']);
+    expect(reportedReserviceLanes('The roaches are back and the mole crickets are back')).toEqual(['pest', 'lawn']);
+    expect(reportedReserviceLanes('Chinch bugs are back')).toEqual(['lawn']);
+    expect(reportedReserviceLanes('the ants are back')).toEqual(['pest']);
+    expect(reportedReserviceLanes('the termites are back')).toEqual([]);
+    expect(reportedReserviceLanes('thanks for the visit')).toEqual([]);
   });
 
   test('the drafter\'s PEST_REPORT_TEXT_RE is that same classifier', () => {
@@ -741,13 +762,13 @@ describe('covered-pests load-time derivation never throws (and drift is reported
 describe('loadReserviceLaneAvailability — a live callback survives an inactive / tokenless customer row', () => {
   const { loadReserviceLaneAvailability } = require('../services/reservice-scheduler');
   const callback = { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't1', service_key: 'pest_re_service' };
-  const fakeDb = ({ customer, callbacks = [callback] }) => {
+  const fakeDb = ({ customer, callbacks = [callback], coverage = [] }) => {
     const mk = (table) => {
       const chain = {};
       for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'orWhere', 'orWhereIn', 'modify', 'select', 'limit', 'forUpdate']) chain[m] = () => chain;
       chain.orderBy = () => { chain.mode = 'callbacks'; return chain; };
       chain.first = async () => (table === 'customers' ? customer : null);
-      chain.then = (resolve) => Promise.resolve(chain.mode === 'callbacks' ? callbacks : []).then(resolve);
+      chain.then = (resolve) => Promise.resolve(chain.mode === 'callbacks' ? callbacks : coverage).then(resolve);
       return chain;
     };
     return (table) => mk(table);
@@ -765,9 +786,21 @@ describe('loadReserviceLaneAvailability — a live callback survives an inactive
     const tokenless = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: true, reservice_token: null } }));
     expect(Object.keys(tokenless.open)).toEqual(['pest']);
     expect(tokenless.bookable).toEqual([]);
-    expect(tokenless.verified).toBe(false);
     const missing = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: null }));
     expect(missing).toEqual({ eligible: [], open: {}, bookable: [], verified: false });
+  });
+
+  // Codex round-39 P2: entitlement is independent of the token — a restored tokenless customer is still covered; only the LINK is missing.
+  test('tokenless customer WITH a recurring pest plan: covered lane kept, nothing bookable, linkMissing, verified', async () => {
+    const coverage = [{ service_type: 'Quarterly Pest Control', is_callback: false, service_key: null, category: 'pest_control' }];
+    const out = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: true, reservice_token: null }, callbacks: [], coverage }));
+    expect(out.eligible).toEqual(['pest']);
+    expect(out.bookable).toEqual([]);
+    expect(out.linkMissing).toBe(true);
+    expect(out.verified).toBe(true);
+    const tokened = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: true, reservice_token: 'tok' }, callbacks: [], coverage }));
+    expect(tokened.bookable).toEqual(['pest']);
+    expect(tokened.linkMissing).toBeUndefined();
   });
 
   test('inactive customer with NO open callback: empty open, unverified (unchanged behavior)', async () => {

@@ -1926,7 +1926,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
   // through — so the active/deleted/token/lane checks are exercised once,
   // at that loader (server/tests/reservice-eligible-lanes.test.js), not
   // re-tested here against a fake customer row.
-  function loadWith({ lanes = ['pest'], selfServe = true, throws = false, booked = [], recurring = false } = {}) {
+  function loadWith({ lanes = ['pest'], selfServe = true, throws = false, booked = [], recurring = false, linkMissing = false } = {}) {
     jest.resetModules();
     // Codex round-11 P2 (PR #5336): the drafter reads reservice-scheduler's SHARED
     // lane availability (coverage minus open callbacks); `lanes` is the covered
@@ -1935,7 +1935,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     const loadEligibleReserviceLanes = jest.fn(async () => {
       if (throws) throw new Error('boom');
       const open = Object.fromEntries(booked.map((l) => [l, { date: '2026-10-05' }]));
-      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)), verified: true, hasRecurringPlan: lanes.length > 0 || recurring };
+      return { eligible: lanes, open, bookable: linkMissing ? [] : lanes.filter((l) => !booked.includes(l)), verified: true, hasRecurringPlan: lanes.length > 0 || recurring, ...(linkMissing ? { linkMissing: true } : {}) };
     });
     // namedReserviceLanesInText (Codex round-6 P1) reads the real module's
     // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
@@ -1943,9 +1943,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, reportedReserviceLanes, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, reportedReserviceLanes, isActivePestReport, mentionsAffirmed, namesOtherService,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -1986,6 +1986,13 @@ describe('free re-service is an entitlement resolved through the existing mechan
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest'] });
     await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'], linkAvailable: true, linkDownLanes: [], verified: true, hasRecurringPlan: true });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
+  });
+
+  // Codex round-39 P2: a covered customer with no reservice_token (restored row) is entitled; only the booking LINK is missing.
+  test('tokenless covered customer: link-unavailable fact state (covered, not "not eligible"), nothing bookable', async () => {
+    const { drafter } = loadWith({ lanes: ['pest'], linkMissing: true });
+    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toMatchObject({ eligible: ['pest'], bookable: [], linkAvailable: false, linkDownLanes: ['pest'], verified: true });
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {}, linkDownLanes: ['pest'], planState: 'unknown' });
   });
 
   test('liveReserviceLaneState fails closed the same way fetchReserviceFactState does', async () => {
@@ -3007,6 +3014,46 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(owed("I'm angry, the ants are back")).toBe(false);
       });
 
+      // Codex round-39 P2: an explicit, AFFIRMED refusal of a visit / callback / link suppresses the owed offer and forbids a promise.
+      test('an explicit refusal of a visit / link suppresses the owed offer; a negated or third-party "refusal" does not', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
+        for (const m of ["Ants are back, but please don't send anyone", "Ants are back. Don't send me a link", 'The ants are back, I do not want a visit', 'ants are back, no need to send anyone out', "ants are back but I don't need a technician", 'Ants are back, no thanks', "the roaches are back and I don't want a callback"]) expect([m, owed(m)]).toEqual([m, false]);
+        for (const m of ["Ants are back, I'm not saying don't send anyone", 'The ants are back, you never send anyone', "The ants are back and I don't know who to send", 'the ants are back, please send someone']) expect([m, owed(m)]).toEqual([m, true]);
+        // and the reply may not promise one
+        const promise = validateReserviceOffer({ reply: "I'm sending your free re-service booking link now.", factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: "Ants are back, please don't send anyone" });
+        expect(promise.ok).toBe(false);
+        expect(promise.violations[0]).toMatch(/explicitly declined/);
+        expect(validateReserviceOffer({ reply: "I'm sending your free re-service booking link now.", factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'Ants are back' }).ok).toBe(true);
+      });
+
+      // Codex round-39 P2: the SET of reported lanes — "Ants and chinch bugs are back" reports pest AND lawn; the promise covers each eligible one.
+      test('several reported lanes: owed = reported ∩ eligible, and the promise must cover each; the slot guard covers every reported lane', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const inboundMessage = 'Ants and chinch bugs are back';
+        const link = [{ type: 'escalate', note: 'send_reservice_link' }];
+        const run = (reply, lanes, extra = {}) => validateReserviceOffer({ reply, factsBlock: facts(lanes), intendedActions: link, inboundMessage, ...extra });
+        // owed: neither lane promised → revised
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest', 'lawn']), intendedActions: [], inboundMessage }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage }).ok).toBe(false);
+        // pest-only promise while both are reported + eligible → rejected; naming both, or generic, passes with BOTH lanes snapshotted
+        expect(run("I'm sending your free pest re-service booking link now.", ['pest', 'lawn']).ok).toBe(false);
+        const both = run("I'm sending your free pest and lawn re-service booking links now.", ['pest', 'lawn']);
+        expect(both.ok).toBe(true);
+        expect(both.promisedLanes.sort()).toEqual(['lawn', 'pest']);
+        const generic = run("I'm sending your free re-service booking link now.", ['pest', 'lawn']);
+        expect(generic.ok).toBe(true);
+        expect(generic.promisedLanes.sort()).toEqual(['lawn', 'pest']);
+        // only one reported lane is eligible: the promise covers that one
+        const lawnOnly = run("I'm sending your free lawn re-service booking link now.", ['lawn']);
+        expect(lawnOnly.ok).toBe(true);
+        expect(lawnOnly.promisedLanes).toEqual(['lawn']);
+        // slot guard: a booked / link-down / eligible lane anywhere in the reported set blocks offered_times
+        const timed = validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage, offeredTimes: [{ date: '2026-10-08' }] });
+        expect(timed.ok).toBe(false);
+        expect(timed.violations[0]).toMatch(/lawn/);
+      });
+
       test('the lane comes from the active clause: another lane\'s service in the same message does not hide the pest report', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
         const out = validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest', 'lawn']), intendedActions: [], inboundMessage: 'My lawn service is Tuesday, and the ants are back' });
@@ -3078,11 +3125,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
         jest.resetModules();
         const mk = (openMap) => {
           jest.resetModules();
-          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
+          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, reportedReserviceLanes, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
           jest.doMock('../services/reservice-scheduler', () => ({
             reserviceSelfServeEnabled: () => true,
             loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'], verified: true }),
-            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService,
+            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, reportedReserviceLanes, isActivePestReport, mentionsAffirmed, namesOtherService,
           }));
           return { drafter: require('../services/sms-shadow-drafter') };
         };
@@ -3753,6 +3800,32 @@ describe('free re-service is an entitlement resolved through the existing mechan
           await expect(send(ok)).resolves.toBeNull();
         }
         for (const bad of ['Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday at 9 AM.', 'Your pest re-service is scheduled for Thursday around 11 AM.', 'Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.']) {
+          await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        }
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    // Codex round-39 P2: a MERIDIEM-FREE range is an asserted window — compared modulo 12h on BOTH endpoints.
+    test('meridiem-free ranges in a callback claim are asserted times (live Thursday 9:00 - 11:00): a wrong or one-sided range is blocked', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const ok of ['Your pest re-service is scheduled for Thursday from 9–11.', 'Your pest re-service is scheduled for Thursday between 9 and 11.', 'Your pest re-service is scheduled for Thursday from 9 to 11.', 'Your pest re-service is scheduled for Thursday, 9:00-11:00.', 'Your pest re-service is scheduled for Thursday; we will confirm within 2-3 days.']) {
+          await expect(send(ok)).resolves.toBeNull();
+        }
+        for (const bad of ['Your pest re-service is scheduled for Thursday from 1–3.', 'Your pest re-service is scheduled for Thursday between 1 and 3.', 'Your pest re-service is scheduled for Thursday from 9 to 10.', 'Your pest re-service is scheduled for Thursday from 10 to 12.', 'Your pest re-service is scheduled for Thursday, 2-4.']) {
           await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
         }
       } finally {

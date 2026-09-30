@@ -302,13 +302,18 @@ async function reserviceLaneAvailability(customer, dbh = db, { strict = false } 
   // Codex round-36 P2: on the NON-strict path (the public /reservice page) a failed callback read fails CLOSED to the friendly
   // not-eligible state — the page used to render it when the eligibility dependency was down, and the unconditional read must not
   // turn that into a 500. The strict path (SMS facts / send-time rechecks) still rethrows.
+  // Codex round-39 P2: "could not read the callbacks" is NOT "no callback is open" — treating it as none made every covered lane
+  // bookable, so the public picker could offer a lane that already holds a booked re-service. A failed read yields NO bookable lane
+  // (and no listed lane), which the public page renders as its friendly unavailable state.
   let open = {};
+  let callbackReadFailed = false;
   if (customer?.id) {
     try {
       open = await openReserviceCallbacks(customer.id, dbh);
     } catch (err) {
       if (strict) throw err;
-      logger.warn(`[reservice-scheduler] open-callback read failed for customer ${customer.id}: ${err.message}; treating as none (non-strict)`);
+      callbackReadFailed = true;
+      logger.warn(`[reservice-scheduler] open-callback read failed for customer ${customer.id}: ${err.message}; no lane is bookable (non-strict)`);
     }
   }
   // Codex round-33 P2: "no supported lane" is not "no plan" — a termite / mosquito / tree-and-shrub recurring customer has no
@@ -323,6 +328,7 @@ async function reserviceLaneAvailability(customer, dbh = db, { strict = false } 
       hasRecurringPlan = null;
     }
   }
+  if (callbackReadFailed) return { eligible: [], open, bookable: [], hasRecurringPlan, callbackReadFailed: true };
   return { eligible, open, bookable: eligible.filter((lane) => !open[lane]), hasRecurringPlan };
 }
 
@@ -346,10 +352,15 @@ async function loadReserviceLaneAvailability(customerId, dbh = db) {
     // newly bookable lane and is not a confirmed prospect (verified:false).
     const identity = await loadReserviceCustomerIdentity(customerId, dbh);
     if (!identity) return none;
-    if (identity.active === false || !identity.reservice_token) {
+    if (identity.active === false) {
       return { eligible: [], open: await openReserviceCallbacks(identity.id, dbh), bookable: [], verified: false };
     }
-    return { ...(await reserviceLaneAvailability(identity, dbh, { strict: true })), verified: true };
+    const availability = await reserviceLaneAvailability(identity, dbh, { strict: true });
+    // Codex round-39 P2: ENTITLEMENT does not depend on the token. A restored customer (admin restore clears deleted_at only) can
+    // be tokenless yet fully covered; the token gates only the booking LINK. Such a customer keeps every covered lane, marked
+    // `linkMissing` so the fact renders the link-unavailable state (acknowledge + escalate, no paid times) instead of "not eligible".
+    if (!identity.reservice_token) return { ...availability, bookable: [], linkMissing: true, verified: true };
+    return { ...availability, verified: true };
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane availability loader failed for customer ${customerId}: ${err.message}`);
     return none;
@@ -498,10 +509,29 @@ const RESERVICE_DEPARTURE_LEFT_RE = new RegExp(
   'i',
 );
 const RESERVICE_PERSISTENCE_NEGATOR_RE = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+(?:yet|even|really|fully|completely|entirely|quite|been|ever|just))*\\W*$`, 'i');
+// Codex round-39 P2: "gone / stopped / disappeared / went away" resolve a sighting ONLY when they bind to the PEST subject ("the ants
+// stopped", "they're gone", "it went away"). "Ants are back because the treatment stopped working" — the spray, the rain, the
+// noise stopping is not the pest stopping. The subject phrase is what sits between the last clause connector and the word; a
+// product-failure complement ("stopped working / helping / killing") never resolves, whoever the subject is.
+const RESERVICE_RESOLUTION_CONNECTOR_RE = /\b(?:because|since|as|when|whenever|while|although|though|if|unless|until|and|but|so|or|then|after|before)\b|[;,:]/gi;
+const RESERVICE_RESOLUTION_SUBJECT_RE = new RegExp(`\\b(?:${RESERVICE_ANY_PEST_NOUN}|they|them|it|these|those|all|both|everything|none)\\b`, 'i');
+const RESERVICE_PRODUCT_FAILURE_AFTER_RE = /^\s+(?:working|helping|killing|protecting|holding|lasting|doing|being\s+(?:effective|useful)|to\s+work)\b/i;
+function reserviceResolutionWordBindsToPest(before) {
+  let segment = before;
+  let last = -1;
+  let lastLen = 0;
+  for (const c of before.matchAll(RESERVICE_RESOLUTION_CONNECTOR_RE)) { last = c.index; lastLen = c[0].length; }
+  if (last >= 0) segment = before.slice(last + lastLen);
+  if (!segment.trim()) return true; // subjectless predicate after a connector inherits its subject (the pronoun pass reads the previous clause)
+  return RESERVICE_RESOLUTION_SUBJECT_RE.test(segment);
+}
 function reserviceClauseResolved(clause) {
   if (RESERVICE_CLAUSE_RESOLVED_RE.test(clause) || RESERVICE_DEPARTURE_LEFT_RE.test(clause)) return true;
   for (const m of clause.matchAll(RESERVICE_CLAUSE_RESOLUTION_WORD_RE)) {
-    if (!RESERVICE_PERSISTENCE_NEGATOR_RE.test(clause.slice(0, m.index))) return true;
+    const before = clause.slice(0, m.index);
+    if (RESERVICE_PERSISTENCE_NEGATOR_RE.test(before)) continue;
+    if (RESERVICE_PRODUCT_FAILURE_AFTER_RE.test(clause.slice(m.index + m[0].length))) continue;
+    if (reserviceResolutionWordBindsToPest(before)) return true;
   }
   return false;
 }
@@ -690,9 +720,11 @@ function mentionsAffirmed(text, termRe) {
 // active clause (a bare lawn complaint, "tell me more about ants") every surviving clause is read.
 const RESERVICE_TURF_INSECT_RE = new RegExp(`\\b(?:${TURF_INSECT_NOUN_SOURCES.join('|')})\\b`, 'i');
 const RESERVICE_TURF_INSECT_G_RE = new RegExp(RESERVICE_TURF_INSECT_RE.source, 'gi');
-function reportedReserviceLane(text) {
+// Codex round-39 P2: the SET of lanes the active report names, in ['pest','lawn'] order — "Ants and chinch bugs are back" reports BOTH.
+// [] for nothing reported / an excluded specialty. reportedReserviceLane is the single-lane view (null when the set is not exactly one).
+function reportedReserviceLanes(text) {
   const facts = reservicePestReportFacts(text);
-  if (!facts.survivingText.trim() || reportedReserviceExcludedSpecialty(text)) return null;
+  if (!facts.survivingText.trim() || reportedReserviceExcludedSpecialty(text)) return [];
   const active = activePestClauses(facts.asserted);
   const basis = active.length ? active.join(' , ') : facts.survivingText;
   const located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
@@ -702,10 +734,11 @@ function reportedReserviceLane(text) {
   const stripped = located.replace(RESERVICE_TURF_INSECT_G_RE, ' ');
   const hasLawn = turfHit || RESERVICE_LAWN_WORDS_RE.test(stripped);
   const hasPest = RESERVICE_PEST_WORDS_RE.test(stripped);
-  if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
-  if (hasLawn) return 'lawn';
-  if (hasPest) return 'pest';
-  return null;
+  return [hasPest && 'pest', hasLawn && 'lawn'].filter(Boolean);
+}
+function reportedReserviceLane(text) {
+  const lanes = reportedReserviceLanes(text);
+  return lanes.length === 1 ? lanes[0] : null; // several lanes reported — let the reply itself name them
 }
 
 // Codex round-5 P1: reportedReserviceLane folds an excluded-specialty report
@@ -856,6 +889,7 @@ module.exports = {
   RESERVICE_LAWN_SERVICE_WORDS,
   RESERVICE_PEST_NOUNS_SOURCE,
   reportedReserviceLane,
+  reportedReserviceLanes,
   reportedReserviceExcludedSpecialty,
   isActivePestReport,
   namesOtherService,

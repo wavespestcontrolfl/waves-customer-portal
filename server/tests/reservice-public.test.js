@@ -39,6 +39,7 @@ jest.mock('../config/feature-gates', () => ({
 const firstResults = {};
 const listResults = {};
 const mockDbFailures = new Set(); // tables whose list reads reject (a dependency outage)
+const mockCallbackReadFailure = { on: false }; // only the open-CALLBACK read rejects (coverage read still works)
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
@@ -56,7 +57,7 @@ jest.mock('../models/db', () => {
       return q;
     };
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
-    q.then = (onOk, onErr) => (mockDbFailures.has(table)
+    q.then = (onOk, onErr) => (mockDbFailures.has(table) || (mockCallbackReadFailure.on && callbackOnly)
       ? Promise.reject(new Error(`db down: ${table}`)).then(onOk, onErr)
       : Promise.resolve(callbackOnly ? [] : (listResults[table] || [])).then(onOk, onErr));
     q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
@@ -497,6 +498,24 @@ describe('selected-lane availability for a customer with both plans', () => {
       expect(build).not.toHaveBeenCalled();
     } finally {
       mockDbFailures.delete('scheduled_services as s');
+    }
+  });
+
+  // Codex round-39 P2: a failed CALLBACK read (coverage read fine) must not make every covered lane bookable — the page would
+  // offer a lane that already holds a booked re-service. It fails closed to the friendly unavailable state.
+  test('a failing callback-only read (coverage OK) offers NO lane: not_eligible, no availability built', async () => {
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'Quarterly Pest Control' }];
+    mockCallbackReadFailure.on = true;
+    try {
+      const res = await browse({});
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'not_eligible', lanes: [], availability: null }));
+      expect(build).not.toHaveBeenCalled();
+      const { reserviceLaneAvailability } = require('../services/reservice-scheduler');
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'))).resolves.toMatchObject({ eligible: [], bookable: [], callbackReadFailed: true });
+      await expect(reserviceLaneAvailability({ id: CUST_ID, active: true }, require('../models/db'), { strict: true })).rejects.toThrow(/db down/);
+    } finally {
+      mockCallbackReadFailure.on = false;
     }
   });
 
