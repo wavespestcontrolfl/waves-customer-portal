@@ -492,6 +492,9 @@ async function loadAutomations(triggerEventKey, automationKey) {
       'a.*',
       't.active_version_id as active_version_id',
       't.status as template_status',
+      't.send_stream as template_send_stream',
+      't.suppression_group_key as template_suppression_group_key',
+      't.mode as template_mode',
       'v.id as template_version_id',
       'v.version_number as active_version_number',
     )
@@ -1134,10 +1137,18 @@ async function processTrigger(args) {
 async function loadAutomationForRun(run) {
   return db('email_template_automations as a')
     .leftJoin('email_templates as t', 't.template_key', 'a.template_key')
+    .leftJoin('email_templates as rt', function pinnedTemplate() { this.on('rt.template_key', '=', db.raw('?', [run.template_key])); })
     .leftJoin('email_template_versions as v', 'v.id', 't.active_version_id')
     .select(
       'a.*',
       't.active_version_id as active_version_id',
+      // The run's PINNED template (run.template_key is what dispatch sends),
+      // not the automation's current one: the admin API lets an automation's
+      // template change while runs are still queued, and the class a send is
+      // judged under must follow the content actually being sent.
+      'rt.send_stream as template_send_stream',
+      'rt.suppression_group_key as template_suppression_group_key',
+      'rt.mode as template_mode',
       'v.id as template_version_id',
       'v.version_number as active_version_number',
     )
@@ -1548,15 +1559,30 @@ function sendPolicyFor(run) {
   return ledgerStreamFor(run.template_key) ? {} : EXECUTOR_SEND_POLICY;
 }
 
+// The class the ledger judges a send under. The prefix decides the ledger STREAM,
+// never whether the mail is marketing: a template whose OWN stream is marketing_*
+// (or whose mode is 'marketing') must be judged as marketing mail — opt-in
+// (marketing_offers), the caps, the marketing unsubscribe group — even under an
+// lc.* key, or the lifted fence would send it as plain relationship mail.
+// Read from the template columns the automation load already selects (no extra
+// query). undefined = let the ledger decide from stream and key.
+function ledgerMarketingClassFor(automation = {}) {
+  const stream = String(automation.template_send_stream || automation.template_suppression_group_key || '').toLowerCase();
+  const mode = String(automation.template_mode || '').toLowerCase();
+  return stream.startsWith('marketing_') || mode === 'marketing' ? 'marketing' : undefined;
+}
+
 // Shadow's read-only mirror of the ledger's eligibility step: would
 // reserveWithCap refuse this customer? Reads only (eligibleForEmail takes no
 // lock and writes nothing), never reserves, never sends. A lookup failure is
 // not a verdict — shadow fails OPEN on infrastructure, like every other
 // best-effort check here.
-async function shadowLedgerEligibility(run, stream) {
+async function shadowLedgerEligibility(run, stream, automation) {
   try {
     const { eligibleForEmail, REASONS } = require('./email-division/eligibility');
-    const verdict = await eligibleForEmail({ customerId: run.recipient_id, stream, emailKey: run.template_key });
+    const verdict = await eligibleForEmail({
+      customerId: run.recipient_id, stream, emailKey: run.template_key, marketingClass: ledgerMarketingClassFor(automation),
+    });
     if (verdict.ok || verdict.reason === REASONS.LOOKUP_FAILED) return { ok: true };
     return { ok: false, reason: `email division ledger: ${verdict.reason}`, code: 'ledger_ineligible' };
   } catch (err) {
@@ -1585,7 +1611,7 @@ async function shadowPreflight(run, executionPayload, automation) {
     let suppressionGroupKey = automation.suppression_group_key || undefined;
     if (stream) {
       const { groupKeyFor, resolveMarketingClass } = require('./email-division/eligibility');
-      suppressionGroupKey = groupKeyFor(stream, run.template_key, resolveMarketingClass(stream, run.template_key));
+      suppressionGroupKey = groupKeyFor(stream, run.template_key, resolveMarketingClass(stream, run.template_key, ledgerMarketingClassFor(automation)));
     }
     const preflight = await EmailTemplates.preflightTemplateSend({
       templateKey: run.template_key,
@@ -1602,7 +1628,7 @@ async function shadowPreflight(run, executionPayload, automation) {
     });
     if (!preflight.ok || !stream) return preflight;
     // What reserveWithCap / the recipient fence would say live.
-    return (await ledgerRecipientRefusal(run)) || shadowLedgerEligibility(run, stream);
+    return (await ledgerRecipientRefusal(run)) || shadowLedgerEligibility(run, stream, automation);
   } catch (err) {
     logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
     return { ok: true };
@@ -1680,6 +1706,19 @@ async function ledgerRecipientRefusal(run) {
 //     the run DEFERS through the existing bounded retry, so a crashed run that
 //     was reclaimed is retried once the reservation settles instead of being
 //     skipped forever without a send.
+// A run is finalized SENT only on CONFIRMED delivery: a message the provider
+// accepted (sent_at), or a ledger row sent by the normal settle or reconciled
+// from an accepted message — never the ledger's uncertain completion
+// (provider_handoff_uncertain), which exists to keep the caps honest.
+const LEDGER_UNCERTAIN_REASON = 'provider_handoff_uncertain';
+function ledgerDeliveryConfirmed(row, message) {
+  if (message?.sent_at) return true;
+  return row?.status === 'sent' && row.reason !== LEDGER_UNCERTAIN_REASON;
+}
+function deliveryUncertainError() {
+  return Object.assign(new Error('email division delivery is unconfirmed: the provider handoff started but no acceptance was recorded'), { code: 'LEDGER_DELIVERY_UNCERTAIN' });
+}
+
 async function settleLedgerDuplicate(run, row) {
   const mine = String(run.recipient_email || '').trim().toLowerCase();
   if (String(row.recipient_email || '').trim().toLowerCase() !== mine) {
@@ -1690,11 +1729,13 @@ async function settleLedgerDuplicate(run, row) {
   if (message?.automation_run_id && String(message.automation_run_id) !== String(run.id)) {
     return { skipReason: 'email division ledger: the message under this key belongs to a different run', skipGuard: 'ledger_duplicate_other_owner' };
   }
-  const delivered = row.status === 'sent' || message?.sent_at || message?.provider_handoff_phase === 'started';
-  if (delivered) {
+  if (ledgerDeliveryConfirmed(row, message)) {
     const messageId = row.email_message_id || message?.id || null;
     return { result: { sent: true, message: messageId ? { id: messageId } : null } };
   }
+  // Handed to the provider but never confirmed (started, no sent_at; or the
+  // ledger's own uncertain completion): not a delivery, and not retried blind.
+  if (row.status === 'sent' || message?.provider_handoff_phase === 'started') throw deliveryUncertainError();
   if (row.status === 'reserved') {
     throw Object.assign(new Error('email division reservation under this key is still outstanding'), { code: 'LEDGER_RESERVATION_OUTSTANDING' });
   }
@@ -1726,7 +1767,7 @@ function recipientChangedSkip() {
 // throws for a failure the run's bounded retry policy handles (a provider /
 // library error the ledger settled 'failed', or an eligibility lookup that
 // could not read).
-async function dispatchThroughLedger(run, executionPayload, stream, onQueued) {
+async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued) {
   const refusal = await ledgerRecipientRefusal(run);
   if (refusal) return { skipReason: refusal.reason, skipGuard: refusal.code };
 
@@ -1736,6 +1777,7 @@ async function dispatchThroughLedger(run, executionPayload, stream, onQueued) {
     customerId: run.recipient_id,
     stream,
     emailKey: run.template_key,
+    marketingClass: ledgerMarketingClassFor(automation),
     idempotencyKey: run.idempotency_key,
     // The address this run's payload was BUILT for. The ledger compares it at
     // the reservation and again at the provider handoff and refuses on a
@@ -1778,9 +1820,14 @@ async function dispatchThroughLedger(run, executionPayload, stream, onQueued) {
   // settles a fence / library block 'skipped', an abort or a dispatch error
   // 'failed', and a send the delivery authority shows went out 'sent'.
   const settled = await db('marketing_email_ledger').where({ id: out.row.id }).first('status', 'reason', 'email_message_id');
-  if (settled?.status === 'sent') {
+  if (settled?.status === 'sent' && ledgerDeliveryConfirmed(settled, null)) {
     return { result: { sent: true, message: settled.email_message_id ? { id: settled.email_message_id } : null } };
   }
+  // A 'sent' row that is only an UNCERTAIN completion (the handoff started, the
+  // provider failed or the response was lost) keeps counting toward the caps,
+  // but is not a delivery: the run takes the same failed / hold path the direct
+  // dispatch takes.
+  if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
   if (settled?.status === 'skipped') {
     return { skipReason: `email division ledger refused the send: ${settled.reason || out.reason}`, skipGuard: 'ledger_refused' };
@@ -1822,7 +1869,7 @@ async function dispatchRun(run, automation, executionPayload) {
     const ledgerStream = ledgerStreamFor(run.template_key);
     let result;
     if (ledgerStream) {
-      const routed = await dispatchThroughLedger(run, executionPayload, ledgerStream, onQueued);
+      const routed = await dispatchThroughLedger(run, automation, executionPayload, ledgerStream, onQueued);
       if (routed.skipReason) return { skipReason: routed.skipReason, skipGuard: routed.skipGuard };
       ({ result } = routed);
     } else {
@@ -1877,18 +1924,45 @@ async function dispatchRun(run, automation, executionPayload) {
 // count restored, never spending the retry budget on contention (GH Codex
 // #3856 r27 P2).
 const PREP_LOCK_DEFER_MS = 60 * 1000;
-async function deferForPrepLock(run, attemptNumber, now) {
-  const runAfter = new Date(now.getTime() + PREP_LOCK_DEFER_MS);
+// Back to runnable a little later with the attempt count restored: not a
+// delivery attempt, so it never spends the retry budget.
+async function deferRun(run, attemptNumber, now, { delayMs, lastError, message }) {
+  const runAfter = new Date(now.getTime() + delayMs);
   const [deferred] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'retry_scheduled',
     attempts: attemptNumber - 1,
     run_after: runAfter,
     next_retry_at: runAfter,
-    last_error: PREP_LOCK_HELD,
+    last_error: lastError,
     updated_at: new Date(),
   }).returning('*');
-  await logRunEvent(run.id, 'retry_scheduled', 'Deferred: prep send lock held by another sender', { next_retry_at: runAfter, attempt_consumed: false });
+  await logRunEvent(run.id, 'retry_scheduled', message, { next_retry_at: runAfter, attempt_consumed: false });
   return deferred || { ...run, status: 'retry_scheduled' };
+}
+function deferForPrepLock(run, attemptNumber, now) {
+  return deferRun(run, attemptNumber, now, {
+    delayMs: PREP_LOCK_DEFER_MS, lastError: PREP_LOCK_HELD, message: 'Deferred: prep send lock held by another sender',
+  });
+}
+
+// A live ledger reservation (another attempt of this run's own send, e.g. a
+// crashed worker's) holds the send: wait for it the way a held prep lease waits — attempt restored, nothing
+// spent. Bounded: the reservation lease (RESERVATION_LIFETIME_MS) is the most
+// any one reservation can stay live, and the deferral count is capped at the
+// number of delays that fit in it (plus slack); past the cap the normal
+// retry / failure path decides, so this can never loop forever.
+const LEDGER_DEFER_MS = 2 * 60 * 1000;
+const LEDGER_DEFER_MESSAGE = 'Deferred: email division reservation outstanding';
+const LEDGER_MAX_DEFERRALS = Math.ceil(RESERVATION_LIFETIME_MS / LEDGER_DEFER_MS) + 2;
+const LEDGER_DEFER_CODES = new Set(['LEDGER_RESERVATION_OUTSTANDING']);
+async function deferForLedger(run, attemptNumber, now, err) {
+  const used = await db('email_template_automation_run_events')
+    .where({ run_id: run.id, event_type: 'retry_scheduled' })
+    .where('message', LEDGER_DEFER_MESSAGE)
+    .count('* as n')
+    .first();
+  if (Number(used?.n || 0) >= LEDGER_MAX_DEFERRALS) return null;
+  return deferRun(run, attemptNumber, now, { delayMs: LEDGER_DEFER_MS, lastError: err.message, message: LEDGER_DEFER_MESSAGE });
 }
 
 async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
@@ -2066,6 +2140,10 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     return outcome.updated;
   } catch (err) {
     if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
+    if (LEDGER_DEFER_CODES.has(err.code)) {
+      const deferred = await deferForLedger(claimedRun, attemptNumber, now, err);
+      if (deferred) return deferred;
+    }
     // A deterministic refusal, not a failure: never retried (the template's
     // stream cannot change under a retry), settled skipped with its own
     // guard so it reads as "belongs to the ledger", not "broke".
