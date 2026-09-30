@@ -398,16 +398,16 @@ async function sendWelcomeEmail(customer) {
 }
 
 // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome EMAIL is skipped —
-// never the welcome text — when this customer's signup email was actually
-// DELIVERED (provider-reported, not merely accepted) and still carries the whole
-// app section (link, sign-in steps and guide). Decided HERE, at
-// delivery time (~60 minutes after signup), from what was really sent: a
-// combined email that failed, was blocked or never went out (or a gate turned
-// off in the meantime) leaves the welcome email to send exactly as it does
-// today. Any lookup error reads as "not covered".
+// never the welcome text — when a full signup email for this scope was accepted
+// for sending (or is on the provider-retry rail) and carries the WHOLE app
+// section (link, sign-in steps and guide). A bounced, dropped or exhausted one
+// leaves the welcome email to send as today. Any lookup error reads as "not
+// covered". Owner ruling 2026-09-30: a later bounce means the address cannot
+// receive our mail, so this email would bounce too; a transient block is
+// already retried on the combined email itself.
 async function combinedSignupEmailCoversWelcome(customer, row) {
   try {
-    const { signupGateLive, APP_SECTION_VALUES, messageCarriesAll, carrierRowState, CARRIER_STATUSES, SIGNUP_FULL_CATEGORY, SIGNUP_TEMPLATE_KEY } = require('./signup-single-email');
+    const { signupGateLive, APP_SECTION_VALUES, QUERY_STATUSES, RETRY_COLUMNS, messageCarriesAll, acceptedForSending, SIGNUP_FULL_CATEGORY, SIGNUP_TEMPLATE_KEY } = require('./signup-single-email');
     if (!signupGateLive()) return false;
     const { accountCustomerIds } = require('./estimate-accepted-email');
     // The sequence row is queued moments BEFORE the signup email is sent, so
@@ -428,24 +428,13 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
     const query = db('email_messages')
       .where({ template_key: SIGNUP_TEMPLATE_KEY, recipient_type: 'customer' })
       .whereIn('recipient_id', ids)
-      .whereIn('status', CARRIER_STATUSES)
+      .whereIn('status', QUERY_STATUSES)
       .whereRaw('categories @> ?::jsonb', [JSON.stringify([SIGNUP_FULL_CATEGORY])])
       .where('created_at', '>=', since);
     const address = String(customer.email || '').trim().toLowerCase();
     if (address) query.whereRaw('lower(recipient_email_snapshot) = ?', [address]);
-    // The WHOLE app section, not a sample of it: a message that kept the sign-in
-    // steps but lost the app link or the guide (reworded or trimmed template)
-    // does not count, and the welcome email then sends as today.
-    // And only one the provider REPORTED DELIVERED (carrierRowState, the same
-    // rule the owed membership email uses): a carrier that is only `sent`, or
-    // that bounced / dropped / blocked, does not suppress the welcome email. No
-    // requeue: the welcome email simply sends. That includes a carrier the
-    // provider-retry rail is still re-attempting (state 'pending'): this runs
-    // about an hour after signup, when the rail's first retry (10 min) has
-    // normally landed, so a still-undelivered carrier means the customer may
-    // have nothing yet; the worst case of sending is a duplicate app pointer.
-    const rows = await query.select('id', 'status', 'text_snapshot', 'html_snapshot', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at').limit(25);
-    return (rows || []).some((message) => carrierRowState(message) === 'delivered' && messageCarriesAll({ message }, APP_SECTION_VALUES));
+    const rows = await query.select('id', 'status', 'text_snapshot', 'html_snapshot', ...RETRY_COLUMNS).limit(25);
+    return (rows || []).some((message) => acceptedForSending(message) && messageCarriesAll({ message }, APP_SECTION_VALUES));
   } catch (err) {
     logger.warn(`[new-recurring-welcome] signup-email check failed for customer ${customer?.id}; sending the welcome email as usual: ${err.message}`);
     return false;

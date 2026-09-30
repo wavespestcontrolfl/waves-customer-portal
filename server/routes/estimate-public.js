@@ -12783,36 +12783,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // was skipped, refused, or errored (the charge then falls back to the
     // delivered pay link exactly like today).
     let recurringCardEnrollmentResult = null;
-    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): a standard recurring
-    // signup's combined onboarding email carries the property and the plan, so
-    // membership.started becomes a DURABLE owed record — written now, resolved
-    // after the combined send by one delivery-time check (also swept every 10
-    // minutes if this process dies): satisfied when a delivered combined email
-    // carried that exact section, otherwise sent exactly as today. The "Auto Pay
-    // is set up" confirmation is NOT part of this: it stays its own email, sent
-    // inline by enrollment exactly as before (owner 2026-09-30). Annual prepay
-    // sends no membership email today and stays out. Gate off, or a failed write
-    // of the membership record: nothing is owed and every email fires inline as
-    // before.
-    const signupEligible = SignupSingleEmail.signupLaneEligible({
-      annualPrepaySelected,
-      customerId,
-      standardConversion: txResult.standardConversion,
-    });
-    // The key the combined email sends under (one per acceptance); the owed
-    // row carries it so the delivery-time check finds that message.
-    const signupOnboardingKey = signupEligible
-      ? require('../services/estimate-accepted-email').acceptedOnboardingKey(estimate.id, acceptanceRecordId)
-      : null;
-    const signupOwedMembershipId = signupEligible
-      ? await SignupSingleEmail.recordOwedMembership(db, {
-        customerId,
-        estimateId: estimate.id,
-        onboardingKey: signupOnboardingKey,
-        membershipEmail: txResult.standardConversion.membershipEmail,
-      })
-      : null;
-    const signupLane = { eligible: !!signupOwedMembershipId };
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -13217,19 +13187,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a signup the combined
-    // onboarding email below carries the property and the plan,
-    // so membership.started is a durable owed record (signupLane above), resolved
-    // after that send: satisfied when the delivered email carried the plan,
-    // otherwise sent exactly as here. Gate off: the block below is unchanged.
-    if (!signupLane.eligible
-      && !annualPrepaySelected
-      && standardConversion?.membershipEmail
-      && standardConversion?.recurringConversionSkipped !== true) {
-      const AccountMembershipEmail = require('../services/account-membership-email');
-      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
-        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
-    }
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a standard recurring
+    // signup the combined onboarding email below carries the property and the
+    // plan, so membership.started waits for that send and goes out inline right
+    // after it ONLY when the send did not cover it (decided at send time; owner
+    // ruling 2026-09-30). Gate off: exactly the block below, sent now.
+    const membershipDue = !annualPrepaySelected
+      && !!standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true;
+    const foldMembership = SignupSingleEmail.signupLaneEligible({ annualPrepaySelected, customerId, standardConversion });
+    const sendMembershipStarted = () => require('../services/account-membership-email')
+      .sendMembershipStarted(standardConversion.membershipEmail)
+      .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
+    if (membershipDue && !foldMembership) void sendMembershipStarted();
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
     // idempotent per estimate so an accept retry can't double-send. The
@@ -13270,24 +13240,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || 'service',
         appointment: firstAcceptedAppointment,
       };
-      if (signupLane.eligible) {
-        // The combined signup email, then the delivery-time resolution of the
-        // owed membership row (also run by the scheduler sweep if this process
-        // dies here).
-        void (async () => {
-          try {
-            await sendEstimateAcceptedOnboarding({
-              ...onboardingArgs,
-              signup: {
-                membershipEmail: standardConversion.membershipEmail,
-                owed: { membershipId: signupOwedMembershipId },
-              },
-            });
-          } catch (e) {
-            logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`);
-          }
-          await SignupSingleEmail.resolveOwedEmail(signupOwedMembershipId);
-        })();
+      if (foldMembership) {
+        // The combined signup email, then membership.started unless that send
+        // covered it (anything but a covering send, including a throw, sends it).
+        void sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup: { membershipEmail: standardConversion.membershipEmail } })
+          .catch((e) => logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`))
+          .then((result) => (result?.coversMembership ? null : sendMembershipStarted()));
       } else {
         void sendEstimateAcceptedOnboarding(onboardingArgs);
       }

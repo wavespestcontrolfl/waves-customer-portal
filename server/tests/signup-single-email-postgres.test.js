@@ -14,8 +14,6 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => ({ ok: true })) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => {}) }));
 const { randomUUID } = require('node:crypto');
 
 postgres('one signup email against migrated PostgreSQL', () => {
@@ -72,8 +70,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
   }
 
   const Signup = require('../services/signup-single-email');
-  const Membership = require('../services/account-membership-email');
-  const Notifications = require('../services/notification-service');
 
   describe('added property (same-ET-day short email)', () => {
     const { _private } = require('../services/estimate-accepted-email');
@@ -100,12 +96,23 @@ postgres('one signup email against migrated PostgreSQL', () => {
     });
 
     test.each([
+      ['sent', { status: 'sent', delivered_at: null }],
+      ['delivered', { status: 'delivered' }],
+      ['reported as spam after delivery', { status: 'spam_report' }],
+      ['blocked by the provider with a retry scheduled (the retry rail will deliver it)', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
+      ['claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 1 }],
+    ])('an earlier full email that was accepted for sending (%s) makes this an added property', async (_label, overrides) => {
+      await message(overrides);
+      expect(await ask()).toBe(true);
+    });
+
+    test.each([
       ['only a short email earlier', { template_key: 'estimate.accepted_additional_property', categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_short']) }],
       ['a plain onboarding email (the old template)', { template_key: 'estimate.accepted_onboarding', categories: JSON.stringify(['estimate_accepted_onboarding']) }],
-      ['an email that is only accepted (`sent`, no delivery evidence)', { status: 'sent', delivered_at: null }],
-      ['an email delivered and then bounced', { bounced_at: new Date() }],
-      ['an email blocked with a provider retry still scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
-      ['an email that failed', { status: 'failed' }],
+      ['an email that failed with no retry left', { status: 'failed' }],
+      ['an email whose provider-retry rail is exhausted', { status: 'failed', provider_retry_exhausted_at: new Date() }],
+      ['an email that bounced', { status: 'bounced' }],
+      ['an email that was dropped', { status: 'dropped' }],
       ['an email that was blocked', { status: 'blocked' }],
       ['another recipient address', { recipient_email_snapshot: 'someone-else@example.invalid' }],
       ['another template', { template_key: 'membership.started' }],
@@ -149,27 +156,26 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect(await covers({ created_at: new Date() })).toBe(true);
       });
 
-      test('a carrier that is only `sent` (no delivery event) does not cover the welcome email', async () => {
-        await message({ status: 'sent', delivered_at: null });
-        expect(await covers()).toBe(false);
-      });
-
-      test('a carrier the provider-retry rail is still re-attempting does not cover the welcome email (it sends)', async () => {
-        await message({ status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) });
-        expect(await covers()).toBe(false);
-      });
-
-      test('a carrier delivered and then bounced (bounced_at) does not cover the welcome email', async () => {
-        await message({ bounced_at: new Date() });
-        expect(await covers()).toBe(false);
-        await trx('email_messages').del();
-        await message({ status: 'bounced', bounced_at: new Date() });
-        expect(await covers()).toBe(false);
-      });
-
-      test('an open with status still `sent` (delivered event lost) covers it', async () => {
-        await message({ status: 'sent', delivered_at: null, opened_at: new Date() });
+      test.each([
+        ['sent', { status: 'sent', delivered_at: null }],
+        ['reported as spam / unsubscribed after delivery', { status: 'unsubscribed' }],
+        ['blocked with a provider retry scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
+        ['claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 2 }],
+      ])('a full signup email accepted for sending (%s) covers the welcome email', async (_label, overrides) => {
+        await message(overrides);
         expect(await covers()).toBe(true);
+      });
+
+      test.each([
+        ['bounced', { status: 'bounced' }],
+        ['dropped', { status: 'dropped' }],
+        ['blocked', { status: 'blocked' }],
+        ['failed with no retry', { status: 'failed', delivered_at: null }],
+        ['failed and the retry rail exhausted', { status: 'failed', delivered_at: null, provider_retry_exhausted_at: new Date() }],
+        ['queued for its first send (no retry yet)', { status: 'queued', delivered_at: null, provider_retry_count: 0 }],
+      ])('a full signup email that is %s does not cover it: the welcome email sends', async (_label, overrides) => {
+        await message(overrides);
+        expect(await covers()).toBe(false);
       });
 
       test('marker kept but the app link removed: not covered (the welcome email sends)', async () => {
@@ -192,8 +198,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
 
       test.each([
         ['it lost the app steps (reworded copy)', { text_snapshot: 'Welcome aboard.' }],
-        ['it was never accepted for sending', { status: 'failed' }],
-        ['it bounced', { status: 'bounced' }],
         ['it is the short version', { template_key: 'estimate.accepted_additional_property', categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_short']) }],
         ['it is the plain email on the old template', { template_key: 'estimate.accepted_onboarding', categories: JSON.stringify(['estimate_accepted_onboarding']) }],
         ['it went to another customer', { recipient_id: randomUUID() }],
@@ -202,348 +206,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
       ])('does not cover when %s', async (_label, overrides) => {
         await message(overrides);
         expect(await covers()).toBe(false);
-      });
-    });
-  });
-
-  describe('durable owed emails (no in-memory holds)', () => {
-    const KEY = 'estimate.accepted_onboarding:est-1:acc:acc-1';
-    const MEMBERSHIP_ARGS = { customerId: '', effectiveDate: new Date('2026-10-06T16:00:00Z'), sourceId: 'estimate:est-1', membershipTier: 'Gold', monthlyRate: 89, billingCadence: 'monthly', billingLane: 'monthly_membership', perApplicationAmount: null, includedServices: 'Pest Control' };
-    let estimateId;
-    const owedRows = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).orderBy('created_at');
-    const dueNow = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).update({ next_send_at: new Date(Date.now() - 1000) });
-    const membership = () => Signup.recordOwedMembership(trx, { customerId, estimateId, onboardingKey: KEY, membershipEmail: { ...MEMBERSHIP_ARGS, customerId } });
-    const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
-    const carrier = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, status: 'sent', delivered_at: null, ...overrides });
-
-    beforeEach(() => {
-      estimateId = randomUUID();
-      Membership.sendMembershipStarted.mockClear().mockResolvedValue({ ok: true });
-      Notifications.notifyAdmin.mockClear();
-      require('../services/logger').error.mockClear();
-    });
-
-    test('an owed record is written once per email, due a few minutes out', async () => {
-      const id = await membership();
-      expect(await membership()).toBe(id);
-      const [row] = await owedRows();
-      expect(row).toMatchObject({ sequence_type: 'signup_membership', status: 'active', customer_id: customerId });
-      expect(new Date(row.next_send_at).getTime()).toBeGreaterThan(Date.now() + 60 * 1000);
-      expect(row.metadata).toMatchObject({ kind: 'membership', onboarding_key: KEY, owed_key: `membership:${estimateId}` });
-    });
-
-    test('CRASH SAFETY: the process dies right after the accept (no fast path ever runs); the sweep still sends the owed email exactly as today', async () => {
-      await membership();
-      // Nothing is sent, held in memory or timer-driven: only the row exists.
-      expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-      expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ sent: 0 }); // not due yet
-      await dueNow();
-      expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ sent: 1, satisfied: 0 });
-      expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-      const args = Membership.sendMembershipStarted.mock.calls[0][0];
-      expect(args).toMatchObject({ customerId, sourceId: 'estimate:est-1', membershipTier: 'Gold', monthlyRate: 89, billingLane: 'monthly_membership', perApplicationAmount: null });
-      expect(args.effectiveDate).toEqual(new Date('2026-10-06T16:00:00Z'));
-      expect((await owedRows()).map((r) => r.status)).toEqual(['completed']);
-      // Idempotent: a second sweep sends nothing more.
-      await Signup.processDueSignupOwedEmails();
-      expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-    });
-
-    test('a claim a crashed sweep left in "sending" is recovered and resolved', async () => {
-      const id = await membership();
-      await trx('sms_sequences').where({ id }).update({ status: 'sending', updated_at: new Date(Date.now() - 60 * 60 * 1000) });
-      await Signup.processDueSignupOwedEmails();
-      expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-    });
-
-    describe('covered by the delivered combined email', () => {
-      const PLAN_VALUES = ['WaveGuard Gold', 'October 6, 2026', '$89.00'];
-      let membershipId;
-      beforeEach(async () => {
-        membershipId = await membership();
-        await Signup.recordExpected(membershipId, PLAN_VALUES);
-      });
-
-      test('a delivered email carrying every value satisfies it: nothing else is sent', async () => {
-        const messageId = await delivered(PLAN_VALUES.join('\n'));
-        expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-        expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-        const [row] = await owedRows();
-        expect(row).toMatchObject({ status: 'completed' });
-        expect(row.metadata.satisfied_by_message).toBe(messageId);
-      });
-
-      describe('acceptance is not delivery (a bounce reported after `sent` must not strand the plan email)', () => {
-        const HOUR = 60 * 60 * 1000;
-        const setStatus = (id, fields) => trx('email_messages').where({ id }).update(fields);
-
-        test('sent, then the provider reports delivered: satisfied on the next look, nothing sent separately', async () => {
-          const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
-          expect((await owedRows())[0]).toMatchObject({ status: 'active' });
-          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-          await setStatus(messageId, { status: 'delivered', delivered_at: new Date() });
-          await dueNow();
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-          expect((await owedRows())[0]).toMatchObject({ status: 'completed' });
-        });
-
-        test('sent, then bounced / dropped / blocked: the membership email is sent separately', async () => {
-          for (const status of ['bounced', 'dropped', 'blocked']) {
-            Membership.sendMembershipStarted.mockClear();
-            await trx('email_messages').del();
-            await trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).del();
-            const id = await membership();
-            await Signup.recordExpected(id, PLAN_VALUES);
-            const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
-            expect(await Signup.resolveOwedEmail(id)).toMatchObject({ pending: true });
-            await setStatus(messageId, { status, bounced_at: new Date() });
-            await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
-            expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
-            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-          }
-        });
-
-        test('sent with no provider event past the settle window: sent separately (a lost webhook cannot hold the email forever)', async () => {
-          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(Date.now() - (Signup.CARRIER_SETTLE_HOURS * HOUR + 60 * 1000)) });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-          expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-        });
-
-        test('sent and still inside the window: the row stays open, rechecked on the backoff but never later than the deadline', async () => {
-          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(Date.now() - (Signup.CARRIER_SETTLE_HOURS * HOUR - 10 * 60 * 1000)) });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
-          const [row] = await owedRows();
-          expect(row).toMatchObject({ status: 'active' });
-          const minutes = (new Date(row.next_send_at).getTime() - Date.now()) / 60000;
-          expect(minutes).toBeGreaterThan(8);
-          expect(minutes).toBeLessThanOrEqual(10.1); // the 15-minute backoff is cut to the deadline
-          expect(row.metadata.awaiting_delivery_of).toBeTruthy();
-          expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-        });
-
-        test('the sweep leaves a pending row alone until it is due, then settles it', async () => {
-          const messageId = await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date() });
-          await dueNow();
-          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ requeued: 1, sent: 0, satisfied: 0 });
-          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ requeued: 0, sent: 0 }); // not due again yet
-          await setStatus(messageId, { status: 'delivered', delivered_at: new Date() });
-          await dueNow();
-          expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ satisfied: 1 });
-        });
-
-        describe('provider-retry rail (a provider / IP block schedules another attempt at the same message)', () => {
-          const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
-          const inMinutes = (m) => new Date(Date.now() + m * 60 * 1000);
-
-          test('blocked with a retry scheduled: the row stays open and NOTHING is sent (the retry would deliver the full email too)', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(10), provider_retry_count: 0, updated_at: new Date() });
-            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
-            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-            expect((await owedRows())[0]).toMatchObject({ status: 'active' });
-          });
-
-          test('a retry claimed and in flight (queued, count > 0) is pending too', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'queued', sent_at: null, provider_retry_count: 1, updated_at: new Date() });
-            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
-            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-          });
-
-          test('the retry lands and is delivered: satisfied, nothing sent separately', async () => {
-            const messageId = await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(10), updated_at: new Date() });
-            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
-            await setStatus(messageId, { status: 'delivered', delivered_at: new Date(), provider_retry_next_at: null, provider_retry_count: 1 });
-            await dueNow();
-            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-          });
-
-          test('retry exhausted (no further attempt): sent separately', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), provider_retry_count: 3, updated_at: new Date() });
-            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-          });
-
-          test('a failed message with no retry scheduled at all is a plain failure: sent separately', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, updated_at: new Date() });
-            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-          });
-
-          test('a rail that stalls past the settle window (its last move was over 2h ago) stops holding the email: sent separately', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(300), provider_retry_count: 1, updated_at: minutesAgo(Signup.CARRIER_SETTLE_HOURS * 60 + 5) });
-            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-          });
-
-          test('the window restarts with each attempt: a retry re-sent 10 minutes ago (sent_at fresh, first block hours ago) is waited on', async () => {
-            await carrier(PLAN_VALUES.join('\n'), { status: 'sent', sent_at: minutesAgo(10), created_at: minutesAgo(400), updated_at: minutesAgo(10), provider_retry_count: 2 });
-            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
-            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-          });
-
-          test('the shared helper is the one rule: welcome and added-property choice treat a retry-pending carrier as NOT delivered', () => {
-            const row = { status: 'failed', provider_retry_next_at: inMinutes(10) };
-            expect(Signup.carrierRowState(row)).toBe('pending');
-            expect(Signup.carrierRowState({ ...row, provider_retry_exhausted_at: new Date() })).toBe('failed');
-            expect(Signup.carrierRowState({ status: 'queued', provider_retry_count: 0 })).toBe('failed');
-          });
-        });
-
-        test('an open or click proves delivery even when the delivered event never arrived (status stays sent)', async () => {
-          await carrier(PLAN_VALUES.join('\n'), { sent_at: new Date(), opened_at: new Date() });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-        });
-
-        test('a spam report or unsubscribe after delivery does not undo the delivery', async () => {
-          await carrier(PLAN_VALUES.join('\n'), { status: 'spam_report', delivered_at: new Date() });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-        });
-
-        test('delivered, then an asynchronous bounce: sent separately', async () => {
-          await delivered(PLAN_VALUES.join('\n'), { status: 'bounced', bounced_at: new Date() });
-          expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-        });
-      });
-
-      test('the short template and a sweep\'s day-scoped resend key count too', async () => {
-        await delivered(PLAN_VALUES.join('\n'), { template_key: 'estimate.accepted_additional_property', idempotency_key: `${KEY}:2026-09-29` });
-        expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-      });
-
-      test.each([
-        ['queued (never accepted)', { status: 'queued' }],
-        ['failed', { status: 'failed' }],
-        ['bounced', { status: 'bounced' }],
-        ['dropped', { status: 'dropped' }],
-        ['blocked', { status: 'blocked' }],
-        ['the plain onboarding template', { template_key: 'estimate.accepted_onboarding' }],
-        ['another acceptance\'s key', { idempotency_key: 'estimate.accepted_onboarding:est-2:acc:acc-2' }],
-      ])('a message that is %s does not cover: the email is sent', async (_label, overrides) => {
-        await delivered(PLAN_VALUES.join('\n'), overrides);
-        expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-        expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-      });
-
-      test('a delivered email missing ONE value does not cover (an edited template that kept only a row)', async () => {
-        await delivered(PLAN_VALUES.slice(0, 2).join('\n'));
-        expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-      });
-
-      test('no recorded expectation (the combined email never got that far): sent separately', async () => {
-        const bare = await Signup.recordOwedMembership(trx, { customerId, estimateId: randomUUID(), onboardingKey: KEY, membershipEmail: { ...MEMBERSHIP_ARGS, customerId } });
-        await delivered(PLAN_VALUES.join('\n'));
-        expect(await Signup.resolveOwedEmail(bare)).toEqual({ sent: true });
-      });
-
-      test('two resolvers racing (the fast path and the sweep) send once', async () => {
-        const results = await Promise.all([Signup.resolveOwedEmail(membershipId), Signup.resolveOwedEmail(membershipId)]);
-        expect(results.filter((r) => r.sent)).toHaveLength(1);
-        expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-      });
-
-      test('the gate turned off between accept and delivery changes nothing: covered mail is still covered', async () => {
-        delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
-        await delivered(PLAN_VALUES.join('\n'));
-        expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-      });
-    });
-
-    describe('retries (durable backoff, never a silent drop)', () => {
-      const failing = () => Membership.sendMembershipStarted.mockResolvedValue({ ok: false, reason: 'provider_down' });
-      const minutesUntilNext = async (id) => Math.round((new Date((await trx('sms_sequences').where({ id }).first()).next_send_at).getTime() - Date.now()) / 60000);
-      const backdate = (id, hours) => trx('sms_sequences').where({ id }).update({ created_at: new Date(Date.now() - hours * 60 * 60 * 1000) });
-
-      test('a failing send backs off 15m, 30m, 1h, 2h, then every 4h, and stays active (attempts past the third are NOT cancelled)', async () => {
-        const id = await membership();
-        failing();
-        const waits = [];
-        for (let attempt = 1; attempt <= 7; attempt += 1) {
-          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
-          expect(await Signup.resolveOwedEmail(id)).toEqual({ requeued: true });
-          expect((await owedRows())[0]).toMatchObject({ status: 'active', step: attempt });
-          waits.push(await minutesUntilNext(id));
-        }
-        expect(waits).toEqual([15, 30, 60, 120, 240, 240, 240]);
-        expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
-      });
-
-      test('every attempt from the third on is logged at error level (earlier ones warn)', async () => {
-        const logger = require('../services/logger');
-        const id = await membership();
-        failing();
-        for (let attempt = 1; attempt <= 4; attempt += 1) {
-          logger.warn.mockClear(); logger.error.mockClear();
-          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
-          await Signup.resolveOwedEmail(id);
-          const loud = logger.error.mock.calls.some(([m]) => String(m).includes('not sent'));
-          expect(loud).toBe(attempt >= 3);
-        }
-      });
-
-      test('a send that recovers after a long outage still goes out (a 45-minute provider outage drops nothing)', async () => {
-        const id = await membership();
-        failing();
-        for (let i = 0; i < 4; i += 1) {
-          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
-          await Signup.resolveOwedEmail(id);
-        }
-        Membership.sendMembershipStarted.mockResolvedValue({ ok: true });
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'completed' });
-        expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
-      });
-
-      test('past 48 hours it stops: the row is escalated (not cancelled) and ONE actionable operator alert is raised', async () => {
-        const id = await membership();
-        await backdate(id, 49);
-        failing();
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ gaveUp: true });
-        const [row] = await owedRows();
-        expect(row).toMatchObject({ status: 'escalated' });
-        expect(row.metadata).toMatchObject({ gave_up: true, last_error: 'provider_down' });
-        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
-        const [category, title, body, opts] = Notifications.notifyAdmin.mock.calls[0];
-        expect(category).toBe('alert');
-        expect(title).toMatch(/membership email not delivered/i);
-        expect(body).toMatch(/send it by hand/i);
-        expect(opts).toMatchObject({ link: `/admin/customers?customerId=${customerId}`, dedupeKey: `signup-owed-email-gave-up:${id}` });
-        // Nothing more is claimed or sent.
-        await dueNow();
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ skipped: true });
-        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
-      });
-
-      test('a sender that THROWS past 48 hours also escalates and alerts', async () => {
-        const id = await membership();
-        await backdate(id, 60);
-        Membership.sendMembershipStarted.mockRejectedValue(new Error('boom'));
-        expect(await Signup.resolveOwedEmail(id)).toMatchObject({ error: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'escalated' });
-        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
-      });
-
-      test('the sweep reports a give-up separately from errors', async () => {
-        const id = await membership();
-        await backdate(id, 49);
-        await dueNow();
-        failing();
-        expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ gaveUp: 1, sent: 0 });
-      });
-
-      test('a sender-decided skip (opt-out, one_time lane) is final', async () => {
-        const id = await membership();
-        Membership.sendMembershipStarted.mockResolvedValue({ ok: false, skipped: true, reason: 'email_opted_out' });
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
-        expect((await owedRows())[0].metadata).toMatchObject({ send_reason: 'email_opted_out' });
-      });
-
-      test('a sender that throws releases the claim for the next sweep, on the backoff', async () => {
-        const id = await membership();
-        Membership.sendMembershipStarted.mockRejectedValue(new Error('boom'));
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ error: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'active' });
-        expect(await minutesUntilNext(id)).toBe(15);
       });
     });
   });
