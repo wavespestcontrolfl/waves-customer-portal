@@ -1221,6 +1221,19 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       });
     } catch (execErr) {
       logger.error(`[cancel-resolution] accepted action failed for case ${caseRow?.id}: ${execErr.message}`);
+      // A coded refusal (a hold with nothing to pause, the once-a-year
+      // limit, …) changed nothing: the case must not stand as 'accepted',
+      // or it replays for 24 h and hides the card for 12 months.
+      if (execErr.code && caseRow?.id) {
+        try {
+          const snap = typeof caseRow.snapshot === 'string' ? JSON.parse(caseRow.snapshot) : (caseRow.snapshot || {});
+          await db('cancellation_cases').where({ id: caseRow.id, resolution_outcome: 'accepted' }).update({
+            resolution_outcome: 'none',
+            snapshot: JSON.stringify({ ...snap, accept_refused: { code: execErr.code, at: new Date().toISOString() } }),
+            updated_at: new Date(),
+          });
+        } catch (markErr) { logger.warn(`[cancel-resolution] refused case ${caseRow.id} not released: ${markErr.message}`); }
+      }
       return res.status(execErr.code ? 409 : 500).json({
         error: execErr.code
           ? execErr.message

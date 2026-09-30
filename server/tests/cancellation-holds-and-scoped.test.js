@@ -62,6 +62,7 @@ function mockMakeBuilder(table) {
     whereNull(k) { filters.push((r) => r[k] == null); return builder; },
     whereRaw() { return builder; },
     forUpdate() { mockState.forUpdate = (mockState.forUpdate || 0) + 1; return builder; },
+    forShare() { return builder; },
     leftJoin() { return builder; },
     orderBy() { return builder; },
     select(...cols) { return Promise.resolve(applied().map((r) => ({ ...r }))); },
@@ -401,6 +402,37 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
   });
 
+  test('a resumed hold whose first visit back is months after the return date still gets its text a week before it', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-120) }, [lawnVisit('back', daysOut(5))]);
+    expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(5)) }), expect.anything());
+  });
+
+  test('a first visit back that changed between the read and the send is not texted with the stale date', async () => {
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.scheduled_services[0].scheduled_date = daysOut(6); return openTrx(cb); };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    await sendDueRestartTexts(['h1']);
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(6)) }), expect.anything());
+  });
+
+  test('marking an accept fails when one of its holds was undone meanwhile — nothing gets marked', async () => {
+    const { markHoldsAccepted } = require('../services/cancellation-resolution/holds');
+    const rec = JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false });
+    seed({ holds: [
+      { id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: rec },
+      { id: 'h2', customer_id: 'c1', family_key: 'mosquito', status: 'cancelled', moved_visits: rec },
+    ] });
+    await expect(markHoldsAccepted(['h1', 'h2'])).rejects.toThrow('no longer active');
+    await expect(markHoldsAccepted(['h1', 'missing'])).rejects.toThrow('no longer active');
+  });
+
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
     holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
     expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);
@@ -431,9 +463,10 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms).toHaveBeenCalledTimes(1);
     expect(mockState.tables.plan_holds[0].reminder_sent_at).toBeTruthy();
 
-    // A hold that ended over 90 days ago is history, not texted about.
+    // Once the first visit back has gone by, the moment for the text has
+    // passed: nothing is sent late.
     mockSms.mockClear();
-    holdSeed({ status: 'resumed', resume_on: daysOut(-95) }, [lawnVisit('back', daysOut(2))]);
+    holdSeed({ status: 'resumed', resume_on: daysOut(-30) }, [lawnVisit('back', daysOut(-2), { status: 'completed' })]);
     expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(0);
     expect(mockSms).not.toHaveBeenCalled();
   });

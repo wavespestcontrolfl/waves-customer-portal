@@ -385,8 +385,10 @@ async function markHoldsAccepted(holdIds) {
   // One transaction: recovery must never find an accept half-marked.
   await db.transaction(async (trx) => {
     for (const holdId of holdIds || []) {
-      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
-      if (!row) continue;
+      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits', 'status');
+      // A hold the recovery pass (or anything else) undid in the meantime
+      // fails the whole marking: the caller compensates, nothing is skipped.
+      if (!row || row.status !== 'active') throw new Error(`plan hold ${holdId} is no longer active`);
       await trx('plan_holds').where({ id: holdId }).update({
         moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), acceptCommitted: true }),
         updated_at: new Date(),
@@ -545,9 +547,6 @@ async function firstVisitBack(hold, dbh = db) {
   return rows.find((row) => familyOfServiceRow(row) === hold.family_key) || null;
 }
 
-// A hold whose first visit back has not come round within this many days of
-// the return date is no longer texted about.
-const REMINDER_LOOKBACK_DAYS = 90;
 // An accept runs its skips within seconds of writing the hold; a hold
 // older than this with an unfinished skip plan was interrupted.
 const SKIP_RECOVERY_AFTER_MS = 15 * 60 * 1000;
@@ -559,7 +558,7 @@ const SKIP_RECOVERY_AFTER_MS = 15 * 60 * 1000;
  * run must not reach its first visit unannounced). A per-hold advisory lock
  * serializes the two callers; the stamp is re-read under it and written
  * only after the provider accepted the send (codex r1 P1).
- * Returns 'sent' | 'unsent' | 'not_due' | 'already_sent' | 'no_visit' | 'cancelled'.
+ * Returns 'sent' | 'unsent' | 'not_due' (incl. a visit that changed under the lock) | 'already_sent' | 'no_visit' | 'cancelled'.
  */
 async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
@@ -585,6 +584,15 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`plan-hold-reminder:${hold.id}`]);
     const live = await trx('plan_holds').where({ id: hold.id }).first('reminder_sent_at');
     if (!live || live.reminder_sent_at) return null;
+    // The first visit back is read again, and its row held FOR SHARE for
+    // the send: a reschedule or cancel that landed since the read above
+    // means the date is stale (the next run names the real one), and one
+    // arriving now waits until this text is out, so its own notice lands
+    // after it.
+    const again = await firstVisitBack(hold, trx);
+    if (!again || String(again.id) !== String(next.id) || again.status !== next.status || dateOnlyString(again.scheduled_date) !== nextOn) return 'stale';
+    const pinned = await trx('scheduled_services').where({ id: next.id }).forShare().first('status', 'scheduled_date');
+    if (!pinned || pinned.status !== next.status || dateOnlyString(pinned.scheduled_date) !== nextOn) return 'stale';
     if (!customer.phone) return false;
     const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
@@ -609,6 +617,7 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
     return true;
   });
   if (sent === null) return 'already_sent';
+  if (sent === 'stale') return 'not_due';
   if (sent) return 'sent';
   logger.error(`[holds] restart text not delivered for hold ${hold.id} — will retry tomorrow`);
   // The visit is about to run with no notice: the office calls.
@@ -688,8 +697,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
 
   // A resumed hold still owes its text when the first visit back comes
   // after the return date.
-  const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at')
-    .where('resume_on', '>=', addDays(today, -REMINDER_LOOKBACK_DAYS)).select('*');
+  const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at').select('*');
   for (const hold of toRemind) {
     try {
       const result = await sendRestartTextIfDue(hold, { today });

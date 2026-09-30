@@ -151,6 +151,11 @@ test('an executor coded failure returns its code and sends no confirmation', asy
   expect(res.body.code).toBe('hold_date_invalid');
   expect(mockSms).not.toHaveBeenCalled();
   expect(mockEmail).not.toHaveBeenCalled();
+  // Nothing changed, so the case is released: no 24 h replay of a refusal,
+  // and the card is not counted as shown/accepted for 12 months.
+  const release = state.updates.find((p) => p.resolution_outcome === 'none');
+  expect(release).toBeTruthy();
+  expect(JSON.parse(release.snapshot).accept_refused).toMatchObject({ code: 'hold_date_invalid' });
 });
 
 test('same accepted template inside 24h returns the original receipt, no re-execution', async () => {
