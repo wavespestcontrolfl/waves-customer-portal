@@ -7145,9 +7145,12 @@ const InvoiceService = {
         delete sms.error;
       }
     }
+    // A planned leg whose summary text was accepted while this send ran is a carried one from
+    // here on (the claim's snapshot still says planned): same retry and refusal handling.
+    const summaryCarried = carriedBySummary || (plannedBySummary && summaryAcceptedNow);
     const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable"
-      || ((carriedBySummary || (plannedBySummary && !summaryAcceptedNow)) && !email.ok && !email.blocked && !email.skipped));
-    if (carriedBySummary && !operatorInitiated && !email.ok && !emailMustRetry) {
+      || ((carriedBySummary || plannedBySummary) && !email.ok && !email.blocked && !email.skipped));
+    if (summaryCarried && !operatorInitiated && !email.ok && !emailMustRetry) {
       await alertSummaryCarriedEmailFailed(invoiceId, claim.invoice.invoice_number, email.error || email.code || "refused");
     }
     const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
@@ -7958,8 +7961,9 @@ const InvoiceService = {
         }
         continue;
       }
+      // A planned row whose summary text was accepted during this attempt is carried now.
       const durableSendError = summaryPlannedRow
-        ? `${SUMMARY_TEXT_PLANNED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        ? `${result.sms?.ok ? SUMMARY_TEXT_CARRIED_ERROR : SUMMARY_TEXT_PLANNED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
         : summaryCarriedRow
         ? `${SUMMARY_TEXT_CARRIED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
         : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"

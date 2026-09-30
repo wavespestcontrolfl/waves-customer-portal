@@ -5890,6 +5890,52 @@ postgres('visit summary recipient recovery', () => {
       });
     });
 
+    describe('the summary text is accepted while the queue sends a planned invoice', () => {
+      const suppressSummary = () => sendCustomerMessage.mockImplementation(async (input) => {
+        if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+        return { sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' };
+      });
+      const dueAgain = (invoiceId) => mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+
+      test('a transient email failure retries, and finalizes only when an email goes', async () => {
+        const invoiceId = await stop();
+        suppressSummary();
+        await coordinate();
+        const email = require('../services/invoice-email').sendInvoiceEmail;
+        email.mockImplementationOnce(async () => {
+          await Invoice.markSummaryTextAccepted(invoiceId);
+          return { ok: false, error: 'SendGrid 500' };
+        });
+        const sendSms = jest.spyOn(Invoice, 'sendViaSMS');
+        await Invoice.processScheduledSends();
+        const retrying = await invoiceRow(invoiceId);
+        expect(retrying).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 1 });
+        expect(retrying.sent_at).toBeNull();
+        expect(retrying.scheduled_send_error.startsWith(MARKER)).toBe(true);
+        await dueAgain(invoiceId);
+        email.mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+        await Invoice.processScheduledSends();
+        expect(email).toHaveBeenCalledTimes(2);
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'sent' });
+        expect(sendSms).not.toHaveBeenCalled();
+        expect(strayTexts).toEqual([]);
+      });
+
+      test('a refused email after the acceptance finalizes as sent and tells the office', async () => {
+        const invoiceId = await stop();
+        suppressSummary();
+        await coordinate();
+        const alert = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n' });
+        require('../services/invoice-email').sendInvoiceEmail.mockImplementationOnce(async () => {
+          await Invoice.markSummaryTextAccepted(invoiceId);
+          return { ok: false, blocked: true, error: 'Suppressed: bounce' };
+        });
+        await Invoice.processScheduledSends();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'sent' });
+        expect(alert).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `summary-carried-email:${invoiceId}` }));
+      });
+    });
+
     describe('the carried receipt alert follows what the summary text did', () => {
       const alertRow = (invoiceId) => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`summary-carried-receipt-email:${invoiceId}`]).first();
       afterEach(async () => { await mockPg('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'summary-carried-receipt-email:%'").del(); });
