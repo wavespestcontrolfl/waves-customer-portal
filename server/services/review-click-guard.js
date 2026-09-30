@@ -75,8 +75,11 @@ async function askSuppressedByClick(request, { followup = false } = {}, database
 }
 
 // The guard for a cadence / outreach touch that has no request row yet.
-async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null } = {}, database = db) {
-  const anchor = await visitAnchor({ serviceRecordId, scheduledServiceId }, database);
+// A cadence with no visit (an admin-started one) anchors at its own start, so
+// only a click after it began counts.
+async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null } = {}, database = db) {
+  const anchor = (await visitAnchor({ serviceRecordId, scheduledServiceId }, database))
+    || (fallbackAnchor ? new Date(fallbackAnchor) : null);
   return reviewLinkClickedSince(customerId, anchor, database);
 }
 

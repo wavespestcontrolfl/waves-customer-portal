@@ -4423,7 +4423,13 @@ const ReviewService = {
     // tapped a tracked review link since this ask's visit. Runs inside the
     // review-send lock (the sequence runner / sendGatedAsk hold it) so it
     // cannot race the click's own stop; terminal, so the cadence stops.
-    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId })) {
+    // A cadence with no visit ids (admin-started) falls back to its own start.
+    let fallbackAnchor = null;
+    if (sequenceId && !serviceRecordId && !scheduledServiceId) {
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("created_at", "started_at");
+      fallbackAnchor = seq?.created_at || seq?.started_at || null;
+    }
+    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor })) {
       logger.info(`[review] Touch suppressed (customerId=${customer.id} reason=review_link_clicked)`);
       return { ok: false, reason: "review_link_clicked", terminal: true };
     }

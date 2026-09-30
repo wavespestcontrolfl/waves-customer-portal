@@ -49,6 +49,16 @@ describe('review-click-guard visit anchor', () => {
     expect(await guard.touchSuppressedByClick('cust-1', { serviceRecordId: 'sr-1' }, db)).toBe(false);
   });
 
+  test('a cadence with no visit anchors at its own start (fallbackAnchor): only a click after it began counts', async () => {
+    const started = '2026-09-20T15:00:00Z';
+    const after = fakeDb({ clicks: ['2026-09-21T15:00:00Z'] });
+    expect(await guard.touchSuppressedByClick('cust-1', { fallbackAnchor: started }, after)).toBe(true);
+    const before = fakeDb({ clicks: ['2026-09-19T15:00:00Z'] });
+    expect(await guard.touchSuppressedByClick('cust-1', { fallbackAnchor: started }, before)).toBe(false);
+    // no visit and no fallback → no anchor → never suppressed
+    expect(await guard.touchSuppressedByClick('cust-1', {}, after)).toBe(false);
+  });
+
   test('a click just after ET midnight on the visit day DOES suppress it', async () => {
     // 2026-09-30T04:30Z = Sept 30, 12:30 a.m. EDT
     const db = fakeDb({ serviceDate: '2026-09-30', clicks: ['2026-09-30T04:30:00Z'] });

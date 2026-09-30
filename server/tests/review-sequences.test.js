@@ -6974,6 +6974,28 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
     expect(mock.__state.rows.review_sequences.map((r) => [r.id !== 'seq-lease', r.status, r.stop_reason])).toEqual([[true, 'stopped', 'clicked']]);
   });
 
+  test('an ADMIN-started cadence (no visit ids) anchors at its own start: a later click on an older unrelated link suppresses its next touch even when no stop ran', async () => {
+    const STARTED = new Date(Date.now() - 3 * 86400000);
+    // The click is on an older, unrelated request (not linked to the cadence); no stopFutureAsks ran.
+    const unrelated = click({ id: 'rr-old', service_record_id: null, sms_sent_at: new Date(Date.now() - 30 * 86400000), redirected_at: CLICKED });
+    const adminSeq = dueSequence({ id: 'seq-admin', service_record_id: null, created_at: STARTED, started_at: STARTED, current_step: 1, touches_sent: 1 });
+    const mock = makeMock({ customers: [customer], review_sequences: [adminSeq], review_requests: [unrelated] });
+    db.mockImplementation(mock);
+    const out = await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+  });
+
+  test('control: an admin-started cadence is NOT suppressed by a click from before it started', async () => {
+    const STARTED = new Date(Date.now() - 1 * 86400000); // after CLICKED (2 days ago)
+    const adminSeq = dueSequence({ id: 'seq-admin2', service_record_id: null, created_at: STARTED, started_at: STARTED, current_step: 1, touches_sent: 1 });
+    const mock = makeMock({ customers: [customer], review_sequences: [adminSeq], review_requests: [click({ id: 'rr-old2', service_record_id: null })] });
+    db.mockImplementation(mock);
+    await ReviewService.processReviewSequences();
+    expect(mock.__state.rows.review_sequences[0].stop_reason).not.toBe('clicked');
+  });
+
   test('a queued ask released back to the scheduler (a stranded send, an uncertain summary that enrolled later) is suppressed by processScheduled', async () => {
     const mock = makeMock({ customers: [customer], service_records: [record], review_requests: [click(), queuedAsk()] });
     db.mockImplementation(mock);
