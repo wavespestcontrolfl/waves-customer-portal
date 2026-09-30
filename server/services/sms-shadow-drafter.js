@@ -615,18 +615,39 @@ function reserviceNegatorGoverns([ns, ne], [os, oe], text) {
   const words = gap.trim().split(/\s+/).filter(Boolean).length;
   return words <= RESERVICE_DENIAL_GAP_MAX_WORDS && !RESERVICE_DENIAL_GAP_BREAK_RE.test(gap);
 }
-function isReserviceDenialClause(clause) {
+// PR #5336 pre-push audit P1 (every offer): each detector regex used to yield
+// only its FIRST match per clause, and its greedy 60-character gap swallowed a
+// second offer into the first one's span — so a denied offer hid a later
+// affirmative one ("We cannot offer a free lawn re-service and will send a
+// free pest re-service" read as one denied span). Offer spans are now ALL the
+// matches of global, LAZY-gap copies of both detectors (derived from the
+// detectors' own sources so they can never drift), and a clause is a denial
+// only when EVERY span is governed by a negator. The lazy gap keeps two offers
+// in one clause as two spans; whether a clause matches at all is unchanged.
+const RESERVICE_OFFER_SPAN_RES = [FREE_RESERVICE_OFFER_RE, RESERVICE_COVERAGE_RE]
+  .map((rx) => new RegExp(rx.source.replace(/\{0,60\}/g, '{0,60}?'), 'gi'));
+const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
+function reserviceOfferSpans(text) {
+  return RESERVICE_OFFER_SPAN_RES
+    .flatMap((rx) => [...text.matchAll(rx)].filter((m) => m[0]).map((m) => [m.index, m.index + m[0].length]));
+}
+// The clause's AFFIRMATIVE promise text, or null when it holds no offer at all
+// or every offer in it is a denial. The GOVERNED (denied) spans are blanked
+// out of the returned text so lane derivation only ever sees what the clause
+// actually promises: in "We cannot offer a free lawn re-service and will send a
+// free pest re-service" the promised lane is pest, not lawn. Unsure -> a
+// promise (an ungoverned span is affirmative).
+function affirmativeReserviceOfferText(clause) {
   const text = String(clause || '');
-  const offers = [FREE_RESERVICE_OFFER_RE, RESERVICE_COVERAGE_RE].map((rx) => rx.exec(text)).filter(Boolean)
-    .map((m) => [m.index, m.index + m[0].length]);
-  if (!offers.length) return false;
-  const negators = [...text.matchAll(new RegExp(RESERVICE_DENIAL_RE.source, 'gi'))].map((m) => [m.index, m.index + m[0].length]);
-  // Unsure -> a promise: EVERY offer span in the clause must be governed by some negator.
-  return offers.every((o) => negators.some((n) => reserviceNegatorGoverns(n, o, text)));
+  const offers = reserviceOfferSpans(text);
+  if (!offers.length) return null;
+  const negators = [...text.matchAll(RESERVICE_DENIAL_SCAN_RE)].map((m) => [m.index, m.index + m[0].length]);
+  const governed = offers.filter((o) => negators.some((n) => reserviceNegatorGoverns(n, o, text)));
+  if (governed.length === offers.length) return null;
+  return governed.reduce((acc, [start, end]) => acc.slice(0, start) + ' '.repeat(end - start) + acc.slice(end), text);
 }
 function rawReserviceOfferMatch(text) {
-  const t = String(text || '');
-  return FREE_RESERVICE_OFFER_RE.test(t) || RESERVICE_COVERAGE_RE.test(t);
+  return reserviceOfferSpans(String(text || '')).length > 0;
 }
 // The AFFIRMATIVE promise clause(s) of an SMS body — the clauses the two
 // detectors above match that are not eligibility denials. Granularity narrows
@@ -647,9 +668,10 @@ function affirmativeReservicePromiseClauses(text) {
   const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i, /[.?!\n]+/];
   for (const splitter of splitters) {
     const hits = t.split(splitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
-    if (hits.length) return hits.filter((c) => !isReserviceDenialClause(c));
+    if (hits.length) return hits.map(affirmativeReserviceOfferText).filter(Boolean);
   }
-  return rawReserviceOfferMatch(t) && !isReserviceDenialClause(t) ? [t] : [];
+  const whole = affirmativeReserviceOfferText(t);
+  return whole ? [whole] : [];
 }
 // The single entry point every caller below uses — never test either regex
 // alone, or a caller could drift out of sync with the other.

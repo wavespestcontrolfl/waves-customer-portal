@@ -2301,6 +2301,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
       "we can't offer a refund, however a complimentary visit is on us",
       'We cannot offer a refund and will send a free re-service.',
       'We cannot offer a refund and a free re-service is on us.',
+      // Pre-push audit P1 (every offer): a denied offer never hides a later affirmative one.
+      'We cannot offer a free lawn re-service and will send a free pest re-service.',
+      'We will send a free pest re-service but cannot offer a free lawn re-service.',
       // Codex round-8 P2: a copula BEFORE "free" no longer excludes it.
       "Your visit is free; we'll text the booking link now.",
       'The re-service is free.',
@@ -2320,6 +2323,25 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'still have ants', intendedActions: [] }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
+    });
+
+    // The promised lane comes from the AFFIRMATIVE offer only: the denied lawn offer never counts.
+    test.each([
+      'We cannot offer a free lawn re-service and will send a free pest re-service.',
+      'We will send a free pest re-service but cannot offer a free lawn re-service.',
+    ])('%s → a promise for the PEST lane only (draft + send time)', async (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const pestOnly = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const out = validateReserviceOffer({ reply, factsBlock: pestOnly, intendedActions: sendLink });
+      expect(out.ok).toBe(true);
+      expect(out.promisedLanes).toEqual(['pest']);
+      // A customer eligible for neither lane is refused; a lawn-only customer is refused a PEST promise.
+      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: sendLink }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['lawn'])}\nBILLING:`, intendedActions: sendLink }).ok).toBe(false);
+      // Send time: live pest eligibility alone is enough (lawn is never consulted); lawn-only blocks the pest promise.
+      await expect(loadWith({ lanes: ['pest'] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toBeNull();
+      await expect(loadWith({ lanes: ['lawn'] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toMatch(/no longer eligible for a free pest re-service/);
     });
 
     test.each(DENIALS.slice(0, 2))('%s → passes draft validation for an ineligible customer (nothing to validate)', (reply) => {
