@@ -50,7 +50,7 @@ describe('the routes keep the hold out of generic verdicts and single-card actio
   test('the clicked hold card is refused by the verdict route and by Resolve / Dismiss', () => {
     expect(src).toContain("if (await streetLevelHoldStillPending(db, item)) {\n      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });");
     // Inside the transaction, after the per-call lock (atomic with the write).
-    const guard = src.indexOf("if (await streetLevelHoldStillPending(trx, item)) {\n      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE)");
+    const guard = src.indexOf("if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, item)) {\n      throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE)");
     expect(guard).toBeGreaterThan(src.indexOf('const result = await conn.transaction(async (trx) => {'));
     expect(guard).toBeGreaterThan(src.indexOf('await lockTriageCall(trx, item.call_log_id);', src.indexOf('async function transitionCore')));
   });
@@ -72,6 +72,8 @@ describe('the routes keep the hold out of generic verdicts and single-card actio
     };
     await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'resolved', conn: make() })).rejects.toMatchObject({ statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
     expect(writes).toHaveLength(0);
+    // Claiming / assigning the card while the visit is pending is allowed.
+    await expect(adminTriage.transitionCore({ id: 't1', nextStatus: 'in_progress', conn: make() })).resolves.not.toMatchObject({ outcome: 'already' });
   });
 });
 

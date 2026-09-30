@@ -414,7 +414,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // Dismiss. Checked HERE, under the per-call lock and inside the
     // transaction, so the decision and the write cannot straddle a concurrent
     // office confirm.
-    if (await streetLevelHoldStillPending(trx, item)) {
+    if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, item)) {
       throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
     }
     if (holdsTable) {
