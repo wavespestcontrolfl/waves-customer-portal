@@ -107,6 +107,13 @@ async function sendTextLeg(ctx, channel, ledger) {
     },
     preDispatchCheck: boundary,
     preSendCheck: boundary,
+    // Twilio runs preSendCheck BEFORE its own asynchronous provider preparation (the annual-offer guard's
+    // short_codes lookup for a shortened payment link). This one runs after it, immediately before
+    // messages.create(): an invoice paid or a schedule paused during that lookup still vetoes the text
+    // (retryable DUNNING_SET_CHANGED / DUNNING_SCHEDULE_CHANGED, the reservation reopened). It reads on the
+    // handoff transaction when there is one, else on the run's own handle. The push rail needs no twin: its
+    // shouldContinue (this same boundary) is re-run right after the OAuth fetch and before the FCM request.
+    ...(channel === 'sms' ? { providerPreSendCheck: ({ dbi } = {}) => boundary({ database: dbi?.isTransaction ? dbi : undefined }) } : {}),
   });
 }
 

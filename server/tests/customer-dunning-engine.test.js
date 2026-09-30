@@ -318,6 +318,16 @@ function acceptingSms(overrides = {}) {
     if (pre?.ok !== true) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: pre.code, retryable: pre.retryable === true };
     const send = await input.preSendCheck({ channel: input.channel, ...(input.channel === 'push' ? { database: MOCK_TRX } : {}) });
     if (send?.ok !== true) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: send.code, retryable: send.retryable === true };
+    // The provider's own asynchronous preparation (twilio's annual-offer guard: a short_codes lookup), then the
+    // caller's providerPreSendCheck immediately before messages.create() — a refusal there is the same
+    // never-attempted, retryable not-sent (twilio.js maps providerPreSendCheckFailed that way).
+    if (input.channel === 'sms') await new Promise((resolve) => { setImmediate(resolve); });
+    if (typeof input.providerPreSendCheck === 'function') {
+      const final = await input.providerPreSendCheck({ channel: 'sms', dbi: undefined });
+      if (final?.ok !== true) {
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: final.code, retryable: final.retryable === true, deferred: final.deferred === true };
+      }
+    }
     return { sent: true, blocked: false, deliveryOutcome: 'accepted', ...overrides };
   });
 }
@@ -1405,6 +1415,80 @@ describe('progress is selected by the CURRENT touch key after the stage is plann
     // both Day 60 legs were delivered NOW; the Day 30 email's earlier time must not stand in for this touch
     expect(new Date(Schedule.advance.mock.calls[0][1].deliveredAt).getTime()).toBe(NOW.getTime());
     expect(interactions).toHaveLength(1);
+  });
+});
+
+describe('the text is re-checked at the FINAL provider hook, after provider preparation (R7)', () => {
+  const smsOnly = () => { prefs = { invoice_channels: ['sms'] }; };
+  const accepted = async () => (await Promise.all(mockSendMessage.mock.results.map((r) => r.value))).filter((r) => r?.sent === true);
+  test('unchanged: one text goes out, and the final hook ran after the earlier checks', async () => {
+    smsOnly();
+    expect((await run()).outcome).toBe('advanced');
+    expect(await accepted()).toHaveLength(1);
+    expect(mockSendMessage.mock.calls[0][0].providerPreSendCheck).toEqual(expect.any(Function));
+    expect(mockResolve.mock.calls.filter(([, o]) => !o?.now)).toHaveLength(3); // preDispatch, preSend, providerPreSend
+  });
+
+  test('an invoice paid DURING the provider preparation (the short-link lookup) vetoes that text: no messages.create, retryable, the reservation reopened; the re-render sends the new set once', async () => {
+    smsOnly();
+    const changed = makeSet(['inv-a', 'inv-b'], { totalCents: 20000, digest: 'paid-c' });
+    // boundary reads (no `now`) of the first attempt: preDispatch, preSend, providerPreSend. Invoice C is paid
+    // during the provider preparation, so the 3rd read (and everything after, incl. the re-render) sees `changed`.
+    let boundary = 0;
+    mockResolve.mockImplementation(async (_id, opts) => {
+      if (opts?.now) return boundary >= 3 ? changed : live;
+      boundary += 1;
+      return boundary >= 3 ? changed : live;
+    });
+    const out = await run();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }), { database: fakeDb });
+    const sent = await accepted();
+    expect(sent).toHaveLength(1);
+    expect(mockSendMessage.mock.calls.at(-1)[0].body).toContain('SMS[invoice_followup_combined_60day] 2 '); // the CURRENT set
+    expect(out.outcome).toBe('advanced');
+  });
+
+  test('a set that keeps changing is vetoed at the final hook every time: nothing is sent, the step is held, the reservation stays reopened', async () => {
+    smsOnly();
+    let boundary = 0;
+    mockResolve.mockImplementation(async (_id, opts) => {
+      if (opts?.now) return boundary >= 3 ? makeSet(['inv-a', 'inv-b'], { totalCents: 20000 + boundary, digest: `d-${boundary}` }) : live;
+      boundary += 1;
+      // preDispatch and preSend match the set the text was rendered from; the FINAL hook never does
+      return [1, 2, 4, 5].includes(boundary) ? (boundary <= 2 ? live : makeSet(['inv-a', 'inv-b'], { totalCents: 20000 + 3, digest: 'd-3' })) : makeSet(['inv-a'], { totalCents: 12900, digest: `x-${boundary}` });
+    });
+    const out = await run();
+    expect(out.outcome).toBe('held');
+    expect(await accepted()).toHaveLength(0);
+    expect(rowFor('sms').metadata.send_failed).toBe(true);
+    expect(Schedule.advance).not.toHaveBeenCalled();
+  });
+
+  test('a schedule paused during the preparation is refused at the final hook (retryable DUNNING_SCHEDULE_CHANGED), nothing sent', async () => {
+    smsOnly();
+    let boundary = 0;
+    mockResolve.mockImplementation(async (_id, opts) => {
+      if (!opts?.now) {
+        boundary += 1;
+        if (boundary === 2) mockScheduleRow = { ...mockScheduleRow, status: 'paused' }; // after the pre-send check has passed, an admin pauses while the lookup runs
+      }
+      return live;
+    });
+    const out = await run();
+    expect(await accepted()).toHaveLength(0);
+    expect(out.outcome).toBe('held');
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SCHEDULE_CHANGED' }), { database: fakeDb });
+  });
+
+  test('the PUSH rail needs no twin: its check is re-run by the push service right before the FCM request, with no arguments', async () => {
+    prefs = { invoice_channels: ['push'] };
+    await run();
+    const input = mockSendMessage.mock.calls[0][0];
+    expect(input.channel).toBe('push');
+    expect(input.providerPreSendCheck).toBeUndefined(); // the push provider takes shouldContinue (= preSendCheck), not this hook
+    mockResolve.mockClear();
+    expect(await input.preSendCheck()).toEqual({ ok: true }); // fcm.send calls shouldContinue() bare, after the token fetch
+    expect(mockResolve).toHaveBeenCalledTimes(1);
   });
 });
 
