@@ -22,11 +22,27 @@ const { CLAIMABLE_LINK_TYPES } = require('./prospect-scorer');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // §3.5 — first-touch provenance. `legacy_unknown` = backfill fallback only.
+// `ai_citation` (the AEO link-source-of-answers feeder, `ai-citation-feeder.js`)
+// is DISCOVERY ONLY — a domain whose first touch is `ai_citation` never earns
+// AUTO authority (link-authority-policy.js decideAuthority downgrades every
+// AUTO_* level to its OWNER_ equivalent for such a domain, and the signup
+// runner's execution authorize() refuses to claim one even if it somehow read
+// AUTO_FREE): owner ruling — discovery never grants authority.
 const LINK_SOURCES = Object.freeze([
   'owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive',
   'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink',
-  'lost_recovery', 'local_opportunity', 'legacy_unknown',
+  'lost_recovery', 'local_opportunity', 'legacy_unknown', 'ai_citation',
 ]);
+// Every `ai_citation` touch's source_detail starts with this prefix — the
+// durable discovery-only mark link-authority-policy.js isDiscoveryOnlyDomain
+// reads on a domain's first-touch detail (it survives a rollback relabel of
+// `source` and an enrich overwrite of `enrichment`). ensureDomain REFUSES an
+// ai_citation touch without it (Codex P1 2026-09-28, round 11), so no
+// writer — the feeder, intake(), the intake resolver, or a future one — can
+// create a citation domain the guard cannot recognize.
+const AI_CITATION_SOURCE_DETAIL_PREFIX = 'ai_citation:';
+// The source_detail prefix each source's touches must carry ('' = none).
+const REQUIRED_DETAIL_PREFIX = Object.freeze(Object.fromEntries(LINK_SOURCES.map((s) => [s, s === 'ai_citation' ? AI_CITATION_SOURCE_DETAIL_PREFIX : ''])));
 
 // §3.4d — intake items (step 2): raw references parked before resolution.
 const INTAKE_ITEM_STATES = Object.freeze(['pending', 'unresolved', 'resolved', 'dropped']);
@@ -113,9 +129,15 @@ const ACTIONS_BY_DIMENSION = Object.freeze({
 const APPROVABLE_LEVELS = Object.freeze(['OWNER_FREE', 'OWNER_ACCOUNT', 'OWNER_OUTREACH', 'OWNER_PAYMENT', 'OWNER_MEMBERSHIP', 'OWNER_LEGAL', 'OWNER_HUMAN_STEP']);
 
 // §4 step 1 — hosts that are references to opportunities or our own, never a
-// target. Dropped by intake (not parked). Subdomains match too.
+// target. Dropped by intake (not parked). Subdomains match too. The ONE
+// never-target list: intake, the baseline, the gap feeder, the ai_citation
+// feeder and ai-citation-classifier.js's listicle heuristic all read it.
 const NEVER_TARGET_HOSTS = Object.freeze([
   'x.com', 'twitter.com', 't.co', 'google.com',
+  // search-engine + map result hosts (Codex P2 2026-09-28, round 11): a
+  // results page an answer engine cites is never an acquisition target
+  'bing.com', 'duckduckgo.com', 'search.yahoo.com', 'maps.apple.com', 'yandex.com', 'yandex.ru',
+  'baidu.com', 'ecosia.org', 'search.brave.com', 'startpage.com',
   'bit.ly', 'tinyurl.com', 'goo.gl', 'ow.ly', 'buff.ly', 'lnkd.in', 'rebrand.ly', 'cutt.ly', 'is.gd', 'youtu.be',
   'wavespestcontrol.com', ...SPOKE_SITE_KEYS,
 ]);
@@ -346,18 +368,24 @@ function touchKey(source, sourceRef, sourceDetail) {
  * first-touch `source` on the domain row is never rewritten; an `owner_seed`
  * touch on an existing normal-priority row raises the priority (§4 step 2).
  */
-async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef = null, seenAt = null, createdAt = null }) {
+async function ensureDomain(q, { domain, source, sourceDetail: givenDetail = null, sourceRef: givenRef = null, seenAt = null, createdAt = null }) {
   const key = canonicalProspectDomain(domain);
   if (!key) throw new Error('ensureDomain: empty domain');
   if (!LINK_SOURCES.includes(source)) throw new Error(`ensureDomain: unknown source '${source}'`);
+  const sourceDetail = givenDetail || null;
+  const sourceRef = givenRef || null;
+  // (a null detail reads as "null": it never carries a non-empty prefix)
+  if (!String(sourceDetail).startsWith(REQUIRED_DETAIL_PREFIX[source])) {
+    throw new Error(`ensureDomain: an ${source} source_detail must start with '${REQUIRED_DETAIL_PREFIX[source]}'`);
+  }
   const priority = source === 'owner_seed' ? 'owner_seed' : 'normal';
 
   const inserted = await q('seo_link_domains')
     .insert({
       domain: key,
       source,
-      source_detail: sourceDetail || null,
-      source_ref: sourceRef || null,
+      source_detail: sourceDetail,
+      source_ref: sourceRef,
       discovery_priority: priority,
       agent_state: 'new',
       ...(createdAt ? { created_at: createdAt, updated_at: createdAt } : {}),
@@ -374,8 +402,8 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
     .insert({
       domain_id: row.id,
       source,
-      source_detail: sourceDetail || null,
-      source_ref: sourceRef || null,
+      source_detail: sourceDetail,
+      source_ref: sourceRef,
       touch_key: touchKey(source, sourceRef, sourceDetail),
       ...(seenAt ? { seen_at: seenAt } : {}),
     })
@@ -666,7 +694,7 @@ module.exports = {
   INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, isStandingConfidence, normalizeSubmissionUrl, pathKey, movePatch, isOutreachLocked,
-  acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
+  acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain, AI_CITATION_SOURCE_DETAIL_PREFIX,
   settleRetiredPlacements,
   REGISTRY_ACTIONS, LANE_OWNED_STATES, registryActionPatch, applyRegistryAction,
 };

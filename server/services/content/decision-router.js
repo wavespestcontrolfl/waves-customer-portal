@@ -83,7 +83,11 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // SERP on the representative query reroute it to an article would freeze
 // the key on completion without ever creating the page — and no later
 // mine could reopen it.
-const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap']);
+// aeo_question_gap joined 2026-09-28 for the same reason: its key is the
+// benchmark question + target page, so a profiler reroute of its refresh
+// (to a new blog or a city-service page) would complete — and freeze — the
+// key without the target ever answering the question.
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap', 'aeo_question_gap', 'citability_backfill']);
 
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;

@@ -17,7 +17,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2e72fc8ae443c96ec67a5f88f2789529b9942053a58d856ac66d460e77c32391"
     },
     "slug": "brown-dog-tick",
     "common_name": "Brown Dog Tick",
@@ -41,7 +42,7 @@
       {
         "slug": "american-dog-tick",
         "difference": "Brown dog tick is plain reddish-brown and can live entirely indoors; American dog tick has pale mottling on the back and needs to go back outdoors.",
-        "next_photo": "A close-up from above of the back for any pale mottling, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above on the back for any pale mottling.",
         "photo_can_confirm": true
       }
     ],
@@ -109,6 +110,582 @@
     "links": {
       "site_page": "/pest-identifier/brown-dog-tick/",
       "guides": []
+    }
+  },
+  {
+    "slug": "american-dog-tick",
+    "kind": "organism",
+    "common_name": "American Dog Tick",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "american dog tick",
+      "american dog ticks",
+      "dermacentor variabilis"
+    ],
+    "scientific_name": "Dermacentor variabilis",
+    "rank": "species",
+    "group": "ticks-mites",
+    "subgroup": "ticks",
+    "site_category": "Biting",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Reddish-brown, flattened, oval body with a mottled gray-white pattern on the back (scutum)",
+      "About the size of a watermelon seed before feeding, swelling gray and much larger once attached",
+      "Found clinging to grass and brush edges, waiting for a host to brush past",
+      "Often picked up on pant legs, socks or a dog's coat after time in tall grass or brush"
+    ],
+    "look_alikes": [
+      {
+        "slug": "lone-star-tick",
+        "difference": "American dog tick has a mottled gray-white pattern on its back; lone star tick has a single solid silvery-white dot (females) or scattered white streaks (males)",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether the pale marking is mottled or one solid spot.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "on-pets"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can spread Rocky Mountain spotted fever; remove promptly with fine-tipped tweezers, note the date, and see a doctor if fever, headache or a rash follow.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Florida's main carrier of Rocky Mountain spotted fever, usually picked up from tall grass, brush or a pet that has been outside. Removing it soon after it attaches lowers the risk, and yard treatment can cut down tick numbers where kids and pets play.",
+      "fact": "It generally needs many hours attached before it can pass along infection, which is why checking yourself and pets after time outdoors matters so much."
+    },
+    "tech_notes": "Confirm mottled scutum pattern to distinguish from lone star tick. Yard treatment focused on lawn edges, brush and shaded harborage; recommend host (pet) tick prevention alongside yard service.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.cdc.gov/rocky-mountain-spotted-fever/about/index.html"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bbe0d35dbeba3552fdaaf611d8efe91661663c5d84946dcd680d2cfd4e065129"
+    }
+  },
+  {
+    "slug": "lone-star-tick",
+    "kind": "organism",
+    "common_name": "Lone Star Tick",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "lone star tick",
+      "lone star ticks",
+      "amblyomma americanum"
+    ],
+    "scientific_name": "Amblyomma americanum",
+    "rank": "species",
+    "group": "ticks-mites",
+    "subgroup": "ticks",
+    "site_category": "Biting",
+    "stages": [
+      "larva",
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Reddish-brown, teardrop-shaped body",
+      "Adult females have one bright, solid silvery-white dot in the center of the back",
+      "Males have scattered white streaks or spots around the edge of the back instead of one central dot",
+      "Unusually aggressive; will actively crawl toward a person rather than just waiting to be brushed against"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-dog-tick",
+        "difference": "Lone star tick has one solid white dot (female) or scattered edge spots (male); American dog tick has an even, mottled gray-white pattern across its back",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether the pale marking is one solid spot or mottled.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "on-pets"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can spread ehrlichiosis and has been linked to a delayed red-meat allergy (alpha-gal syndrome); see a doctor if you develop fever, rash or a reaction after eating meat following a bite.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "One of the most aggressive ticks in Florida, known for actively crawling toward people in wooded and brushy areas instead of waiting to be brushed against. Beyond disease risk, its bite has also been linked to a lasting red-meat allergy in some people, so quick removal and yard treatment both matter.",
+      "fact": "It is the tick most linked in the US to alpha-gal syndrome, a delayed allergic reaction to red meat that can develop after a bite."
+    },
+    "tech_notes": "All three active stages bite humans; unusually mobile/aggressive compared to most ticks. Yard treatment focused on brush, leaf litter and lawn edges; recommend host tick prevention for pets.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.mayoclinic.org/diseases-conditions/alpha-gal-syndrome/in-depth/tick-species/art-20546861"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e1d8cdcc678328a34cbe6384588f4e93d07c1b4d93fe1b0bc63107cfa2afdb47"
+    }
+  },
+  {
+    "slug": "blacklegged-tick",
+    "kind": "organism",
+    "common_name": "Blacklegged Tick (deer tick)",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "deer tick"
+    ],
+    "aliases": [
+      "blacklegged tick",
+      "deer tick",
+      "ixodes scapularis"
+    ],
+    "scientific_name": "Ixodes scapularis",
+    "rank": "species",
+    "group": "ticks-mites",
+    "subgroup": "ticks",
+    "site_category": "Biting",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, plain reddish-brown to dark tick with no white spots or mottled pattern",
+      "Legs and the shield behind the head (scutum) are noticeably dark, almost black, giving it its name",
+      "Much smaller than an American dog tick, especially as a nymph",
+      "Found in wooded, leafy areas rather than open sunny lawn"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-dog-tick",
+        "difference": "Blacklegged tick is small and plain dark reddish-brown to black; American dog tick is larger with an obvious mottled gray-white back pattern",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether there is any pale marking at all.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden",
+      "on-pets"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The species that spreads Lyme disease up north, though Florida populations rarely bite people and Lyme cases from local bites are rare; see a doctor if a rash or fever follows a bite.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "The same species that spreads Lyme disease in the northeastern US, but Florida's population behaves differently and rarely bites people, so local Lyme risk is much lower here. Its nymphs, the stage most likely to bite unnoticed, are most active in summer; adults stay active into fall and winter.",
+      "fact": "Florida's blacklegged ticks are far less likely to bite humans than their northern relatives, which is a big reason Lyme disease stays rare in the state despite the tick being present."
+    },
+    "tech_notes": "FL populations show different host-seeking behavior than northern populations and rarely parasitize humans; keep messaging calibrated to that lower regional risk rather than northeastern Lyme statistics. Treat leafy/wooded harborage per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.floridahealth.gov/diseases-and-conditions/disease/lyme-disease/",
+      "https://ask.ifas.ufl.edu/publication/IN300"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Re-fetched UF/IFAS EDIS IN300 directly this session: it states 'human exposure to blacklegged ticks is greatest during the summer months when high nymphal Ixodes scapularis activity and human outdoor activity coincide,' and that adults become active in October and remain active through winter. Peak months moved from a guessed Nov-Mar adult-only window to Jun-Aug, matching IN300's own explicit 'greatest exposure' statement for nymphs (this entry's other tracked stage); season_basis moved to 'year_round' since the tick is present all year with this as the highlighted highest-exposure window. This is IN300's general species-level pattern, not a Florida- or SWFL-specific curve; Florida populations are noted elsewhere in this entry to bite people less often than northern populations. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5586acd3cfea105908c772c022c5656ba139ae8a2976eb5d4c1d40c2c394ec0a"
+    }
+  },
+  {
+    "slug": "chiggers",
+    "kind": "organism",
+    "common_name": "Chiggers (red bugs)",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "red bugs"
+    ],
+    "aliases": [
+      "chiggers",
+      "chigger",
+      "red bugs",
+      "trombiculidae"
+    ],
+    "scientific_name": "Trombiculidae",
+    "rank": "family",
+    "group": "ticks-mites",
+    "subgroup": "mites",
+    "site_category": "Biting",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Too small to easily see with the naked eye; a orange-yellow to reddish speck at most",
+      "Bites cluster where clothing sits tight against skin: sock lines, waistbands, behind the knees",
+      "Itching and small red welts start hours after exposure, not right away",
+      "Picked up from tall grass, brushy edges and shaded, damp ground rather than a bite you feel happening"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bird-rodent-mites",
+        "difference": "Chigger bites cluster at sock lines and waistbands after time in grass; bird/rodent mite bites scatter over the upper body and follow a nest indoors",
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten and any bird or rodent nest nearby; a technician judges.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
+      },
+      {
+        "slug": "cat-flea",
+        "difference": "Chigger bites cluster at sock lines and waistbands after time in tall grass; flea bites cluster low on the legs and ankles, often with pets in the home.",
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where you were bitten (pets/carpet vs. outdoor plants); a technician judges from that.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites itch intensely for about a week to two; see a doctor if you develop a strong allergic reaction, fever, or the welts do not improve.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Nearly invisible larval mites that cause intensely itchy welts hours after a walk through tall grass, brush or shaded, damp yard edges. Unlike up north, they can be active all year in Florida; a technician can evaluate the grassy, brushy hot spots and decide whether treatment is worthwhile.",
+      "fact": "Chiggers do not burrow under the skin or suck blood; they inject a fluid that breaks down skin cells, which is what actually causes the itch."
+    },
+    "tech_notes": "No significant human disease transmission documented in the US. Occur in patchy 'islands' rather than evenly across a yard; target damp, shaded, overgrown edges and areas with heavy rodent activity.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG085"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c756bc7c70906b80eeddd21487f5b5096967288f48c07cfc0174867058d23607"
+    }
+  },
+  {
+    "slug": "bird-rodent-mites",
+    "kind": "organism",
+    "common_name": "Bird and Rodent Mites",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "tropical rat mite",
+      "tropical fowl mite"
+    ],
+    "aliases": [
+      "bird mites",
+      "rodent mites",
+      "rat mites",
+      "fowl mites",
+      "ornithonyssus"
+    ],
+    "scientific_name": "Ornithonyssus spp.",
+    "rank": "genus",
+    "group": "ticks-mites",
+    "subgroup": "mites",
+    "site_category": "Biting",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Barely visible, pale to reddish-brown speck, only clearly seen under magnification",
+      "Bites turn up in small clusters or scattered itchy bumps on the neck, arms and face",
+      "Shows up suddenly indoors after birds or rodents nesting nearby leave, die, or are removed",
+      "Often traced back to a nest in an attic, soffit, vent or chimney rather than an outdoor source"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chiggers",
+        "difference": "Bird/rodent mite bites scatter over the upper body indoors near a nest; chigger bites cluster at sock lines and waistbands after time in grass outdoors",
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten and any bird or rodent nest nearby; a technician judges.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "attic-walls",
+      "bedroom",
+      "living-areas"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites cause itchy welts that can last for days; see a doctor if the reaction is severe or does not improve.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "These mites live on birds or rodents and only turn to biting people once their usual host nest is gone, so a sudden run of itchy bites indoors often traces back to a nest in an attic, soffit or vent. An inspection can locate that nest source, which is the key step toward addressing the bites.",
+      "fact": "They will bite people readily once their bird or rodent host disappears, but they cannot survive long term on a human, so they generally die off on their own once the nest source is gone."
+    },
+    "tech_notes": "Locate and address the bird/rodent nest source (attic, soffit, vent, chimney) before or alongside any treatment; treating bite areas alone without removing the source will not resolve it.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Rodent_mite_dermatitis"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "b354cc1b9cbdd057c1a9ef9b92a389033bef79b18f658fc131c748b812fa7894"
     }
   }
 ]

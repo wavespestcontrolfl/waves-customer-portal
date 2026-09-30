@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
+import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
@@ -179,6 +180,12 @@ export default function ServiceRecapModal({
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
             if (rp.application_rate != null && Number(rp.application_rate) > 0) {
+              // Except a rate recorded in mL, which is never shown (owner
+              // ruling 2026-09-29: nothing a tech sees on a completion is in
+              // mL). With no rate row the submission leaves the rate
+              // unconfirmed, and the server keeps the recorded one (see
+              // rate_confirmed below).
+              if (isMlUnit(rp.rate_unit)) return;
               // A recorded rate missing its unit (legacy rows) falls back
               // to the catalog unit — an empty unit would hide the rate
               // editor while rate_confirmed still marked the field
@@ -202,17 +209,29 @@ export default function ServiceRecapModal({
             setRates(seededRates);
           }
         }
-        // Default pest tank mix (owner 2026-08-29, shared with
-        // CompletionPanel via lib/pest-default-mix — codex P1 on #3611):
-        // a FRESH recurring general-pest or pest re-service recap
-        // pre-selects Taurus SC, Talstar P, and the non-ionic surfactant
-        // so the primary field-tech completion starts from the house mix
-        // too. Rates seed exactly as a manual tap would; this lane
+        // Default pest tank mix (shared with CompletionPanel via
+        // lib/pest-default-mix — codex P1 on #3611; product list per the
+        // 2026-09-26 owner ruling superseding 2026-08-29): a FRESH
+        // recurring general-pest, one-time pest, or pest re-service recap
+        // pre-selects Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10
+        // Nonionic Surfactant so the primary field-tech completion starts
+        // from the house mix too. Rates seed exactly as a manual tap would; this lane
         // records no amounts, so the 4/4/0.25-oz totals live only on the
         // full completion form. Never seeds over an existing record
         // (reopen/resend must preserve what was applied) and fails
         // closed on a failed record lookup, same as the recorded-
         // products path above. Everything stays deselectable/editable.
+        // Codex r3 P1, PR #5049 (checked for this surface too, no fix
+        // needed here): CompletionPanel's own pest-mix seed can survive a
+        // switch to inspection_only/customer_declined because it exposes
+        // a visitOutcome selector the tech can change mid-form. This recap
+        // lane has no such selector — POST /pest-recap always represents a
+        // performed visit — and the seed above only fires with NO existing
+        // record; a visit already recorded as non-performed skips this
+        // block entirely and falls into the recorded-products branch above
+        // (which pre-selects only what was actually recorded, possibly
+        // nothing). There is no state transition here for a seeded
+        // default to survive.
         if (
           !data?.existingRecord &&
           !data?.existingRecordLoadFailed &&

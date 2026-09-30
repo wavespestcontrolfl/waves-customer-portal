@@ -67,8 +67,10 @@ describe('billing reminder per-channel delivery progress', () => {
       row.metadata.send_failed = false;
       return { allowed: true };
     });
-    ContactLedger.markDelivered.mockImplementation(async (entry) => {
-      rows.find((candidate) => candidate.id === entry.id).metadata.delivered = true;
+    ContactLedger.markDelivered.mockImplementation(async (entry, options = {}) => {
+      const row = rows.find((candidate) => candidate.id === entry.id);
+      row.metadata.delivered = true;
+      if (options.occurredAt) row.occurred_at = options.occurredAt;
       return true;
     });
     ContactLedger.markSendFailed.mockImplementation(async (entry, extra) => {
@@ -236,6 +238,45 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test('repairs a lost bell acknowledgement once without counting changed retry copy', async () => {
+    const send = jest.fn()
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'notification_ledger_failed' })
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible' });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    await expect(deliver(['push'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(rows[0].metadata.delivered).toBe(true);
+  });
+
+  test('a legacy Email dedupe settles the reservation without a fresh delivery count', async () => {
+    const send = jest.fn(async () => ({ ok: true, deduped: true }));
+    await expect(deliver(['email'], send, 'email-dedupe')).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(rows[0].metadata.delivered).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['email', 'sms'])('a deduped %s leg restores the stored acceptance time, not the retry reservation time', async (channel) => {
+    const sentAt = new Date('2026-05-20T14:00:00Z');
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt }));
+    await expect(deliver([channel], send, `old-${channel}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.anything(), { occurredAt: sentAt });
+    expect(rows[0].occurred_at).toEqual(sentAt);
+    await expect(deliver([channel], send, `old-${channel}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(rows[0].occurred_at).toEqual(sentAt);
+  });
+
+  test('fresh Email does not adopt unrelated sentAt metadata as its contact time', async () => {
+    await deliver(['email'], jest.fn(async () => ({
+      sent: true, deliveryOutcome: 'accepted', sentAt: new Date('2026-05-20T14:00:00Z'),
+    })), 'fresh-email');
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.anything());
+    expect(rows[0].occurred_at.getTime()).toBeGreaterThan(new Date('2026-05-20T14:00:00Z').getTime());
   });
 
   test('accepted Text is not repeated while failed Email is retried', async () => {
@@ -432,6 +473,48 @@ describe('billing reminder per-channel delivery progress', () => {
     await expect(reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
       .resolves.toEqual([expect.objectContaining({ complete: true })]);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['payer resolve failed', 'dunning-stop check failed'])('incomplete evidence (%s) holds a restored waiver until the real policy can resume', async (reason) => {
+    const originalGate = process.env.GATE_COLLECTIONS_POLICY;
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      rows.push({ id: 'prior-text', channel: 'sms', source: 'balance_reminder_workflow',
+        metadata: { notificationEventKey: 'invoice-1:gentle', selectedChannels: ['email', 'sms'],
+          delivered: true, policy_waived_channels: ['email'] } });
+      const ContactPolicy = require('../services/collections/contact-policy');
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['invoice-1'],
+        denialReasons: [], balanceIncomplete: reason });
+      collectionsChannelPermitted.mockImplementation(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
+      const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({
+        complete: false, deliveredNow: [],
+        results: { email: { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' } },
+      });
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+      expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(rows[0].metadata.policy_waived_channels).toEqual(['email']);
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['invoice-1'], denialReasons: [] });
+      await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['email'] });
+      expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email']);
+      expect(rows[0].metadata.policy_waived_channels).toEqual([]);
+    } finally {
+      if (originalGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
+      else process.env.GATE_COLLECTIONS_POLICY = originalGate;
+    }
+  });
+
+  test('one incomplete pending leg holds every selected leg before reservation', async () => {
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => ({ allowed: true,
+      ...(channel === 'email' ? { balanceIncomplete: 'payer resolve failed' } : {}) }));
+    const send = jest.fn();
+    await expect(deliver(['email', 'push'], send)).resolves.toMatchObject({ complete: false,
+      results: { email: { retryable: true }, push: { retryable: true } } });
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   test('a newly allowed Email removes its persisted waiver before a transient retry failure', async () => {

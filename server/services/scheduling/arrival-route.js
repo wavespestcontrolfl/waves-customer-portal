@@ -535,7 +535,24 @@ async function prepareArrivalCapacity(options) {
   return { options, fingerprint: routeFingerprint(context), travel: context.travel };
 }
 
-async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes, serviceTypes } = {}) {
+// Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
+// lenient than strict"): a customer-picked time is an ARRIVAL window, kept
+// only while the certified fit's own delay stays within the caller's grace.
+// Pulled out of verifyArrivalCapacity for direct unit coverage — arrival-
+// route.js's own DB-backed callers make the whole function hard to exercise
+// without a real transaction. `arrivalGraceMinutes` not a positive finite
+// number (undefined for every staff/voice caller, and for a self-serve
+// caller on a grace-0 day) is a no-op: the existing 120-minute arrival
+// promise (baked into effectiveWindowRange/simulateArrivalRoute) stays the
+// only bound, exactly as before this lane.
+function arrivalExceedsGrace(fit, arrivalGraceMinutes) {
+  return Number.isFinite(arrivalGraceMinutes) && arrivalGraceMinutes > 0
+    && Number.isFinite(fit?.arrivalDelayMinutes) && fit.arrivalDelayMinutes > arrivalGraceMinutes;
+}
+
+async function verifyArrivalCapacity(prepared, {
+  conn, windowStart, windowEnd, durationMinutes, serviceTypes, arrivalGraceMinutes,
+} = {}) {
   if (!prepared || (!capacityEnabled() && !prepared.options.preserveCapacity)) throw capacityError();
   // Callers hold selected and unassigned tech-day fences before row locks.
   // Completion writers lock stops without the tech-day fence. Hold relevant
@@ -556,6 +573,10 @@ async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, d
     ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),
     ...(durationMinutes ? { durationMinutes } : {}), bufferMinutes: 0 });
   if (!fit.feasible) throw capacityError(fit.reason);
+  // A grace narrower than the system's 120-minute promise: conditions may
+  // have shifted between the offer (which already screened for this) and
+  // this commit-time re-certification — never widen what was offered.
+  if (arrivalExceedsGrace(fit, arrivalGraceMinutes)) throw capacityError('arrival_grace');
   await assertCapacityEligibility(conn, context, serviceTypes);
   return fit;
 }
@@ -634,5 +655,5 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  _internals: { clockOrder, storedOrderStale },
+  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace },
 };

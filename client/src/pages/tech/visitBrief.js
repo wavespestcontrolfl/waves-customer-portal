@@ -5,6 +5,7 @@
 // comes from the canonical attachedVisitInvoice helper. Checkout math stays
 // exclusively in MobileCheckoutSheet — the brief displays, checkout charges.
 import { attachedVisitInvoice, visitInvoiceStatusNote } from '../../components/schedule/visitInvoice';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 // A status-only completion still needs the combined closeout to create its
 // canonical service record. Require the explicit false from the current day
@@ -57,8 +58,9 @@ export function smsHref(phone) {
 
 // Per-kind copy for billingLane.prediction — the kinds the server emits
 // (billing-lane.js / predictionFromAttachedInvoice): invoice, auto_charge,
-// payer, prepaid, covered_membership, covered_annual, no_charge. Only
-// `invoice` with a positive amount means money changes hands at the door.
+// payer, prepaid, covered_membership, covered_annual, no_charge,
+// covered_sibling_invoice, sibling_needs_review. Only `invoice` with a
+// positive amount means money changes hands at the door.
 const PREDICTION_COPY = {
   invoice: (amt) => (amt > 0 ? `Collect ${fmtMoney(amt)} today` : 'No charge today'),
   auto_charge: (amt) => (amt > 0 ? `${fmtMoney(amt)} auto-charges on completion` : 'Nothing to charge'),
@@ -67,6 +69,26 @@ const PREDICTION_COPY = {
   covered_membership: () => 'Covered by plan — nothing to collect',
   covered_annual: () => 'Covered by annual plan — nothing to collect',
   no_charge: () => 'No charge',
+  // Same-day combined per-application trip — a sibling visit's
+  // first-application invoice already bills it (billing-lane.js
+  // siblingCoverageForSchedule). Without an entry here the kind
+  // fell through `copy ? copy(amount) : null` to a silent headline: null,
+  // dropping the billing row from the brief entirely (codex round-6 P2).
+  //
+  // codex round-7 P1: "nothing to collect" was ALWAYS the headline here,
+  // even when the sibling invoice is still draft/sent/overdue — genuinely
+  // collectible. `siblingCoverage` (the server's own canonical verdict,
+  // billing-lane.js siblingCoverageForSchedule) tells a technician to
+  // collect on that invoice instead of walking off the job.
+  covered_sibling_invoice: (_amt, prediction, siblingCoverage) => {
+    const coverage = siblingCoverageCopy(siblingCoverage, { siblingServiceType: prediction?.siblingServiceType });
+    return coverage?.collectible ? coverage.short : 'Covered by sibling invoice — nothing to collect';
+  },
+  // The sibling lookup came back needs_review/error — the mint resolver
+  // refuses to charge this visit either way, so the brief must say "go
+  // resolve it," never stay silent (codex round-6 P2, mirrors
+  // BillingLaneCard's own copy for this kind).
+  sibling_needs_review: () => 'Combined-trip invoice needs review — do not collect',
 };
 
 /**
@@ -80,6 +102,7 @@ export function visitMoneySummary(service) {
   const invoice = attachedVisitInvoice(service);
   const note = invoice ? visitInvoiceStatusNote(invoice) : null;
   const prediction = service?.billingLane?.prediction || null;
+  const siblingCoverage = service?.billingLane?.siblingCoverage || null;
   const kind = prediction?.kind || null;
   if (!kind) {
     return { kind: null, amount: null, collectNeeded: false, headline: null, note, invoice };
@@ -87,11 +110,17 @@ export function visitMoneySummary(service) {
   const rawAmount = Number(prediction.amount);
   const amount = Number.isFinite(rawAmount) ? rawAmount : null;
   const copy = PREDICTION_COPY[kind];
+  // codex round-7 P1: a covered_sibling_invoice prediction whose sibling
+  // invoice is still collectible flags collectNeeded too — same amber
+  // "needs action" treatment VisitBriefPanel already gives an `invoice`
+  // row, so the brief doesn't bury a real balance due in quiet gray text.
+  const siblingCollectNeeded = kind === 'covered_sibling_invoice'
+    && siblingCoverage?.state === 'collect_on_combined_invoice';
   return {
     kind,
     amount,
-    collectNeeded: kind === 'invoice' && amount > 0,
-    headline: copy ? copy(amount) : null,
+    collectNeeded: (kind === 'invoice' && amount > 0) || siblingCollectNeeded,
+    headline: copy ? copy(amount, prediction, siblingCoverage) : null,
     note,
     invoice,
   };

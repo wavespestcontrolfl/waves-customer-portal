@@ -42,7 +42,14 @@ const Joi = require('joi');
 const Ajv = require('ajv');
 const logger = require('../logger');
 const { attemptReplay, emailFailure, defaultNotify, defaultSendEmail } = require('./call-extraction-replay');
-const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
+const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, assertedSpokenMatch } = require('./voice-relay-spoken-checks');
+const { normalizeSpanishSpokenText } = require('./voice-relay-spanish-numbers');
+// Same provider-usage normaliser the LLM call ledger uses (input/output/cache
+// read/cache write token columns) — reused here, not duplicated, purely for
+// its field shape; nothing here reads or writes llm_dispatch_log. Sandy's own
+// model calls never go through that ledger (see CLAUDE.md's Voice relay
+// entry), so this is the only place a replay's real token usage is captured.
+const { extractUsage } = require('../llm-dispatch-metrics');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice-relay-eval', 'scenarios.json');
@@ -55,15 +62,22 @@ const OPS_KEY = 'voice-relay-eval';
 const { retireIfClean } = require('../ops-digest-fall-off');
 const OPS_HEADING = 'Voice relay conversation eval';
 // Operational ceiling for the shipped fixture plus one retry, sized for a
-// fixture of up to ninety caller turns and thirty-four scenarios (today's is
-// smaller: 28 scenarios, 77 turns). Every caller turn may use all six
-// 20-second streams (relay-conversation MAX_TOOL_ROUNDS / STREAM_TIMEOUT_MS),
-// not merely one, so ninety turns can spend three hours on Sandy per attempt.
-// Thirty-four judge chains, four-wide at the dispatcher's four-minute budget,
-// add 36 minutes. Twice that is 7h12m; eight hours leaves 48 minutes for
-// fixture-tool timeouts and other overhead. Re-derive this ceiling if the
+// fixture of up to 130 caller turns and forty-five scenarios (today's is
+// smaller: 43 scenarios, 119 turns, added by the Spanish booking/mechanics
+// slice — was 36 scenarios/98 turns before it). Every caller turn may use all
+// six 20-second streams (relay-conversation MAX_TOOL_ROUNDS /
+// STREAM_TIMEOUT_MS), not merely one, so 130 turns can spend just over four
+// hours (4h20m) on Sandy per attempt. Forty-five judge chains, four-wide at
+// the dispatcher's four-minute budget, take ceil(45/4) = 12 batches — 48
+// minutes, not the 45/4 = 11.25 rounded DOWN to 45 minutes this comment used
+// to claim. 4h20m + 48m is 5h08m per attempt; the eval's own retry-once
+// wrapper doubles that to a 10h16m worst case for the pair. Twelve hours
+// leaves about 1h44m for fixture-tool timeouts and other overhead (Codex
+// round-2 P2: the prior 10h ceiling UNDERCUT that 10h16m worst case by 16
+// minutes — this is a floor, not a target, so it must exceed the bound with
+// margin, never merely round up to meet it). Re-derive this ceiling if the
 // live bounds change or the fixture grows past those counts.
-const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const CHILD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
@@ -211,9 +225,12 @@ const RESUME_SCHEMA = Joi.object({
   // itself reads receipts from.
   priorReceipts: Joi.array().min(1).items(Joi.string().valid(...WRITE_TOOLS)),
 }).allow(null);
-const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
+const REGEX_MATCHER_SCHEMA = Joi.object({
+  regex: Joi.string().pattern(/\S/).custom((source, helpers) => (compileRegex(source) ? source : helpers.error('any.invalid'))).required(),
+});
+const MATCHER_VALUE = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean(), REGEX_MATCHER_SCHEMA);
 const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
-  MATCHER_SCALAR, Joi.array().min(1).items(MATCHER_SCALAR.required()),
+  MATCHER_VALUE, Joi.array().min(1).items(MATCHER_VALUE.required()),
 ));
 const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
   Joi.string().pattern(/\S/),
@@ -254,15 +271,19 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
 ).required());
 // One scripted turn: the caller's words, optionally preceded by a barge-in
 // over the last agent utterance — `true` (cut at the halfway word),
-// `{ words: n }` or `{ heard: '…' }` (exactly the forms injectInterrupt
-// reads). Exact keys only: a misspelled `interupt` would otherwise be
-// ignored and grade a barge-in scenario that never barged in.
+// `{ words: n }`, `{ heard: '…' }` or `{ through: '<regex>' }` (exactly the
+// forms injectInterrupt reads). Exact keys only: a misspelled `interupt`
+// would otherwise be ignored and grade a barge-in scenario that never
+// barged in.
 const TURN_SCHEMA = Joi.object({
   caller: Joi.string().pattern(/\S/).required(),
   interrupt: Joi.alternatives().try(
     Joi.boolean(),
     Joi.object({ words: Joi.number().integer().min(1) }).length(1),
     Joi.object({ heard: Joi.string().pattern(/\S/) }).length(1),
+    Joi.object({
+      through: Joi.string().pattern(/\S/).custom((v, helpers) => (compileRegex(v) ? v : helpers.message('interrupt.through must be a valid regex'))),
+    }).length(1),
   ),
 });
 
@@ -283,7 +304,11 @@ function loadFixture(fixturePath = DEFAULT_FIXTURE_PATH) {
 //   {{iso+N}}      2026-09-16
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const DATE_TOKEN_RE = /\{\{(day|dow|monthday|iso)([+-]\d+)\}\}/g;
+const DATE_TOKEN_RE = /\{\{(day|dow|monthday|iso|dow_es|monthday_es)([+-]\d+)\}\}/g;
+// Spanish forms for Spanish scenarios: {{dow_es+N}} "domingo",
+// {{monthday_es+N}} "4 de octubre".
+const WEEKDAYS_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const MONTHS_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
 function etCalendarDate(runDate) {
   const { etParts } = require('../../utils/datetime-et');
@@ -297,6 +322,8 @@ function renderDateToken(kind, offsetDays, base) {
   const monthday = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
   if (kind === 'dow') return dow;
   if (kind === 'monthday') return monthday;
+  if (kind === 'dow_es') return WEEKDAYS_ES[d.getUTCDay()];
+  if (kind === 'monthday_es') return `${d.getUTCDate()} de ${MONTHS_ES[d.getUTCMonth()]}`;
   if (kind === 'iso') return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   return `${dow} ${monthday}`;
 }
@@ -331,8 +358,27 @@ const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+// A { tool, input?, after? } reference to one particular call (afterTool /
+// after). The optional flat `after` reference selects the first matching call
+// after another call, e.g. the refreshed find_slots after the refused S1.
+const hasCallRefCore = (v) => isPlainObject(v) && typeof v.tool === 'string' && v.tool.length > 0
+  && (v.input === undefined || (isPlainObject(v.input) && Object.keys(v.input).length > 0));
+const isBaseCallRef = (v) => hasCallRefCore(v) && Object.keys(v).every((k) => k === 'tool' || k === 'input');
+const isCallRef = (v) => hasCallRefCore(v)
+  && Object.keys(v).every((k) => k === 'tool' || k === 'input' || k === 'after')
+  && (v.after === undefined || isBaseCallRef(v.after));
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
+const SPOKEN_POLICY_SCHEMA = Joi.object({
+  asserted: Joi.boolean(),
+  prospective: Joi.boolean(),
+  callerNames: Joi.array().items(Joi.string().trim().min(1)).min(1),
+}).unknown(true);
+const SPOKEN_POLICY_ERRORS = Object.freeze({
+  asserted: 'asserted must be boolean',
+  prospective: 'prospective must be boolean',
+  callerNames: 'callerNames must be a non-empty list of names',
+});
 // A regex list, or the same list graded over a caller-turn window —
 // { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
 // second turn (a barge-in correction supersedes the read-back it cut);
@@ -341,9 +387,15 @@ const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a 
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
   if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
-  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn'].includes(k));
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn)`;
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool', 'asserted', 'prospective', 'callerNames'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool, asserted, prospective, callerNames)`;
+  if (v.afterTool !== undefined && !(typeof v.afterTool === 'string' && v.afterTool) && !isCallRef(v.afterTool)) {
+    return 'afterTool must be a tool name or { tool, input?, after?: { tool, input? } }';
+  }
   if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
+  const policyError = SPOKEN_POLICY_SCHEMA.validate(v, { convert: false }).error?.details[0];
+  if (policyError) return SPOKEN_POLICY_ERRORS[policyError.path[0]];
+  if (v.prospective === true && v.asserted !== true) return 'prospective requires asserted: true';
   const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
   if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
   return regexPatterns(v.patterns);
@@ -360,13 +412,16 @@ const CHECK_VALUE_RULES = Object.freeze({
   // capture_lead_input_includes' generic sibling: any allowed tool, not just
   // capture_lead. { tool: "<name>", input: { <field>: <expected> }, fromTurn?: <caller turn> }.
   tool_input_includes: (knownTools) => (v) => {
-    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn)`;
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn>, untilTurn?: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn', 'untilTurn', 'after'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn, untilTurn, after)`;
+    if (v.after !== undefined && !isCallRef(v.after)) return 'after must be { tool, input?, after?: { tool, input? } }';
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
     if (v.fromTurn !== undefined && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
+    if (v.untilTurn !== undefined && (!Number.isInteger(v.untilTurn) || v.untilTurn < 1)) return 'untilTurn must be a caller turn number (1 is the first)';
+    if (v.fromTurn !== undefined && v.untilTurn !== undefined && v.untilTurn < v.fromTurn) return 'untilTurn must not precede fromTurn';
     return null;
   },
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
@@ -383,14 +438,20 @@ const CHECK_VALUE_RULES = Object.freeze({
   // rejected or not — an early guess is the violation even if the fixture
   // refused it) before caller turn `turn`. The sibling of
   // `tools_called_at_most`'s per-scenario ceiling: a cap alone cannot say
-  // WHICH call was premature, only that too many happened.
+  // WHICH call was premature, only that too many happened. An optional
+  // `input` narrows it to a specific call shape (e.g. a specific slot_ref)
+  // when the same tool legitimately fires at different turns for different
+  // inputs (Codex round-4: slot-gone's S1 request may not precede the
+  // caller's first pick, but S3's REPLACEMENT request may not precede the
+  // second pick either, on the SAME tool).
   tool_not_called_before_turn: (knownTools) => (v) => {
-    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'turn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, turn)`;
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn>, input?: {...} }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'turn', 'input'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, turn, input)`;
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!Number.isInteger(v.turn) || v.turn < 1) return 'turn must be a caller turn number (1 is the first)';
+    if (v.input != null && !isPlainObject(v.input)) return 'input must be a plain object of expected fields';
     return null;
   },
   ...SPOKEN_CHECK_VALUE_RULES,
@@ -835,13 +896,11 @@ function noCallbackNumber(name, input, scenario) {
   return isLikelyE164(toE164(input.callback_phone || scenario.caller?.from || '')) ? null : NO_CALLBACK_NUMBER_TEXT;
 }
 
-/** Does `input` satisfy a `when` matcher? Strings match case-insensitively as substrings, arrays as any-of, everything else strictly. */
+/** Fixture `when` uses the same string/regex/any-of value matchers as input expectations. */
 function inputMatches(input = {}, when = {}) {
   return Object.entries(when).every(([field, want]) => {
     const have = input[field];
-    if (Array.isArray(want)) return want.some((w) => (typeof w === 'string' ? String(have ?? '').toLowerCase().includes(w.toLowerCase()) : have === w));
-    if (typeof want === 'string') return String(have ?? '').toLowerCase().includes(want.toLowerCase());
-    return have === want;
+    return Array.isArray(want) ? want.some((w) => wantMatches(have, w)) : wantMatches(have, want);
   });
 }
 
@@ -895,7 +954,10 @@ function matcherInput(record, event, name, input) {
   const view = { ...input };
   if (!usable('email', view.email)) delete view.email;
   for (const prior of [...record.toolCalls].reverse()) {
-    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true) continue;
+    // Production returns from the spam branch before noteEstimateFields. A
+    // schema-valid suppressed call is therefore neither a receipt nor a
+    // source for a later capture's accumulated field view.
+    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true || prior.input?.lead_quality === 'spam') continue;
     for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && usable(field, prior.input[field])) view[field] = prior.input[field];
   }
   return view;
@@ -1068,7 +1130,32 @@ function patchStreamProto(getProto, state, label) {
       if (record && stream && typeof stream.finalMessage === 'function') {
         const finalMessage = stream.finalMessage.bind(stream);
         stream.finalMessage = () => finalMessage().then(
-          (msg) => { record.modelRounds += 1; return msg; },
+          (msg) => {
+            record.modelRounds += 1;
+            // Real usage only — a scripted test double's message with no
+            // `usage` block contributes nothing and is not counted as a
+            // round for the cache-hit rate. Both supported providers expose
+            // Anthropic-shaped final usage on this common client surface.
+            if (record.usage && msg && msg.usage && typeof msg.usage === 'object') {
+              // Validate raw counters before the shared ledger extractor
+              // coerces/truncates them. Malformed data must not reduce spend
+              // or invent a measured cache round; explicit zeroes are valid.
+              const counts = [msg.usage.input_tokens, msg.usage.output_tokens,
+                msg.usage.cache_read_input_tokens, msg.usage.cache_creation_input_tokens];
+              if (counts.every((count) => Number.isSafeInteger(count) && count >= 0)) {
+                const usage = extractUsage('anthropic', msg);
+                record.usage.input_tokens += usage.input_tokens;
+                record.usage.output_tokens += usage.output_tokens;
+                record.usage.cached_input_tokens += usage.cached_input_tokens;
+                record.usage.cache_write_tokens += usage.cache_write_tokens;
+                record.usage.rounds += 1;
+                if (usage.cached_input_tokens) record.usage.cacheReadRounds += 1;
+              } else {
+                record.usage.incompleteRounds += 1;
+              }
+            }
+            return msg;
+          },
           (err) => {
             // The relay aborts the same controller for a caller barge-in AND
             // for its 20 s stream timeout (or, on the OpenAI leg, the
@@ -1080,6 +1167,9 @@ function patchStreamProto(getProto, state, label) {
             const aborted = (err && err.name === 'AbortError') || /abort/i.test(message);
             if (aborted && record.interruptInFlight) record.modelAborts += 1;
             else record.modelErrors.push(aborted ? `stream aborted by the relay's own bound: ${message}` : message);
+            // A rejected round may already have spent tokens that no usage
+            // block reports. Mark totals incomplete rather than too cheap.
+            if (record.usage) record.usage.incompleteRounds += 1;
             throw err;
           },
         );
@@ -1219,7 +1309,9 @@ function applyResumeFixture(convo, scenario, record) {
 
 /**
  * A barge-in over the last agent utterance: `true` cuts it at the halfway
- * word, `{ words: n }` after n words, `{ heard: '…' }` at an exact prefix.
+ * word, `{ words: n }` after n words, `{ heard: '…' }` at an exact prefix,
+ * `{ through: '<regex>' }` right after the word where the first match ends
+ * (the halfway word when nothing matches).
  */
 function injectInterrupt(convo, record, spec) {
   const last = [...record.events].reverse().find((e) => e.kind === 'agent' && !e.system);
@@ -1236,6 +1328,16 @@ function injectInterrupt(convo, record, spec) {
     if (!norm(heard) || !norm(last.text).startsWith(norm(heard))) {
       throw Object.assign(new Error(`interrupt "heard" is not a prefix of the agent utterance it cuts: ${JSON.stringify(clip(heard, 80))} vs ${JSON.stringify(clip(last.text, 80))}`), { code: 'EVAL_INTERRUPT_MISMATCH' });
     }
+  } else if (spec && typeof spec === 'object' && typeof spec.through === 'string') {
+    // "Barge in while the price is being read": the cut lands inside the
+    // first figure however much the model said before it, so where the
+    // halfway word happens to fall never decides whether the scenario ran.
+    const text = String(last.text);
+    const re = compileRegex(spec.through);
+    const m = re && re.exec(text);
+    const tokens = [...text.matchAll(/\S+/g)];
+    const n = m ? tokens.filter((tok) => tok.index < m.index + Math.max(1, m[0].length)).length : Math.max(1, Math.floor(words.length / 2));
+    heard = tokens.slice(0, n).map((tok) => tok[0]).join(' ');
   } else {
     const n = spec && typeof spec === 'object' && Number.isInteger(spec.words) ? spec.words : Math.max(1, Math.floor(words.length / 2));
     heard = words.slice(0, n).join(' ');
@@ -1309,14 +1411,22 @@ function agentUtterances(record) {
   return record.events.filter((e) => e.kind === 'agent');
 }
 
+// One expected value: a string is a case-insensitive substring, `{ regex }`
+// a case-insensitive pattern (word boundaries a substring cannot express —
+// "ants" must not match "plants"), anything else strict equality.
+function wantMatches(have, w) {
+  if (typeof w === 'string') return String(have ?? '').toLowerCase().includes(w.toLowerCase());
+  if (w && typeof w === 'object' && !Array.isArray(w) && typeof w.regex === 'string') {
+    try { return new RegExp(w.regex, 'i').test(String(have ?? '')); } catch { return false; }
+  }
+  return have === w;
+}
+
 function inputIncludes(input = {}, expected = {}) {
   const misses = [];
   for (const [key, want] of Object.entries(expected)) {
     const have = input[key];
-    let ok;
-    if (Array.isArray(want)) ok = want.some((w) => (typeof w === 'string' ? String(have ?? '').toLowerCase().includes(w.toLowerCase()) : have === w));
-    else if (typeof want === 'string') ok = String(have ?? '').toLowerCase().includes(want.toLowerCase());
-    else ok = have === want;
+    const ok = Array.isArray(want) ? want.some((w) => wantMatches(have, w)) : wantMatches(have, want);
     if (!ok) misses.push(`${key}=${JSON.stringify(have === undefined ? null : have)} (wanted ${JSON.stringify(want)})`);
   }
   return misses;
@@ -1349,10 +1459,12 @@ const CHECK_RUNNERS = Object.freeze({
   // `tool` is the violation this check exists to catch even when the
   // fixture rejected it for missing/invalid arguments.
   tool_not_called_before_turn(value, record) {
-    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn);
+    const scope = value.input ? ` with ${JSON.stringify(value.input)}` : '';
+    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn
+      && (!value.input || inputIncludes(t.input || {}, value.input).length === 0));
     return early.length
-      ? ['fail', `${value.tool} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
-      : ['pass', `${value.tool} never called before caller turn ${value.turn}`];
+      ? ['fail', `${value.tool}${scope} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
+      : ['pass', `${value.tool}${scope} never called before caller turn ${value.turn}`];
   },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
@@ -1367,13 +1479,18 @@ const CHECK_RUNNERS = Object.freeze({
     return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
   spoken_never_matches(value, record, view) {
-    const { sources, spoken, scope } = spokenScope(value, view);
+    const { sources, spoken, scope } = spokenScope(value, view, record);
     const hit = firstRegexHit(sources, spoken);
     return hit ? ['fail', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['pass', `no forbidden phrase spoken${scope}`];
   },
   spoken_matches_any(value, record, view) {
-    const { sources, spoken, scope } = spokenScope(value, view);
-    const hit = firstRegexHit(sources, spoken);
+    const { sources, spoken, scope } = spokenScope(value, view, record);
+    const policy = Array.isArray(value) ? {} : {
+      asserted: value.asserted === true,
+      prospective: value.prospective === true,
+      callerNames: value.callerNames || [],
+    };
+    const hit = firstRegexHit(sources, spoken, policy);
     return hit ? ['pass', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['fail', `none of ${sources.map((v) => `/${v}/i`).join(', ')} was spoken${scope}`];
   },
   capture_lead_input_includes(value, record) {
@@ -1389,15 +1506,22 @@ const CHECK_RUNNERS = Object.freeze({
   },
   // Any tool, not just capture_lead: only a call the fixture actually ran
   // (ok === true — a refused/invalid call did nothing) can satisfy this, and
-  // an optional fromTurn scopes it to a call at or after a given caller turn
-  // (e.g. "the corrected lookup, not the pre-correction one").
+  // an optional fromTurn / untilTurn scopes it to a call at or after / at or
+  // before a given caller turn (e.g. "the corrected lookup, not the
+  // pre-correction one", or "the pest lookup the caller interrupted").
   tool_input_includes(value, record) {
-    const { tool, input, fromTurn } = value;
-    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && (fromTurn == null || t.turn >= fromTurn));
+    const { tool, input, fromTurn, untilTurn, after } = value;
+    // `after`: the call must also come after that reference's first
+    // successful call — e.g. the refreshed slot lookup after the refused S1.
+    const afterIndex = after ? firstCallIndex(record, after) : null;
+    if (after && afterIndex == null) return ['fail', `${after.tool}${after.input ? ` ${JSON.stringify(after.input)}` : ''} never succeeded, so no ${tool} call can follow it`];
+    const inWindow = (t) => (fromTurn == null || t.turn >= fromTurn) && (untilTurn == null || t.turn <= untilTurn) && (afterIndex == null || t.index > afterIndex);
+    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && inWindow(t));
     if (!calls.length) {
       const anyCall = record.toolCalls.some((t) => t.name === tool);
+      const window = [fromTurn != null ? `from caller turn ${fromTurn}` : null, untilTurn != null ? `through caller turn ${untilTurn}` : null].filter(Boolean).join(' ');
       return ['fail', anyCall
-        ? `${tool} was never called successfully${fromTurn != null ? ` from caller turn ${fromTurn} on` : ''} (every call was rejected, failed, or came before that turn)`
+        ? `${tool} was never called successfully${window ? ` ${window}` : ''} (every call was rejected, failed, or fell outside that window)`
         : `${tool} was never called`];
     }
     const best = calls.map((c) => inputIncludes(c.input, input)).reduce((a, b) => (b.length < a.length ? b : a));
@@ -1447,18 +1571,43 @@ const CHECK_RUNNERS = Object.freeze({
 // The patterns and the speech they grade: every utterance, or — for
 // { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
 // that caller turn on, or on exactly that caller turn.
-function spokenScope(value, { spoken, utterances }) {
-  if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
-  if (value.onTurn != null) {
-    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}` };
-  }
-  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
+// The first successful call a reference names: a tool name, or { tool,
+// input, after? } to pin one particular call (the refreshed find_slots after
+// the refused S1, rather than the initial lookup).
+function firstCallIndex(record, ref) {
+  const tool = typeof ref === 'string' ? ref : ref && ref.tool;
+  const input = ref && typeof ref === 'object' ? ref.input : null;
+  const afterRef = ref && typeof ref === 'object' ? ref.after : null;
+  const afterIndex = afterRef ? firstCallIndex(record, afterRef) : null;
+  if (afterRef && afterIndex == null) return null;
+  const call = ((record && record.toolCalls) || []).find((t) => t.name === tool && t.ok === true
+    && (afterIndex == null || t.index > afterIndex)
+    && (!input || inputIncludes(t.input || {}, input).length === 0));
+  return call ? call.index : null;
 }
 
-function firstRegexHit(sources, spoken) {
+// `afterTool` (optional, with onTurn/fromTurn) keeps only what Sandy said
+// AFTER the first successful call to that tool — e.g. "the reply the caller
+// interrupted came after the pricing lookup", whatever point the cut landed.
+function spokenScope(value, { spoken, utterances }, record = null) {
+  if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
+  let pool = utterances;
+  let after = '';
+  if (value.afterTool) {
+    const at = firstCallIndex(record, value.afterTool);
+    pool = at == null ? [] : utterances.filter((u) => u.index > at);
+    after = ` after ${typeof value.afterTool === 'string' ? value.afterTool : `${value.afterTool.tool}${value.afterTool.input ? ` ${JSON.stringify(value.afterTool.input)}` : ''}`}`;
+  }
+  if (value.onTurn != null) {
+    return { sources: value.patterns, spoken: pool.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}${after}` };
+  }
+  return { sources: value.patterns, spoken: pool.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}${after}` };
+}
+
+function firstRegexHit(sources, spoken, { asserted = false, prospective = false, callerNames = [] } = {}) {
   for (const source of sources) {
     const re = compileRegex(source);
-    const text = spoken.find((t) => re && re.test(t));
+    const text = spoken.find((t) => re && (asserted ? assertedSpokenMatch(t, re, { prospective, callerNames }) : re.test(t)));
     if (text) return { source, text };
   }
   return null;
@@ -1504,13 +1653,33 @@ function allowedToolsCheck(scenario, record) {
   };
 }
 
+// Grade a copy of spoken text so typography and Spanish number forms do
+// not change the meaning seen by checks. Keep the original record and tool
+// response text untouched.
+const TYPOGRAPHIC_APOSTROPHE_RE = /[\u2018\u2019\u02BC]/g;
+function plainApostrophes(text) {
+  return String(text ?? '').replace(TYPOGRAPHIC_APOSTROPHE_RE, "'");
+}
+function gradedRecordFor(scenario, record) {
+  const spokenText = (text) => {
+    const plain = plainApostrophes(text);
+    return scenario.language === 'es' ? normalizeSpanishSpokenText(plain) : plain;
+  };
+  return {
+    ...record,
+    events: (record.events || []).map((e) => (e.kind === 'agent' ? { ...e, text: spokenText(e.text) } : e)),
+    spoken: (record.spoken || []).map(spokenText),
+  };
+}
+
 function evaluateChecks(scenario, record) {
+  const graded = gradedRecordFor(scenario, record);
   // Receipt evidence is mandatory for every scenario, including custom fixtures.
   // Ignore explicit copies so they cannot weaken or double-count the invariant.
   return [
-    allowedToolsCheck(scenario, record),
-    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, record),
-    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, record)),
+    allowedToolsCheck(scenario, graded),
+    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, graded),
+    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, graded)),
   ];
 }
 
@@ -1590,6 +1759,17 @@ function newRecord(scenario, h) {
     // — never the module-level constant a per-session override never moves.
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL, modelFallbackReason: null,
     modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
+    // Per-round Anthropic token usage, accumulated as each model round's
+    // finalMessage() resolves (see installHarness's stream.finalMessage
+    // patch below) — same field names extractUsage('anthropic', …) returns.
+    // `rounds` counts only rounds that actually carried a `usage` block (a
+    // scripted test double with none never counts), and `cacheReadRounds` is
+    // how many of those had a non-zero cached_input_tokens — the numerator
+    // for a cache-hit rate. Haiku 4.5's minimum cacheable prefix is 4,096
+    // tokens; Sandy's system prompt is smaller, so this is how we actually
+    // see whether any round gets a cache hit rather than guessing from trial
+    // position (see docs/sandy-benchmark.md).
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
   };
 }
 
@@ -1742,6 +1922,22 @@ async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
 
 // ── The run ───────────────────────────────────────────────────────────────
 
+// Tokens were spent whether or not the scenario ultimately evaluated clean —
+// folded into the run summary unconditionally (a record with no `usage` at
+// all, e.g. a scripted test double with no `usage` block on its messages,
+// contributes zero), so a scenario the harness itself broke on still counts
+// its real spend. Its own function so tallyRecord's complexity stays where
+// it was before this field existed.
+function tallyUsage(summaryUsage, recordUsage = {}) {
+  summaryUsage.input_tokens += recordUsage.input_tokens || 0;
+  summaryUsage.output_tokens += recordUsage.output_tokens || 0;
+  summaryUsage.cached_input_tokens += recordUsage.cached_input_tokens || 0;
+  summaryUsage.cache_write_tokens += recordUsage.cache_write_tokens || 0;
+  summaryUsage.rounds += recordUsage.rounds || 0;
+  summaryUsage.cacheReadRounds += recordUsage.cacheReadRounds || 0;
+  summaryUsage.incompleteRounds += recordUsage.incompleteRounds || 0;
+}
+
 // One record's contribution to the run summary (misses per tier and telemetry).
 function tallyRecord(summary, r, all) {
   summary.durationMs += r.durationMs || 0;
@@ -1751,6 +1947,7 @@ function tallyRecord(summary, r, all) {
   summary.warnings += (r.warnings || []).length;
   summary.modelRounds += r.modelRounds || 0;
   summary.modelErrors += (r.modelErrors || []).length;
+  tallyUsage(summary.usage, r.usage);
   if (r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE') summary.modelUnavailable += 1;
   if (r.status === 'error') { summary.replayErrors += 1; summary.replayErrorIds.push(r.id); return; }
   if (r.status === 'fail') { summary.failed += 1; summary.failedIds.push(r.id); } else summary.passed += 1;
@@ -1777,10 +1974,25 @@ function summarize(results, { judge = false } = {}) {
     criticalMisses: 0, adjudicatedMajorMisses: 0, majorMisses: 0, qualityMisses: 0,
     judge, judged: 0, judgeFallbacks: 0, judgeErrors: 0, dbRefusals: 0, unexpectedTools: 0, invalidInputs: 0, warnings: 0,
     modelRounds: 0, modelErrors: 0, modelUnavailable: 0, qualityScore: null, durationMs: 0,
+    // Real per-round Anthropic token usage, summed across every scenario in
+    // this run (see newRecord's `usage` field and the finalMessage patch in
+    // installHarness). `rounds` / `cacheReadRounds` are the cache-hit-rate
+    // denominator/numerator — see cacheHitRate below.
+    usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
   };
   const all = [];
   for (const r of results) tallyRecord(summary, r, all);
   summary.qualityScore = qualityScore(all);
+  // null (not 0) with zero rounds carrying usage — no evidence either way,
+  // never read as "no cache hits ever".
+  summary.usage.cacheHitRate = summary.usage.rounds ? summary.usage.cacheReadRounds / summary.usage.rounds : null;
+  // Token totals are only complete when no model round was rejected (its
+  // spend is real but unreported) AND every successful round carried a
+  // usage block — the same rule the benchmark runner applies (Codex
+  // pre-push on #4946), so the standalone eval never reads complete when
+  // the runner would not.
+  summary.usage.missingUsageRounds = Math.max(0, (summary.modelRounds || 0) - summary.usage.rounds);
+  summary.usage.complete = summary.usage.incompleteRounds === 0 && summary.usage.missingUsageRounds === 0;
   return summary;
 }
 
@@ -1796,6 +2008,15 @@ function summaryLine(summary = {}) {
     n('dbRefusals') && `dbRefusals=${n('dbRefusals')}`,
     (summary.failedIds || []).length && `failed=[${summary.failedIds.join(', ')}]`,
     (summary.replayErrorIds || []).length && `errors=[${summary.replayErrorIds.join(', ')}]`,
+    summary.usage && summary.usage.rounds
+      ? `tokens(in=${summary.usage.input_tokens}/out=${summary.usage.output_tokens}/cacheRead=${summary.usage.cached_input_tokens}/cacheWrite=${summary.usage.cache_write_tokens}) cacheHitRate=${summary.usage.cacheHitRate == null ? 'n/a' : `${(summary.usage.cacheHitRate * 100).toFixed(1)}%`} (${summary.usage.rounds} round(s) with usage)`
+      : null,
+    summary.usage && !summary.usage.complete && (summary.usage.incompleteRounds || summary.usage.missingUsageRounds)
+      ? `usage INCOMPLETE: ${[
+        summary.usage.incompleteRounds ? `${summary.usage.incompleteRounds} rejected/unparseable round(s)` : null,
+        summary.usage.missingUsageRounds ? `${summary.usage.missingUsageRounds} successful round(s) without complete usage` : null,
+      ].filter(Boolean).join(', ')} (totals are a lower bound)`
+      : null,
   ];
   return segments.filter(Boolean).join(' ');
 }
@@ -2048,6 +2269,7 @@ module.exports = {
   SEVERITIES,
   WRITE_TOOLS,
   loadFixture,
+  selectScenarios,
   renderDateTokens,
   lintFixture,
   knownToolNames,
@@ -2057,12 +2279,13 @@ module.exports = {
   runVoiceRelayEval,
   runVoiceRelayEvalProcess,
   notifyEvalCrash,
+  summarize,
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
+    CHILD_TIMEOUT_MS, plainApostrophes, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
     JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
-    makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
+    makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,
   },
 };

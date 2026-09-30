@@ -12,7 +12,8 @@ const migration = require('../models/migrations/20260926000030_customer_geocode_
 const normalizedGuardMigration = require('../models/migrations/20260927000000_normalize_customer_verified_pin_guard');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { saveReview, getReviewDetail, listReviewQueue, attemptReviewedGeocode, excludeReviewedAddresses,
-  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId } = require('../services/customer-geocode-review');
+  excludePrimaryPropertyReviewBlocks, excludePrimaryPropertyReviewForId, excludeCustomerAutomaticGeocodeForId,
+  reviewedCustomerLocation } = require('../services/customer-geocode-review');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
 const CUSTOMER = '71000000-0000-4000-8000-000000000001';
@@ -139,6 +140,9 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     });
     expect((await getReviewDetail(CUSTOMER, mockConnection)).review.status).toBe('verified');
     expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
+    const reviewedLocation = await reviewedCustomerLocation(await customer(), mockConnection);
+    expect(Number(reviewedLocation.latitude)).toBe(PIN.lat);
+    expect(Number(reviewedLocation.longitude)).toBe(PIN.lng);
   });
   test('a primary pin is not adopted for a divergent address', async () => {
     await mockConnection('customer_properties').where({ id: PRIMARY }).update({
@@ -162,6 +166,15 @@ postgres('durable customer geocode review in PostgreSQL', () => {
       mockConnection('customers').where({ id: CUSTOMER }), PRIMARY,
     );
     expect(await customerUpdate.update({ latitude: PIN.lat, longitude: PIN.lng })).toBe(0);
+    const visitId = randomUUID();
+    await mockConnection('scheduled_services').insert({ id: visitId, customer_id: CUSTOMER, status: 'pending' });
+    const automaticUpdate = excludeCustomerAutomaticGeocodeForId(
+      mockConnection('scheduled_services').where({ id: visitId }), CUSTOMER,
+    );
+    expect(await automaticUpdate.update({ status: 'confirmed' })).toBe(0);
+    expect(await reviewedCustomerLocation(await customer(), mockConnection)).toMatchObject({
+      latitude: null, longitude: null, geocode_review_blocked: true,
+    });
     expect((await customer()).latitude).toBeNull();
     expect((await mockConnection('customer_properties').where({ id: PRIMARY }).first()).latitude).toBeNull();
   });
@@ -182,6 +195,14 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect((await listReviewQueue({}, mockConnection)).total).toBe(1);
     await saveReview(mockConnection, await customer(), { status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR });
     expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
+  });
+  test('blank and null units remain the same quarantined address for direct retries', async () => {
+    await saveReview(mockConnection, { ...await customer(), address_line2: null }, {
+      status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR,
+    });
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line2: '' });
+    expect(await attemptReviewedGeocode(CUSTOMER, mockConnection)).toBeNull();
+    expect(geocodeAddressWithStatus).not.toHaveBeenCalled();
   });
   test('a failed coordinate transaction rolls back mirrors and never schedules a refresh', async () => {
     const onCoordinatesCommitted = jest.fn();

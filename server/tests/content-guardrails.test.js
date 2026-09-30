@@ -215,6 +215,16 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 
+  test('named lawn pests resolve to the blocked lawn-pest id (Chinch Bugs, Sod Webworms, Mole Crickets, Grubs, Armyworms)', () => {
+    for (const tag of ['Chinch Bugs', 'chinch-bug', 'Sod Webworms', 'Mole Crickets', 'grubs', 'Armyworms']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+    // Every alias targets a real blocklist id.
+    for (const target of guardrails.BLOCKED_SERVICE_ALIASES.values()) {
+      expect(guardrails.FAQ_BLOCKED_SERVICES.has(target)).toBe(true);
+    }
+  });
+
   test('every canonical blog tag whose service is blocked resolves as blocked', () => {
     // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
     // form of a blocked service must be covered, alias or normalization.
@@ -1284,15 +1294,19 @@ describe('outbound-link gate: operator-intercept citation exceptions (Codex roun
     );
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
-  test('operatorCitations allows curated citation hosts, subdomains included, and curated competitor source hosts', () => {
+  test('operatorCitations allows curated citation hosts, subdomains included — never a competitor site', () => {
     for (const body of [
       'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/) research.',
-      'Per [Orkin\'s published terms](https://www.orkin.com/terms) as of June 2026.',
       'Per [FDACS](https://www.fdacs.gov/Consumer-Resources) guidance.',
     ]) {
       const r = guardrails.evaluate({ body }, { operatorCitations: true });
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
     }
+    // Owner ruling 2026-09-28: a blog post never links a competitor's site.
+    // Curated competitor source hosts used to be citable on operator drafts;
+    // that allowance is gone (deliberate contract change).
+    const r = guardrails.evaluate({ body: 'Per [Orkin\'s published terms](https://www.orkin.com/terms).' }, { operatorCitations: true });
+    expect(r.findings.map((f) => f.code)).toEqual(expect.arrayContaining(['DISALLOWED_EXTERNAL_LINK', 'COMPETITOR_LINK']));
   });
   test('operatorCitations still blocks non-curated hosts and suffix-spoofed domains', () => {
     expect(guardrails.evaluate({ body: 'Buy [links](https://spam.example/x).' }, { operatorCitations: true })
@@ -1531,13 +1545,21 @@ describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, sem
       'Load //192.168.1.1/x today.',
       '<a href="//localhost/x">x</a>',
       'Try [x](//[::1]/admin) now.',
+      // Userinfo before the host: the browser still goes to the host (Codex r7 on #5191).
+      'See [x](//user@spam-example.com/x) now.',
+      '<a href="//a@b@spam-example.com">x</a>',
+      // Markdown escapes are removed before a link is built (Codex r8 on #5191).
+      'See [x](\\/\\/spam-example.com/x) now.',
+      'See [x](https\\://spam-example.com/x) now.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
     }
-    // prose slashes still don't trip
-    const prose = guardrails.evaluate({ body: 'Rates vary and//or depend on size.' }, {});
-    expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    // prose slashes and ordinary escapes still don't trip
+    for (const body of ['Rates vary and//or depend on size.', 'Plain \\*stars\\* and [UF](https://edis.ifas.ufl.edu/x).']) {
+      const prose = guardrails.evaluate({ body }, {});
+      expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
   });
   test('semicolonless numeric entities decode like a browser (greedy digit consumption included)', () => {
     // decimal: 'a' is not a decimal digit, so &#58alert(1) is a live javascript: link
@@ -2394,6 +2416,136 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['/lawn-care/fall-armyworm-outbreak/'] });
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post links (voice_constraints.related_posts) ride the same allowance, exactly the listed paths, never an invented sibling', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const brief = {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      target_sites: ['wavespestcontrol.com'],
+      voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
+        related_posts: [
+          { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
+          { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
+        ],
+      },
+    };
+    const options = deriveSyncGuardrailOptions({}, brief);
+    expect(options.relatedPostLinks).toEqual(expect.arrayContaining([
+      '/lawn-care/fall-armyworm-outbreak/', '/lawn-care/chinch-bug-damage/',
+    ]));
+    const body = 'See our guide on [fall armyworms](/lawn-care/fall-armyworm-outbreak/) for background.';
+    const linked = guardrails.evaluate({ body }, options);
+    expect(linked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // A blog post NOT on the brief's related_posts list is still an invented
+    // route — the allowance is exactly the listed paths, never every blog post.
+    const invented = 'See our guide on [drainage tips](/lawn-care/never-seeded-this-post/) for background.';
+    const notLinked = guardrails.evaluate({ body: invented }, options);
+    expect(notLinked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const wrongHost = 'See [fall armyworms](https://www.sarasotaflpestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const wrongHostResult = guardrails.evaluate({ body: wrongHost }, options);
+    expect(wrongHostResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const hubAbsolute = 'See [fall armyworms](https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const hubResult = guardrails.evaluate({ body: hubAbsolute }, options);
+    expect(hubResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    for (const unsafeAbsolute of [
+      'https://www.wavespestcontrol.com:8443/lawn-care/fall-armyworm-outbreak/',
+      'https://user:pass@www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/',
+    ]) {
+      const unsafeResult = guardrails.evaluate({ body: `See [fall armyworms](${unsafeAbsolute}).` }, options);
+      expect(unsafeResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+    const standardPort = guardrails.evaluate({
+      body: 'See [fall armyworms](https://www.wavespestcontrol.com:443/lawn-care/fall-armyworm-outbreak/).',
+    }, options);
+    expect(standardPort.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // No related_posts on the brief at all → no extra allowance, unchanged behavior.
+    const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
+    expect(bare.allowedInternalLinks).toEqual([]);
+    expect(bare.relatedPostLinks).toEqual([]);
+  });
+
+  test('related-post allowances fail closed when the spoke kill switch changes the publish host', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+    try {
+      const brief = {
+        action_type: 'new_supporting_blog',
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: {
+          related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+          related_posts: [{ path: '/termite/spoke-only/' }],
+        },
+      };
+      const options = deriveSyncGuardrailOptions({}, brief);
+      // The path keeps its identity as a related post bound to its FROZEN
+      // (spoke) host — never the drifted hub host — and relatedPostLinksLive
+      // is false, so internalRouteFinding quarantines every reference to it
+      // rather than dropping it into the untracked-route bucket (Codex
+      // #4984 r6+ P1: emptying relatedPostLinks let a wrong-host or even a
+      // relative link past the host check entirely if check_existing_content
+      // separately re-admitted the same path into the generic allowlist).
+      expect(options.relatedPostHosts).toEqual(['sarasotaflpestcontrol.com']);
+      expect(options.relatedPostLinks).toEqual(['/termite/spoke-only/']);
+      expect(options.relatedPostLinksLive).toBe(false);
+      const result = guardrails.evaluate({ body: '[Spoke only](/termite/spoke-only/)' }, options);
+      expect(result.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // The escape hatch this finding closed: check_existing_content had
+      // separately re-admitted this SAME path into the generic allowlist
+      // (draft.checked_existing_routes) — under the old "drop the path"
+      // behavior that would have silently satisfied the generic,
+      // host-blind allowedInternalLinks check once relatedPaths no longer
+      // recognized it. It must still P0 today.
+      const draft = { body: '[Spoke only](/termite/spoke-only/)', checked_existing_routes: ['/termite/spoke-only/'] };
+      const stillDenied = guardrails.evaluate(draft, options);
+      expect(stillDenied.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // An absolute link on the CURRENT (drifted) hub host must also P0 —
+      // the path was only ever verified live on the frozen spoke.
+      const hubAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.wavespestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(hubAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // And even an absolute link on its OWN frozen spoke host must still
+      // P0 — a full mismatch quarantines the path everywhere, not just off
+      // the new host, since the brief itself no longer targets that spoke.
+      const frozenHostAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.sarasotaflpestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(frozenHostAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
+  });
+
+  test('a related path that failed the publish-time liveness recheck is denied, even via the generic allowlist', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/', '/termite/live-post/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+      staleRelatedPostLinks: ['/termite/swarmers/'],
+    };
+    const stale = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)', checked_existing_routes: ['/termite/swarmers/'] }, options);
+    expect(stale.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const live = guardrails.evaluate({ body: '[Live](/termite/live-post/)' }, options);
+    expect(live.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post paths match with their canonical case', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+    };
+    const exact = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)' }, options);
+    expect(exact.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    const recased = guardrails.evaluate({ body: '[Swarmers](/Termite/Swarmers/)' }, options);
+    expect(recased.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
   test('member-expression components are rejected (Codex round 2)', () => {
@@ -3560,12 +3712,19 @@ describe('third-party price citations and trusted sources', () => {
   const { findHardcodedPrice } = guardrails;
   // Operator provenance unlocks the PRICE exemption. Trusted-source links
   // alone never permit prices in mined drafts.
-  // A competitor-price draft is ALWAYS an operator draft, so the citation
-  // allowlist is in scope — the source URL must be one the gate accepts.
-  const OP = { thirdPartyCitations: true, operatorCitations: true };
-  // The exemption now requires the amount's paragraph to carry BOTH a
-  // citation link and an "as of <date>" — the manifest's global sourcing
-  // rule. Fixtures that expect an exemption must therefore be sourced.
+  // A competitor-price draft is ALWAYS an operator draft.
+  // Every competitor carries evidence here (Codex r9 on #5191): these tests
+  // exercise ATTRIBUTION. The evidence requirement has its own tests below.
+  const { COMPETITORS, COMPETITOR_BRAND_SIGNALS } = require('../services/content/competitor-facts');
+  const { competitorRecordHosts } = require('../services/content/competitor-links');
+  const ALL_EVIDENCE = [
+    ...COMPETITORS.flatMap((c) => competitorRecordHosts(c).map((h) => `https://${h}/pricing`)),
+    ...COMPETITOR_BRAND_SIGNALS.map((n) => `https://www.bbb.org/profile/${n.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+  ];
+  const OP = { thirdPartyCitations: true, operatorCitations: true, evidenceUrls: ALL_EVIDENCE };
+  // Fixtures written under the retired source-and-date rule (r12–r15) keep
+  // this harmless prefix. Since the owner ruling of 2026-09-28 a competitor
+  // price needs no link or date; the prefix neither helps nor hurts.
   const SRC = 'Per ConsumerAffairs (https://www.consumeraffairs.com/x), as of June 2026, ';
 
   test('mined drafts get NO third-party exemption — the P0 price guard holds (Codex P1)', () => {
@@ -3696,32 +3855,139 @@ describe('third-party price citations and trusted sources', () => {
     expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report.js today.', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
   });
 
-  test('the source and date must be RENDERED, not hidden (r12)', () => {
+  test('hidden markup in the amount\'s paragraph still disqualifies the exemption (r12)', () => {
     expect(findHardcodedPrice('{/* as of June 2026 https://x.com/y */} Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<!-- as of June 2026 https://x.com/y --> Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Per (https://x.com/y) {/* as of June 2026 */} Orkin charges a $199 fee.', OP)).not.toBeNull();
   });
 
-  test('the citation must be an ALLOWED source, not just any URL (r12 P0)', () => {
-    expect(findHardcodedPrice('Per https://random-blog.example.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
-    // A curated host, or a source this brief named, both qualify.
-    expect(findHardcodedPrice('Per https://www.consumeraffairs.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-    expect(findHardcodedPrice('Per https://legalclarity.org/a, as of June 2026, Orkin charges a $199 fee.',
-      { ...OP, requiredSourceUrls: ['https://legalclarity.org/a'] })).toBeNull();
-  });
-
-  test('generic framing cannot excuse an unsourced intercept price (r13 P0)', () => {
+  test('generic framing cannot excuse an UNATTRIBUTED intercept price (r13 P0)', () => {
     // "though pricing varies by contract" is exactly the phrasing the seeder
-    // tells writers to add, and it walked straight past the source rule.
-    expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Aptive charges $199 — get a quote for your home.', OP)).not.toBeNull();
+    // tells writers to add. On an intercept draft it never exempts an amount
+    // by itself; only attribution to a competitor does. Since the owner
+    // ruling of 2026-09-28 an attributed competitor price needs no in-post
+    // source or date (its source rides the evidence notes), so the attributed
+    // forms now pass (deliberate contract change).
+    expect(findHardcodedPrice('Quarterly pest control is $199, though pricing varies by contract.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Quarterly pest control is $199 — get a quote for your home.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).toBeNull();
     // Non-intercept drafts keep the long-standing framing exemption.
     expect(findHardcodedPrice('Use the calculator for a $99 estimate.', {})).toBeNull();
   });
 
-  test('reference definitions are found DOC-WIDE, not just in the paragraph (r13)', () => {
-    // Definitions are conventionally collected at the end of the document.
-    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n\nMore prose.\n\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+  // Owner ruling 2026-09-28: "list them, we don't have to link to their
+  // site, or say verified or not verified." Competitor claims, prices
+  // included, are stated plainly. This deliberately retires the r12–r15
+  // source-and-date contract (citation link + "as of" date in the amount's
+  // sentence); it is an owner-ruled change, not a review-driven rewrite.
+  // The source moved to the unpublished evidence notes (Codex r9 on #5191).
+  test('a competitor price needs NO in-post citation link and NO as-of date (owner ruling 2026-09-28)', () => {
+    for (const body of [
+      'Orkin charges a $199 cancellation fee.',
+      'Aptive charges from $49 to $99 per month for comparable plans.',
+      "Orkin's cancellation fee is $199.",
+      // Any old citation shape is simply irrelevant now — not required, not
+      // disqualifying.
+      'Per https://random-blog.example.com/x, Orkin charges a $199 fee.',
+      'Orkin charges a $199 fee. June 2026 was rainy.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).toBeNull();
+      // …but its source must be in the evidence notes.
+      expect(findHardcodedPrice(body, { thirdPartyCitations: true })).not.toBeNull();
+    }
+  });
+
+  // Codex r9 on #5191: with no link on the page, "Orkin charges $199" passed
+  // on the name alone, so an invented figure could auto-publish. The source
+  // rides the unpublished evidence instead, and it has to be THAT company's.
+  describe('a competitor price needs its source in the unpublished evidence (Codex r9 on #5191)', () => {
+    const IC = { thirdPartyCitations: true };
+    const ORKIN = 'Orkin charges a $199 cancellation fee.';
+    const APTIVE = "Aptive's early-cancellation fee is $199.";
+
+    test('no evidence, or another company\'s, keeps the P0', () => {
+      expect(findHardcodedPrice(ORKIN, IC)).toBe('$199');
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.terminix.com/pricing'] })).toBe('$199');
+      // A page naming Orkin on an arbitrary host is not a public record.
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://example.com/orkin-prices'] })).toBe('$199');
+      // aptive.com is an unrelated company (not an Aptive host).
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://aptive.com/terms'] })).toBe('$199');
+      // Not a web URL at all.
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['ftp://www.orkin.com/pricing'] })).toBe('$199');
+    });
+
+    test('the company\'s own page, or a public-record page naming it, is evidence', () => {
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.orkin.com/pricing'] })).toBeNull();
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://goaptive.com/terms'] })).toBeNull();
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc-0443/complaints'] })).toBeNull();
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html'] })).toBeNull();
+      // The public-record page must name THIS company.
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc-0443/complaints'] })).toBe('$199');
+    });
+
+    test('a source the operator brief binds is evidence when it names the company (B1/B3)', () => {
+      const bound = ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html', 'Orkin published terms/plan pages'];
+      expect(findHardcodedPrice(APTIVE, { ...IC, boundSourceUrls: bound })).toBeNull();
+      expect(findHardcodedPrice('Aptive charges a $199 fee.', { ...IC, boundSourceUrls: ['https://legalclarity.org/how-to-cancel-aptive/'] })).toBeNull();
+      // A bound source about someone else, or prose, is not.
+      expect(findHardcodedPrice(ORKIN, { ...IC, boundSourceUrls: bound })).toBe('$199');
+      expect(findHardcodedPrice(ORKIN, { ...IC, boundSourceUrls: ['https://legalclarity.org/how-to-cancel-trugreen-phone-mail-or-online/'] })).toBe('$199');
+    });
+
+    test('a detection-only brand is evidenced by a public-record page naming it', () => {
+      const HAWX = 'Hawx charges a $149 early-termination fee.';
+      expect(findHardcodedPrice(HAWX, IC)).toBe('$149');
+      expect(findHardcodedPrice(HAWX, { ...IC, evidenceUrls: ['https://www.bbb.org/us/tn/x/profile/pest-control/hawx-pest-control/complaints'] })).toBeNull();
+    });
+
+    test('evaluate() reads the draft\'s notes_for_reviewer', () => {
+      const hasPrice = (r) => r.findings.some((f) => f.code === 'HARDCODED_PRICE');
+      const opts = { operatorCitations: true, competitorPriceCitations: true };
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN }, opts))).toBe(true);
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'Evidence sources:\n- https://www.orkin.com/pricing' }, opts))).toBe(false);
+      // Escaped and protocol-relative forms read as the browser reads them.
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'Evidence sources: //www.orkin&#46;com/pricing' }, opts))).toBe(false);
+      // The brief's bound sources count too.
+      expect(hasPrice(guardrails.evaluate({ body: APTIVE }, { ...opts, requiredSourceUrls: ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html'] }))).toBe(false);
+      // The redraft directive says where the source goes.
+      const f = guardrails.evaluate({ body: ORKIN }, opts).findings.find((x) => x.code === 'HARDCODED_PRICE');
+      expect(f.message).toMatch(/Evidence sources/);
+      // Mined drafts get neither the exemption nor the hint.
+      const mined = guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'https://www.orkin.com/pricing' }, {}).findings.find((x) => x.code === 'HARDCODED_PRICE');
+      expect(mined).toBeTruthy();
+      expect(mined.message).not.toMatch(/Evidence sources/);
+    });
+  });
+
+  // With no link or date to check, an ANONYMOUS figure would publish a price
+  // nobody can trace (Codex r2 on #5191): only a named curated competitor
+  // owns an exempt amount.
+  test('an anonymous competitor price is not exempt: the sentence must name the company (Codex r2 on #5191)', () => {
+    for (const body of [
+      'Other companies charge a $199 cancellation fee.',
+      'Other companies typically charge $25 per month more for the same coverage.',
+      'Your previous provider may bill a $99 fee for ending service early.',
+      'The industry average is $145 per quarterly visit.',
+      SRC + 'The industry average is $145 per quarterly visit.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
+    }
+  });
+
+  test('a Waves price stays blocked on the same intercept draft (owner ruling 2026-09-28 changes nothing here)', () => {
+    for (const body of [
+      'Our quarterly service is $89 per application.',
+      'Waves charges $89 per visit.',
+      'Unlike Orkin, {{brandName}} charges $89.',
+      'Orkin is expensive. Quarterly pest control is $129.',
+      'Orkin charges too much, but quarterly pest control is $129 per application.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
+    }
+    // Mined drafts still get no competitor-price exemption at all.
+    expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.')).not.toBeNull();
+    // …and an attributed price in a table still fails closed.
+    expect(findHardcodedPrice('| Orkin charges | $199 |', OP)).not.toBeNull();
   });
 
   test('raw HTML is a CLOSED allowlist, not a blacklist (r14 P0)', () => {
@@ -3763,13 +4029,6 @@ describe('third-party price citations and trusted sources', () => {
     }
   });
 
-  test('the citation must be in the amount\'s OWN SENTENCE (r14 P0)', () => {
-    // An unrelated citation elsewhere in the paragraph is not evidence for
-    // this price; the briefs' mandated shape puts the source in-sentence.
-    expect(findHardcodedPrice('Per [UF](https://ufl.edu/chinch), chinch bugs peak in July. Orkin charges a $199 fee as of June 2026.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/x)).', OP)).toBeNull();
-  });
-
   test('a URL inside an MDX expression is never a citation (r14 P0)', () => {
     // Expressions execute at render and are not tags, so the raw-HTML
     // allowlist never saw them — a brief-named URL could ride into code.
@@ -3795,53 +4054,10 @@ describe('third-party price citations and trusted sources', () => {
     expect(guardrails._internals.externalLinkFinding('{/* a note */} Orkin charges a fee.', N)).toBeNull();
   });
 
-  test('the date must be GOVERNED by "as of" (r14)', () => {
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), Orkin charges a $199 fee. June 2026 was rainy.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-  });
-
-  test('a code span or escaped bracket is not a citation (r15)', () => {
-    // Both render literal text — nothing a reader can click.
-    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 `[source](https://www.consumeraffairs.com/x)`.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 \\[source](https://www.consumeraffairs.com/x).', OP)).not.toBeNull();
-  });
-
   test('HTML deletion elements are not attribution either (r15)', () => {
     // Same as "~~": the reader sees the owner struck out and the price live.
     expect(findHardcodedPrice('<del>Other companies charge</del> $89 per visit for local quarterly service.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<s>Other companies charge</s> $89 per visit for local quarterly service.', OP)).not.toBeNull();
-  });
-
-  test('shortcut and collapsed reference citations qualify (r14)', () => {
-    // The label lives in the FIRST bracket for these two forms.
-    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 [source].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-    expect(findHardcodedPrice('Aptive charges a $199 fee as of July 2026 [source][].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-  });
-
-  test('OUR OWN links cannot source a competitor price (r14)', () => {
-    // Hub and spoke domains are navigation, not third-party evidence.
-    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee as of July 2026 ([source](https://www.wavespestcontrol.com/pest-control-calculator/)).', OP)).not.toBeNull();
-    // A genuine third-party source still qualifies.
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-  });
-
-  test('the citation must be reader-VISIBLE, not an image or dangling ref (r13 P0)', () => {
-    // Image destinations and unused reference definitions are stripped from
-    // the rendered page, so neither is a citation a reader can follow.
-    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 fee.\n[unused]: https://www.consumeraffairs.com/x', OP)).not.toBeNull();
-    expect(findHardcodedPrice('![img](https://www.consumeraffairs.com/x) As of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
-    // A USED reference link resolves and does qualify.
-    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-  });
-
-  test('a cited price must actually BE cited — source AND date (r12)', () => {
-    // Grammar alone let an invented figure through: the manifest requires
-    // every dollar figure sourced and dated in-post.
-    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Per ConsumerAffairs (https://www.consumeraffairs.com/x), Orkin charges a $199 fee.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 cancellation fee.', OP)).not.toBeNull();
-    // Both present → exempt.
-    expect(findHardcodedPrice(`${SRC}Orkin charges a $199 cancellation fee.`, OP)).toBeNull();
   });
 
   test('PROSE attribution still works — this is what the exemption is for', () => {
@@ -4078,7 +4294,7 @@ describe('third-party price citations and trusted sources', () => {
     const seedish = guardrails.evaluate({ body }, { operatorCitations: true });
     expect(seedish.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
     // True intercepts pass via the dedicated flag.
-    const intercept = guardrails.evaluate({ body }, { operatorCitations: true, competitorPriceCitations: true });
+    const intercept = guardrails.evaluate({ body, notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' }, { operatorCitations: true, competitorPriceCitations: true });
     expect(intercept.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
   });
 
@@ -4101,8 +4317,6 @@ describe('third-party price citations and trusted sources', () => {
       // puts a second subject before the verb and is deliberately NOT
       // exempt (see the rigid-template note in content-guardrails).
       'Terminix charges a $150 early-termination fee on annual plans.',
-      'Other companies typically charge $25 per month more for the same coverage.',
-      'Your previous provider may bill a $99 fee for ending service early.',
     ]) {
       expect(findHardcodedPrice(SRC + body, OP)).toBeNull();
     }
@@ -4246,7 +4460,6 @@ describe('third-party price citations and trusted sources', () => {
 
   test('possessive price constructions are attributed', () => {
     expect(findHardcodedPrice(SRC + "Orkin's cancellation fee is $199 in most contracts.", OP)).toBeNull();
-    expect(findHardcodedPrice(SRC + 'The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
   test('unlisted non-government domains still require the exact brief source', () => {
@@ -5164,6 +5377,17 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const fractional = guardrails.evaluate({ body: 'Wait half an hour before re-entering.' }, {});
     expect(fractional.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Worded fractions of an hour are figures too (PR #5187 codex r11).
+    for (const body of [
+      'Keep pets off the treated lawn for a quarter hour.',
+      'Keep pets off the lawn for a quarter-hour.',
+      'Wait a quarter of an hour before re-entering.',
+      'Wait three quarters of an hour before re-entering.',
+    ]) {
+      expect(guardrails.evaluate({ body }, {}).findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    const quarterOfCustomers = guardrails.evaluate({ body: 'A quarter of homeowners call us about ants.' }, {});
+    expect(quarterOfCustomers.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
     const requires = guardrails.evaluate({ body: 'Applications require 30 minutes before people can re-enter.' }, {});
     expect(requires.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const until = guardrails.evaluate({ body: 'Keep children away until 30 minutes after application.' }, {});
@@ -5848,5 +6072,83 @@ describe('reentrySafetyClaimFinding — shared claim corpus', () => {
   const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
   test.each(FLAGGED_CLAIMS)('%s', (text) => {
     expect(reentrySafetyClaimFinding(text)).toBeTruthy();
+  });
+});
+
+// #4905 guard: reentrySafetyClaimFinding runs synchronously on every live
+// voice-call turn (relay-visit.js / relay-context.js / relay-booking.js) and
+// email draft (email-reply-claims-verifier.js), plus comms-lint.js. Its
+// multi-second stalls were V8 compiling the ~50 large patterns to native code
+// on their first runs in a process — once for one-byte text and again for
+// two-byte text (an em dash, é) — landing on the first live call to reach
+// each path. A single warm-up call never fixed it: the function returns at
+// its first claim, and a one-byte call never compiles the two-byte code. The
+// server now runs warmReentrySafetyPatterns() once at boot, before it
+// listens. The tests below guard the patterns being compiled once, the boot
+// warm-up being wired before listen, and first-sight latency after that
+// warm-up, timed in a FRESH process (in-worker timing is flaky on CI; see
+// ask-waves-latency-probe.js).
+describe('reentrySafetyClaimFinding avoids rebuilding RegExp objects per call (#4905)', () => {
+  const { reentrySafetyClaimFinding, _internals } = require('../services/content/content-guardrails');
+  const { REENTRY_SAFETY_PATTERNS } = _internals;
+
+  test('reuses the SAME compiled RegExp objects across calls instead of rebuilding them', () => {
+    expect(REENTRY_SAFETY_PATTERNS.length).toBeGreaterThan(40);
+    const before = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    reentrySafetyClaimFinding('Those sound like ghost ants — tiny, pale, and they love kitchens.');
+    reentrySafetyClaimFinding('A totally different sentence about billing questions today.');
+    const after = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    // Object IDENTITY, not just equal sources: a regression back to
+    // `new RegExp(src, 'gi')` per call would produce a DIFFERENT object with
+    // the same source, which `toBe` catches and `toEqual` would not.
+    before.forEach((re, i) => expect(after[i]).toBe(re));
+  });
+});
+
+describe('reentrySafetyClaimFinding worst-case latency (#4905)', () => {
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  // The issue's own first-seen inputs, plus em-dash/en-dash/ASCII-hyphen
+  // variants (normalizeHardCopyText folds all dash variants to ASCII) and a
+  // couple of Spanish replies — ordinary short text, not adversarial input.
+  const corpus = [
+    'Those sound like ghost ants — tiny, pale, and they love kitchens.',
+    'No worries — it is safe for kids.',
+    'Hello — world, this is a short line.',
+    'Hello - world, this is a short line.',
+    'Hello – world, this is a short line.',
+    'Great question! Our barrier treatment covers the yard every 21 days.',
+    'Ghost ants – tiny and pale – love sugary kitchen spills.',
+    'No hay problema — es completamente normal en esta época del año.',
+    'Los técnicos llegarán mañana — por favor mantenga a las mascotas adentro.',
+    'Su patio se ve genial - gracias por elegir Waves.',
+  ];
+  // A super-linear or never-tiers regex fails fast instead of hanging CI
+  // (the child is synchronous, so jest's own test timeout cannot interrupt
+  // it).
+  const timeInFreshProcess = () => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'reentry-claim-latency-probe.js')], {
+      input: JSON.stringify(corpus), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
+  };
+
+  // Best of three fresh processes per input: one sample can catch a CI
+  // scheduling spike; a real regression fails all three.
+  let ms = [];
+  beforeAll(() => {
+    const runs = [timeInFreshProcess(), timeInFreshProcess(), timeInFreshProcess()];
+    ms = corpus.map((_, i) => Math.min(...runs.map((run) => run[i])));
+  });
+
+  test('the server compiles the patterns at boot, before it listens', () => {
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const warm = src.indexOf('warmReentrySafetyPatterns()');
+    expect(warm).toBeGreaterThan(-1);
+    expect(src.indexOf('primeGuardrails.then(() => httpServer.listen(')).toBeGreaterThan(warm);
+  });
+
+  test.each(corpus.map((text, index) => [text, index]))('stays well under budget for %j', (text, index) => {
+    expect(ms[index]).toBeLessThan(50);
   });
 });

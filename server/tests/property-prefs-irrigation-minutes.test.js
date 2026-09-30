@@ -9,13 +9,13 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn().mockResolvedValue(undefined) }));
-jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 
 const fs = require('fs');
 const path = require('path');
 const propertyRouter = require('../routes/property');
 
-const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('../services/irrigation-weekly-email');
 
 const {
   propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, IRRIGATION_INPUT_FIELDS,
@@ -32,13 +32,17 @@ describe('property preferences — irrigation minutes per zone', () => {
     expect(String(item.newValue)).toContain('25');
   });
 
-  // The lists live in route-module scope; pin them at source so dropping the
-  // field from any one list fails here rather than silently in prod.
+  // The Joi schema and ALLOWED_FIELDS now live in the shared
+  // property-preferences-schema module (extracted 2026-09-27 so the admin
+  // writer can reuse them); the GET defaults stay in route-module scope.
+  // Pin both sources so dropping the field from any one list fails here
+  // rather than silently in prod.
   test('field is wired through schema, ALLOWED_FIELDS and the GET defaults', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
-    expect(src).toMatch(/irrigationRunMinutes: Joi\.number\(\)\.integer\(\)\.min\(1\)\.max\(240\)\.allow\(null\)/);
-    expect(src).toMatch(/'irrigation_run_minutes'/); // ALLOWED_FIELDS
-    expect(src).toMatch(/irrigationRunMinutes: null/); // GET defaults
+    const schemaSrc = fs.readFileSync(path.join(__dirname, '../services/property-preferences-schema.js'), 'utf8');
+    const routeSrc = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
+    expect(schemaSrc).toMatch(/irrigationRunMinutes: Joi\.number\(\)\.integer\(\)\.min\(1\)\.max\(240\)\.allow\(null\)/);
+    expect(schemaSrc).toMatch(/'irrigation_run_minutes'/); // ALLOWED_FIELDS
+    expect(routeSrc).toMatch(/irrigationRunMinutes: null/); // GET defaults
   });
 
   // The derivation normalizes against canonical vocabularies — a persisted
@@ -135,6 +139,13 @@ describe('property preferences — Weekly Inches eligibility', () => {
     expect(hasLawnServiceEvidence).toHaveBeenCalledWith('c2');
     hasLawnServiceEvidence.mockResolvedValueOnce(false);
     await expect(customerQualifiesForLawnInches({ id: 'c3' })).resolves.toBe(false);
+  });
+
+  test('an irrigation-email opt-in qualifies a customer without lawn service', async () => {
+    hasLawnServiceEvidence.mockResolvedValueOnce(false);
+    hasIrrigationEmailOptIn.mockResolvedValueOnce(true);
+    await expect(customerQualifiesForLawnInches({ id: 'c5', waveguard_tier: 'Bronze' })).resolves.toBe(true);
+    expect(hasIrrigationEmailOptIn).toHaveBeenCalledWith('c5');
   });
 
   test('a failed evidence lookup THROWS — the PUT must fail the save, never silently drop inches', async () => {

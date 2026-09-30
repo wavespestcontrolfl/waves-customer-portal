@@ -16,7 +16,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -279,6 +279,7 @@ async function loadUnactionedFlags({ includeExpired = false } = {}) {
     .limit(MAX_ROWS)
     .select(
       db.raw('COUNT(*) OVER () AS total_count'),
+      db.raw("ARRAY_AGG(ad.id::text || ':' || COALESCE(ss.status, '')) OVER () AS all_ids"),
       'ad.id', 'ad.created_at', 'ad.input_snapshot', 'ad.customer_id',
       'cu.first_name', 'cu.last_name',
       'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.status as visit_status',
@@ -340,7 +341,18 @@ function composeRescheduleIntentDigest(rows) {
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, count: total };
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full list still lands in `detail`.
+  const headline = `Schedule — ${total} reschedule text${total === 1 ? '' : 's'} not applied`;
+  const summary = 'Reply or move each visit — automation runs them as booked.';
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // agent_decisions ids — a count-only digest can't otherwise tell "same
+  // requests" from "different ones" at a flat total.
+  // Full-set identity (all_ids, computed before LIMIT).
+  // The visit outcome rides each key: a flag whose visit went from armed to
+  // COMPLETED/NO-SHOW despite the request is a new incident at the same id.
+  const itemKeys = fullSetItemKeys(flags, { idOf: (row) => (row.id == null ? null : `${row.id}:${row.visit_status || ''}`) });
+  return { subject, text, html, count: total, headline, summary, itemKeys };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js:
@@ -425,6 +437,10 @@ async function runRescheduleIntentWatcher(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
+      count: composed.count,
+      itemKeys: composed.itemKeys,
       link: '/admin/communications',
       sendEmail: () => mailer.sendOne({
         to,

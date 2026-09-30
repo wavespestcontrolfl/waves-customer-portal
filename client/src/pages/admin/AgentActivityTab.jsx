@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Badge, Button, Card, Select, cn } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -130,8 +130,16 @@ async function markDigestRead(item) {
   }
 }
 
-function ActivityRow({ item, onReview }) {
-  const [open, setOpen] = useState(false);
+function ActivityRow({ item, onReview, focused }) {
+  const [open, setOpen] = useState(() => !!focused);
+  const rowRef = useRef(null);
+  // The bell's ops_digest rows deep-link here with &focus=<notification id>
+  // (client/src/components/NotificationBell.jsx) when their own link is
+  // this shared feed — open and scroll to the exact row rather than landing
+  // on the top of a long list.
+  useEffect(() => {
+    if (focused) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focused]);
   const meta = STATUS_META[item.status] || STATUS_META.completed;
   const expandable = item.steps?.length > 0 || item.detail;
   // Review: the owner owes a decision. A digest of any status keeps its
@@ -140,7 +148,7 @@ function ActivityRow({ item, onReview }) {
   const needsAction = !!item.link && (item.status === "awaiting_review" || item.kind === "digest");
   const actionLabel = item.status === "awaiting_review" ? "Review" : "Open";
   return (
-    <li className="border-t border-hairline border-zinc-200 first:border-t-0">
+    <li ref={rowRef} className={cn("border-t border-hairline border-zinc-200 first:border-t-0", focused && "bg-zinc-100")}>
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
         <div className="w-14 flex-shrink-0 pt-0.5 text-12 text-ink-tertiary u-nums">
           <div>{fmtTime(item.startedAt)}</div>
@@ -224,6 +232,12 @@ export default function AgentActivityTab() {
   const [feed, setFeed] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // ?focus=<notification id> — the bell's deep link into this feed (a
+  // digest item's id is `digest:<that same id>` — see digestItem in
+  // services/agent-activity.js).
+  const [searchParams] = useSearchParams();
+  const focusParam = searchParams.get("focus");
+  const focusTarget = focusParam ? `digest:${focusParam}` : null;
   // Only the latest request may write state: two quick window changes can
   // resolve out of order and the 24h rows would overwrite the 7d view.
   const requestRef = useRef(0);
@@ -234,14 +248,19 @@ export default function AgentActivityTab() {
     setLoading(true);
     setError(null);
     try {
-      const next = await adminFetch(`/admin/agents/activity?hours=${hours}`);
+      // Pass ?focus= through so the server can load that ONE row even when
+      // it's read and older than the window (server/routes/admin-agents.js
+      // -> agent-activity.js's loadDigestRows) — otherwise the bell's deep
+      // link can point at a row this fetch would never otherwise return.
+      const focusQuery = focusParam ? `&focus=${encodeURIComponent(focusParam)}` : "";
+      const next = await adminFetch(`/admin/agents/activity?hours=${hours}${focusQuery}`);
       if (isCurrent()) setFeed(next);
     } catch (e) {
       if (isCurrent()) setError(e?.message || "Failed to load activity");
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [hours]);
+  }, [hours, focusParam]);
 
   useEffect(() => {
     load();
@@ -345,7 +364,7 @@ export default function AgentActivityTab() {
         ) : (
           <ol>
             {items.map((item) => (
-              <ActivityRow key={item.id} item={item} onReview={markDigestRead} />
+              <ActivityRow key={item.id} item={item} onReview={markDigestRead} focused={focusTarget != null && item.id === focusTarget} />
             ))}
           </ol>
         )}

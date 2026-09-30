@@ -1,0 +1,2145 @@
+[
+  {
+    "slug": "dollarweed",
+    "kind": "weed",
+    "common_name": "Dollarweed",
+    "aka": [
+      "pennywort"
+    ],
+    "aliases": [
+      "dollarweed",
+      "pennywort",
+      "dollar weed",
+      "hydrocotyle"
+    ],
+    "scientific_name": "Hydrocotyle spp.",
+    "rank": "genus",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Round, coin-shaped leaves with the stalk attached at the center of the underside, like a tiny umbrella or lily pad",
+      "Scalloped (slightly toothed) leaf edges",
+      "Low, spreading growth that thickens fast in soggy or overwatered turf",
+      "White rhizomes just under the surface connect the leaves in a spreading patch"
+    ],
+    "look_alikes": [
+      {
+        "slug": "matchweed",
+        "difference": "Dollarweed has round leaves on individual stalks; matchweed has small toothed oval leaves in opposite pairs and a purple-and-white \"match head\" flower.",
+        "next_photo": "A close-up of a single leaf from above, showing whether it is round with a center-attached stalk or oval with opposite pairs along a stem.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A round-leafed weed that thrives wherever soil stays wet, so a thick patch usually signals overwatering, a leaky irrigation zone, or poor drainage rather than a lawn problem on its own. A technician looks at the weed, turf type, season, and coverage, since the wet spot behind it needs addressing too.",
+      "fact": "Its round leaves attach to the stalk right at the center of the underside, like a tiny umbrella, which is where its lily-pad look comes from.",
+      "blurb": "A round-leafed weed that signals wet soil \u2014 check the sprinkler zone and drainage along with treating it."
+    },
+    "tech_notes": "Confirm irrigation schedule and drainage at the site before treatment; white rhizomes must be fully removed by hand-pulling or the patch regrows. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/dollarweed/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d03b64646a6a0422da6430ec70c642a6acad15bbd49c96be7733d78e6496a52d"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "rhizomes",
+        "tubers"
+      ],
+      "id_cues": [
+        "Round, coin-sized leaves with the stalk attached dead-center on the underside",
+        "Scalloped leaf edge, visible on close inspection",
+        "Dig at the base \u2014 thin white rhizomes connect nearby plants just under the soil",
+        "Shows up first in the wettest or most overwatered part of the lawn"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "florida-pusley",
+    "kind": "weed",
+    "common_name": "Florida Pusley",
+    "aka": [],
+    "aliases": [
+      "florida pusley",
+      "pusley",
+      "richardia scabra"
+    ],
+    "scientific_name": "Richardia scabra",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Rough, hairy stems and thick, hairy, opposite leaves that feel sandpapery",
+      "Small white, star-shaped flowers clustered at the stem tips",
+      "Low, prostrate mat that spreads outward from a central point",
+      "Forms dense patches quickly once it flowers and sets seed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spotted-spurge",
+        "difference": "Florida pusley has hairy stems and leaves with white star-shaped flowers; spotted spurge has smooth leaves with a maroon spot and oozes milky sap when broken.",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (milky sap or not) and the leaf surface (hairy vs. smooth with a center spot); keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "matchweed",
+        "difference": "Florida pusley has hairy stems, clustered white flowers; matchweed has smooth toothed leaves and one purple-and-white \"match head\" flower on a bare stalk.",
+        "next_photo": "A close-up of the flower head (loose star-shaped cluster vs. one round match-head bloom on a bare stalk).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common summer weed in thin or newly established turf that spreads fast once it flowers, since each plant produces abundant seed. A technician looks at how thin the turf is where it's showing up, along with the season and coverage, before recommending an approach.",
+      "fact": "Its small white flowers can turn a thin patch of lawn into a solid stand of pusley within a few weeks, since a single plant produces an abundance of seed.",
+      "blurb": "A fast-seeding summer weed that fills in wherever the turf is thin."
+    },
+    "tech_notes": "Sometimes cited as a possible indicator of plant-parasitic nematode pressure on the turf underneath; note but do not diagnose nematodes from the weed alone. Hand-digging removes the taproot; herbicide per label if used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/",
+      "https://ask.ifas.ufl.edu/publication/EP634"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "46c881600d8e853b71207f73e2880c0581735291b5948cec8c37b215c029a298"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Stems and leaves feel rough and hairy to the touch",
+        "Small white star-shaped flowers cluster at the tips of the stems",
+        "Grows low and prostrate, forming a thickening mat",
+        "Leaves are thick, fleshy, and grow in opposite pairs"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "spotted-spurge",
+    "kind": "weed",
+    "common_name": "Spotted Spurge",
+    "aka": [
+      "spotted sandmat"
+    ],
+    "aliases": [
+      "spotted spurge",
+      "spurge",
+      "spotted sandmat",
+      "euphorbia maculata"
+    ],
+    "scientific_name": "Euphorbia maculata",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, oblong leaves in opposite pairs, each with an irregular maroon-to-purple spot in the center",
+      "Breaking a stem oozes a milky white sap",
+      "Low, flat, mat-forming growth that hugs the ground and does not root at the nodes",
+      "Shows up first in dry, thin, or sandy patches of turf, sidewalk cracks, and beds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-pusley",
+        "difference": "Spotted spurge has smooth leaves with a maroon spot and milky sap when broken; Florida pusley has hairy stems, no sap, and clustered white star-shaped flowers.",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (milky sap or not) and the leaf surface (spotted and smooth vs. hairy); keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "matchweed",
+        "difference": "Spotted spurge has a maroon leaf spot and oozes milky sap when broken; matchweed has plain green leaves, no sap, and a purple-and-white \"match head\" flower.",
+        "next_photo": "Wearing gloves, a close-up of a broken stem and the leaf surface; keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Breaking a stem releases a milky sap that can irritate skin or eyes; wash it off and avoid touching your face after handling this weed.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A low mat-forming weed that moves into thin, dry, or stressed turf and produces seed quickly once established. A technician looks at how thin the surrounding turf is, the season, and coverage before recommending an approach, since a thicker lawn is what keeps it from coming back.",
+      "fact": "Breaking a stem releases a milky white sap \u2014 a quick tell apart from look-alikes that don't ooze sap. Wear gloves, keep the sap away from your eyes, and wash off any that touches skin, since it can irritate.",
+      "blurb": "A ground-hugging weed with a milky sap and a spot on each leaf, thriving in thin or dry turf."
+    },
+    "tech_notes": "Present in both dry and overwatered thin turf; sometimes cited alongside pusley as a possible nematode indicator \u2014 do not diagnose nematodes from the weed alone. Per label if herbicide is used. Sap can irritate skin or eyes on contact; wash exposed skin.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/",
+      "https://plants.ces.ncsu.edu/plants/euphorbia-maculata/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c3b9402fec1ff5b8292dbf70fbe634e1802b21ceb851a84dac5a064f44a8dc2a"
+    },
+    "role": "weed",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Small oblong leaves in opposite pairs, each with a maroon-to-purple center spot",
+        "Break a stem and check for milky white sap",
+        "Grows flat against the ground rather than rooting upward at the nodes",
+        "Common first in the driest, thinnest, or most compacted part of the lawn"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "chamberbitter",
+    "kind": "weed",
+    "common_name": "Chamberbitter",
+    "aka": [
+      "gripeweed",
+      "little mimosa"
+    ],
+    "aliases": [
+      "chamberbitter",
+      "gripeweed",
+      "little mimosa",
+      "phyllanthus urinaria"
+    ],
+    "scientific_name": "Phyllanthus urinaria",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, rounded leaflets arranged in two flat rows along the branchlets, resembling a miniature mimosa tree",
+      "Tiny, warty, bead-like fruits lined up along the underside of each leaf branch",
+      "Grows upright from a taproot rather than sprawling flat",
+      "Base becomes woody as the plant matures, making it tougher to pull"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sensitive-plant",
+        "difference": "Chamberbitter has tiny bead-like fruits under the leaflets and doesn't fold when touched; sensitive plant folds at a touch and has pink powderpuff flowers.",
+        "next_photo": "Gently touch a leaflet, avoiding the prickly stems, and photograph the reaction (folds vs. no reaction), plus a close-up of a leaf branch underside for beaded fruit.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A warm-season weed that looks harmless as a seedling but is easiest to deal with early \u2014 once its base turns woody later in summer, it gets noticeably tougher to remove. A technician looks at how far along the plants are and how much of the lawn is affected before recommending an approach.",
+      "fact": "Its seed pods split open explosively when they mature, flinging seeds away from the parent plant, which is part of why a few missed plants can reseed a whole bed the next year.",
+      "blurb": "A mimosa look-alike weed that's easy to pull young and much tougher once its base turns woody."
+    },
+    "tech_notes": "Timing matters \u2014 pre-emergence or early post-emergence control is far more effective than waiting until the base has hardened. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/chamberbitter/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "4dc59f3320c6431caf564cdfad86140f461405fc51208114ff73c90b0cf0d1aa"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Rows of small, rounded leaflets along flat branchlets, like a tiny mimosa",
+        "Tiny warty, bead-like fruits tucked along the underside of the leaf branch",
+        "Grows upright on a single stem from a taproot, not flat along the ground",
+        "Leaves do not fold or react when touched (unlike sensitive plant)"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "matchweed",
+    "kind": "weed",
+    "common_name": "Matchweed",
+    "aka": [
+      "frogfruit",
+      "turkey tangle fogfruit",
+      "capeweed"
+    ],
+    "aliases": [
+      "matchweed",
+      "frogfruit",
+      "capeweed",
+      "turkey tangle fogfruit",
+      "phyla nodiflora"
+    ],
+    "scientific_name": "Phyla nodiflora",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small oval leaves with toothed tips, arranged in opposite pairs on hairy, branching stems",
+      "Round flower head with a purple center ringed by tiny white blooms \u2014 the \"match head\" look",
+      "Long creeping stems (stolons) that root at the nodes and form dense mats",
+      "Low growth, usually under a foot tall, spreading several feet from one plant"
+    ],
+    "look_alikes": [
+      {
+        "slug": "dollarweed",
+        "difference": "Matchweed has small opposite, toothed leaves and a round purple-and-white flower head; dollarweed has round leaves on individual stalks and no showy flower.",
+        "next_photo": "A close-up of a single leaf and whether a round \"match head\" flower is present on a stalk.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "florida-pusley",
+        "difference": "Matchweed has smooth, toothed leaves and one round match-head flower per stalk; Florida pusley has hairy stems and a loose cluster of small white flowers.",
+        "next_photo": "A close-up of the flower head (one round bloom vs. a loose cluster) and leaf surface (smooth vs. hairy).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "spotted-spurge",
+        "difference": "Matchweed has plain green leaves, no sap, and a round match-head flower; spotted spurge has a maroon leaf spot and oozes milky sap when a stem is broken.",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (sap or not) and the leaf surface (spotted vs. plain); keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A native, low-growing groundcover that some homeowners actually keep on purpose in low-traffic areas, and that shows up as a weed elsewhere in the lawn. It's mostly a cosmetic issue in turf a customer wants uniform, and a technician weighs the weed type, turf type, season, and coverage before suggesting anything.",
+      "fact": "Its round flower head, with a ring of tiny white blooms around a purple center, is where the name \"matchweed\" comes from \u2014 it looks like a struck match head on a stalk.",
+      "blurb": "A native groundcover weed with a distinctive purple-and-white \"match head\" bloom \u2014 mostly a cosmetic issue in a lawn."
+    },
+    "tech_notes": "Distinguish from an intentional groundcover planting before recommending removal; a pollinator-friendly native, so weigh customer preference before treating. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/frogfruit/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cd06582109e535a2ff73140dd87cb79048111243e041bf0e6aec16b24e310469"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Round flower head with a purple center ringed by tiny white flowers, on a bare stalk",
+        "Small, opposite, oval leaves with toothed tips",
+        "Long creeping stems root at each node, forming a dense mat",
+        "Stems and leaves feel slightly hairy"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "virginia-buttonweed",
+    "kind": "weed",
+    "common_name": "Virginia Buttonweed",
+    "aka": [],
+    "aliases": [
+      "virginia buttonweed",
+      "buttonweed",
+      "diodia virginiana"
+    ],
+    "scientific_name": "Diodia virginiana",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Opposite, lance-shaped leaves with no leaf stalk, joined across the stem by a thin membrane",
+      "Small white, tubular flowers with four petal lobes, star-shaped when viewed from the front",
+      "Hairy, branching stems that spread flat and root along the ground",
+      "Tolerates very low mowing heights, unlike most other broadleaf weeds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "dollarweed",
+        "difference": "Virginia buttonweed has lance-shaped opposite leaves and small white four-lobed flowers; dollarweed has round leaves on individual stalks with no showy flower.",
+        "next_photo": "A close-up of a single leaf (lance-shaped vs. round) and whether small white flowers are present along the stem.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "doveweed",
+        "difference": "Virginia buttonweed has narrow lance-shaped leaves and small white flowers; doveweed has fleshy stems, sheathing leaf bases, and purple three-petaled flowers.",
+        "next_photo": "A close-up of a leaf blade shape and whether it looks grass-like (doveweed) or narrow and lance-shaped (buttonweed).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A mat-forming weed that favors moist to wet turf and is genuinely persistent \u2014 a piece of stem or root left behind after pulling can start a new plant. A technician looks at the wet spot behind it as well as the weed itself, turf type, season, and coverage.",
+      "fact": "A broken stem or root fragment left in the soil can grow into a whole new plant, which is part of why hand-pulling alone so often leaves it looking like it came right back.",
+      "blurb": "A wet-soil weed that regrows from leftover stem or root fragments \u2014 persistent, but not aggressive turf-wide."
+    },
+    "tech_notes": "Address the underlying moisture/drainage issue alongside any treatment; regrowth from fragments is the main reason hand-pulling underperforms. Per label if herbicide is used; note it tolerates very low mowing heights.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep141",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b4cea85cf391d50de02f7d4683edeabc2f026972cf849363b5262d2ea8605bd3"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Opposite lance-shaped leaves with no stalk, joined at the stem by a thin membrane",
+        "Small white flowers with four petal lobes, star-shaped from the front",
+        "Hairy stems spread flat and root as they go",
+        "Still visible even in a very low-mowed lawn, unlike most broadleaf weeds"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "yellow-woodsorrel",
+    "kind": "weed",
+    "common_name": "Yellow Woodsorrel",
+    "aka": [
+      "oxalis",
+      "wood sorrel"
+    ],
+    "aliases": [
+      "yellow woodsorrel",
+      "wood sorrel",
+      "oxalis",
+      "yellow oxalis"
+    ],
+    "scientific_name": "Oxalis spp.",
+    "rank": "genus",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Three heart-shaped leaflets per leaf, like a clover but each leaflet notched at the tip",
+      "Small, five-petaled yellow flowers",
+      "Slender, upright seed pods that look like tiny okra pods",
+      "Pods burst open when touched, flinging seeds several feet"
+    ],
+    "look_alikes": [
+      {
+        "slug": "common-lespedeza",
+        "difference": "Yellow woodsorrel has heart-shaped leaflets and yellow flowers; common lespedeza has oblong leaflets with parallel veins and small pink-purple flowers.",
+        "next_photo": "A close-up of the leaflet shape (heart-shaped vs. oblong) and the flower color (yellow vs. pink-purple).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "creeping-beggarweed",
+        "difference": "Yellow woodsorrel has heart-shaped leaflets, yellow flowers, exploding pods; creeping beggarweed has pointed leaflets, pink-purple flowers, sticky flat pods.",
+        "next_photo": "A close-up of the leaflet shape and the seed pod (slender and upright vs. flat and segmented).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A clover look-alike that pops up in beds and thin turf and spreads itself by flinging seed from its own pods when brushed or mowed. It's mostly a cosmetic nuisance in a lawn, and a technician looks at the weed type, turf type, season, and coverage before recommending an approach.",
+      "fact": "Its slender seed pods act like tiny spring-loaded cannons, launching seeds several feet away the moment they're bumped or brushed.",
+      "blurb": "A clover look-alike with yellow flowers and exploding seed pods that fling seed across the bed."
+    },
+    "tech_notes": "Often confused with clover by customers; confirm the notched, heart-shaped leaflet and yellow flower before treatment. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/entnemdept/2023/10/27/weed-of-the-month-woodsorrel/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "685ff2a1fba46b71907937b35444efc2932daff4612ba099bd86c867153e5525"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Three heart-shaped leaflets per leaf, each notched at the tip, like a clover",
+        "Small, five-petaled yellow flowers",
+        "Slender, upright seed pods resembling miniature okra",
+        "Touch a mature pod \u2014 it bursts and flings seed"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "old-world-diamond-flower",
+    "kind": "weed",
+    "common_name": "Old World Diamond-flower",
+    "aka": [
+      "diamond flower"
+    ],
+    "aliases": [
+      "old world diamond flower",
+      "diamond flower",
+      "oldenlandia corymbosa",
+      "hedyotis corymbosa"
+    ],
+    "scientific_name": "Oldenlandia corymbosa",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Smooth, narrow, opposite leaves on thin, branching, sprawling stems",
+      "Tiny white four-petaled flowers, usually two or more on long paired stalks",
+      "Low, spreading mat, rarely taller than about six inches",
+      "Common in moist lawns and garden beds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "virginia-buttonweed",
+        "difference": "Old world diamond-flower has thin stems, tiny white flowers on paired stalks; Virginia buttonweed is coarser, with hairy stems, larger flowers against the stem.",
+        "next_photo": "A close-up of the flower stalk (long thin paired stalks vs. flowers sitting flush against a hairy stem).",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "dayflower",
+        "difference": "Old world diamond-flower has thin wiry stems with tiny white flowers; dayflower has thick, fleshy, succulent stems with broader leaves and showy blue flowers.",
+        "next_photo": "A close-up of the stem thickness (thin and wiry vs. thick and fleshy) and the flower color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fine, wiry annual weed that spreads across moist lawns and garden beds and is easy to overlook until it forms a mat. A technician looks at the weed type, turf type, season, and coverage before recommending an approach.",
+      "fact": "It's originally from Asia and Africa, and despite its delicate look it can quickly carpet a moist bed once established.",
+      "blurb": "A fine, wiry weed that fills moist lawns and beds \u2014 easy to miss until it forms a mat."
+    },
+    "tech_notes": "Confirm against buttonweed and dayflower before treatment; thin stems and tiny flowers are the distinguishing tell. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "County-level SWFL prevalence (Sarasota/Charlotte/Manatee/Lee/Collier) is unconfirmed \u2014 the Atlas of Florida Plants distribution map is JS-rendered and did not yield county voucher text in this pass; life cycle is confirmed annual per UF/IFAS Mid-Florida REC.",
+      "approval_hash": "3148a53f45f65f5cd03327702e9b55de29667130e8848a6c74219d70447c819b"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Thin, wiry, branching stems that sprawl low across the ground",
+        "Narrow, smooth, opposite leaves",
+        "Tiny white four-petaled flowers on long paired stalks",
+        "Common in lawns and beds that stay moist"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "asiatic-hawksbeard",
+    "kind": "weed",
+    "common_name": "Asiatic Hawksbeard",
+    "aka": [
+      "Asiatic false hawksbeard"
+    ],
+    "aliases": [
+      "asiatic hawksbeard",
+      "asiatic false hawksbeard",
+      "youngia japonica"
+    ],
+    "scientific_name": "Youngia japonica",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Flat rosette of lobed leaves low to the ground, easily mistaken for a small dandelion",
+      "Thin, upright, branching flower stalk rising well above the leaf rosette",
+      "Small clusters of yellow, dandelion-like flowers at the top of the stalk",
+      "Common in cool-season thin turf, beds, and disturbed soil"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cudweed",
+        "difference": "Asiatic hawksbeard has a flat, lobed rosette and a tall stalk with small yellow flowers; cudweed has soft, fuzzy leaves and whitish-brown flowers instead.",
+        "next_photo": "A close-up of the flower color (yellow vs. whitish-brown) and whether the leaves look soft/fuzzy or smooth and lobed.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      12,
+      1,
+      2,
+      3
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A cool-season weed that's often mistaken for a small dandelion and tends to move into thin turf over the winter months. A technician looks at how thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "It's frequently mistaken for dandelion, but its flower clusters are smaller and its leaf rosette sits flatter against the ground.",
+      "blurb": "A dandelion look-alike that moves into thin winter turf."
+    },
+    "tech_notes": "Cool-season annual \u2014 expect it to fade as warm-season turf resumes active growth in spring; thin turf is the underlying driver. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6ece699c3f7dbfffdbd35a3d0fd3c41d589c23eeb130a5ea26b4992f0e841275"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_cool",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Flat rosette of lobed leaves low to the ground",
+        "Tall, thin, branching flower stalk well above the leaves",
+        "Small clusters of yellow, dandelion-like flowers at the top",
+        "Shows up in cool months in thin turf and disturbed soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "creeping-beggarweed",
+    "kind": "weed",
+    "common_name": "Creeping Beggarweed",
+    "aka": [],
+    "aliases": [
+      "creeping beggarweed",
+      "beggarweed",
+      "desmodium incanum"
+    ],
+    "scientific_name": "Desmodium incanum",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Three leaflets per leaf, rounded at the base and tapering to a point, on hairy stems",
+      "Small pink-to-purple, pea-shaped flowers in summer",
+      "Flat, segmented seed pods that stick to clothing and pet fur",
+      "Grows prostrate in mowed turf but can stand upright in unmowed beds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "common-lespedeza",
+        "difference": "Creeping beggarweed leaflets round at the base, tapering to a point, with sticky pods; common lespedeza leaflets are oblong with parallel veins, a spur tip.",
+        "next_photo": "A close-up of a single leaflet shape and whether a flat, segmented seed pod is present.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "yellow-woodsorrel",
+        "difference": "Creeping beggarweed has rounder, pointed leaflets, pink-purple flowers, sticky pods; yellow woodsorrel has heart-shaped leaflets, yellow flowers, bursting pods.",
+        "next_photo": "A close-up of the leaflet shape and flower color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A perennial weed that favors full-sun, dry, thin turf and spreads its sticky seed pods on clothes, socks, and pet fur. A technician looks at how thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "Its flat, segmented seed pods are built to hitch a ride \u2014 they cling to fabric and fur, which is how it spreads from yard to yard.",
+      "blurb": "A perennial weed that thrives in thin, dry turf and hitches rides on clothes and pets via its sticky pods."
+    },
+    "tech_notes": "Favors dry, full-sun, thin turf rather than wet areas \u2014 distinguishes it from most other broadleaf weeds in this file. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep591",
+      "https://blogs.ifas.ufl.edu/osceolaco/2019/09/26/creeping-beggarweed-in-the-landscape-desmodium-incanum/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "5fa7b16e246b1753cf1680790a69d281290d1c3d6d53ba377c95d4cae7a15cfa"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Three leaflets per leaf, rounded at the base and tapering to a point",
+        "Small pink-to-purple pea-shaped flowers",
+        "Flat, segmented seed pods that stick to clothes and fur",
+        "Lies flat when mowed, but can stand upright in an unmowed bed"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "common-lespedeza",
+    "kind": "weed",
+    "common_name": "Common Lespedeza",
+    "aka": [
+      "Japanese clover"
+    ],
+    "aliases": [
+      "common lespedeza",
+      "japanese clover",
+      "kummerowia striata"
+    ],
+    "scientific_name": "Kummerowia striata",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Three oblong leaflets per leaf, with parallel side veins running nearly straight out to the smooth edge",
+      "A tiny spur at the tip of each leaflet",
+      "Small pink-to-purple flowers tucked into the leaf joints along the stem",
+      "Grows low, dense, and mat-like, close to the ground"
+    ],
+    "look_alikes": [
+      {
+        "slug": "creeping-beggarweed",
+        "difference": "Common lespedeza leaflets are oblong, parallel veins, a spur tip; creeping beggarweed leaflets are rounder at the base, tapering to a point, with sticky pods.",
+        "next_photo": "A close-up of the leaflet shape and vein pattern, and whether a flat segmented seed pod is present.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "yellow-woodsorrel",
+        "difference": "Common lespedeza has oblong leaflets, small flowers tucked at leaf joints; yellow woodsorrel has heart-shaped leaflets, yellow flowers on own stalks.",
+        "next_photo": "A close-up of the leaflet shape and flower color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A low mat-forming weed that shows up most in thin, dry, low-nutrient turf \u2014 especially centipedegrass lawns. Fixing the underlying thinness helps as much as anything; a technician evaluates turf and soil, and any nutrition correction stays within the local fertilizer rules.",
+      "fact": "It's closely tied to soils low in available nitrogen, which is part of why it shows up so often in centipedegrass lawns that are deliberately kept on a lean feeding schedule.",
+      "blurb": "A mat-forming weed that favors thin, low-nutrient turf, especially centipedegrass lawns."
+    },
+    "tech_notes": "Associated with low-nitrogen, thin turf (notably centipedegrass); grows close to the ground and mows poorly. A technician times any nutrition adjustment within the local fertilizer rules.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/nassauco/2017/07/16/q-can-identify-weed-yard/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "No dedicated UF/IFAS EDIS publication for this species was found live; core ID facts (trifoliate leaflets, low-N/centipedegrass association, July\u2013Oct flowering) are corroborated by a UF/IFAS Nassau County Extension post and Clemson HGIC rather than a core EDIS page.",
+      "approval_hash": "c2482128fd64e84595406d1253f9626e5100e35cd0c8ea9805c0bd474263b24c"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Three oblong leaflets with straight parallel side veins and a tiny spur at the tip",
+        "Small pink-to-purple flowers tucked in at the leaf joints",
+        "Grows low and mat-like, hard to cut cleanly with a mower",
+        "Most common in thin, dry, low-fertility turf"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "spanish-needles",
+    "kind": "weed",
+    "common_name": "Spanish Needles",
+    "aka": [
+      "beggar-ticks"
+    ],
+    "aliases": [
+      "spanish needles",
+      "beggar ticks",
+      "bidens alba"
+    ],
+    "scientific_name": "Bidens alba",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small daisy-like flower with a few simple white petals around a fuzzy yellow center",
+      "Compound leaves with toothed, pointed leaflets",
+      "Grows upright, often a foot or more tall in unmowed areas",
+      "Narrow, barbed black seeds that stick firmly to clothing, fur, and socks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asiatic-hawksbeard",
+        "difference": "Spanish needles has white petals around a yellow center and barbed seeds sticking to clothes; Asiatic hawksbeard has small all-yellow flowers, no sticky seeds.",
+        "next_photo": "A close-up of the flower (white petals with yellow center vs. all yellow) and the seed (barbed, sticky vs. fluffy like a dandelion).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common, disturbed-ground weed that shows up in beds, fence lines, and unmowed edges more than in a regularly cut lawn. It's mostly a nuisance from the barbed seeds sticking to clothes and pets rather than a threat to turf, and a technician looks at coverage and location before recommending an approach.",
+      "fact": "Its barbed black seeds are built to hitchhike on fur and fabric, which is why a walk through an overgrown lot can leave someone covered in them.",
+      "blurb": "A common disturbed-ground weed known for its barbed seeds that stick to clothes and pet fur."
+    },
+    "tech_notes": "Rarely a problem in regularly mowed turf; more common in beds, fence lines, and unmaintained edges. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "55db6985d7fe7b040a57090fa08e997429bcc74cdcd2b0de041373a213cb2cbf"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Small daisy-like flower with a few white petals around a fuzzy yellow center",
+        "Compound leaves with toothed, pointed leaflets",
+        "Grows upright, taller in unmowed spots than most lawn weeds",
+        "Narrow black seeds with tiny barbs that catch on fabric and fur"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "artilleryweed",
+    "kind": "weed",
+    "common_name": "Artilleryweed",
+    "aka": [
+      "artillery plant"
+    ],
+    "aliases": [
+      "artilleryweed",
+      "artillery plant",
+      "artillery fern",
+      "pilea microphylla"
+    ],
+    "scientific_name": "Pilea microphylla",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Tiny, fleshy, fern-like leaves on soft, translucent green stems",
+      "Forms low, spreading, moss-like clumps rather than a single upright plant",
+      "Grows in shaded mulch beds, planting beds, and cracks in driveways and hardscapes far more often than in open lawn",
+      "Flowers are tiny and inconspicuous, but forcefully eject pollen when ready \u2014 the source of the name"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spotted-spurge",
+        "difference": "Artilleryweed has tiny fern-like leaves on soft stems, growing in shaded mulch beds and cracks; spotted spurge has a maroon leaf spot, milky sap, sunnier spots.",
+        "next_photo": "Wearing gloves, a close-up of the stem (soft and translucent vs. milky sap when broken) and where it grows (shaded bed vs. sunny thin turf); keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fern-like, moss-textured weed that colonizes mulch beds, shaded corners, and cracks in driveways and walkways more than open lawn. It's a cosmetic bed weed for most homeowners, and a technician looks at coverage and location before recommending an approach.",
+      "fact": "It gets its name from forcefully ejecting pollen from its tiny flowers, almost like a tiny cannon firing \u2014 a real, if microscopic, spectacle.",
+      "blurb": "A fern-like, moss-textured weed that colonizes mulch beds and cracks in hardscapes."
+    },
+    "tech_notes": "More a bed/hardscape weed than a turf weed; check drain holes, ground cloth under mulch, and shaded cracks. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP535"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "35212f903bb3e81a1b7c803cb05e6b27289a9bfae3542d60527609f1014a89ce"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Tiny fern-like leaves on soft, nearly translucent green stems",
+        "Forms low, moss-like spreading clumps",
+        "Found in shaded mulch beds and cracks in hardscape more than open lawn",
+        "Stems are fragile and succulent, not woody"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "sensitive-plant",
+    "kind": "weed",
+    "common_name": "Sensitive Plant",
+    "aka": [
+      "powderpuff",
+      "sunshine mimosa"
+    ],
+    "aliases": [
+      "sensitive plant",
+      "powderpuff",
+      "sunshine mimosa",
+      "mimosa"
+    ],
+    "scientific_name": "Mimosa spp.",
+    "rank": "genus",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Compound, fern-like leaves made of many tiny leaflets that fold up when touched",
+      "Round, fluffy, pink-to-lavender \"powderpuff\" flowers",
+      "Low, mat-forming, spreading growth in the common Florida native form; a shrubbier, thorned form also occurs",
+      "Tolerates some mowing and foot traffic once established"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chamberbitter",
+        "difference": "Sensitive plant folds up when touched and has pink powderpuff flowers; chamberbitter doesn't react to touch, with tiny bead-like fruits under its leaf branches.",
+        "next_photo": "Gently touch a leaflet, avoiding the prickly stems, and photograph the reaction (folds vs. no reaction), plus a wide shot of the flower if present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A native groundcover with fern-like leaves that fold when touched, sometimes kept on purpose as a low-mow lawn alternative and sometimes unwanted in a traditional turf lawn. A technician looks at customer preference along with coverage and turf type before recommending anything.",
+      "fact": "Its leaflets fold up within seconds of being touched or shaken, a real defense response rather than just a nickname.",
+      "blurb": "A touch-sensitive native groundcover \u2014 sometimes wanted, sometimes not, depending on the lawn."
+    },
+    "tech_notes": "Confirm whether the customer wants it removed or kept \u2014 it's a recognized turf alternative in some landscapes, not automatically a weed to eliminate. A shrubbier thorned Mimosa form also occurs; note thorns if present.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/nassauco/files/2017/05/Mimosa.pdf",
+      "https://blogs.ifas.ufl.edu/escambiaco/2024/07/03/video-mimosa-as-a-lawn-companion-plant"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Whether a given Mimosa specimen is the thornless native M. strigillosa or the thorned M. pudica is a per-photo call, not a fact this entry can settle generically \u2014 thorns indicate M. pudica, a thornless mat indicates M. strigillosa.",
+      "approval_hash": "e1aba049c24a8ad480bc267371d76fb722eb8f0c77c125acc7802b642abd29ae"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Compound, fern-like leaves that fold shut within seconds of being touched",
+        "Round, fluffy, pink-to-lavender flower heads",
+        "Usually low and mat-forming; check for thorns on a shrubbier-looking plant",
+        "Can take some mowing and light foot traffic once established"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "cudweed",
+    "kind": "weed",
+    "common_name": "Cudweed",
+    "aka": [],
+    "aliases": [
+      "cudweed",
+      "gamochaeta"
+    ],
+    "scientific_name": "Gamochaeta spp.",
+    "rank": "genus",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Soft, hairy, gray-green to whitish leaves forming a low rosette",
+      "Upright, felty flower stalk topped with small clusters of whitish-brown flowers, no showy petals",
+      "Low-growing, most noticeable in thin winter turf and disturbed soil",
+      "Whole plant has a soft, velvety or woolly feel"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asiatic-hawksbeard",
+        "difference": "Cudweed has soft, fuzzy gray-green leaves and small whitish-brown flowers, no showy petals; Asiatic hawksbeard has lobed leaves and small yellow flowers.",
+        "next_photo": "A close-up of the flower color (whitish-brown vs. yellow) and whether the leaves feel fuzzy or smooth.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      12,
+      1,
+      2,
+      3
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A soft, fuzzy cool-season weed that moves into thin turf and newly disturbed soil over the winter and fades out once warm-season grass fills back in. A technician looks at how thin the turf is, the season, and coverage before recommending an approach.",
+      "fact": "Several look-alike cudweed species grow in Florida, some fuzzy gray-green and some glossier, and all of them serve as host plants for American painted lady butterfly caterpillars.",
+      "blurb": "A soft, fuzzy winter weed that moves into thin turf and fades as warm-season grass fills back in."
+    },
+    "tech_notes": "Cool-season annual; expect it to decline as turf resumes active growth in spring. Thin turf density is the underlying driver. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/lakeco/2026/08/06/identifying-florida-lawn-weeds/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "77dffbae967c1e7153b98941cb750851c442393e38e10837a8ed5855f22c006d"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_cool",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Soft, hairy, gray-green to whitish leaves in a low rosette",
+        "Upright, felty flower stalk with small whitish-brown flower clusters, no showy petals",
+        "Whole plant feels soft, velvety, or woolly to the touch",
+        "Shows up in thin winter turf and disturbed soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "dayflower",
+    "kind": "weed",
+    "common_name": "Dayflower",
+    "aka": [],
+    "aliases": [
+      "dayflower",
+      "commelina"
+    ],
+    "scientific_name": "Commelina spp.",
+    "rank": "genus",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Thick, fleshy, succulent stems with lance-shaped leaves that sheath around the stem at the base",
+      "Showy flowers, often two or three blue petals plus a small whitish petal, opening for just a single day",
+      "Sprawling growth that roots at the nodes when stems touch soil",
+      "Can be confused with grass at a glance because of the parallel-veined leaf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "doveweed",
+        "difference": "Dayflower has showy blue-and-white flowers on fleshy stems; doveweed has smaller purple flowers and leaves that mimic St. Augustinegrass, easy to overlook.",
+        "next_photo": "A close-up of the flower (showy blue-and-white vs. small purple) and the leaf's resemblance to surrounding turf.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Dayflower has fleshy, succulent stems and showy blue-and-white flowers; St. Augustinegrass has wide, blunt blades on stolons, no true flower visible when mowed.",
+        "next_photo": "A close-up of the stem (fleshy and round vs. flat grass blade) and whether a flower is present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A succulent, grass-like weed that favors moist areas and can be mistaken for turf until its showy blue flower gives it away. A technician looks at weed type, turf type, season, and coverage, since like doveweed it can be harder to control in St. Augustine than most broadleaf weeds.",
+      "fact": "Each flower opens for only a single day before wilting, which is exactly where the name \"dayflower\" comes from.",
+      "blurb": "A succulent, grass-like weed with a showy blue flower that opens for just one day at a time."
+    },
+    "tech_notes": "Confirm against doveweed and St. Augustine \u2014 fleshy stem and the blue-and-white flower are the clearest tells. Stem fragments left behind after pulling can root again; per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/doveweed/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "4735a4992bd1f4c04c0cd2c82d0c672a5026b122107de3981140186e5ca82d84"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Thick, fleshy, succulent stem, round rather than flat like a grass blade",
+        "Lance-shaped leaves that sheath around the stem at the base",
+        "Showy flower with two or three blue petals and a small whitish petal, open for a day",
+        "Roots wherever a stem node touches moist soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "doveweed",
+    "kind": "weed",
+    "common_name": "Doveweed",
+    "aka": [],
+    "aliases": [
+      "doveweed",
+      "murdannia nudiflora"
+    ],
+    "scientific_name": "Murdannia nudiflora",
+    "rank": "species",
+    "group": "broadleaf-weeds",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Glossy, dark green, lance-shaped leaves that closely resemble St. Augustinegrass blades",
+      "Thick, fleshy, succulent creeping stems (not true grass stolons)",
+      "Small purple, three-petaled flowers, easy to miss among the foliage",
+      "Grows unnoticed in a St. Augustine lawn until it forms a noticeably different-textured patch"
+    ],
+    "look_alikes": [
+      {
+        "slug": "st-augustinegrass",
+        "difference": "Doveweed's leaves are glossier, more succulent than St. Augustine's, with fleshy round stems, not true stolons, plus small purple flowers St. Augustine lacks.",
+        "next_photo": "A close-up comparing leaf gloss and stem texture (fleshy and round vs. a true grass stolon) plus a wide shot checking for small purple flowers.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "dayflower",
+        "difference": "Doveweed has small purple flowers and leaves that mimic St. Augustinegrass; dayflower has larger, showy blue-and-white flowers, easier to spot against turf.",
+        "next_photo": "A close-up of the flower (small purple vs. showy blue-and-white).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "An aggressive summer weed that mimics St. Augustinegrass closely enough to grow unnoticed until it has already spread, and is genuinely hard to control once established. A technician evaluates the weed, turf type, season, and coverage to explain why this one needs a different approach than an ordinary broadleaf weed.",
+      "fact": "Its leaves are built to blend in \u2014 close enough to St. Augustinegrass that a patch can spread for weeks before anyone notices it isn't turf.",
+      "blurb": "A St. Augustine look-alike weed that spreads unnoticed and is genuinely hard to control once established."
+    },
+    "tech_notes": "Germinates when soil temps reach roughly 65-70F; a healthy, dense stand of turf is the best long-term defense. This one, along with torpedograss, is a legitimately difficult control case in St. Augustine \u2014 set expectations accordingly rather than promising quick results.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/doveweed/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f502743359dad324a22ff75897a68ee48d0dcdd23f9008d354376be2da953209"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "broadleaf",
+      "life_cycle": "annual_warm",
+      "spreads_by": [
+        "seed",
+        "stolons"
+      ],
+      "id_cues": [
+        "Leaves are glossier and more succulent-looking than surrounding St. Augustinegrass",
+        "Stems are thick, fleshy, and round rather than a true flattened grass stolon",
+        "Small purple, three-petaled flowers appear once the patch matures",
+        "Often first noticed as a slightly different-textured patch rather than an obvious weed"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  }
+]

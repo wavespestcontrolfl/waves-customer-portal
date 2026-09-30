@@ -1,9 +1,16 @@
 // client/src/lib/pest-default-mix.js
 //
-// Default tank mix for recurring general-pest and pest re-service
-// (callback) completions (owner 2026-08-29): the visit STARTS with
-// Taurus SC, Talstar P, and the non-ionic surfactant recorded, with the
-// house totals — 4 oz of each concentrate, 0.25 oz of surfactant.
+// Default tank mix for recurring general-pest, ONE-TIME pest, and pest
+// re-service (callback) completions. Originally owner 2026-08-29 (Taurus
+// SC + Talstar P + a non-ionic surfactant); superseded by the owner
+// ruling 2026-09-26, which (a) swaps Talstar P for Atticus Talak 7.9 F —
+// "Talstar P" is inactive in the prod catalog, Talak is the real
+// bifenthrin now carried — (b) names the exact surfactant row, LESCO
+// 90/10 Nonionic Surfactant (the old bare "Non-ionic Surfactant" catalog
+// row it matched no longer exists as such), and (c) extends coverage to
+// the one-time pest control visit, which the 2026-08-29 list deliberately
+// left off. The visit STARTS with all three recorded, at the house
+// totals — 4 oz of each concentrate, 0.25 oz of surfactant.
 //
 // Single source of truth for BOTH completion surfaces (codex P1 on
 // #3611): the full CompletionPanel (admin dispatch) seeds complete
@@ -18,8 +25,8 @@
 // surfactant as the applied chemical at the pest total).
 export const PEST_DEFAULT_MIX = [
   { pattern: /^taurus\s*sc\b/i, totalAmount: 4 },
-  { pattern: /^talstar\s*p\b/i, totalAmount: 4 },
-  { pattern: /^non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
+  { pattern: /^atticus\s*talak\b/i, totalAmount: 4 },
+  { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];
 
 // Everything the mix must NOT seed on: other service lines (lawn, T&S,
@@ -35,9 +42,15 @@ const NON_MIX_SERVICE_RE =
 // in migration 20260514000009 (all three naming generations, the legacy
 // bare-cadence forms, and "Recurring Pest Control"); the alias list's
 // exclusions — "General Pest Control (Initial)", the bare one-time
-// "Pest Control Service", the lawn combo — all fail this gate too.
+// "Pest Control Service", the lawn combo — all still fail this gate.
+// "one-time pest control" is a SEPARATE, narrower addition (owner
+// 2026-09-26): the admin-created One-Time Pest Control Service catalog
+// row now gets the same mix, without loosening the bare "Pest Control
+// Service" LABEL exclusion above (still no product-line naming to key
+// off a bare name) — isPestDefaultMixVisit below covers the common bare-
+// label case separately, by the row's stable catalog key instead.
 const RECURRING_GENERAL_PEST_RE =
-  /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest/i;
+  /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest|one[-\s]?time\s+pest\s+control/i;
 
 // The mix belongs on recurring general-pest maintenance visits and pest
 // re-services ONLY. Callers on an un-gated surface pass the whole
@@ -50,7 +63,26 @@ export function isPestDefaultMixVisit(service) {
   if (NON_MIX_SERVICE_RE.test(s)) return false;
   const isReservice =
     service?.isCallback === true || /re-?service|callback/.test(s);
-  return isReservice || RECURRING_GENERAL_PEST_RE.test(s);
+  if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
+  // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
+  // admin-created One-Time Pest Control Service job is often scheduled
+  // under the bare "Pest Control Service" label (admin-schedule.js's
+  // EDIT_FALLBACK_SERVICES scheduler fallback + legacy rows) — the label
+  // test above deliberately keeps excluding that bare name, since it
+  // carries no product-line naming to key off. The catalog KEY is
+  // unambiguous, so it gets the mix regardless of label; every specialty
+  // exclusion above (NON_MIX_SERVICE_RE, checked first against the label)
+  // still wins, and a specialty visit never carries this key anyway — each
+  // has its own distinct one (tick_control, bee_wasp_removal, …). Checked
+  // across every field a caller's dispatch-shaped service object might
+  // carry it under.
+  const key = String(
+    service?.completionProfile?.serviceKey
+      || service?.serviceKey
+      || service?.service_key_snapshot
+      || "",
+  ).toLowerCase();
+  return key === "one_time_pest_control";
 }
 
 // Resolve the mix against the loaded catalog: first row matching each

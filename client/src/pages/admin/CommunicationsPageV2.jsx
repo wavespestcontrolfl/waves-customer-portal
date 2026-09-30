@@ -272,6 +272,34 @@ const TABS = [
 ];
 const SMS_LOG_PAGE_SIZE = 500;
 
+// Short reviewer-facing labels for an Agent Review draft's intended_actions
+// (Codex r3 P1) — the promise a reviewer must see BEFORE sending copy that
+// commits to it. "none" carries no promise and is never shown; an unknown
+// type (a future action the drafter added) falls back to its raw string
+// rather than disappearing silently.
+const INTENDED_ACTION_LABELS = {
+  escalate: "escalate to staff",
+  book_appointment: "book appointment",
+  send_payment_link: "send payment link",
+  send_portal_link: "send portal link",
+  send_estimate_link: "send estimate link",
+};
+// An escalation's note names the actual work the outgoing copy promises, so
+// the reviewer sees it (Codex r7): known notes get their own instruction,
+// any other note is shown as written.
+const INTENDED_ACTION_NOTE_LABELS = {
+  send_reservice_link: "text their free re-service booking link",
+  cancel_request: "process the cancellation request",
+  followup_promised: "own the promised follow-up",
+};
+function intendedActionLabel(action) {
+  const type = typeof action === "string" ? action : action?.type;
+  const note = typeof action === "string" ? "" : String(action?.note || "").trim();
+  const base = INTENDED_ACTION_LABELS[type] || type;
+  if (!note) return base;
+  return `${base}: ${INTENDED_ACTION_NOTE_LABELS[note] || note}`;
+}
+
 // ── V2 helpers ────────────────────────────────────────────────
 
 function smsThreadKey(phone) {
@@ -742,19 +770,31 @@ function ConversationViewV2({
 // 70 chars. Dynamic values (name, service type) pass through untouched: a
 // customer named José still gets greeted correctly, and the operator sees
 // the resulting body (and char count) before sending.
+// Say "Waves" once (owner ruling 2026-09-28). These bodies send as custom
+// copy, so the server's template brand dedupe never sees them: a service
+// name that itself starts with "Waves " (the catalog's "Waves Assessment")
+// drops the prefix, and a clause that already names Waves skips the
+// "it's Waves." intro.
+const SAYS_WAVES_RE = /\bWaves\b/;
+function withoutBrandPrefix(value) {
+  return String(value || "").replace(/^Waves\s+/, "");
+}
+
 export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
-    serviceType ? ` ${serviceType}` : ""
+  const service = withoutBrandPrefix(serviceType);
+  return `Hi ${first}, it's Waves. Reschedule your ${day}${
+    service ? ` ${service}` : ""
   } visit here: ${url}`;
 }
 
 export function buildReservicePrefill({ firstName, laneLabel, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Book your free${
-    laneLabel ? ` ${laneLabel}` : ""
+  const lane = withoutBrandPrefix(laneLabel);
+  return `Hi ${first}, it's Waves. Book your free${
+    lane ? ` ${lane}` : ""
   } re-service here: ${url}`;
 }
 
@@ -811,7 +851,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   const first = String(firstName || "").trim();
   const line = String(clause || "").trim();
   if (!first || !line) return null;
-  return `Hi ${first}, it's Waves Pest Control. ${line}`;
+  return SAYS_WAVES_RE.test(line) ? `Hi ${first}! ${line}` : `Hi ${first}, it's Waves. ${line}`;
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
@@ -3251,6 +3291,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     {f.reason}
                   </div>
                 ))}
+              </div>
+            )}
+            {agentDraft?.intendedActions?.filter((a) => a?.type && a.type !== "none").length > 0 && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption">
+                <span className="font-medium text-zinc-900">Actions: </span>
+                <span className="text-ink-secondary">
+                  {agentDraft.intendedActions
+                    .filter((a) => a?.type && a.type !== "none")
+                    .map(intendedActionLabel)
+                    .join(", ")}
+                </span>
               </div>
             )}
             {agentDraft?.inboundMessage && (

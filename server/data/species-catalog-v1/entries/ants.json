@@ -15,7 +15,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "1d133c1db156629d1c62e9462e1c0200b0b6d42db8e395a7fd30f27eb03aee7c"
     },
     "slug": "ghost-ant",
     "common_name": "Ghost Ant",
@@ -132,15 +133,15 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "250b440b9e3719200d54f48f0afa0de1d4cd6cd180a722bd4d1bfccc3d38f983"
     },
     "slug": "bigheaded-ant",
     "common_name": "Bigheaded Ant",
     "aliases": [
       "bigheaded ant",
       "big headed ant",
-      "big-headed ant",
-      "pheidole"
+      "big-headed ant"
     ],
     "scientific_name": "Pheidole megacephala",
     "rank": "species",
@@ -157,7 +158,7 @@
       {
         "slug": "fire-ant",
         "difference": "Bigheaded ant majors have a squarish head and aren't known to sting; fire ant workers are more uniform and sting readily when the mound is disturbed.",
-        "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape.",
+        "next_photo": "From a safe distance, zoom in from above on a major worker showing the head shape.",
         "photo_can_confirm": true
       }
     ],
@@ -246,7 +247,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5eda3d6b842262c75d06c24eb936e4b11f69f8709621be14f7a2e4125fd43efb"
     },
     "slug": "fire-ant",
     "common_name": "Red Imported Fire Ant",
@@ -272,7 +274,7 @@
       {
         "slug": "tropical-fire-ant",
         "difference": "Tropical fire ant major workers have a head much wider than the body; red imported fire ant majors have a normal-proportioned head.",
-        "next_photo": "A close-up from a few feet away of the largest workers from the mound, next to a coin.",
+        "next_photo": "From a safe distance, zoom in on the largest workers from the mound.",
         "photo_can_confirm": true
       }
     ],
@@ -358,7 +360,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural."
+      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "762a016d2c84d4fc17529304f8812f511d33983368dcd264be41cc4dfb1096fa"
     },
     "slug": "carpenter-ant",
     "common_name": "Florida Carpenter Ant",
@@ -383,7 +386,7 @@
       {
         "slug": "subterranean-termite",
         "difference": "Carpenter ant swarmers have a pinched waist and elbowed antennae; termite swarmers have a straight waist, straight antennae, and four equal wings.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side on the waist and antennae of a winged individual.",
         "photo_can_confirm": true
       }
     ],
@@ -472,7 +475,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bdf74d178f14a7d07e39b8ec14d69ddb93e35453addce1902e9f65788a6aef2e"
     },
     "slug": "tawny-crazy-ant",
     "common_name": "Tawny Crazy Ant",
@@ -498,7 +502,7 @@
       {
         "slug": "longhorn-crazy-ant",
         "difference": "Tawny crazy ants are uniformly reddish-brown and slightly larger; longhorn crazy ants are dark with noticeably long legs and antennae.",
-        "next_photo": "A close-up from above showing body color and leg/antenna length next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above showing body color and leg/antenna length.",
         "photo_can_confirm": true
       }
     ],
@@ -584,7 +588,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "cd0d4452a90f1c3bffd8552751d015236bf45664c624f461e7e5ad442844b54a"
     },
     "slug": "white-footed-ant",
     "common_name": "White-footed Ant",
@@ -677,6 +682,1493 @@
     "links": {
       "site_page": "/pest-identifier/white-footed-ant/",
       "guides": []
+    }
+  },
+  {
+    "slug": "tropical-fire-ant",
+    "kind": "organism",
+    "common_name": "Tropical Fire Ant",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "native fire ant"
+    ],
+    "aliases": [
+      "tropical fire ant",
+      "tropical fire ants",
+      "solenopsis geminata"
+    ],
+    "scientific_name": "Solenopsis geminata",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "fire-ants",
+    "site_category": "Ants",
+    "stages": [
+      "worker",
+      "major worker",
+      "mound"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Reddish-brown ants of mixed sizes in the same trail",
+      "The biggest workers have an oversized, squarish head",
+      "Two bumps (nodes) in the narrow waist",
+      "Loose, irregular mounds, often at the base of trees or along edges"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fire-ant",
+        "difference": "Red imported fire ant majors have a normal-sized head; tropical fire ant majors have a head much wider than the body",
+        "next_photo": "From a safe distance, zoom in from above on the largest ants from the mound.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Stings burn and can cause allergic reactions. Keep kids and pets off the mound.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A native fire ant that stings like the imported kind. Mounds near play areas, pet runs and AC pads are worth having a technician look at.",
+      "fact": "Its biggest workers use their huge heads to crack seeds, which is why it is sometimes called the seed-crushing fire ant."
+    },
+    "tech_notes": "Confirm major head shape vs S. invicta. Bait broadcast plus mound treatment per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://entnemdept.ufl.edu/creatures/urban/ants/tropical_fire_ant.htm"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "79a2a23dcbc2ddcc7e49b8b6bce2df180bcfc1c5a37f630fed098ac5a9c4aa3f"
+    }
+  },
+  {
+    "slug": "little-fire-ant",
+    "kind": "organism",
+    "common_name": "Little Fire Ant",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "electric ant"
+    ],
+    "aliases": [
+      "little fire ant",
+      "little fire ants",
+      "wasmannia auropunctata",
+      "electric ant"
+    ],
+    "scientific_name": "Wasmannia auropunctata",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "fire-ants",
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny, pale golden-brown ants, barely bigger than a pinhead",
+      "Move slowly compared to most ants instead of running in fast trails",
+      "Dense carpets of ants on tree trunks, mulch and fruit rather than a single trail",
+      "One node in the waist and a two-segmented antennal club"
+    ],
+    "look_alikes": [
+      {
+        "slug": "tropical-fire-ant",
+        "difference": "Little fire ant is far smaller (about 1.5 mm) and slow-moving; tropical fire ant workers are larger and dash along trails",
+        "next_photo": "From a safe distance, zoom in on the ants' size and how quickly they move.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "pharaoh-ant",
+        "difference": "Pharaoh ant is pale yellow-red with a darker abdomen tip and runs in fast trails; little fire ant is more golden and moves sluggishly",
+        "next_photo": "From a safe distance, zoom in macro on a single ant on a light background, camera as steady as possible.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "A tiny sting that burns out of proportion to the ant's size and can cause welts; suspected but not proven as a cause of a Florida-named eye condition seen in local pets.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Small ants with a sting out of proportion to their size, spreading in nursery stock and landscaping in parts of Florida. A photo suggests little fire ant but doesn't confirm it — the size and slow movement help, and an inspection can confirm before it covers a yard.",
+      "fact": "Colonies can have many queens, which is part of why little fire ant populations can spread quickly once they take hold in a yard."
+    },
+    "tech_notes": "Confirm via slow movement and small size; consider submitting a sample to FDACS given regulatory interest. Broadcast bait per label; retreatment often needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN296",
+      "https://ask.ifas.ufl.edu/publication/IN1351",
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC12754576/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "01f514e635e99afa414879d1b54ccfc2058e4f898e2fdf9fffe6b4c43edb984d"
+    }
+  },
+  {
+    "slug": "pharaoh-ant",
+    "kind": "organism",
+    "common_name": "Pharaoh Ant",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "pharaoh ant",
+      "pharaoh ants",
+      "monomorium pharaonis"
+    ],
+    "scientific_name": "Monomorium pharaonis",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very small, pale yellow to light reddish-brown ants",
+      "Darker tip on the abdomen than the rest of the body",
+      "Thin, fast-moving trails that branch into wall voids, outlets and cabinets",
+      "Colonies can be indoors year-round, even in winter, unlike most yard ants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "thief-ant",
+        "difference": "Thief ant is similarly tiny and pale but has a 2-segmented antennal club and no dark abdomen tip; pharaoh ant's antennal club is 3-segmented",
+        "next_photo": "A macro photo of the trail on a light-colored surface, as close as the camera will focus",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "ghost-ant",
+        "difference": "Ghost ant has a dark head and thorax with a pale, almost see-through abdomen and legs; pharaoh ant is uniformly pale yellow-red",
+        "next_photo": "A well-lit close-up of a single ant showing the color of the head versus the abdomen",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "living-areas",
+      "attic-walls"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "One of the harder household ants to clear because disturbing or spraying a colony can trigger it to split into several new colonies instead of dying off. A technician evaluates the trails and typically uses targeted baiting rather than repellent sprays.",
+      "fact": "Pharaoh ant colonies can hold hundreds of queens, which is a big reason spraying a trail on the counter rarely clears the problem for long."
+    },
+    "tech_notes": "Do not repellent-spray visible trails; this budding is a known trigger. Identify via 3-segmented antennal club and darker gaster tip. Bait matrix across the colony network per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/download/113284/108460/157302"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "80ab4bf81c9fdbffc50719e118c3f1fda24df6b430dcea2a27d5006cf9d12217"
+    }
+  },
+  {
+    "slug": "longhorn-crazy-ant",
+    "kind": "organism",
+    "common_name": "Longhorn Crazy Ant",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "crazy ant"
+    ],
+    "aliases": [
+      "longhorn crazy ant",
+      "crazy ants",
+      "paratrechina longicornis"
+    ],
+    "scientific_name": "Paratrechina longicornis",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "crazy-ants",
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark brown to black body with unusually long legs and antennae",
+      "Moves in fast, erratic, non-straight paths instead of a tidy trail",
+      "Slender ant with long, bent-forward waist segment",
+      "No mound; nests under debris, in potted plants or wall voids"
+    ],
+    "look_alikes": [
+      {
+        "slug": "tawny-crazy-ant",
+        "difference": "Tawny crazy ant is a uniform reddish-tan color and appears in huge, dense masses outdoors; longhorn crazy ant is darker and usually seen in smaller numbers",
+        "next_photo": "From a safe distance, photograph the ants against a white background showing overall body color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "kitchen",
+      "living-areas",
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites are rare and mild if the ant is handled; not a health risk.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A nuisance ant that wanders indoors from mulch and potted plants rather than a structural threat. A technician evaluates moisture and harborage near the foundation alongside any treatment.",
+      "fact": "It gets its name from its long legs and antennae and its habit of running in erratic zig-zags instead of a straight trail."
+    },
+    "tech_notes": "No sting; bites are rare and mild. Treat as general nuisance ant; locate moist harborage (mulch, potted plants, wall voids) and bait/perimeter treat per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/download/108996/104134"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "44ccea12ab74200c2b5d9d87eded4bbbcf0e1a9adc8e20457383eac3382eca58"
+    }
+  },
+  {
+    "slug": "acrobat-ant",
+    "kind": "organism",
+    "common_name": "Acrobat Ant",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "acrobat ant",
+      "acrobat ants",
+      "crematogaster"
+    ],
+    "scientific_name": "Crematogaster spp.",
+    "rank": "genus",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Heart-shaped abdomen held up and forward over the back when the ant is disturbed",
+      "Small, shiny ant, light red to dark brown or black",
+      "Short spines on the back of the thorax",
+      "Trails run up and down tree trunks and along eaves rather than across open lawn"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fire-ant",
+        "difference": "Acrobat ant lifts its heart-shaped abdomen straight up over its body; fire ant's abdomen stays low and rounded and it does not raise it that way",
+        "next_photo": "From a safe distance, zoom in on the ant from the side while it is moving, showing whether the abdomen tip points up or trails behind.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "attic-walls",
+      "lanai-patio"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can bite and sting if a nest is disturbed, but the sting is mild and short-lived for most people.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Usually an outdoor tree ant that scavenges for insects and honeydew, but it can move into damp or already-damaged wood around a home. Trails leading into siding, fascia or attic vents are worth an inspection rather than a spray.",
+      "fact": "It gets its name from the way it holds its heart-shaped abdomen up over its body like a tiny acrobat when it feels threatened."
+    },
+    "tech_notes": "Confirm heart-shaped, upraised gaster. Nests occupy old beetle/moth galleries in trees or damp wood in structures; inspect for moisture source before treating voids.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in610"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c404c5a9312b090516f63a83c81ce74431299864353e2df406af0fd6c58777ca"
+    }
+  },
+  {
+    "slug": "dark-rover-ant",
+    "kind": "organism",
+    "common_name": "Dark Rover Ant",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "rover ant"
+    ],
+    "aliases": [
+      "dark rover ant",
+      "rover ant",
+      "rover ants",
+      "brachymyrmex patagonicus"
+    ],
+    "scientific_name": "Brachymyrmex patagonicus",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely small, dark brown, soft-bodied ant",
+      "Huge numbers of ants swarming together with no obvious single trail",
+      "All workers look the same size, with no larger 'major' workers like fire ants have",
+      "Attracted to damp spots, potted plants and areas near AC condensate lines"
+    ],
+    "look_alikes": [
+      {
+        "slug": "thief-ant",
+        "difference": "Dark rover ant is dark brown and does not follow a tight chemical trail; thief ant is pale yellow and follows narrow, steady trails",
+        "next_photo": "A close-up on a light background showing overall body color and whether the ants are trailing in a line",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "living-areas"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless but often overwhelming nuisance ant that follows moisture indoors. Numbers can look alarming, but it does not sting, bite or damage the home.",
+      "fact": "It is a fairly recent arrival from South America that has spread quickly across the Gulf states since first being found in the U.S. in the 1970s."
+    },
+    "tech_notes": "Colonies form satellites easily and forage without a strong chemical trail, so spot-spraying is ineffective. Reduce moisture sources (AC lines, potted plants, leaky faucets) and bait/perimeter treat per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/in899"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 46: traits[2] previously stated a non-visible safety claim (no sting/bite); replaced with a visible worker-size trait.",
+      "approval_hash": "16b4eb0aa8a164d0b1e503b9cd8409832a808536233d256a6b720b7e65a5bdaf"
+    }
+  },
+  {
+    "slug": "graceful-twig-ant",
+    "kind": "organism",
+    "common_name": "Graceful Twig Ant",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "elongate twig ant",
+      "mexican twig ant"
+    ],
+    "aliases": [
+      "graceful twig ant",
+      "twig ant",
+      "elongate twig ant",
+      "pseudomyrmex gracilis"
+    ],
+    "scientific_name": "Pseudomyrmex gracilis",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "allergy-risk-ants",
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender, wasp-like ant about 1/3 inch long, noticeably larger than most household ants",
+      "Reddish-orange head and thorax with a dark abdomen",
+      "Usually seen alone on tree trunks, shrubs or walls rather than in a busy trail",
+      "Long, thin legs and a distinctly narrow waist"
+    ],
+    "look_alikes": [
+      {
+        "slug": "trap-jaw-ant",
+        "difference": "Twig ant is slim, wasp-shaped and climbs plants; trap-jaw ant is stockier with long straight open jaws and is usually on the ground",
+        "next_photo": "From a safe distance, zoom in from the side on the shape of the jaws and whether the ant is on a plant or on the ground.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "A single sting can be sharply painful and build over several minutes, though it is not considered dangerous for most healthy adults; see a doctor if you have a strong allergic reaction.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A solitary ant that lives in hollow twigs and stems and rarely bothers people unless it gets trapped against skin or clothing. Usually not worth treating unless it is nesting right at an entryway.",
+      "fact": "It nests inside hollow twigs, dead branches and even old plant stems, which is where its \"twig ant\" name comes from."
+    },
+    "tech_notes": "Sting is disproportionate to size; not aggressive and rarely stings unless handled. Locate hollow twig/stem nest sites near structure if treatment is warranted.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/download/116996/115141"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "9a4fdbc0ed8c253bd0483ce3804bd1e3421d07b2d62b760fc5c6311082bd60a9"
+    }
+  },
+  {
+    "slug": "trap-jaw-ant",
+    "kind": "organism",
+    "common_name": "Trap-jaw Ant",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "trap jaw ant",
+      "trap jaw ants",
+      "odontomachus"
+    ],
+    "scientific_name": "Odontomachus spp.",
+    "rank": "genus",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Long, straight, trap-like jaws held wide open at rest",
+      "Reddish-brown to black, medium-sized ant with a slender, elongated body",
+      "Single tall node in the waist behind the thorax",
+      "Can snap its jaws shut fast enough to fling itself backward off the ground"
+    ],
+    "look_alikes": [
+      {
+        "slug": "graceful-twig-ant",
+        "difference": "Trap-jaw ant has long straight jaws held open and is usually found in mulch or leaf litter; graceful twig ant has normal short jaws and climbs on plants",
+        "next_photo": "From a safe distance, zoom in front-on at the head showing whether the jaws are long and straight or short.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Delivers a sharp, painful sting if picked up or stepped on; not aggressive toward people who leave it alone.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A predatory ant found in mulch and leaf litter across Florida landscapes that mostly hunts other insects and rarely comes indoors. Worth pointing out to kids because a sting is painful, but it is not a structural pest.",
+      "fact": "Its jaws snap shut faster than almost any other animal movement recorded, which it uses both to catch prey and to catapult itself away from danger."
+    },
+    "tech_notes": "Not a structural or nuisance-indoor species; typically found in mulch beds and leaf litter. Treat only if nesting near entryways; no special product notes.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/escambiaco/2019/03/14/a-new-ant-experience-in-the-landscape/",
+      "https://repository.lib.fsu.edu/islandora/object/fsu:182392/datastream/PDF/view"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Genus-level entry (several Odontomachus species occur in Florida). A directly-read FSU thesis on O. brunneus (citing Deyrup & Cover 2004) confirms it 'inhabits a variety of terrestrial habitats throughout Florida'; no source gives SWFL-county-level frequency data, so range stays 'occasional', this catalog's cautious default, rather than asserted as settled. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "b209c86e986d3206d498874ef2ac51191d836632741995157d47853cc60c8692"
+    }
+  },
+  {
+    "slug": "florida-harvester-ant",
+    "kind": "organism",
+    "common_name": "Florida Harvester Ant",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "bull ant"
+    ],
+    "aliases": [
+      "florida harvester ant",
+      "harvester ant",
+      "harvester ants",
+      "bull ant",
+      "pogonomyrmex badius"
+    ],
+    "scientific_name": "Pogonomyrmex badius",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "stinging-ants",
+    "site_category": "Ants",
+    "stages": [
+      "worker",
+      "major worker",
+      "mound"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark rust-red ants, larger than most yard ants, with an enlarged head on the biggest workers",
+      "Flattened, bare mound of sand up to about two feet across with one or a few entrances",
+      "A ring of small pebbles, seed husks or charcoal bits often litters the mound surface",
+      "Nests only in open, sandy, sparsely vegetated ground, never in mulch or turf-thick lawns"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fire-ant",
+        "difference": "Harvester ant mounds are flat, bare sand disks; fire ant mounds are fluffy, dome-shaped and have no obvious single entrance",
+        "next_photo": "From a safe distance, photograph the whole mound showing its shape and surface.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "One of the more painful ant stings in Florida, with burning and redness that can last into the next day. See a doctor if you have a strong allergic reaction.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A native seed-gathering ant that nests in open sandy patches and stings hard if a mound is disturbed. It clears vegetation around its own mound rather than damaging structures, so most yards can simply avoid the mound or ask a technician about it.",
+      "fact": "Workers forage for seeds and store them underground, which is how the species earned the name harvester ant."
+    },
+    "tech_notes": "Confirm flattened sand mound with pebble/husk ring vs fire ant dome mound. Direct mound treatment per label; avoid broad lawn treatment since it nests only in bare sandy openings.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in536"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "92ad3a27a8be0c336686129aaaf4a59d90d0cb39544a622a7f06d13d4b4f4883"
+    }
+  },
+  {
+    "slug": "thief-ant",
+    "kind": "organism",
+    "common_name": "Thief Ant",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "grease ant"
+    ],
+    "aliases": [
+      "thief ant",
+      "thief ants",
+      "grease ant",
+      "grease ants",
+      "solenopsis molesta"
+    ],
+    "scientific_name": "Solenopsis molesta",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely tiny, pale yellow to light brown ant",
+      "Often seen trailing very close to the nests of larger ants, which it raids for food and brood",
+      "Strong attraction to greasy and fatty foods as well as sweets",
+      "Two nodes in the waist like a fire ant, but far smaller"
+    ],
+    "look_alikes": [
+      {
+        "slug": "pharaoh-ant",
+        "difference": "Thief ant is uniformly pale with a 2-segmented antennal club; pharaoh ant has a darker abdomen tip and a 3-segmented antennal club",
+        "next_photo": "A macro close-up of a single ant on a light background showing the abdomen tip color",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "garage-storage"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tiny nuisance ant that often nests near other ant colonies to steal their food and young. It does not sting or damage the home, but colonies can be hard to spot because they are so small.",
+      "fact": "It nests so close to other ant colonies and steals so much from them that entomologists named it the thief ant."
+    },
+    "tech_notes": "So small it is easily mistaken for pharaoh ant; check antennal club segments to confirm. Bait for grease/protein as well as sugar; locate nest which may be near larger ant colony.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.fws.gov/species/thief-ant-solenopsis-molesta"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Primary source used is FWS species page rather than a UF/IFAS EENY (none found dedicated to this species); cross-checked against IFAS pharaoh ant page comparison images.",
+      "approval_hash": "feccc9b10a523d2264454de8ad4aa78f71b7b1554f8d6096281247703fa313e8"
+    }
+  },
+  {
+    "slug": "pyramid-ant",
+    "kind": "organism",
+    "common_name": "Pyramid Ant",
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "cone ant"
+    ],
+    "aliases": [
+      "pyramid ant",
+      "pyramid ants",
+      "cone ant",
+      "dorymyrmex"
+    ],
+    "scientific_name": "Dorymyrmex spp.",
+    "rank": "genus",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "worker",
+      "mound"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, fast-moving, light orange to reddish-brown ant",
+      "Small pyramid-shaped bump on top of the thorax, visible from the side",
+      "Volcano-shaped mound with a crater around a single center hole, usually in bare sandy soil",
+      "Does not sting; releases a musty odor when crushed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fire-ant",
+        "difference": "Pyramid ant mounds are small, cone-shaped craters around one hole; fire ant mounds are larger, fluffy domes without a single obvious opening",
+        "next_photo": "From a safe distance, photograph the mound from directly above showing its shape and whether there is one central hole.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, non-stinging native ant that actually helps by preying on fire ant brood and newly mated fire ant queens. Its small volcano-shaped mounds in bare, sandy spots are best left alone.",
+      "fact": "Pyramid ants raid young fire ant colonies and attack newly mated fire ant queens, which makes them a natural check on fire ant numbers."
+    },
+    "tech_notes": "Beneficial species; discourage routine treatment of pyramid ant mounds unless client specifically objects to mound appearance.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/charlotteco/2026/04/26/a-good-ant/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "d921624ec26059ed859ddde716142331546782180db391608d85adf5eed1c60c"
+    }
+  },
+  {
+    "slug": "winged-ants",
+    "kind": "organism",
+    "common_name": "Winged Ants (swarmers)",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [
+      "ant swarmers",
+      "flying ants"
+    ],
+    "aliases": [
+      "winged ants",
+      "flying ants",
+      "ant swarmers",
+      "ant swarmer"
+    ],
+    "scientific_name": "Formicidae (reproductives)",
+    "rank": "group",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "stages": [
+      "winged reproductive"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Four wings, with the front pair clearly longer than the back pair",
+      "Bent (elbowed) antennae",
+      "A distinctly pinched, narrow waist with one or two small bumps",
+      "Front and back wings are unequal in size and often shed after landing, littering the area with wings but few or no bodies"
+    ],
+    "look_alikes": [
+      {
+        "slug": "termite-swarmers",
+        "difference": "Ant swarmers have a pinched waist, bent antennae and unequal wing pairs; termite swarmers have a thick waist, straight antennae and equal-length wings",
+        "next_photo": "A close-up from directly above showing the waist shape and whether the wing pairs are equal length",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "living-areas",
+      "lanai-patio"
+    ],
+    "looks": [
+      "winged-swarmer"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Winged ants leaving a mature colony to start new ones, usually after warm, humid weather. Unlike termite swarmers, they are not a structural warning sign on their own, though a swarm indoors means a colony is nesting close by — the waist and antenna shape are the way to tell the two apart.",
+      "fact": "A swarm is the ant colony's one shot at spreading to new places, so most species time it to warm, still evenings right after rain."
+    },
+    "tech_notes": "Photo ID before treatment: check waist shape, antennae, wing-pair length ratio to rule out termite swarmers. Locate parent colony if swarm is indoors.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/collections/series_featured_creatures"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed the old entnemdept.ufl.edu/creatures/urban/ants/ URL now 301-redirects to the general EDIS Featured Creatures collection page rather than ant-swarmer-specific content; source updated to that collection page. Species identity of any given swarm varies with which ant is nesting nearby, so the peak months given are a general seasonal estimate, not one species' calendar.",
+      "approval_hash": "47142798be70cb6e344c156677a2380c5c8eca805f3dce714137924d820e00cd"
+    }
+  },
+  {
+    "slug": "fire-ant-mound",
+    "kind": "sign",
+    "common_name": "Fire Ant Mound",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "fire ant mound",
+      "fire ant mounds"
+    ],
+    "scientific_name": "Solenopsis spp. (sign)",
+    "rank": "group",
+    "group": "ants",
+    "subgroup": "fire-ants",
+    "site_category": "Ants",
+    "stages": [
+      "mound"
+    ],
+    "sign_of": [
+      "fire-ant",
+      "tropical-fire-ant"
+    ],
+    "traits": [
+      "Loose, fluffy dome of soft dirt with no single visible entrance hole",
+      "Usually 6 inches to over a foot across, often bigger after rain",
+      "Found in open lawn, along walkway edges, or at the base of trees",
+      "Disturbing the mound brings ants boiling out fast, in numbers, within seconds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "pyramid-ant",
+        "difference": "Fire ant mounds are fluffy domes with no clear opening; pyramid ant mounds are small, cone-shaped craters around one central hole",
+        "next_photo": "From a safe distance, photograph the mound from directly above showing its shape and whether there is one central hole; don't disturb it.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "florida-harvester-ant",
+        "difference": "Fire ant mounds are dome-shaped and fluffy; harvester ant mounds are flat, bare sand disks often ringed with pebbles or seed husks",
+        "next_photo": "From a safe distance, photograph the mound showing whether it is domed or flat; don't disturb it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "sign",
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Disturbing a mound brings out stinging ants fast. Keep kids and pets away and do not stand on or mow over an active mound.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A dome-shaped mound like this usually means fire ants underneath, ready to swarm out fast if disturbed. It is worth having mounds near play areas, pet runs and walkways treated rather than mowed over.",
+      "fact": "A single fire ant mound can hold well over 100,000 ants, all connected through tunnels that can spread several feet in every direction."
+    },
+    "tech_notes": "Classic dome mound with no single entrance, soil pushed up from below-ground tunnels. Bait broadcast plus direct mound treatment per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://entnemdept.ufl.edu/creatures/urban/ants/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e63e1e87743feb5cfe6871eafe6288216c3e1cf09e0facc946afe4c9e023cebf"
     }
   }
 ]

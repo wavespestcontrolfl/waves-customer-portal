@@ -22,6 +22,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/email', () => ({ send: jest.fn(() => Promise.resolve()) }));
+// Same behavior as the real gate-off path (sendEmail() runs unchanged) —
+// this only lets the admin-alerts-ring test below inspect the call's args.
+const mockDeliverOpsDigest = jest.fn(async ({ sendEmail }) => sendEmail());
+jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: (...args) => mockDeliverOpsDigest(...args) }));
 jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: jest.fn(() => Promise.resolve({})) }));
 jest.mock('dns', () => ({ promises: { resolveMx: jest.fn() } }));
 
@@ -500,6 +504,58 @@ describe('llm decode anchoring', () => {
       if (r.candidate) expect(r.evidence.quote).not.toBe('this quote was invented');
     } finally {
       if (OLD_KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = OLD_KEY;
+    }
+  });
+});
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the ACT-needs-a-
+// human suggestion email's short bell copy — generic headline (no customer
+// name), summary names the candidate when one exists.
+describe('bounceSuggestionHeadlineAndSummary', () => {
+  test('a candidate found: summary names it and asks to confirm', () => {
+    expect(rescue.bounceSuggestionHeadlineAndSummary('jane@newdomain.com')).toEqual({
+      headline: 'Email — bounce needs a fix',
+      summary: 'Best guess is jane@newdomain.com. Confirm and apply it.',
+    });
+  });
+
+  test('no confident candidate: summary asks for a new address', () => {
+    expect(rescue.bounceSuggestionHeadlineAndSummary(null)).toEqual({
+      headline: 'Email — bounce needs a fix',
+      summary: 'No good replacement found. Ask for a new address.',
+    });
+  });
+});
+
+// admin-alerts-ring scope (2026-09-28): every call here is a DIFFERENT
+// customer's bounce needing a human — count alone would go quiet after the
+// first (they all share one alertClass), so newCount:1 says every one is
+// new news and it always rings.
+describe('sendSuggestionEmail — always rings (admin-alerts-ring scope)', () => {
+  beforeEach(() => { mockDeliverOpsDigest.mockClear(); });
+
+  test('passes count:1 and newCount:1 to deliverOpsDigest', async () => {
+    await rescue.sendSuggestionEmail({
+      rescueRowId: 'r1', bouncedEmail: 'first@bounced.example', candidate: null,
+      owner: { lead: { first_name: 'A', last_name: 'One' } },
+    });
+    expect(mockDeliverOpsDigest).toHaveBeenCalledWith(expect.objectContaining({
+      key: 'email-bounce-rescue', count: 1, newCount: 1,
+    }));
+  });
+
+  test('a second, DIFFERENT address within 7 days also rings — not silenced by the first', async () => {
+    await rescue.sendSuggestionEmail({
+      rescueRowId: 'r1', bouncedEmail: 'first@bounced.example', candidate: null,
+      owner: { lead: { first_name: 'A', last_name: 'One' } },
+    });
+    await rescue.sendSuggestionEmail({
+      rescueRowId: 'r2', bouncedEmail: 'second@bounced.example', candidate: 'guess@bounced.example',
+      owner: { lead: { first_name: 'B', last_name: 'Two' } },
+    });
+    expect(mockDeliverOpsDigest).toHaveBeenCalledTimes(2);
+    for (const call of mockDeliverOpsDigest.mock.calls) {
+      expect(call[0]).toMatchObject({ count: 1, newCount: 1 });
     }
   });
 });

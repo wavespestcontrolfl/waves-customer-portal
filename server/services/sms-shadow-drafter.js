@@ -27,6 +27,8 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
+const { gateEnvValue } = require('../config/feature-gates');
+const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -77,7 +79,82 @@ const DRAFTER = 'house_voice';
 // v11: explicit, context-sensitive gratitude candidates. The existing
 // graduation cohort resets when these instructions change.
 const PROMPT_VERSION = 'house_voice_v11';
+// v12 REAL ANSWERS (2026-09-27, owner ruling) — dark behind
+// GATE_SMS_REAL_ANSWERS (gateEnvValue, default off everywhere; read at call
+// time, no redeploy to flip). Gate off: buildSystemPromptWithProfile and
+// buildFactsBlock are byte-identical to v11 — every conditional in both
+// resolves to the pre-existing v11 literal on that branch, and
+// generateGroundedDraft keeps stamping PROMPT_VERSION. Gate on: replaces
+// "say you'll confirm and follow up" with answer-from-the-facts + real
+// offers (OPEN TIMES for booking/rescheduling from AvailabilityEngine, exact
+// amounts + send_payment_link, send_portal_link/send_estimate_link where
+// they fit), narrows the HELD-FOR-A-PERSON hand-off list by whichever
+// per-category gate (GATE_SMS_AGENT_COMPLAINTS / _BILLING_DISPUTES /
+// _CHEMICAL_MEDICAL / _LEGAL, each its own dark default-off gate) is on, and
+// answers cancellations instead of escalating them (skip/reschedule from
+// OPEN TIMES only — never an invented discount/credit/refund — plus an
+// escalate/"cancel_request" action so a person still processes the actual
+// cancellation). generateGroundedDraft stamps this version instead of
+// PROMPT_VERSION on a draft that actually used the rewritten prompt, so
+// judge/ledger rows tell the two cohorts apart.
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
 const SHADOW_STATUS = 'shadow';
+
+/**
+ * The prompt version a draft generated RIGHT NOW would stamp — PROMPT_VERSION
+ * with the gate off; with it on, REAL_ANSWERS_PROMPT_VERSION, PLUS a suffix
+ * naming every per-category gate (GATE_SMS_AGENT_COMPLAINTS/
+ * _BILLING_DISPUTES/_CHEMICAL_MEDICAL/_LEGAL) that is ALSO on — e.g.
+ * 'house_voice_v12_real_answers+bc' for billing disputes + complaints
+ * (single-char tags, sorted, so the flip order never changes the identity —
+ * see the varchar(40) column-length note by REAL_ANSWERS_HANDOFF_CATEGORIES
+ * below for why they're single characters). Pre-push audit P1 (round 2):
+ * flipping a category gate changes the RENDERED prompt (realAnswersHandoffBullets
+ * moves that category off the HELD-FOR-A-PERSON list and swaps in its own
+ * instruction) without this suffix, every category-gate combination would
+ * share the bare v12 identity — pooling graduation evidence across genuinely
+ * different behaviors, and letting a sealed-eval run completed BEFORE a
+ * category flip keep satisfying GRAD_REQUIRE_SEALED_EXAM for behavior it
+ * never examined. This module's own generateGroundedDraft calls this same
+ * function to stamp each draft (never re-derives the ternary itself), so
+ * draft rows, graduation cohorts, and exam checks all share one identity.
+ * Exported so OTHER "what counts as current" readers — sms-graduation's
+ * cohort-version default, sms-auto-send's gratitude expectedPromptVersion
+ * checks and its gratitudeCandidatePage discovery filter (a LIKE-prefix
+ * match against REAL_ANSWERS_PROMPT_VERSION, since it must recognize every
+ * suffixed variant, not just the bare one) — can resolve the SAME effective
+ * version instead of the static PROMPT_VERSION constant, which stays v11
+ * forever. While GATE_SMS_REAL_ANSWERS stays off (the default) this is
+ * identical to PROMPT_VERSION, so today's call sites are unaffected either
+ * way.
+ */
+// prompt_version columns are varchar(40) (message_drafts, agent_decisions,
+// shadow_draft_judgments, sms_pathology_entries, sms_sealed_eval_runs) — a
+// Postgres insert/update THROWS past that, which would drop drafts and
+// break exam creation the moment a category gate joined the master one
+// (pre-push audit P1 round 3). No separator between tags (concatenated,
+// not joined by comma) keeps the worst case (all four) short; this bound
+// is enforced defensively below rather than trusted to stay true by eye.
+const PROMPT_VERSION_COLUMN_MAX = 40;
+function currentPromptVersion() {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
+  const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
+    .filter((c) => gateEnvValue(c.gate))
+    .map((c) => c.tag)
+    .sort();
+  const version = activeCategoryTags.length
+    ? `${REAL_ANSWERS_PROMPT_VERSION}+${activeCategoryTags.join('')}`
+    : REAL_ANSWERS_PROMPT_VERSION;
+  if (version.length > PROMPT_VERSION_COLUMN_MAX) {
+    // Fail closed to the bare identity rather than risk a DB write erroring
+    // out mid-draft — a truncated-to-the-wrong-thing label is a smaller
+    // problem than losing the draft entirely, and this can only happen if a
+    // future category tag is added without keeping it a single character.
+    logger.error(`[sms-shadow] currentPromptVersion() would exceed the varchar(${PROMPT_VERSION_COLUMN_MAX}) prompt_version columns (${version.length} chars: ${version}) — falling back to the bare identity`);
+    return REAL_ANSWERS_PROMPT_VERSION;
+  }
+  return version;
+}
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
 // behaves like v6); count is bounded so the prompt can't balloon.
@@ -95,6 +172,1161 @@ const INTENDED_ACTION_TYPES = [
   'send_portal_link',
   'send_estimate_link',
 ];
+
+// v12 real-answers hand-off categories (owner ruling 2026-09-27). Each has
+// its own dark, default-off gate — ON removes exactly that category from
+// the HELD-FOR-A-PERSON list in the real-answers prompt (realAnswersHandoffBullets).
+// Cancellations are NOT in this list: the owner ruling drops cancellations
+// out of escalation entirely (see the cancellation bullet below), independent
+// of any of these four gates.
+// `tag` is the stable identifier currentPromptVersion() folds into the
+// effective version string when a category gate is on (see below) — kept
+// separate from `label` (the human-readable prompt text) so a future
+// wording tweak to `label` can never silently change what graduation/
+// sealed-eval treat as "the same version". Single characters ON PURPOSE
+// (pre-push audit P1 round 3): prompt_version is varchar(40) across
+// message_drafts, agent_decisions, shadow_draft_judgments,
+// sms_pathology_entries and sms_sealed_eval_runs, and REAL_ANSWERS_PROMPT_VERSION
+// alone is 28 chars — a full-word tag like 'billing_disputes' would already
+// overflow the column with just ONE category gate on. Concatenated with no
+// separator (currentPromptVersion() sorts them, so order is still
+// deterministic) every one of these codes must stay a single character, or
+// the worst case (all four gates on) must still fit in `28 + 1 + N` chars.
+const REAL_ANSWERS_HANDOFF_CATEGORIES = [
+  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'c' },
+  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'b' },
+  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns', tag: 'm' },
+  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats', tag: 'l' },
+];
+
+// 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads
+// "within the hour". Outside that window, "9 AM" means the NEXT 9 AM on the
+// clock, which is TODAY before 8am and TOMORROW from 8pm on (pre-push audit
+// P2 — the original version said "tomorrow morning" for the whole outside-
+// hours range, which was wrong from midnight to 7:59 AM: 9 AM hasn't
+// happened yet that same calendar day). Computed off the ET wall clock so
+// the model is TOLD the answer, never asked to compute it itself. `now` is
+// test-only (defaults to the real clock); production callers never pass it.
+//
+// Pre-push audit P1: this value is TIME-VARYING (it flips at the 8am/8pm ET
+// boundaries) and must NEVER be interpolated into the SYSTEM prompt —
+// sms-gratitude-qualification.js hashes the full rendered system prompt and
+// pins it (systemPromptSha256); a boundary crossing would change that hash
+// with no code or config change, silently blocking a qualified gratitude
+// lane with pins_changed. It rides in the per-draft FACTS block instead
+// (buildFactsBlock's "FOLLOW-UP SLA RIGHT NOW" line, gate-on only), which is
+// NEVER pinned/hashed — the system prompt only ever describes the STABLE
+// RULE ("use the exact wording from the facts"), never the live value.
+function followupSlaPhrase(now = new Date()) {
+  const { hour } = etParts(now);
+  if (hour >= 8 && hour < 20) return 'within the hour';
+  return hour < 8 ? 'by 9 AM this morning' : 'by 9 AM tomorrow morning';
+}
+// SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
+// ./sms-followup-sla (Codex r3) and are re-exported below.
+const followupSla = require('./sms-followup-sla');
+
+// The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
+// line (only the categories whose own gate is still off), one instruction
+// bullet per category whose gate IS on (Codex-proofed against silent
+// no-ops: "each category gate removes exactly its category" is the test
+// contract), and the CANCELLATIONS bullet, which is unconditional — owner
+// ruling: cancellations are never escalated as their own category anymore.
+// Deliberately time-INVARIANT text (see followupSlaPhrase's comment above):
+// points at the facts' "FOLLOW-UP SLA RIGHT NOW" line rather than
+// interpolating the live value, so this string — and the system prompt hash
+// sms-gratitude-qualification.js pins — never changes at the 8am/8pm ET
+// boundary.
+function realAnswersHandoffBullets() {
+  const held = REAL_ANSWERS_HANDOFF_CATEGORIES.filter((c) => !gateEnvValue(c.gate));
+  const lines = [
+    held.length
+      ? `- HELD FOR A PERSON: ${held.map((c) => c.label).join(', ')}. Acknowledge warmly, don't resolve it, add {"type":"escalate"} to intended_actions, and say CONCRETELY when they'll hear back — use the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET).`
+      : "- Every category that used to hold for a person now answers from the facts instead — see the category rules below.",
+  ];
+  if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) {
+    // Codex r6 P1: a free callback is an entitlement, not a courtesy — the
+    // existing mechanism (reservice-scheduler.reserviceLanesForCustomer)
+    // grants it only to eligible active pest/lawn lanes and the customer
+    // books it on the /reservice page, which shows its OWN availability.
+    // Eligibility therefore rides in as a per-draft FACT, and the offer
+    // routes to that link through an escalation a teammate owns — never
+    // generic OPEN TIMES, never a promise the facts don't back.
+    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES')) {
+    lines.push('- BILLING DISPUTES: answer from the facts only — state the real numbers from BILLING, never resolve the dispute or offer a credit/refund/discount that is not in the facts.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL')) {
+    lines.push('- CHEMICAL/MEDICAL CONCERNS: answer from the facts only.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_LEGAL')) {
+    lines.push('- LEGAL THREATS: answer from the facts only.');
+  }
+  lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
+  return lines.join('\n');
+}
+
+// Compact, real, bookable OPEN TIMES for the facts block — read-only
+// (AvailabilityEngine.getAvailableSlots, the SAME call the check_availability
+// tool makes; see server/services/ai-assistant/tools-expanded.js). Gated on
+// GATE_SMS_REAL_ANSWERS + a scheduling-related inbound + a known city; fully
+// fail-safe otherwise: no city, no scheduling intent, an error, or a timeout
+// all resolve to null (section omitted) — this must NEVER block drafting.
+// Never books or holds a slot. Each slot's `start`/`end` is the internal
+// job-duration block AvailabilityEngine packs the route with, NOT the
+// customer-facing window — every other surface in this file quotes the
+// same 2-hour-from-start arrival window (owner directive; see the v8 note
+// above on UPCOMING SERVICES), so this renders `startTime24` through the
+// SAME canonical helper (arrivalWindowRange/formatSmsTimeRange) rather than
+// the raw slot end.
+const OPEN_TIMES_TIMEOUT_MS = 3000;
+const OPEN_TIMES_MAX_DAYS = 3;
+const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
+
+// The SAME day label fetchOpenTimesBlock renders and the send-time recheck
+// must reproduce from a FRESH getAvailableSlots call — pulled out so the two
+// can never drift into two different label formats for the same day.
+function openTimesDayLabel(d) {
+  return d?.fullDate || [d?.dayOfWeek, d?.month, d?.dayNum].filter(Boolean).join(' ');
+}
+
+// ── Scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER, owner ruling 2026-09-29, slice 1) ──
+// For a text about ONE upcoming visit, offered times are the times the
+// customer's own reschedule link would show for that visit: the same visit
+// loader, the same page eligibility verdict (grouped / missed / notice-window
+// / inactive account all refuse), the same booking range and the same
+// buildBookingAvailability picker (service time frames, proximity routing,
+// planning minutes, detour cap) — reused from routes/reschedule-public.js,
+// not copied. Required lazily: that module pulls in the express router.
+// SLICE 1 SCOPE: only an identity that IS an upcoming visit takes this path.
+// Open-estimate / new_service / last_completed / engine_default identities
+// keep the zone-based finder (fetchOpenTimesData above) even with the gate on;
+// new-visit offers move to the /book finder in the next slice.
+const SCHEDULER_OFFER_SOURCE = 'scheduler';
+const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
+// The picker chain (visit load, page eligibility, booking config, the
+// service's availability build with a possible geocode and the find-time
+// travel probe) is much heavier than the zone finder OPEN_TIMES_TIMEOUT_MS
+// (3s) was sized for, and the reschedule GET route runs it with no deadline.
+// Only the scheduler path uses this; the old finder keeps its 3000.
+const SCHEDULER_OPEN_TIMES_TIMEOUT_MS = 10000;
+
+// The same label the zone finder renders (availability.js fullDate):
+// "Tuesday, September 29", from the picker's YYYY-MM-DD day.
+function schedulerDayLabel(day) {
+  const m = String(day?.date || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0));
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+  }
+  return openTimesDayLabel(day);
+}
+
+// The visit's own current (day label, arrival window), rendered through the
+// same day-label and arrivalWindowRange/formatSmsTimeRange path the offers
+// use. buildAvailabilityForService passes excludeServiceIds: [svc.id], so the
+// visit's own slot reads as open in the picker; callers use this to keep it
+// out of the offers and to refuse a quote the visit has since moved onto.
+// null when the row carries no date or start time.
+function visitCurrentWindow(svc) {
+  const { apptDateStr, hhmm } = require('./reschedule-eligibility');
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  const date = apptDateStr(svc?.scheduled_date);
+  const start = hhmm(svc?.window_start);
+  if (!date || !start) return null;
+  const range = arrivalWindowRange(start);
+  const window = range ? formatSmsTimeRange(range) : null;
+  if (!window) return null;
+  const startMinutes = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+  return { date: schedulerDayLabel({ date }), window, startMinutes };
+}
+
+// The picker's days for ONE visit (plus the visit's own current window), or
+// null when the visit is not one the reschedule link would offer times for
+// (not found, someone else's, refused by the page's eligibility, or no
+// location to route from). Errors throw — callers fail closed.
+async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
+  const reschedule = require('../routes/reschedule-public')._internals;
+  const booking = require('../routes/booking');
+  const svc = await reschedule.loadById(scheduledServiceId);
+  if (!svc || svc.customer_deleted_at) return null;
+  // The id came from this customer's own context; refuse anything else.
+  if (customerId && String(svc.customer_id) !== String(customerId)) return null;
+  const elig = await reschedule.pageEligibility(svc);
+  if (!elig || !elig.ok) return null;
+  const config = await booking._internals.loadBookingConfig();
+  const range = reschedule.bookingRange(config);
+  const availability = await reschedule.buildAvailabilityForService(svc, { ...range, config });
+  return availability ? { days: availability.days || [], currentWindow: visitCurrentWindow(svc) } : null;
+}
+
+// Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
+// windows do not overlap (the picker lists every feasible start, often close
+// together; quoting 8:00-10:00 and 8:15-10:15 as two choices is noise).
+function pickSchedulerOfferWindows(slots) {
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  const ordered = (slots || [])
+    .map((s) => String(s?.startTime24 || s?.start_time || '').slice(0, 5))
+    .filter((t) => /^\d{2}:\d{2}$/.test(t))
+    .sort();
+  const windows = [];
+  let nextFree = -1;
+  for (const start of ordered) {
+    const minutes = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+    if (minutes < nextFree) continue;
+    const range = arrivalWindowRange(start);
+    const window = range ? formatSmsTimeRange(range) : null;
+    if (!window) continue;
+    windows.push(window);
+    nextFree = minutes + 120;
+    if (windows.length >= OPEN_TIMES_MAX_SLOTS_PER_DAY) break;
+  }
+  return windows;
+}
+
+// The picker's slots minus any whose 2-hour arrival window overlaps the
+// visit's current one (a 9:15 start is not a real alternative to a visit
+// already at 9:00) — the same overlap rule pickSchedulerOfferWindows applies
+// between offers.
+function excludeCurrentWindowSlots(slots, startMinutes) {
+  return (slots || []).filter((s) => {
+    const start = String(s?.startTime24 || s?.start_time || '').slice(0, 5);
+    if (!/^\d{2}:\d{2}$/.test(start)) return true;
+    const minutes = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+    return Math.abs(minutes - startMinutes) >= 120;
+  });
+}
+
+async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
+  if (!scheduledServiceId) {
+    logger.info('[sms-shadow] OPEN TIMES withheld — upcoming visit has no id to offer times for');
+    return { block: null, days: [] };
+  }
+  let timer = null;
+  const startedAt = Date.now();
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('open-times timeout')), SCHEDULER_OPEN_TIMES_TIMEOUT_MS);
+    });
+    const loaded = await Promise.race([loadSchedulerVisitDays({ customerId, scheduledServiceId }), timeout]);
+    if (!loaded) {
+      logger.info('[sms-shadow] OPEN TIMES withheld — visit is not reschedulable through the scheduler');
+      return { block: null, days: [] };
+    }
+    const lines = [];
+    const days = [];
+    for (const d of loaded.days) {
+      const date = schedulerDayLabel(d);
+      // The visit's own current slot reads as open (the picker excludes the
+      // visit itself); never offer a customer the time they already have.
+      const cur = loaded.currentWindow;
+      const slots = cur && cur.date === date ? excludeCurrentWindowSlots(d.slots, cur.startMinutes) : d.slots;
+      const windows = pickSchedulerOfferWindows(slots);
+      if (!windows.length) continue;
+      lines.push(`- ${date}: ${windows.join(', ')}`);
+      days.push({ date, windows });
+      if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
+    }
+    return { block: lines.length ? lines.join('\n') : null, days };
+  } catch (err) {
+    logger.warn(`[sms-shadow] scheduler open-times fetch failed (${err.message}); omitting OPEN TIMES section`);
+    return { block: null, days: [] };
+  } finally {
+    if (timer) clearTimeout(timer);
+    logger.info(`[sms-shadow] scheduler open-times draft fetch took ${Date.now() - startedAt}ms`);
+  }
+}
+
+// The read-only AvailabilityEngine call, ONE per draft generation — returns
+// both the rendered OPEN TIMES text (block, unchanged contract:
+// fetchOpenTimesBlock below is a thin wrapper over this that every existing
+// caller/test keeps using) and the SAME days in structured form (days:
+// [{date, windows: [...]}]), which validateOfferedTimes checks the model's
+// own offered_times declaration against — one fetch, two views of the same
+// data, so they can never drift apart.
+async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, offersFromScheduler = false, scheduledServiceId = null } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
+  if (!schedulingIntent || (!city && !offersFromScheduler)) return { block: null, days: [] };
+  // GATE_SMS_OFFERS_SCHEDULER: the identity step resolved to ONE upcoming
+  // visit, so its times come from the reschedule link's own picker. Never
+  // falls back to the zone finder below — a visit the picker refuses (or one
+  // with no id carried) gets no OPEN TIMES at all.
+  if (offersFromScheduler) return fetchSchedulerOpenTimesData({ customerId, scheduledServiceId });
+  let timer = null;
+  try {
+    const Availability = require('./availability');
+    const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    // estimateId (pre-push audit P2, estimate-conversion-agent.js): the SAME
+    // second argument check_availability itself passes — when the inbound
+    // thread already resolved to a specific estimate, the offered slots
+    // must reflect THAT estimate's service minutes, not a generic default.
+    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
+    const lines = [];
+    const days = [];
+    for (const d of (result?.days || [])) {
+      const windows = (d.slots || [])
+        .map((s) => {
+          const range = arrivalWindowRange(s.startTime24);
+          return range ? formatSmsTimeRange(range) : null;
+        })
+        .filter(Boolean)
+        .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
+      if (!windows.length) continue; // no slot on this day survived arrival-window formatting
+      const date = openTimesDayLabel(d);
+      lines.push(`- ${date}: ${windows.join(', ')}`);
+      days.push({ date, windows });
+      if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
+    }
+    return { block: lines.length ? lines.join('\n') : null, days };
+  } catch (err) {
+    logger.warn(`[sms-shadow] open-times fetch failed (${err.message}); omitting OPEN TIMES section`);
+    return { block: null, days: [] };
+  } finally {
+    // Whichever side of the race wins, the timer must never outlive this
+    // call — an uncleared setTimeout is a real leaked handle (it kept the
+    // process alive for the timeout's own duration on every successful,
+    // fast-resolving fetch too, not just on an actual timeout).
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Free re-service eligibility for the facts block (Codex r6 P1), through
+// the EXISTING mechanism — reservice-scheduler.reserviceLanesForCustomer,
+// the same check the composer's /reservice-link helper and the public
+// /reservice page run. Only when the real-answers AND complaints gates are
+// on. Fail-closed everywhere: self-serve off, an inactive or missing
+// customer, a lookup error or a timeout all resolve to [] (not eligible).
+// Returns null when the gates are off (no fact is rendered at all).
+async function fetchReserviceLanes({ customerId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
+  if (!customerId) return [];
+  let timer = null;
+  try {
+    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) return [];
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const lookup = (async () => {
+      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
+      if (!row || row.active === false) return [];
+      return reserviceLanesForCustomer(row);
+    })();
+    const lanes = await Promise.race([lookup, timeout]);
+    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+  } catch (err) {
+    logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The rendered fact line, and its reader. One line, fixed wording, so the
+// deterministic check below and a frozen replay read the same thing.
+const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
+function reserviceFactLine(lanes) {
+  const list = Array.isArray(lanes) ? lanes : [];
+  return list.length
+    ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
+    : `${RESERVICE_FACT_LABEL} not eligible`;
+}
+
+// The shared compliance predicate (AGENTS.md "Compliance language on any
+// customer surface"): banned customer-copy claims ("pet-safe",
+// "EPA-approved", fixed re-entry/drying times). Fail CLOSED: if the guard
+// can't load, every text reads as banned.
+// The ONE sanctioned safety idiom (Codex r9+r10): "safe once dry" counts
+// only when the SAME text also carries the technician-confirms-timing
+// clause — the complete prescribed answer. The sanctioned sentence is
+// stripped before screening so any OTHER claim in the text still drops it.
+// Only the EXACT standalone idiom is exempt (Codex r8 P1): "safe" must not
+// be a compound's tail ("pet-safe once dry") and the idiom must not carry a
+// timing modifier ("safe once dry in 30 minutes") — those stay in the text
+// for the screens below, and the exempt match is replaced by a neutral
+// token rather than removed so nothing around it is altered.
+const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-–—,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
+const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+function hasBannedCustomerCopy(text) {
+  let bannedCopyGuard = null;
+  try {
+    ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
+  } catch { bannedCopyGuard = null; }
+  if (!bannedCopyGuard) return true;
+  let t = String(text || '');
+  if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
+    t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
+  }
+  return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
+}
+
+// Publication guard (Codex r7 P1): with a category gate on, the model
+// answers chemical and medical questions itself, so the compliance rule can
+// no longer rest on the prompt. A real-answers reply carrying banned copy is
+// a violation, fed into the same revise/verify loop; exhausting the budget
+// leaves the draft unconverged, which nothing publishes or sends.
+function validateComplianceCopy({ reply }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  if (!reply || !hasBannedCustomerCopy(reply)) return { ok: true, violations: [] };
+  return { ok: false, violations: ['the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
+}
+
+// Deterministic backstop: a reply that offers a free visit while the facts
+// do not say eligible is a violation, fed into the same revise/verify loop
+// (and enforced in single-pass mode, where no verifier would catch it).
+const FREE_RESERVICE_OFFER_RE = /\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b[^.?!\n]{0,60}\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|service|callback|come back|return)\b|\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|callback|come back|return)\b[^.?!\n]{0,60}\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b/i;
+function eligibleReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible for `));
+  if (!line) return [];
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
+}
+function validateReserviceOffer({ reply, factsBlock }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  const text = String(reply || '');
+  if (!FREE_RESERVICE_OFFER_RE.test(text)) return { ok: true, violations: [] };
+  const lanes = eligibleReserviceLanes(factsBlock);
+  if (!lanes.length) {
+    return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
+  }
+  // Codex r7: eligibility is per service line — a pest-only customer must
+  // not be offered a free LAWN re-service (or the reverse).
+  const named = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]].filter(([, rx]) => rx.test(text)).map(([lane]) => lane);
+  const wrong = named.filter((lane) => !lanes.includes(lane));
+  if (wrong.length) {
+    return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+  }
+  return { ok: true, violations: [] };
+}
+
+// Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
+// the structural fix for PR #5194): which job a reply's open times must be
+// sized for. Six Codex rounds on keyword tables kept finding new phrasings —
+// the bookable catalog has 16 termite, 7 rodent and 7 pest variants plus
+// the specialty services — so the model reads the text and picks one of the
+// customer's own visits, their open estimate, or one bookable catalog
+// service (the call pipeline's loadBookableCallServices list), and code
+// accepts only an answer that names an option it offered. An unclear text,
+// an invented option or a provider failure is uncertain, which withholds
+// OPEN TIMES: availability sized for the wrong job is worse than none
+// (Codex #5194 r4). Runs only for a live, gate-on draft about to fetch OPEN
+// TIMES (generateGroundedDraft).
+const SERVICE_IDENTITY_TIMEOUT_MS = 20000;
+
+// The visits a text can be about: every upcoming one (V1…) and the most
+// recent completed one (C1 — a callback on it).
+function serviceIdentityVisits(context) {
+  const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type)
+    // scheduledServiceId stays on this internal object only — the identity
+    // prompt renders id/type/date, never the row id.
+    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true, scheduledServiceId: s.scheduledServiceId ?? null }));
+  const last = (context?.serviceHistory || []).find((s) => s && s.type);
+  return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
+}
+
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
+  const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
+  return [
+    'A customer of Waves Pest Control texted:',
+    JSON.stringify(String(inboundMessage || '')),
+    '',
+    'Their visits:',
+    ...(visitLines.length ? visitLines : ['none on file']),
+    ...(openEstimate ? ['', `Their open estimate: ${openEstimate.service || 'service not stated'}`] : []),
+    '',
+    'Services Waves books (key: name):',
+    ...services.map((s) => `${s.service_key}: ${s.name}`),
+    '',
+    'A reply may offer open appointment times, sized for one job. Which job is this text about?',
+    ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
+    ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
+    ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
+    '- "none": the text names no service and points at no particular visit.',
+    '- "unclear": it could be more than one visit or service, or it asks about several at once.',
+    'Choose only from the lists above. When unsure, answer "unclear".',
+  ].join('\n');
+}
+
+// The provider can answer only with an offered option. A kind with nothing
+// to offer (a brand-new customer has no visit; a catalog load that failed
+// open has no service) is left out of the answer entirely rather than sent
+// as a bare null-typed property.
+function serviceIdentitySchema(visits, openEstimate, services) {
+  const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
+  const properties = {
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
+    ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
+  };
+  return { type: 'object', additionalProperties: false, required: Object.keys(properties), properties };
+}
+
+// The text names no job: the one upcoming visit (a reschedule or "when can
+// you come" is about it), uncertain for several; with none upcoming, the
+// open estimate ("Sounds good, can we do Tuesday?", Codex #5194 r3), else
+// the last completed visit, else the engine's own default service for a
+// brand-new customer.
+// The visit's scheduled_services id on the identity, only when it has one —
+// keeps the identity shape unchanged for every context without ids. Withheld
+// when another upcoming visit reads identically in the identity prompt (same
+// type, same date): the model's pick between them is arbitrary, and the id
+// would size OPEN TIMES for one particular visit (and property). The service
+// type stays certain either way, so the zone-finder path is unchanged; the
+// scheduler path withholds OPEN TIMES without an id.
+function visitIdField(visit, visits = []) {
+  if (!visit?.scheduledServiceId) return {};
+  const twin = visits.some((v) => v !== visit && v.upcoming && v.type === visit.type
+    && formatEtDate(v.date) === formatEtDate(visit.date));
+  return twin ? {} : { scheduledServiceId: visit.scheduledServiceId };
+}
+
+function unnamedServiceIdentity(visits, openEstimate) {
+  const upcoming = visits.filter((v) => v.upcoming);
+  if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming', ...visitIdField(upcoming[0]) };
+  if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  const completed = visits.find((v) => !v.upcoming);
+  if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
+  return { serviceType: null, certain: true, reason: 'engine_default' };
+}
+
+// Code accepts only an option it offered (the schema already constrains the
+// provider; this re-checks) — anything else is uncertain.
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
+  const visit = visits.find((v) => v.id === answer?.visit);
+  const service = services.find((s) => s.service_key === answer?.service);
+  if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
+  if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
+  return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
+}
+
+// { serviceType, certain, reason, estimateId? } — estimateId when the open
+// estimate is the job.
+async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
+  const visits = serviceIdentityVisits(context);
+  try {
+    const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
+    const { dispatchWithFallback } = require('./llm/call');
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'sms_service_identity',
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
+      jsonMode: true,
+      jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
+      maxTokens: 100,
+      timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
+    }, { reserveFallbackBudget: true });
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
+  } catch (err) {
+    logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
+    return { serviceType: null, certain: false, reason: 'no_valid_answer' };
+  }
+}
+
+// The service a live (non-estimate) scheduling reply is about: the next
+// scheduled visit's type, else the most recent completed one. Null when the
+// context names neither (the engine then keeps its own default).
+function liveServiceType(context) {
+  const next = (context?.upcomingServices || []).find((s) => s && s.type);
+  if (next) return String(next.type);
+  const last = (context?.serviceHistory || []).find((s) => s && s.type);
+  return last ? String(last.type) : null;
+}
+
+async function fetchOpenTimesBlock(args) {
+  return (await fetchOpenTimesData(args)).block;
+}
+
+// Owner-directed structural fix, replacing the prose date-parsing that took
+// 3 non-converging local-audit rounds to get subtly wrong in a new way each
+// time (pooling a window's time text across every day that offers it, then
+// over-correcting to require every one of those days to hold, then
+// over-correcting AGAIN with a weekday-text heuristic that still produced a
+// cross-product on a genuinely multi-option reply). The root cause was
+// re-deriving which day the model meant AFTER the fact, from plain reply
+// text — so the model now DECLARES it directly: offered_times is part of
+// its own JSON output (gate-on schema only), and this function is the
+// deterministic, draft-time check of that declaration against the ACTUAL
+// OPEN TIMES list — no prose parsing anywhere in this path. Pure/sync.
+//
+// A violation here is fed into the SAME revise/verify loop
+// generateGroundedDraft already runs for every other grounding failure —
+// exhausting the revision budget still ungrounded fails the draft closed
+// exactly like an ordinary fact-check miss (no draft, no card), never a
+// silent pass-through.
+// How many times `reply` quotes this exact OPEN TIMES window text. Digit
+// boundaries on both sides so "1:00 PM - 3:00 PM" can never be counted
+// inside "11:00 PM - 3:00 PM" — the window strings share one renderer, so
+// that is the only substring overlap possible between two different ones.
+function countQuotedWindow(reply, window) {
+  if (!reply || !window) return 0;
+  const escaped = window.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?<!\\d)${escaped}(?!\\d)`, 'g');
+  return (reply.match(re) || []).length;
+}
+
+function indexOpenTimesDays(openTimesDays) {
+  const validPairs = new Set();
+  const windowsByText = new Map(); // window text -> Set(dates that offer it)
+  for (const d of (openTimesDays || [])) {
+    for (const window of (d.windows || [])) {
+      validPairs.add(`${d.date}|${window}`);
+      if (!windowsByText.has(window)) windowsByText.set(window, new Set());
+      windowsByText.get(window).add(d.date);
+    }
+  }
+  return { validPairs, windowsByText };
+}
+
+function validateOfferedTimes({ offeredTimes, openTimesDays, reply, factsBlock = '' }) {
+  const violations = [];
+  const list = Array.isArray(offeredTimes) ? offeredTimes : [];
+  const replyText = reply || '';
+  const { validPairs, windowsByText } = indexOpenTimesDays(openTimesDays);
+  const factsOutsideOpenTimes = stripOpenTimesSection(factsBlock);
+
+  // window text -> how many VALID declared entries carry it
+  const declaredCount = new Map();
+  for (const entry of list) {
+    const date = entry && typeof entry.date === 'string' ? entry.date : '';
+    const window = entry && typeof entry.window === 'string' ? entry.window : '';
+    if (!date || !window) {
+      violations.push(`offered_times has an entry missing a date or window: ${JSON.stringify(entry)}`);
+      continue;
+    }
+    if (!validPairs.has(`${date}|${window}`)) {
+      violations.push(`offered_times claims "${date}: ${window}" but that is not an OPEN TIMES slot`);
+      continue;
+    }
+    if (!countQuotedWindow(replyText, window)) {
+      violations.push(`offered_times lists "${date}: ${window}" but the reply never quotes that time`);
+      continue;
+    }
+    declaredCount.set(window, (declaredCount.get(window) || 0) + 1);
+  }
+
+  // Reverse check, bound PER OCCURRENCE (pre-push audit P1): every time the
+  // reply quotes an OPEN TIMES window there must be exactly one declared
+  // (date, window) entry for it. A window-text-only check let "Tuesday 9–11
+  // or Wednesday 9–11" pass with only Tuesday declared — Wednesday would
+  // then never be persisted or rechecked at send time. Counting occurrences
+  // needs no prose parsing: the window text is the one thing FACT
+  // DISCIPLINE already makes the model copy verbatim.
+  //
+  // Pre-push audit P1 (round 2): the same window text can be grounded
+  // ELSEWHERE in the facts — an existing appointment's arrival window under
+  // UPCOMING SERVICES renders through the same formatter, so a reply that
+  // CONFIRMS "Tuesday 9:00 AM - 11:00 AM" (booked, not open) while Wednesday
+  // 9:00 AM - 11:00 AM happens to be open is not offering anything. Each
+  // occurrence of the window text outside the OPEN TIMES section is one
+  // quote the reply may make without declaring it; every quote beyond that
+  // is a new offer and must be declared. Still no prose parsing: both counts
+  // are exact-text.
+  for (const [window, dates] of windowsByText) {
+    const quoted = countQuotedWindow(replyText, window);
+    if (!quoted) continue;
+    const declared = declaredCount.get(window) || 0;
+    const groundedElsewhere = countQuotedWindow(factsOutsideOpenTimes, window);
+    const undeclared = quoted - declared;
+    if (undeclared < 0) {
+      violations.push(`the reply quotes "${window}" ${quoted} time(s) but offered_times declares it ${declared} time(s) — write the time out once per offered day, with one {date, window} entry each`);
+    } else if (undeclared > groundedElsewhere && !declared && !groundedElsewhere) {
+      const dateHint = dates.size === 1 ? ` (offered on ${[...dates][0]})` : '';
+      violations.push(`the reply quotes "${window}" from OPEN TIMES${dateHint} but it is not listed in offered_times`);
+    } else if (undeclared > groundedElsewhere) {
+      violations.push(`the reply quotes "${window}" ${quoted} time(s) but only ${declared} offered_times entr${declared === 1 ? 'y' : 'ies'} plus ${groundedElsewhere} already-scheduled mention${groundedElsewhere === 1 ? '' : 's'} account for it — write the time out once per offered day, with one {date, window} entry each`);
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
+
+// Single-pass (verifier OFF) day binding, Codex r4: validateOfferedTimes
+// proves each declared (date, window) is a real slot quoted in the reply,
+// but not that the reply names the DECLARED day next to that time — with
+// Tuesday and Wednesday both offering 9-11, "Tuesday 9-11" declaring
+// Wednesday would converge and the snapshot would recheck the wrong day.
+// The LLM verifier judges this when it runs; when it does not, this does:
+// every declared day must be named, and every occurrence of a declared
+// window must sit nearest to an anchor (weekday or "Month N") of a day
+// declared for that window.
+function replyBindsDeclaredDays(reply, offeredTimes) {
+  const text = String(reply || '');
+  const lower = text.toLowerCase();
+  const list = (Array.isArray(offeredTimes) ? offeredTimes : [])
+    .filter((e) => e && typeof e.date === 'string' && e.date && typeof e.window === 'string' && e.window);
+  if (!list.length) return true;
+  const anchorsOf = (date) => {
+    const label = String(date || '');
+    return [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean).map((a) => a.toLowerCase());
+  };
+  // Every day mention (weekday or "Month N") of every declared entry.
+  const anchors = [];
+  for (const e of list) {
+    let named = false;
+    for (const a of anchorsOf(e.date)) {
+      let i = lower.indexOf(a);
+      while (i !== -1) { named = true; anchors.push({ pos: i, end: i + a.length, date: e.date }); i = lower.indexOf(a, i + 1); }
+    }
+    if (!named) return false;
+  }
+  // Every occurrence of every declared window text.
+  const occurrences = [];
+  for (const w of new Set(list.map((e) => e.window))) {
+    let i = text.indexOf(w);
+    while (i !== -1) { occurrences.push({ pos: i, end: i + w.length, window: w }); i = text.indexOf(w, i + 1); }
+  }
+  // A day mention belongs to a time's OPTION when no other offered time sits
+  // between them ("Tuesday from 9-11 or Wednesday from 2-4": Wednesday is
+  // adjacent to both times, Tuesday only to the first). Each time must then
+  // be matched to a DISTINCT adjacent day mention whose date is declared for
+  // that window — nearest-distance alone misreads "day from time" phrasing.
+  const declared = new Set(list.map((e) => `${e.date}|${e.window}`));
+  const between = (a, b) => occurrences.some((o) => o.pos >= Math.min(a, b) && o.end <= Math.max(a, b));
+  const candidates = occurrences.map((o) => anchors
+    .map((a, idx) => ({ a, idx }))
+    .filter(({ a }) => (a.end <= o.pos ? !between(a.end, o.pos) : !between(o.end, a.pos)))
+    .filter(({ a }) => declared.has(`${a.date}|${o.window}`))
+    .map(({ idx }) => idx));
+  const used = new Set();
+  const assign = (k) => {
+    if (k === candidates.length) return true;
+    for (const idx of candidates[k]) {
+      // the weekday and the calendar date of one label are the same mention
+      const key = `${anchors[idx].date}@${idx}`;
+      if (used.has(key)) continue;
+      used.add(key);
+      if (assign(k + 1)) return true;
+      used.delete(key);
+    }
+    return false;
+  };
+  return assign(0);
+}
+
+// The deterministic inverse of buildFactsBlock's OPEN TIMES section, for a
+// FROZEN facts block (sealed-exam replay — pre-push audit P1): the replay
+// must not fetch today's calendar, but it still has to validate the model's
+// offered_times against the OPEN TIMES the draft actually saw, or every
+// correctly declared offer in a frozen exam would be rejected against an
+// empty list and the exam would grade drift toward deferral. Parses our own
+// rendered "- <date>: <w1>, <w2>" lines only — never model prose.
+const OPEN_TIMES_SECTION_HEADER = 'OPEN TIMES (real, bookable slots, ET';
+// [start, endExclusive) line range of the OPEN TIMES section, or null.
+function openTimesSectionRange(lines) {
+  const start = lines.findIndex((l) => l.startsWith(OPEN_TIMES_SECTION_HEADER));
+  if (start === -1) return null;
+  let end = start + 1;
+  while (end < lines.length && lines[end].startsWith('- ') && lines[end].includes(': ')) end++;
+  return [start, end];
+}
+// The facts block with its OPEN TIMES section removed — what a reply may
+// quote a window from WITHOUT it being a new offer (an existing visit's
+// arrival window, a history line).
+function stripOpenTimesSection(factsBlock) {
+  if (!factsBlock) return '';
+  const lines = String(factsBlock).split('\n');
+  const range = openTimesSectionRange(lines);
+  if (!range) return String(factsBlock);
+  return [...lines.slice(0, range[0]), ...lines.slice(range[1])].join('\n');
+}
+function parseOpenTimesDaysFromFactsBlock(factsBlock) {
+  if (!factsBlock) return [];
+  const lines = String(factsBlock).split('\n');
+  const range = openTimesSectionRange(lines);
+  if (!range) return [];
+  const days = [];
+  for (let i = range[0] + 1; i < range[1]; i++) {
+    const line = lines[i];
+    const idx = line.indexOf(': ');
+    const date = line.slice(2, idx);
+    const windows = line.slice(idx + 2).split(', ').map((w) => w.trim()).filter(Boolean);
+    if (date && windows.length) days.push({ date, windows });
+  }
+  return days;
+}
+
+// Which of a persisted snapshot's (date, window) pairs a send path must
+// recheck against live availability, given the body that will ACTUALLY go
+// out. Pure/sync; shared by the immediate /sms and queue-time /schedule-sms
+// Agent Review seam (verifyAgentDecisionForSend). Returns one of:
+//   { action: 'skip' }                       nothing to recheck
+//   { action: 'recheck', quotedWindows }     recheck exactly these pairs
+//   { action: 'refuse', reason }             fail closed — do not send
+//
+// Unedited body (matches the drafted reply): recheck every pair whose window
+// text is still present; a body that quotes none needs no recheck.
+//
+// Edited body (Codex r2 P2): a reviewer who reformats an offered time
+// ("9–11 AM"), or changes its day while keeping the time, would otherwise
+// slip past an exact-text filter — the first skips the recheck, the second
+// rechecks the wrong day. With no prose parsing available, an edited body
+// fails closed unless each pair is either fully KEPT (window text present,
+// and the day name present when the drafted reply named it) or fully
+// DROPPED (its day name and window text gone from what remains), and
+// nothing time- or day-shaped may be added beyond what the drafted reply
+// already carried outside its offers. A refused
+// reviewer edit re-drafts; a stale offer never sends.
+function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
+  const pairs = (snapshot?.quotedWindows || []).filter((w) => w && typeof w.window === 'string' && w.window);
+  if (!pairs.length) return { action: 'skip' };
+  const body = String(outgoingBody || '');
+  // Any byte difference is an edit — whitespace inside a time range is
+  // enough to break the exact-text filter, so it must not pass as "unedited".
+  const edited = originalBody != null && body.trim() !== String(originalBody).trim();
+  if (!edited) {
+    const still = pairs.filter((w) => body.includes(w.window));
+    return still.length ? { action: 'recheck', quotedWindows: still } : { action: 'skip' };
+  }
+
+  // Pre-push audit P1: day and window must be checked as a BOUND pair, not
+  // independently — "Tuesday 9-11 or Wednesday 2-4" edited to "Tuesday 2-4
+  // or Wednesday 9-11" has every day and every window present. The binding
+  // the drafter's verifier already grounded lives in the ORIGINAL text, so
+  // each pair's offer span (the shortest stretch of the drafted reply that
+  // holds its day name and its window text) must survive the edit verbatim.
+  const original = String(originalBody || '');
+  const kept = [];
+  let residual = body;
+  let originalResidual = original;
+  const notKept = [];
+  for (const w of pairs) {
+    // Anchors: the weekday, then the calendar date ("September 29") — a
+    // date label renders as "Tuesday, September 29".
+    const label = String(w.date || '');
+    const day = [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean);
+    const span = offerSpanInText(original, day, w.window);
+    if (span && body.includes(span)) {
+      // Pre-push audit P1 (r4): "…Tuesday 9:00 AM - 11:00 AM next week?"
+      // keeps the span verbatim yet changes the date. No vocabulary of
+      // date-changing modifiers is ever complete, so the rule is
+      // structural: inside the sentence that holds a kept offer, the edit
+      // may only use words the drafted sentence already had — trimming an
+      // option passes, ADDING anything to that sentence refuses.
+      if (!sentenceAddsNoWords(original, body, span)) return { action: 'refuse', reason: 'edited_offer_text' };
+      kept.push(w);
+      residual = residual.split(span).join(' ');
+      originalResidual = originalResidual.split(span).join(' ');
+      continue;
+    }
+    notKept.push({ w, day });
+  }
+  // (1) A pair that did not survive verbatim must be GONE: neither its
+  //     window text nor its day name (when the drafted reply named it) may
+  //     remain in the residual — a swap or a re-spaced range keeps them.
+  const lowerResidual = residual.toLowerCase();
+  for (const { w, day } of notKept) {
+    if (countQuotedWindow(residual, w.window) > 0) return { action: 'refuse', reason: 'edited_offer_text' };
+    for (const anchor of day) {
+      const a = anchor.toLowerCase();
+      if (original.toLowerCase().includes(a) && lowerResidual.includes(a)) return { action: 'refuse', reason: 'edited_offer_text' };
+    }
+  }
+  // (2) Nothing offer-like may be ADDED (pre-push audit P1: an appended
+  //     "Or tomorrow 2pm?" beside intact offers): every time- or day-shaped
+  //     token left in the edited residual must already have been in the
+  //     drafted reply outside its kept offers. Missing exact text is never
+  //     proof of removal ("Tue 9–11 AM" is a rewrite), and a rewrite's own
+  //     tokens are new, so it refuses here.
+  const allowed = new Map();
+  for (const t of offerTokens(originalResidual)) allowed.set(t, (allowed.get(t) || 0) + 1);
+  for (const t of offerTokens(residual)) {
+    const n = allowed.get(t) || 0;
+    if (!n) return { action: 'refuse', reason: 'edited_offer_text' };
+    allowed.set(t, n - 1);
+  }
+  return kept.length ? { action: 'recheck', quotedWindows: kept } : { action: 'skip' };
+}
+
+// Anything a customer could read as an appointment time or day: weekday
+// names or abbreviations, clock times, bare hour ranges, or relative-day
+// words. Deliberately broad — it only decides what an EDIT may leave behind
+// or add, and the safe answer to "not sure" is refuse.
+const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b|\b(next|this|following)\s+(week|weekend|month)\b|\bweek(end|s)?\b/gi;
+function offerTokens(text) {
+  return (String(text || '').match(OFFER_TOKEN_RE) || []).map((t) => t.toLowerCase().replace(/\s+/g, ' ').replace(/\./g, ''));
+}
+function looksLikeOfferText(text) {
+  return offerTokens(text).length > 0;
+}
+
+// The sentence of `text` that contains [start, end): back to the previous
+// terminator-plus-space (or newline/start), forward through the next one.
+function sentenceAround(text, start, end) {
+  let s = 0;
+  const before = text.slice(0, start);
+  const back = Math.max(before.lastIndexOf('. '), before.lastIndexOf('? '), before.lastIndexOf('! '), before.lastIndexOf('\n'));
+  if (back !== -1) s = back + 1;
+  const after = text.slice(end);
+  const m = after.match(/[.?!](?=\s|$)|\n/);
+  const e = m ? end + m.index + 1 : text.length;
+  return text.slice(s, e);
+}
+function sentenceWords(sentence) {
+  return String(sentence || '').toLowerCase().split(/\s+/)
+    .map((w) => w.replace(/^[^a-z0-9$]+|[^a-z0-9]+$/g, ''))
+    .filter(Boolean);
+}
+// true when the body's sentence around `span` uses only words from the
+// drafted reply's sentence around the same span.
+function sentenceAddsNoWords(original, body, span) {
+  const oi = original.indexOf(span);
+  const bi = body.indexOf(span);
+  if (oi === -1 || bi === -1) return false;
+  const allowed = new Set(sentenceWords(sentenceAround(original, oi, oi + span.length)));
+  return sentenceWords(sentenceAround(body, bi, bi + span.length)).every((w) => allowed.has(w));
+}
+
+// The shortest substring of `text` containing the pair's day anchor
+// (case-insensitive) and its `window` (exact), whichever order; just the
+// window text when no anchor is named; null when the window is absent.
+// The anchor is the weekday when the reply names it, else the calendar
+// date ("September 29") — a reply that wrote the date instead of the
+// weekday binds through the date (pre-push audit P1: "September 29 from
+// 9-11" edited to "October 6 from 9-11" must not keep the September span).
+function offerSpanInText(text, day, window) {
+  const positions = (needle, haystack) => {
+    const out = [];
+    if (!needle) return out;
+    let i = haystack.indexOf(needle);
+    while (i !== -1) { out.push(i); i = haystack.indexOf(needle, i + 1); }
+    return out;
+  };
+  const windowAt = positions(window, text);
+  if (!windowAt.length) return null;
+  const anchors = Array.isArray(day) ? day : [day];
+  let anchor = null;
+  let dayAt = [];
+  for (const a of anchors) {
+    if (!a) continue;
+    dayAt = positions(a.toLowerCase(), text.toLowerCase());
+    if (dayAt.length) { anchor = a; break; }
+  }
+  if (!anchor) return window;
+  day = anchor;
+  let best = null;
+  for (const wi of windowAt) {
+    for (const di of dayAt) {
+      const start = Math.min(wi, di);
+      const end = Math.max(wi + window.length, di + day.length);
+      if (!best || end - start < best.end - best.start) best = { start, end };
+    }
+  }
+  return text.slice(best.start, best.end);
+}
+
+// Deterministic amount guard shared by every delivery boundary (Codex r3:
+// the estimate-review lane reused only hasPriceQuote and threw away every
+// grounded v12 answer). true when the reply carries an amount the facts
+// block did not authorize, or price grammar the extractor cannot verify.
+// Language that states what is OWED or charged on an ongoing basis.
+const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
+const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
+// Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
+// USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
+// unit-less numerals stay out of the deterministic guard (dates, house
+// numbers, zone counts would false-positive) — those remain the verifier's
+// + reviewer's territory. One definition, with PAYMENT_ACK_RE, for this
+// draft-time guard and the send-time recheck (sms-amount-recheck).
+const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
+const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+// The billing figures a reply may quote, in cents — one definition for this
+// draft-time guard and the send-time recheck (sms-amount-recheck): what is
+// OWED (balance, open invoice, published monthly dues) and what was PAID.
+// `settledOnly` keeps only payments that went through (Codex r7 —
+// recentPayments is attempted history and carries failed / pending /
+// overdue rows too, none of which back "your payment went through").
+function billingAmountCents(context, { settledOnly = false } = {}) {
+  const billing = context?.billing || {};
+  const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
+  const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
+  return {
+    owed: finiteSet([
+      billing.outstandingBalance > 0 ? centsOf(billing.outstandingBalance) : NaN,
+      centsOf(billing.openInvoice?.amountDue),
+      ...require('./context-aggregator').authorizedDuesCents(context),
+    ]),
+    paid: finiteSet((billing.recentPayments || [])
+      .filter((p) => !settledOnly || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
+      .map((p) => centsOf(p?.amount))),
+  };
+}
+
+// `opts.byMeaning` pins the strict clause/status-aware rule regardless of
+// the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
+// rollback is still a v12 draft and is rechecked as one.
+function replyQuotesUngroundedAmount(reply, context, opts = {}) {
+  const suggestMode = require('./sms-suggest-mode');
+  const centsOf = (v) => Math.round(Number(v) * 100);
+  const text = String(reply || '');
+  // Gate on: only payments that actually went through back an acknowledgement.
+  const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
+  const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+  // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
+  // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
+  // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
+  // we cannot positively match EVERY numeric to an authorized value, the
+  // draft stays shadow. An authorized "$120.00" reply extracts and passes;
+  // "fifty dollars" stays unverifiable and withholds. Cadence follows the
+  // same rule as any other amount now that dues are authorized: "$98.50/mo"
+  // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
+  // carries no currency marker, extracts nothing, and still withholds.
+  const priceGrammarFires = suggestMode.hasPriceQuote(text);
+  const replyAmounts = amountsIn(text);
+  if (priceGrammarFires && replyAmounts.length === 0) return true;
+
+  // Gate OFF: the original pooled allowlist — any authoritative figure
+  // passes — so live behavior is unchanged by PR #5119.
+  if (!realAnswers) {
+    return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
+  }
+
+  // Gate ON: each amount is authorized by the MEANING of its own clause
+  // (Codex r5/r6). An owed figure backs a statement about what is owed; a
+  // payment figure backs a payment acknowledgement. Judging the language
+  // reply-wide let "We received your $120.50 payment; your remaining
+  // balance is $95" pass with the two figures swapped. A clause that reads
+  // as both, or as neither, cannot be bound and fails closed. The language
+  // tests run on the clause with its amounts masked — the ack grammar stops
+  // at a period, and "$95.50" must not end it.
+  const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
+  for (const clause of clauses) {
+    const text = String(clause || '');
+    const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
+    // Price grammar left once the readable figures are masked is a price the
+    // extractor cannot verify ("fifty dollars", "the fee is 45"): it fails
+    // closed even beside a grounded figure, in another clause (Codex #5194
+    // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
+    if (suggestMode.hasPriceQuote(masked)) return true;
+    const amounts = amountsIn(text);
+    if (!amounts.length) continue;
+    const owed = AMOUNT_OWED_RE.test(masked);
+    const ack = PAYMENT_ACK_RE.test(masked);
+    if (owed === ack) return true;
+    const allowed = owed ? owedCents : paidCents;
+    if (amounts.some((a) => !allowed.has(a))) return true;
+  }
+  return false;
+}
+
+// The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
+// computed once per generation and carried on whichever row the caller
+// persists it to (message_drafts.intended_actions for the live SMS lane,
+// agent_decisions.input_snapshot for the estimate-follow-up lane and every
+// suggest-mode/auto-send decision). Persists the model's own VALIDATED
+// offered_times declaration (owner-directed structural fix) rather than
+// re-deriving quoted pairs from reply text. null when there's nothing to
+// recheck: no OPEN TIMES was fetched, or the draft declared no times.
+function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null, scheduledServiceId = null }) {
+  if (!openTimesBlock) return null;
+  const quotedWindows = Array.isArray(offeredTimes)
+    ? offeredTimes
+        .filter((e) => e && typeof e.date === 'string' && e.date && typeof e.window === 'string' && e.window)
+        .map((e) => ({ date: e.date, window: e.window }))
+    : [];
+  if (!quotedWindows.length) return null;
+  // serviceType only when known — keeps the persisted shape unchanged for
+  // every caller that has none (and every existing snapshot row).
+  // scheduledServiceId (+ source marker) ONLY when the scheduler path
+  // produced the offer (GATE_SMS_OFFERS_SCHEDULER): the send-time recheck
+  // then asks the same picker about the same visit. Absent, the snapshot
+  // keeps its old shape and the old finder rechecks it.
+  return {
+    lookup: {
+      city, customerId: customerId || null, estimateId: estimateId || null, ...(serviceType ? { serviceType } : {}),
+      ...(scheduledServiceId ? { scheduledServiceId, source: SCHEDULER_OFFER_SOURCE } : {}),
+    },
+    quotedWindows,
+  };
+}
+
+// The days a send-time recheck compares against: the scheduler picker's for
+// a snapshot that carries a visit id, else the zone finder's. null = the
+// visit is no longer one the picker offers times for.
+async function currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }) {
+  if (scheduledServiceId) {
+    const loaded = await loadSchedulerVisitDays({ customerId, scheduledServiceId });
+    return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
+  }
+  const Availability = require('./availability');
+  const result = await Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) });
+  return { days: result?.days || [], labelOf: openTimesDayLabel };
+}
+
+// Re-fetch availability at SEND time and verify every quoted (date, window)
+// pair is STILL offered on THAT SAME date — the structural fix itself.
+// Read-only (the SAME AvailabilityEngine.getAvailableSlots call
+// fetchOpenTimesBlock and check_availability make); never books, never
+// holds a slot. Fails CLOSED: a missing city, a fetch error, or a timeout
+// all resolve to "not still offered" — the one thing this function must
+// never do is silently assume a quoted time is fine when it couldn't
+// actually confirm that.
+async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, scheduledServiceId = null, quotedWindows } = {}) {
+  if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
+  if (!city && !scheduledServiceId) return { ok: false, reason: 'open_times_recheck_no_city' };
+  let timer = null;
+  const startedAt = Date.now();
+  try {
+    const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('open-times recheck timeout')),
+        scheduledServiceId ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
+      );
+    });
+    // A snapshot minted by the scheduler path (scheduledServiceId on its
+    // lookup) is rechecked through the same picker for the same visit; a
+    // legacy snapshot without one keeps the zone finder. A visit the picker
+    // no longer offers times for reads as every quoted window gone.
+    const current = await Promise.race([
+      currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }),
+      timeout,
+    ]);
+    if (!current) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows: quotedWindows };
+    // The picker excludes the visit itself, so a visit moved ONTO a quoted
+    // slot since the draft reads as open there: refuse it — the customer
+    // would be "offered" the time they already have.
+    // Same 2-hour overlap rule the draft applies: a quoted window that now
+    // overlaps the visit's current one (quoted 9-11, visit moved to 10-12)
+    // is refused too, not only an exact match.
+    const cur = current.currentWindow;
+    const currentWindows = new Set();
+    const startMinutesOf = new Map();
+    for (const d of current.days) {
+      const date = current.labelOf(d);
+      for (const s of (d.slots || [])) {
+        const range = arrivalWindowRange(s.startTime24);
+        const window = range ? formatSmsTimeRange(range) : null;
+        if (!window) continue;
+        currentWindows.add(`${date}|${window}`);
+        const hhmm = String(s.startTime24 || '').slice(0, 5);
+        if (/^\d{2}:\d{2}$/.test(hhmm)) startMinutesOf.set(`${date}|${window}`, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)));
+      }
+    }
+    const overlapsVisit = (w) => {
+      if (!cur || w.date !== cur.date) return false;
+      if (w.window === cur.window) return true;
+      const start = startMinutesOf.get(`${w.date}|${w.window}`);
+      return start != null && cur.startMinutes != null && Math.abs(start - cur.startMinutes) < 120;
+    };
+    if (quotedWindows.some(overlapsVisit)) return { ok: false, reason: 'open_times_visit_already_there' };
+    const goneWindows = quotedWindows.filter((w) => !currentWindows.has(`${w.date}|${w.window}`));
+    if (goneWindows.length) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows };
+    return { ok: true };
+  } catch (err) {
+    logger.warn(`[sms-shadow] open-times send-time recheck failed (${err.message}) — failing closed`);
+    return { ok: false, reason: 'open_times_recheck_failed' };
+  } finally {
+    // Same leaked-handle fix as fetchOpenTimesBlock's own timer.
+    if (timer) clearTimeout(timer);
+    if (scheduledServiceId) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
+  }
+}
 
 // v9 voice-profile tunables. SHADOW_VOICE_PROFILE=false is the kill switch:
 // drafting reverts to the base prompt with no profile block, no deploy.
@@ -133,12 +1365,37 @@ async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
 }
 
 function buildSystemPromptWithProfile(voiceProfileText = '') {
+  // v12 REAL ANSWERS: every conditional below resolves to the exact v11
+  // literal when the gate is off (see the constant-block comment above
+  // PROMPT_VERSION) — gate off is byte-identical. Every branch below is also
+  // TIME-INVARIANT (pre-push audit P1): the live follow-up SLA phrase is a
+  // per-draft FACT (buildFactsBlock's "FOLLOW-UP SLA RIGHT NOW" line), never
+  // interpolated here — this function's output must stay stable across the
+  // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
+  // pins the full rendered system prompt.
+  const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
+  const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
+  const deferRule = realAnswersOn
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
+    : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
+  // Codex r3: the v11 "do NOT name a time" branch and the v12 "offer OPEN
+  // TIMES" rule both fired on "when can you come?", and the more specific
+  // prohibition won. Gate-on, the no-appointment case explicitly routes to
+  // OPEN TIMES; gate-off keeps the v11 literal.
+  const noAppointmentRule = realAnswersOn
+    ? "If the customer asks when we're coming and no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times) so they can pick one; only if OPEN TIMES is absent or empty, say you'll confirm it and get right back to them."
+    : "If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.";
+  const handoffBullet = realAnswersOn
+    ? realAnswersHandoffBullets()
+    : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (SERVICE HISTORY, UPCOMING SERVICES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
-- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), UPCOMING SERVICES, or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
+FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
+- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
 - Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
@@ -155,12 +1412,12 @@ BILLING & MONEY RULES:
 PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
-When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.
+${deferRule}
 
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
-- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
+${handoffBullet}
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
 - When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
 - For other intents, if the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
@@ -169,7 +1426,8 @@ Respond with ONLY a JSON object, no prose, no code fences:
 {
   "reply": "the SMS you would send",
   "intended_actions": [{"type": "escalate", "note": "optional short reason"}],
-  "missing_info": "facts you needed but the context lacked, or null"
+  "missing_info": "facts you needed but the context lacked, or null"${realAnswersOn ? `,
+  "offered_times": [{"date": "the OPEN TIMES date label, verbatim", "window": "the OPEN TIMES window text, verbatim"}]` : ''}
 }`;
 
   // Owner-approved voice profile rides in via the SAME sanitize/compose path
@@ -188,12 +1446,12 @@ Respond with ONLY a JSON object, no prose, no code fences:
       const composed = composeSystemPrompt(base, voiceProfileText);
       // composeSystemPrompt returns the base untouched when sanitization
       // strips every profile line — identity IS the applied signal.
-      if (composed !== base) return { system: composed, applied: true };
+      if (composed !== base) return { system: composed, applied: true, realAnswersApplied: realAnswersOn };
     } catch (err) {
       logger.warn(`[sms-shadow] voice profile compose failed (${err.message}); drafting on base prompt`);
     }
   }
-  return { system: base, applied: false };
+  return { system: base, applied: false, realAnswersApplied: realAnswersOn };
 }
 
 function buildSystemPrompt(voiceProfileText = '') {
@@ -282,30 +1540,44 @@ function monthlyChargeNote(dues) {
  * verifier checks the draft against, so the two agree on what counts as
  * "supported". Shared by buildUserPrompt and the verify loop.
  */
-function buildFactsBlock(context) {
+function buildFactsBlock(context, extras = {}) {
+  // v12 REAL ANSWERS: buildFactsBlock stays SYNC on purpose (it's called
+  // from the verifier/judge paths too) — the async slot fetch happens
+  // upstream (fetchOpenTimesBlock) and its rendered text rides in here as
+  // `extras.openTimesBlock`. Omitted/null (gate off, no scheduling intent,
+  // no city, fetch error/timeout, or an old caller that doesn't pass it) →
+  // openTimesSection is '' and the returned block is byte-identical to v11.
+  const openTimesSection = extras.openTimesBlock
+    ? `OPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n${extras.openTimesBlock}\n`
+    : '';
+  // Pre-push audit P1: the live follow-up SLA phrase ("within the hour" /
+  // "by 9 AM tomorrow morning") is TIME-VARYING — it flips at the 8am/8pm ET
+  // boundary — so it must never be baked into the (hashed/pinned) system
+  // prompt; see followupSlaPhrase's own comment. It rides here instead, as
+  // an ordinary per-draft FACT the model quotes verbatim, same as OPEN
+  // TIMES. Gate-on unconditional (not scheduling-intent-gated): ANY category
+  // — a hand-off, a cancellation, a held complaint — may need to state it.
+  // `extras.now` was test-only through PR #5194; generateGroundedDraft now
+  // passes its own captured factsAt here for every live draft too (Codex
+  // #5194 P2 — see its comment), so the phrase rendered here and the
+  // instant returned as factsGeneratedAt are always the same moment.
+  const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
+    : '';
+  // Free re-service eligibility (Codex r6 P1) — only when the real-answers
+  // AND complaints gates are on; a caller that passes no lanes renders
+  // "not eligible" (fail closed). Resolved upstream (fetchReserviceLanes).
+  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS') && gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+    ? `${reserviceFactLine(extras.reserviceLanes)}\n`
+    : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
   // grounding from ANY untrusted text — property notes, call summaries, and
   // transcripts alike. Fail CLOSED: if the guard can't load, treat every
   // candidate line as banned.
-  let bannedCopyGuard = null;
-  try {
-    ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
-  } catch { bannedCopyGuard = null; }
-  // The ONE sanctioned safety idiom (Codex r9+r10): "safe once dry" counts
-  // only when the SAME text also carries the technician-confirms-timing
-  // clause — the complete prescribed answer. The sanctioned sentence is
-  // stripped before screening so any OTHER claim in the text still drops it.
-  const SANCTIONED_SAFE_RE = /\bsafe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/i;
-  const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
-  const hasBannedCopy = (text) => {
-    if (!bannedCopyGuard) return true;
-    let t = String(text || '');
-    if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
-      t = t.replace(SANCTIONED_SAFE_RE, '');
-    }
-    return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
-  };
+  // (the predicate itself is module-level — hasBannedCustomerCopy — since
+  // Codex r7, shared with the publication guard validateComplianceCopy)
+  const hasBannedCopy = hasBannedCustomerCopy;
 
   const conversation = (context.smsHistory || [])
     .slice(0, 10)
@@ -538,7 +1810,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-BILLING:
+${openTimesSection}${slaSection}${reserviceSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -754,15 +2026,21 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model, servedModel, verifierModels }. converged=true means the verifier
+ * { parsed, passes, converged, model, servedModel, verifierModels, factsBlock,
+ * factsGeneratedAt }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model identifies
  * the winning requested route; servedModel identifies the provider-reported
- * model that produced the FINAL draft. Verify failures
+ * model that produced the FINAL draft. factsGeneratedAt is the instant
+ * factsBlock was rendered (Codex #5194 P2) — null on a frozen replay
+ * (presetFactsBlock), which has no such instant of its own; a live caller
+ * persists it so the SLA phrase it carries can be re-anchored at send time
+ * instead of to the row's later created_at (see sms-followup-sla.js's
+ * slaDraftedAt). Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -774,13 +2052,104 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const voiceProfile = presetVoiceProfile !== undefined
     ? presetVoiceProfile
     : await fetchVoiceProfileForDrafter();
-  const { system, applied: profileApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
+  const { system, applied: profileApplied, realAnswersApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
+  // Only the drafts that actually saw the rewritten (real-answers) prompt
+  // stamp the bumped version — a base-prompt draft (gate off) keeps v11, the
+  // same "applied is the stamped signal" rule the voice profile already
+  // follows just above. currentPromptVersion() (never a bare
+  // REAL_ANSWERS_PROMPT_VERSION ternary, pre-push audit P1 round 2): it also
+  // folds in whichever per-category gates are on, so a draft actually
+  // rendered under e.g. "complaints handled" stamps a version distinct from
+  // one rendered with complaints still held — the one identity every other
+  // consumer (graduation cohorts, sealed-eval exam checks) shares.
+  const promptVersion = realAnswersApplied ? currentPromptVersion() : PROMPT_VERSION;
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
   // confound that contaminated every backfill measurement). Live callers
-  // omit it and get the aggregator-built block as before.
-  const factsBlock = presetFactsBlock || buildFactsBlock(context);
+  // omit it and get the aggregator-built block as before. The OPEN TIMES
+  // fetch is skipped for a frozen replay too — a live availability read
+  // against a historical message would grade the draft on today's calendar,
+  // not the one it actually saw.
+  //
+  // Pre-push audit P1: `schedulingIntent` alone is the UPSTREAM webhook's
+  // hasSchedulingIntent() classifier, which is scoped to ordinary "when are
+  // you coming" scheduling messages — it does NOT fire for "cancel my
+  // service" or a complaint ("I still have ants"). But the real-answers
+  // rules ALSO need real OPEN TIMES for exactly those two categories
+  // (cancellation skip/reschedule offers, unconditionally; a complaint's
+  // free re-service offer, when GATE_SMS_AGENT_COMPLAINTS is on) — without
+  // this, the model would be told to offer specific times it was never
+  // given and would either invent one (a FACT DISCIPLINE violation) or defer
+  // instead of answering. Reuses the SAME cancel/complaint detection this
+  // file's own save-the-sale routing already applies to intent + raw text
+  // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
+  // drift apart.
+  // Which job the OPEN TIMES are sized for (Codex r3, follow-up #5, owner
+  // 2026-09-28): serviceIdentityFor has the model pick the visit, open
+  // estimate or catalog service the text is about. An estimate the message
+  // is linked to (estimateId) pins the service itself — its service_interest
+  // wins inside the engine — so no classification then. Carried on the
+  // snapshot so the send-time recheck asks the same question.
+  const needsOpenTimes = Boolean(schedulingIntent)
+    || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
+    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+  // The identity step runs only when a live, gate-on OPEN TIMES fetch is
+  // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
+  // or with no city to look up (fetchOpenTimesData returns nothing then —
+  // the backfill lane never passes one), drafting makes no catalog query and
+  // no extra model call.
+  // A live draft (liveOpenTimes: only draftShadowReply passes it — replay and
+  // backfill callers pass no city on purpose) may also fetch with no customer
+  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler path locates the visit
+  // from the visit row itself; the zone finder still needs a city and returns
+  // nothing without one.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes
+    && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
+    && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const identity = willFetchOpenTimes && !estimateId
+    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
+    : { serviceType: liveServiceType(context), certain: true };
+  const serviceType = identity.serviceType;
+  const pricingEstimateId = estimateId || identity.estimateId || null;
+  // An estimate pins the service itself; otherwise an uncertain identity
+  // withholds OPEN TIMES rather than pricing the wrong job.
+  const identityCertain = Boolean(pricingEstimateId) || identity.certain;
+  if (willFetchOpenTimes && !identityCertain) {
+    logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
+  }
+  // GATE_SMS_OFFERS_SCHEDULER (slice 1): a text the identity step resolved to
+  // ONE upcoming visit is offered that visit's times from the reschedule
+  // link's own picker. Everything else (estimate, new_service,
+  // last_completed, engine_default) stays on the zone finder for now.
+  const offersFromScheduler = willFetchOpenTimes && !estimateId && identityCertain
+    && SCHEDULER_VISIT_REASONS.has(identity.reason) && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
+  const scheduledServiceId = offersFromScheduler ? (identity.scheduledServiceId || null) : null;
+  // A frozen replay validates offered_times against the OPEN TIMES it
+  // actually saw (parsed back out of its own facts block); `block` stays
+  // null there so no send-time snapshot is minted for a draft nothing sends.
+  const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
+    ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
+    : await fetchOpenTimesData({
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId: pricingEstimateId, serviceType,
+      ...(offersFromScheduler ? { offersFromScheduler: true, scheduledServiceId } : {}),
+    });
+  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
+  // draft resolves eligibility through the existing re-service mechanism.
+  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+  // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
+  // not off created_at — the row's created_at lands only after this whole
+  // draft→verify→revise loop finishes below, which can cross the 8am/8pm ET
+  // phrase boundary the send-time checks (sms-followup-sla.js) re-derive the
+  // deadline from. factsAt IS that instant; it rides straight into
+  // buildFactsBlock's `now` (so the rendered phrase and the timestamp this
+  // function returns are always the same moment) and out again as
+  // factsGeneratedAt on every return below, for the caller to persist. A
+  // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
+  // "generated now" instant of its own — it returns null.
+  const factsAt = presetFactsBlock ? null : new Date();
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -813,13 +2182,61 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [],
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
   };
   let { parsed, model, servedModel } = first;
-  // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
-  if (!VERIFY_ENABLED) return {
-    parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [],
-  };
+  // Kill switch / single-pass mode: no LLM verification claim, behave as
+  // pre-v3 — except the offered_times check, which is deterministic and
+  // costs no call (Codex r2 P2): a single-pass draft that quotes a slot but
+  // omits or misstates its declaration would otherwise persist a null or
+  // wrong send-time snapshot. It fails closed the same way an exhausted
+  // revise loop does — converged:false, which every consumer already
+  // refuses to publish or send.
+  if (!VERIFY_ENABLED && realAnswersApplied) {
+    // STRUCTURAL (Codex r7, after seven rounds whose findings mostly shared
+    // one premise — real answers ON with the verifier OFF): a real-answers
+    // draft states appointment times, amounts, eligibility and category
+    // answers, and the LLM verifier is the grounding check for all of it.
+    // Deterministic checks cannot stand in for it (each round found another
+    // paraphrase they miss), so with the verifier disabled a real-answers
+    // draft is NEVER converged: it stays a shadow row the judge still
+    // covers, and nothing publishes or sends it. The kill switch therefore
+    // also switches real answers off at the delivery boundary.
+    logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
+    return {
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      openTimesSnapshot: null,
+    };
+  }
+  if (!VERIFY_ENABLED) {
+    // No facts block here on purpose (Codex r3): the grounded-elsewhere
+    // allowance exists so the LLM verifier can judge a confirmation of a
+    // booked visit; with that verifier OFF nothing can, so an undeclared
+    // quote of any OPEN TIMES window is a violation outright.
+    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply });
+    if (singlePassCheck.ok && !replyBindsDeclaredDays(parsed?.reply, parsed?.offered_times)) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
+    }
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock });
+    if (!singlePassReservice.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassReservice.violations);
+    }
+    if (!singlePassCheck.ok) {
+      logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
+      return {
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+        openTimesSnapshot: null,
+      };
+    }
+    return {
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
+      openTimesSnapshot: computeOpenTimesSnapshot({
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+      }),
+    };
+  }
 
   const verifier = require('./sms-draft-verifier');
   let passes = 1;
@@ -830,25 +2247,44 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // An empty reply ("no reply warranted") asserts nothing — nothing to check.
     if (!parsed.reply) { converged = true; break; }
 
+    // Owner-directed structural fix: check the model's own offered_times
+    // declaration deterministically FIRST, before spending a verifier call —
+    // any violation is a verifier-grade failure and feeds the SAME
+    // revise/verify loop below via a synthesized verdict, exactly like an
+    // LLM-caught fact-check miss.
+    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
+    for (const check of [reserviceCheck, complianceCheck]) {
+      if (!check.ok) {
+        timesCheck.ok = false;
+        timesCheck.violations.push(...check.violations);
+      }
+    }
+
     let verdict;
-    try {
-      const vResp = await createDeepMessage(client, {
-        laneId: 'sms_verifier',
-        model: verifier.VERIFIER_MODEL,
-        max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
-        effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
-        system: verifier.buildVerifierSystemPrompt(),
-        messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
-      });
-      // createDeepMessage can transparently cross providers. Preserve the
-      // model that actually served each verdict so sealed qualification can
-      // prove that its pinned verifier route ran instead of its fallback.
-      verifierModels.push(typeof vResp?.model === 'string' ? vResp.model : null);
-      verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
-    } catch (err) {
-      logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
-      converged = false;
-      break;
+    if (!timesCheck.ok) {
+      verdict = { supported: false, violations: timesCheck.violations };
+    } else {
+      try {
+        const vResp = await createDeepMessage(client, {
+          laneId: 'sms_verifier',
+          model: verifier.VERIFIER_MODEL,
+          max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
+          effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
+          system: verifier.buildVerifierSystemPrompt(),
+          messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply, parsed.offered_times) }],
+        });
+        // createDeepMessage can transparently cross providers. Preserve the
+        // model that actually served each verdict so sealed qualification can
+        // prove that its pinned verifier route ran instead of its fallback.
+        verifierModels.push(typeof vResp?.model === 'string' ? vResp.model : null);
+        verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
+      } catch (err) {
+        logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
+        converged = false;
+        break;
+      }
     }
 
     if (!verdict) { converged = false; break; } // unparseable verdict — stop, don't loop
@@ -881,7 +2317,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
-  return { parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels };
+  return {
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
+    // Computed off the FINAL parsed.reply (after every revision pass) — an
+    // earlier draft may have quoted a window a REVISION dropped, or vice
+    // versa; only what's actually about to be sent matters here.
+    openTimesSnapshot: computeOpenTimesSnapshot({
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+    }),
+  };
 }
 
 /**
@@ -929,11 +2373,31 @@ function parseShadowResponse(text) {
         .map((a) => ({ type: a.type, note: typeof a.note === 'string' ? a.note.slice(0, 200) : undefined }))
     : [];
 
+  // Structural fix (owner directive, replacing the prose date-parsing that
+  // took 3 non-converging local-audit rounds to get wrong in a new way each
+  // time): the model now DECLARES which OPEN TIMES (date, window) pairs it
+  // offered, instead of that binding being re-derived after the fact from
+  // plain reply text. Raw here — generateGroundedDraft's deterministic
+  // validateOfferedTimes checks each entry against the actual OPEN TIMES
+  // list and against the reply text; a malformed entry (missing/non-string
+  // date or window) is dropped rather than crashing the parse, so it reads
+  // as an ungrounded time and fails that check instead.
+  const offeredTimes = Array.isArray(parsed.offered_times)
+    ? parsed.offered_times
+        .filter((e) => e && typeof e === 'object')
+        .map((e) => ({
+          date: typeof e.date === 'string' ? e.date.trim().slice(0, 100) : '',
+          window: typeof e.window === 'string' ? e.window.trim().slice(0, 60) : '',
+        }))
+        .filter((e) => e.date && e.window)
+    : [];
+
   return {
     reply: parsed.reply.trim(),
     intended_actions: intendedActions,
     auto_send_safe: autoSendSafe,
     missing_info: typeof parsed.missing_info === 'string' ? parsed.missing_info.slice(0, 500) : null,
+    offered_times: offeredTimes,
   };
 }
 
@@ -962,8 +2426,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
-    const { parsed, passes, converged, model: draftModel, voiceProfileVersion } = await generateGroundedDraft({
-      client, context, inboundMessage, intent, schedulingIntent,
+    // city (real-answers OPEN TIMES fetch — see fetchOpenTimesBlock) comes
+    // from the customer row the webhook already matched, never re-looked-up.
+    const {
+      parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
+      openTimesSnapshot, factsGeneratedAt,
+    } = await generateGroundedDraft({
+      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
@@ -971,9 +2440,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     }
 
     const intentName = intent?.intent || 'GENERAL';
-    // Built once: persisted on the row (judge parity) AND consulted by the
-    // deterministic amount-source guard below.
-    const factsForDraft = buildFactsBlock(context);
+    // factsForDraft is the EXACT block generateGroundedDraft drafted and
+    // verified against (judge parity) — built once inside the loop above and
+    // returned, never recomputed here (a second live OPEN TIMES fetch could
+    // race a slot taken between the two calls and disagree with what the
+    // model actually saw).
     // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
     // card; intents flipped to 'auto_send' (and that have earned the rung)
     // have it SENT to the customer automatically. Escalation intents,
@@ -1039,7 +2510,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         status: SHADOW_STATUS,
         drafter: DRAFTER,
         model: draftModel,
-        prompt_version: PROMPT_VERSION,
+        prompt_version: promptVersion,
         // What the drafter actually saw — the judge grades fact-grounding
         // against this, not the one-line summary (without it, a draft that
         // correctly uses a call/dispatch fact reads as an invention).
@@ -1052,6 +2523,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // shaped this draft — null = base prompt. Lets cohort readouts
           // split v9 drafts by the profile that was live at draft time.
           voice_profile_version: voiceProfileVersion ?? null,
+          // The minimum needed to recheck quoted OPEN TIMES at send time
+          // (pre-push audit P2) — null when the draft quoted none. Carried
+          // through to whichever agent_decisions row a human-approved or
+          // auto-send publish creates, so every send path can re-verify
+          // without re-deriving it from facts_block text.
+          open_times_snapshot: openTimesSnapshot ?? null,
           ...(gratitudeCandidate ? {
             gratitude: {
               source: 'live_webhook',
@@ -1089,55 +2566,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // maybeAutoSend still refuses amount-bearing drafts (autonomy boundary —
     // relaxing that is a separate explicit owner call).
     //
-    // DETERMINISTIC source restriction (Codex r5+r6): the verifier treats
-    // the customer's literal words as grounding, so "I think my balance is
-    // $50" could be confirmed verbatim — and the rendered facts block
-    // CONTAINS the SMS thread, so scanning it would whitelist the
-    // customer's own figure. The whitelist is therefore built from the
-    // AUTHORITATIVE billing/estimate VALUES in context, compared numerically
-    // (so "$120" matches a $120.00 fact).
-    const centsOf = (v) => Math.round(Number(v) * 100);
-    // The monthly-membership dues are an AUTHORITATIVE account amount too
-    // (codex #3141 r1). Without them here the whitelist was built from
-    // balances, invoices and payments only, so the dues figure the facts
-    // block just published read as ungrounded, the draft was held shadow, and
-    // the monthly-lane exception this PR exists to make reachable stayed
-    // unreachable on the suggestion/auto-send path.
-    //
-    // Only what the facts actually STATE is authorized. The monthly dues come
-    // from the shared definition (codex #3141 r2, r3): the dues base whenever
-    // the monthly lane published dues, plus the total AND the fee it breaks
-    // out when the surcharge was resolved — the facts publish all three, so a
-    // draft that accurately repeats "the $2.85 credit-card fee" must not read
-    // as ungrounded. It is shared with the scheduler's fire-time
-    // revalidation because two copies of this list had already drifted.
-    const authorizedCents = new Set([
-      context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-      context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-      ...require('./context-aggregator').authorizedDuesCents(context),
-      ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
-    ].filter((v) => Number.isFinite(v)));
-    // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
-    // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
-    // unit-less numerals stay out of the deterministic guard (dates, house
-    // numbers, zone counts would false-positive) — those remain the
-    // verifier's + reviewer's territory.
-    const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-    const replyAmounts = (parsed.reply.match(AMOUNT_FORMS_RE) || [])
-      .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
-    // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
-    // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
-    // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
-    // we cannot positively match EVERY numeric to an authorized value, the
-    // draft stays shadow. An authorized "$120.00" reply extracts and passes;
-    // "fifty dollars" stays unverifiable and withholds. Cadence follows the
-    // same rule as any other amount now that dues are authorized: "$98.50/mo"
-    // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
-    // carries no currency marker, extracts nothing, and still withholds.
-    const priceGrammarFires = suggestMode.hasPriceQuote(parsed.reply);
-    const replyHasUngroundedAmount = priceGrammarFires
-      ? (replyAmounts.length === 0 || replyAmounts.some((a) => !authorizedCents.has(a)))
-      : replyAmounts.some((a) => !authorizedCents.has(a));
+    // The whitelist itself (authoritative values only, never the thread text
+    // the facts block also carries; dues included) is replyQuotesUngroundedAmount
+    // above — shared with the estimate-review lane since Codex r3.
+    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
@@ -1160,13 +2592,22 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           actionsVerifiedSafe: parsed.auto_send_safe,
           confidence: intent?.confidence ?? null,
           model: draftModel,
-          promptVersion: PROMPT_VERSION,
+          promptVersion,
           // The profile that ACTUALLY shaped this draft (null = base prompt).
           // The executor refuses when it differs from the currently effective
           // profile — readiness evidence belongs to the effective profile,
           // and a stale/base-prompt draft must not ride it (Codex r4 P1).
           voiceProfileVersion,
           schedulingIntent,
+          // Pre-push audit P2: the minimum needed to recheck quoted OPEN
+          // TIMES at send time — dispatchClaimedSend re-fetches and refuses
+          // to send if a quoted window is no longer offered.
+          openTimesSnapshot,
+          // Codex #5194 P2: the instant the drafter rendered the SLA phrase
+          // into factsBlock — claimAutoSend persists it on the decision's
+          // input_snapshot so slaDraftedAt can anchor the deadline to it
+          // instead of the row's own (later) created_at.
+          factsGeneratedAt,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -1199,8 +2640,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               intent: intentName,
               confidence: intent?.confidence ?? null,
               model: draftModel,
-              promptVersion: PROMPT_VERSION,
+              promptVersion,
               lintFailures: lint.failures,
+              openTimesSnapshot,
+              intendedActions: parsed.intended_actions,
+              // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+              factsGeneratedAt,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -1246,8 +2691,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intent: intentName,
             confidence: intent?.confidence ?? null,
             model: draftModel,
-            promptVersion: PROMPT_VERSION,
+            promptVersion,
             lintFailures: lint.failures,
+            openTimesSnapshot,
+            intendedActions: parsed.intended_actions,
+            // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+            factsGeneratedAt,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -1300,9 +2749,38 @@ module.exports = {
   resolveEffectiveVoiceProfile,
   DRAFTER,
   PROMPT_VERSION,
+  REAL_ANSWERS_PROMPT_VERSION,
+  currentPromptVersion,
   VERIFY_ENABLED,
   MAX_REVISIONS,
   SHADOW_STATUS,
   INTENDED_ACTION_TYPES,
   EXEMPLAR_INJECTION_RE,
+  REAL_ANSWERS_HANDOFF_CATEGORIES,
+  followupSlaPhrase,
+  fetchOpenTimesBlock,
+  fetchOpenTimesData,
+  validateOfferedTimes,
+  countQuotedWindow,
+  parseOpenTimesDaysFromFactsBlock,
+  stripOpenTimesSection,
+  planOpenTimesRecheck,
+  looksLikeOfferText,
+  computeOpenTimesSnapshot,
+  openTimesStillOffered,
+  SLA_PHRASES: followupSla.SLA_PHRASES,
+  replyPromisesFollowup: followupSla.replyPromisesFollowup,
+  slaPhraseStatus: followupSla.slaPhraseStatus,
+  replyQuotesUngroundedAmount,
+  billingAmountCents,
+  AMOUNT_MASK_RE,
+  PAYMENT_ACK_RE,
+  replyBindsDeclaredDays,
+  liveServiceType,
+  serviceIdentityFor,
+  fetchReserviceLanes,
+  reserviceFactLine,
+  validateReserviceOffer,
+  validateComplianceCopy,
+  hasBannedCustomerCopy,
 };

@@ -65,6 +65,46 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('10 g/gal')).toBeInTheDocument();
   });
 
+  // Owner ask 2026-09-28: every record of service links to the public Products
+  // & Safety page from its footer, product rows or not. The URL prints in full.
+  it.each([
+    ['with product rows', BASE_DATA],
+    ['with no product rows', { ...BASE_DATA, applications: [] }],
+  ])('links to the public Products & Safety page (%s)', (_label, data) => {
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Every product we use and our safety protocol:/)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'https://www.wavespestcontrol.com/products-and-safety/' });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) is LIVE-VIEW ONLY
+  // (codex P1 2026-09-28): the server strips `report_copy` from every PDF
+  // payload before it reaches this document (stripLiveOnlyReportProductCopy,
+  // report-data.js), so the PDF never renders it even if a caller somehow
+  // still handed the component a `report_copy` key.
+  it('never renders "How it works" / "Also labeled for" / "Pets & kids", even if report_copy is present on the payload', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [{
+        ...BASE_DATA.applications[0],
+        product: {
+          ...BASE_DATA.applications[0].product,
+          report_copy: {
+            how_it_works: 'A fast-acting non-repellent that reaches ants you never see.',
+            also_labeled_for: 'Cockroaches, crickets, earwigs and silverfish.',
+            pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+          },
+        },
+      }],
+    };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText(/How it works:/)).toBeNull();
+    expect(screen.queryByText(/Also labeled for:/)).toBeNull();
+    expect(screen.queryByText(/Pets & kids:/)).toBeNull();
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');
@@ -1611,5 +1651,49 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
     expect(screen.queryByText(reservice.result)).toBeNull();
+  });
+});
+
+describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPECTATIONS, dark)', () => {
+  it('renders the rain, spider, and what-to-expect blocks when present on pestReportV2.expectations', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: {
+        expectations: {
+          rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
+          // whatWeDid is server-fixed wording (never a raw protocol-action
+          // label — owner ruling 2026-09-28); this matches the actual
+          // server output.
+          spiders: {
+            headline: 'Spiders',
+            whatWeDid: 'We knocked down webs and treated the eaves and entry points where spiders build.',
+            expectation: 'Webbing should noticeably thin out over about two weeks.',
+            nextStep: 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.',
+          },
+          whatToExpect: { lines: ['Non-repellent products (like what we used) work by transfer.'] },
+        },
+      },
+    }} token="tok123" />);
+    expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
+    expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
+    expect(screen.getByText('Spiders')).toBeInTheDocument();
+    expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
+    expect(screen.getByText('What to expect')).toBeInTheDocument();
+    expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
+  });
+
+  it('omits all three blocks when expectations is absent (gate off — the common case today)', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('Rain and your treatment')).toBeNull();
+    expect(screen.queryByText('Spiders')).toBeNull();
+    expect(screen.queryByText('What to expect')).toBeNull();
+  });
+
+  it('the PDF/static render never carries the live-forecast heavy-rain caveat — server-side, forecastHeavyRain is only ever true for mode==="live" (reports-public.js), so a PDF payload\'s rain.lines can only ever be the trailing-week facts, never this sentence', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
+    }} token="tok123" />);
+    expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
   });
 });

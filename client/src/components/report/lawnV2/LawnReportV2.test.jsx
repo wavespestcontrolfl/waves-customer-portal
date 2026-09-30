@@ -193,6 +193,10 @@ describe('WaterIntakeBar moved-home note (codex gh-r25)', () => {
 
 describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
   const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true, prescribesRun: true } };
+  const recordedWaterIn = {
+    watering: 'Water in with 0.25 inches today.', waterInRequired: true,
+    creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
+  };
   it('with a plan on the card the legacy balance explanation is suppressed — the plan is the sole watering instruction (codex gh-r21)', () => {
     render(<WaterIntakeBar water={{ ...water, status: 'low', explanation: 'A little more irrigation time will help this week.' }} />);
     expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
@@ -203,7 +207,7 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
   });
   it('a credited watering-in shows the REDUCED plan, never the unreduced run under the credit note (codex gh-r24)', () => {
     const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
-    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={recordedWaterIn} />);
     expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent(afterTreatment.title);
     expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('No further turf runs this week.');
     expect(screen.queryByText('About 20 minutes.')).toBeNull();
@@ -213,7 +217,7 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
   });
   it('credits the treatment watering only for a label-REQUIRED watering-in inside the plan week', () => {
-    render(<WaterIntakeBar water={water} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    render(<WaterIntakeBar water={water} aftercare={recordedWaterIn} />);
     expect(screen.getByTestId('lawn-week-plan-aftercare-note')).toHaveTextContent(/counts as one of this week/);
   });
   it('never credits the neutral "keep your normal schedule" fallback as a run', () => {
@@ -222,7 +226,7 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
   });
   it('a HOLD plan keeps treatment-first but never claims a run was covered (codex gh-r16)', () => {
-    render(<WaterIntakeBar water={{ ...water, weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs.', visitInPlanWeek: true, prescribesRun: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs.', visitInPlanWeek: true, prescribesRun: false } }} aftercare={recordedWaterIn} />);
     const note = screen.getByTestId('lawn-week-plan-aftercare-note');
     expect(note).toHaveAttribute('data-plan-credit', 'hold');
     expect(note).toHaveTextContent(/treatment comes first/);
@@ -230,9 +234,64 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     expect(note).not.toHaveTextContent(/counts as one of this week/);
   });
   it('never credits a historical visit\'s watering-in against the current week', () => {
-    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={recordedWaterIn} />);
     expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
     expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+  });
+  it.each([
+    [{ ...recordedWaterIn, evidenceSource: undefined }, 'legacy object'],
+    [{ ...recordedWaterIn, evidenceSource: 'irrigation_requirement' }, 'wrong provenance'],
+    [{ ...recordedWaterIn, needsReview: true }, 'review-required'],
+    [{ ...recordedWaterIn, wateringHold: true }, 'watering hold'],
+  ])('keeps the full plan and withholds credit for a %s', (aftercare) => {
+    const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={aftercare} />);
+    expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+    expect(screen.queryByText('No further turf runs this week.')).toBeNull();
+  });
+  // PR #5033 round 4: the card mirrors the server's fail-closed table.
+  it.each([
+    [{ ...recordedWaterIn, watering: '' }, 'no recorded instruction'],
+    [{ ...recordedWaterIn, evidenceSource: 'irrigation_requirement' }, 'unsupported evidence source'],
+  ])('puts a %s under the review condition and never credits it', (aftercare) => {
+    const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={aftercare} />);
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/Confirm the product watering directions/);
+    expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+  });
+  it('places review-required aftercare before the full plan', () => {
+    render(<WaterIntakeBar water={water} aftercare={{
+      watering: 'Use the recorded product note.',
+      evidenceSource: 'legacy_unverified_instruction',
+      needsReview: true,
+    }} />);
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent('Use the recorded product note.');
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/Confirm the product watering directions/);
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+  });
+  it.each([
+    ['current-week', true],
+    ['legacy without week membership', undefined],
+  ])('keeps review-required aftercare as a plan condition for a %s visit', (_label, visitInPlanWeek) => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek } }} aftercare={{
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'legacy_unverified_instruction',
+      needsReview: true,
+    }} />);
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent('Apply 0.25 inches within 24 hours.');
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/before applying the plan below/);
+  });
+  it('keeps a historical aftercare note visible without gating the current-week plan', () => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'legacy_unverified_instruction',
+      needsReview: true,
+    }} />);
+    expect(screen.queryByTestId('lawn-week-plan-condition')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+    expect(document.querySelector('.lawn-callout-after')).toHaveTextContent('Apply 0.25 inches within 24 hours.');
   });
 });
 

@@ -1,5 +1,6 @@
 const {
   createDraft, listDrafts, getDraft, sendDraft, dismissDraft, resetStuckDraft, markEmail,
+  priceMatchHeadlineAndSummary,
 } = require('../services/price-scan/price-match-draft');
 
 // Minimal in-memory knex-like stub for the price_match_drafts chains used.
@@ -477,5 +478,51 @@ describe('createDraft owner-copy notification (PRICE_MATCH_NOTIFY_OWNER)', () =>
     const row = await createDraft(db, [proofMatch], { sendgrid: { isConfigured: () => true, sendOne } });
     expect(row.status).toBe('pending'); // draft still staged
     expect(sendOne).not.toHaveBeenCalled(); // but NOT auto-delivered to the rep
+  });
+});
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the owner-copy
+// digest's short bell copy. Real 09-28 prod draft, `lineFor()`-shaped
+// (mark-email.js) — savingsPct is the normalized $/oz-equivalent fraction
+// composeMarkEmail already sorts/labels by (0.383 = 38.3%), not a raw
+// sitePrice-minus-compPrice (which breaks when the two vendors write the
+// same pack size differently, e.g. "2.5 gal" vs "2.5 gallon").
+describe('priceMatchHeadlineAndSummary', () => {
+  const segmentII = { product: 'Segment II Herbicide', sitePrice: 1293.90, savingsPct: 0.383 };
+  const onslaught = { product: 'Onslaught Fastcap', sitePrice: 499.39, savingsPct: 0.111 };
+
+  test('real 09-28 fixture: names both products and the correct rounded per-order saving', () => {
+    const { headline, summary } = priceMatchHeadlineAndSummary([segmentII, onslaught]);
+    expect(headline).toBe('Price match — 2 lower prices for SiteOne');
+    expect(summary).toBe('Segment II Herbicide and Onslaught Fastcap, about $551 less per order. Draft not sent.');
+  });
+
+  test('a single line is singular and names just the one product', () => {
+    const { headline, summary } = priceMatchHeadlineAndSummary([segmentII]);
+    expect(headline).toBe('Price match — 1 lower price for SiteOne');
+    expect(summary).toBe('Segment II Herbicide, about $496 less per order. Draft not sent.');
+  });
+
+  test('a line missing sitePrice or savingsPct is skipped from the dollar sum but still named', () => {
+    const broken = { product: 'Mystery Product', sitePrice: NaN, savingsPct: 0.2 };
+    const { summary } = priceMatchHeadlineAndSummary([segmentII, broken]);
+    expect(summary).toBe('Segment II Herbicide and Mystery Product, about $496 less per order. Draft not sent.');
+  });
+
+  test('too many/long product names to fit 110 chars falls back to "<first> and N more"', () => {
+    const lines = [
+      segmentII, onslaught,
+      { product: 'A Third Very Long Product Name For Testing', sitePrice: 100, savingsPct: 0.1 },
+      { product: 'A Fourth Very Long Product Name For Testing', sitePrice: 100, savingsPct: 0.1 },
+    ];
+    const { summary } = priceMatchHeadlineAndSummary(lines);
+    expect(summary.length).toBeLessThanOrEqual(110);
+    expect(summary).toMatch(/^Segment II Herbicide and 3 more, about \$\d+ less per order\. Draft not sent\.$/);
+  });
+
+  test('no comparable savings still names the products and omits the dollar figure', () => {
+    const noSavings = { product: 'Break Even Product', sitePrice: 50, savingsPct: 0 };
+    const { summary } = priceMatchHeadlineAndSummary([noSavings]);
+    expect(summary).toBe('Break Even Product. Draft not sent.');
   });
 });

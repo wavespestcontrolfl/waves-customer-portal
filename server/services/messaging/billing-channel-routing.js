@@ -81,7 +81,8 @@ function billingNotificationEventKey(input) {
 // notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
 // an explicit Email/App leg whose suppression state could not be read, and
 // BILLING_EMAIL_PREPARATION_HOLD for a retryable Email refusal before the
-// provider handoff (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
+// provider handoff, or a definite SendGrid rejection after it
+// (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
 // is the same kind of schedulable hold for an explicit Text leg whose dedupe
 // state (the advisory-lock check, or the prior-accepted-send lookup) could
 // not be read. BILLING_TEXT_LEG_IN_FLIGHT is the Text leg's own
@@ -97,6 +98,7 @@ const REPLAY_HOLD_CODES = Object.freeze([
 ]);
 
 function isReplayHold(result) {
+  if (result.bellPersisted === true || result.reason === 'app_event_already_visible') return false;
   return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
 }
 
@@ -121,7 +123,57 @@ function preferenceChangeHold(overrides = {}) {
   };
 }
 
+// This is event settlement, not evidence that retry copy reached a device.
+// Only the guarded push path can supply either bell witness.
+function billingLegDeliveryState(channel, result = {}) {
+  if (channel === 'push' && result.deliveryOutcome === 'not_sent'
+    && result.reason === 'app_event_already_visible') return 'deduped';
+  if (result.deliveryOutcome === 'accepted') return result.deduped ? 'deduped' : 'delivered';
+  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return result.deduped ? 'deduped' : 'delivered';
+  return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
+}
+
+// A deduped Email/Text leg exposes the original acceptance as sentAt; a
+// persisted App bell exposes eventVisibleAt. Return only valid stored evidence
+// and leave legacy missing-evidence behavior to each caller.
+function billingLegContactTime(result = {}) {
+  const candidates = result.deduped && result.channelResults
+    ? Object.entries(result.channelResults)
+      .filter(([channel, leg]) => billingLegDeliveryState(channel, leg) === 'deduped')
+      .flatMap(([, leg]) => [leg.sentAt, leg.eventVisibleAt])
+      .concat([result.sentAt, result.eventVisibleAt, result.originalAt])
+    : result.deduped ? [result.sentAt, result.eventVisibleAt, result.originalAt] : [result.eventVisibleAt];
+  const times = candidates.filter(Boolean).map((candidate) => new Date(candidate))
+    .filter((time) => !Number.isNaN(time.getTime()));
+  return times.length ? new Date(Math.max(...times.map((time) => time.getTime()))) : null;
+}
+
+function storedEmailAcceptedAt(message = {}) {
+  for (const candidate of [message?.sent_at, message?.created_at]) {
+    if (candidate == null) continue;
+    const time = new Date(candidate);
+    if (!Number.isNaN(time.getTime())) return time;
+  }
+  return null;
+}
+
+// A replay may close progress only when every accepted rail belongs to an
+// earlier episode. The same decision governs invoice and collections writers.
+function previouslySettledBillingLegs(results) {
+  const accepted = results.filter((result) => result?.sent === true || result?.ok === true);
+  if (!accepted.length || accepted.some((result) => result.deduped !== true)) return null;
+  const times = accepted.map(billingLegContactTime).filter(Boolean);
+  return { originalAt: times.length
+    ? new Date(Math.max(...times.map((time) => time.getTime()))) : null };
+}
+
+function originalBillingContactArgs(result) {
+  const originalAt = result?.deduped ? billingLegContactTime(result) : null;
+  return originalAt ? [{ occurredAt: originalAt }] : [];
+}
+
 function needsRetry(result) {
+  if (result?.bellPersisted === true || result?.reason === 'app_event_already_visible') return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
@@ -135,8 +187,8 @@ function legFailure(channel, err) {
   const outcome = err.providerOutcome;
   return outcome?.deliveryOutcome === 'accepted'
     ? { ...outcome, sent: true, blocked: false, channel }
-    : { sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
-      code: 'BILLING_CHANNEL_FAILED', reason: err.message, retryable: true };
+    : { ...outcome, sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
+      code: 'BILLING_CHANNEL_FAILED', reason: outcome?.reason || outcome?.error || err.message, retryable: true };
 }
 
 // One leg through the complete guarded pipeline.
@@ -181,7 +233,15 @@ async function sendBillingLeg({ input, channel, channels, channelResults, catego
 // the caller retries it; otherwise the latest acceptance, then any retry.
 function billingDispatchOutcome(channelResults) {
   const results = Object.values(channelResults);
-  const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
+  const settled = Object.entries(channelResults).reverse().map(([channel, result]) => {
+    const state = billingLegDeliveryState(channel, result);
+    if (!state) return null;
+    // The aggregate reports settlement of the event. The leg retains its
+    // actual native outcome and never gains a provider id or current bell.
+    return { ...result, sent: true, blocked: false, deliveryOutcome: 'accepted',
+      retryable: false, deferred: false, ...(state === 'deduped' ? { deduped: true } : {}) };
+  }).filter(Boolean);
+  const accepted = settled.find((result) => !result.deduped) || settled[0];
   const retry = results.find(needsRetry);
   const textRetry = needsRetry(channelResults.sms) && channelResults.sms;
   const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
@@ -230,5 +290,6 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
-  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold,
+  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
+  billingLegContactTime, previouslySettledBillingLegs, originalBillingContactArgs, storedEmailAcceptedAt,
 };

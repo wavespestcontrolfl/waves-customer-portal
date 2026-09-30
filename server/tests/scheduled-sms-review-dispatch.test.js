@@ -15,7 +15,7 @@ jest.mock('../utils/cron-lock', () => ({
   wasLockSkipped: result => result?.skipped === true,
 }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
-  requiresDurableFinalize: entry => entry === 'durable-test',
+  requiresDurableFinalize: entry => ['durable-test', 'invoice_send_deferred'].includes(entry),
 }));
 const db = require('../models/db');
 const history = require('../services/review-ask-history');
@@ -181,6 +181,96 @@ test('repeated settlement failures preserve accepted evidence for the scheduler 
   expect(row.metadata.review_ask_reservation).toBe(true);
   expect(row.created_at).toEqual(new Date());
   expect(row.metadata.queued_at).toEqual(queuedAt);
+});
+
+test('a wrapper invoice replay persists the old App event time with its durable finalize claim', async () => {
+  const visibleAt = new Date('2026-09-08T15:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, eventVisibleAt: visibleAt, deliveryOutcome: 'accepted',
+    channelResults: { push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt } } };
+  expect(await dispatchScheduledSms(row, row.metadata, async () => result)).toMatchObject({ sent: true, deduped: true });
+  expect(row.created_at).toEqual(visibleAt);
+  expect(updates[0].patch.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
+  expect(updates[0].patch.metadata.bindings).toContain(visibleAt);
+});
+
+test('wrapper invoice replay saves original Email and Text times for restart and finalize-only recovery', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  const textAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+    } };
+  await dispatchScheduledSms(row, row.metadata, async () => result);
+  expect(row.created_at).toEqual(textAt);
+  const stamp = updates[0].patch.metadata;
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, textAt, true, true, emailAt, true, true, textAt]);
+});
+
+test('a deferred completion decline persists old App and Email rail evidence without mark_invoice_delivery', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  const emailAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Your payment failed — pay here: https://portal.test/pay';
+  row.metadata = { entry_point: 'autopay_completion_decline_deferred', invoice_id: 'inv-1' };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deduped: true,
+    deliveryOutcome: 'accepted', channelResults: {
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+    },
+  }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.metadata.mark_invoice_delivery).toBeUndefined();
+  expect(row.created_at).toEqual(emailAt);
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, emailAt, true, true, emailAt, true, true, appAt]);
+});
+
+test('fresh Email beside an old Text does not persist an all-old invoice witness', async () => {
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: new Date('2026-09-08T14:00:00Z') },
+    } }));
+  expect(updates[0].patch.metadata.sql).toContain("'invoice_prior_delivery_deduped', ?::boolean");
+  expect(updates[0].patch.metadata.bindings[1]).toBe(false);
+  expect(row.created_at).toEqual(new Date());
+});
+
+test('legacy wrapper saves old App rail time beside a fresh Email without marking the aggregate old', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  // Historical wrapper rows have no hasEmailLeg flag, so Email can be a
+  // newly delivered sibling of an App bell that was already visible.
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+    } }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.created_at).toEqual(new Date());
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, false, null, true, false, null, true, true, appAt]);
+});
+
+test('legacy wrapper also saves old Email time beside a fresh Text leg', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deliveryOutcome: 'accepted' },
+    } }));
+  expect(row.created_at).toEqual(new Date());
+  expect(updates[0].patch.metadata.bindings).toEqual([null, false, null, true, true, emailAt, true, false, null]);
 });
 
 test.each(['recent', 'history', 'busy'])('completion durably arms its stripped review fallback through finalization: %s', async kind => {
@@ -435,4 +525,20 @@ test('a provider error after the reservation was set still holds the full 72h un
   expect(row.status).toBe('scheduled');
   expect(row.metadata.review_ask_reservation).toBe(true);
   expect(row.scheduled_for.getTime()).toBe(Date.now() + 72 * 3600000);
+});
+
+test('retiring an earlier billing event keeps the original queue time and mints no provider proof', async () => {
+  const queuedAt = new Date(Date.now() - 86400000);
+  const visibleAt = new Date(queuedAt.getTime() + 1000);
+  row.created_at = queuedAt;
+  row.message_body = 'Billing event';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true, queued_at: queuedAt.toISOString() };
+  const send = jest.fn(async () => ({ sent: true, deduped: true, deliveryOutcome: 'accepted', reason: 'app_event_already_visible', eventVisibleAt: visibleAt }));
+  const result = await dispatchScheduledSms(row, row.metadata, send, 'billing');
+  expect(result.deduped).toBe(true);
+  const final = updates.find(({ patch }) => patch.status === 'sent').patch;
+  expect(new Date(final.created_at)).toEqual(visibleAt);
+  expect(final.metadata.bindings).toEqual([null, visibleAt, true, visibleAt, false, false, null, true, true, visibleAt]);
+  expect(final.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
+  expect(row.status).toBe('sent');
 });

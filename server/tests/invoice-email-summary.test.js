@@ -264,6 +264,29 @@ describe('sendInvoiceEmail service summary', () => {
     expect(args.payload.invoice_summary).toBe(invoice.notes);
   });
 
+  test('a deduped template Email returns and repairs only its stored acceptance time', async () => {
+    const originalAt = new Date('2026-08-20T14:00:00Z');
+    mockDb(invoiceRow({ status: 'sending', send_claim_token: 'original' }));
+    const baseDb = db.getMockImplementation();
+    const stamp = jest.fn().mockResolvedValue(1);
+    db.mockImplementation((table) => {
+      const q = baseDb(table);
+      if (table === 'invoices') q.update = stamp;
+      return q;
+    });
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { provider_message_id: 'old-sg', sent_at: originalAt } });
+    try {
+      expect(await sendInvoiceEmail('inv-1', { claimToken: 'original' }))
+        .toMatchObject({ ok: true, deduped: true, sentAt: originalAt });
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [originalAt]);
+      expect(stamp).toHaveBeenCalledWith(expect.objectContaining({
+        email_sent_at: { sql: 'COALESCE(email_sent_at, ?::timestamptz)', bindings: [originalAt] },
+      }));
+    } finally { delete db.raw; }
+  });
+
   test('does not render or dispatch an invoice email while its deposit is held', async () => {
     mockDb(invoiceRow());
     const fence = jest.spyOn(require('../services/estimate-deposits'), 'assertInvoiceDepositSettlementReady')

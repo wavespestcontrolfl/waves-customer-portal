@@ -846,6 +846,92 @@ describe('invoice send claim adoption of a queued pay-link SMS', () => {
       expect(row.metadata.adoption_resolved_at).toEqual(expect.any(String));
     });
 
+    test('skipAccountCreditAutoApply (IB closeout repair): the send never applies account credit — no auto-apply call, not reported as credit-covered', async () => {
+      const order = [];
+      invoices = makeInvoicesTable({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: null,
+      }, {
+        onUpdate: (payload) => { if (payload.send_claim_token === null) order.push('invoice_token_clear'); },
+      });
+      smsLog = makeSmsLogTable([{
+        id: 'sms-queued-1',
+        status: 'scheduled',
+        scheduled_for: ORIGINAL_SCHEDULED_FOR,
+        metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+      }], {
+        onUpdate: (payload) => {
+          if (payload.metadata && payload.metadata.__sqlRaw && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
+            order.push('sms_resolve');
+          }
+        },
+      });
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockClear();
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { skipAccountCreditAutoApply: true });
+
+      expect(autoApplyAccountCreditIfEnabled).not.toHaveBeenCalled();
+      expect(result.covered_by_credit).toBeUndefined();
+    });
+
+    test('expectedTotal (IB closeout repair): a claimed invoice whose total differs from the approval restores the claim and sends nothing', async () => {
+      const order = [];
+      invoices = makeInvoicesTable({
+        id: 'inv-1',
+        invoice_number: 'WPC-2026-2001',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        token: 'tok-1',
+        total: 100,
+        credit_applied: 0,
+        send_claim_token: null,
+      }, {
+        onUpdate: (payload) => { if (payload.send_claim_token === null) order.push('invoice_token_clear'); },
+      });
+      smsLog = makeSmsLogTable([{
+        id: 'sms-queued-1',
+        status: 'scheduled',
+        scheduled_for: ORIGINAL_SCHEDULED_FOR,
+        metadata: { entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT, invoice_id: 'inv-1' },
+      }], {
+        onUpdate: (payload) => {
+          if (payload.metadata && payload.metadata.__sqlRaw && payload.metadata.__sqlRaw.includes('adoption_resolved_at')) {
+            order.push('sms_resolve');
+          }
+        },
+      });
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return invoices.query();
+        if (table === 'sms_log') return smsLog.query();
+        if (table === 'customers') return customerQuery(customer);
+        if (table === 'activity_log') return passthroughQuery();
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      autoApplyAccountCreditIfEnabled.mockClear();
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { skipAccountCreditAutoApply: true, expectedTotal: 90 });
+
+      expect(result).toMatchObject({ ok: false, code: 'total_changed' });
+      expect(autoApplyAccountCreditIfEnabled).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(invoices.state().status).toBe('draft');
+    });
+
     test('a credit-covered send (direct sendViaSMS) resolves the adopted rows before clearing the token', async () => {
       const order = [];
       invoices = makeInvoicesTable({

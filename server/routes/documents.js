@@ -24,6 +24,7 @@ const { applyReportIdentitySnapshotToLegacyPdf } = require('../services/service-
 const {
   WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const PhotoService = require('../services/photos');
 
@@ -530,6 +531,13 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.fillColor(MUTED).text(
     'View this report in your Waves portal · National Poison Control: (800) 222-1222',
     0, 770, { width: 612, align: 'center' }
+  );
+  // Owner ask 2026-09-28: every report links to the public Products & Safety
+  // page, this Documents-API PDF (visits with no report token) included. The
+  // URL prints in full for paper copies; it fits the band above the page edge.
+  doc.fillColor(MUTED_ON_DARK).text(
+    `Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`,
+    0, 780, { width: 612, align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` }
   );
   doc.page.margins.bottom = previousBottomMargin;
   doc.restore();

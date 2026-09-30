@@ -547,6 +547,35 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it('notification_prefs: a duplicate\'s payment_receipt=false never carries onto the kept profile', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, payment_receipt: true, created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: false, payment_receipt: false, created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated.sms_enabled).toBe(false);
+    expect(state.updated).not.toHaveProperty('payment_receipt');
+  });
+
+  it('notification_prefs: a kept profile\'s own payment_receipt=false is cleared by the merge', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, payment_receipt: false, payment_receipt_channels: ['email'], created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: true, payment_receipt: true, payment_receipt_channels: ['email'], created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated.payment_receipt).toBe(true);
+    expect(state.updated.payment_receipt_channels).not.toEqual([]);
+  });
+
+  it('notification_prefs: a moved duplicate row sheds payment_receipt=false', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: null,
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: false, payment_receipt: false, created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated).toEqual({ customer_id: 'W', payment_receipt: true });
+  });
+
   it('notification_prefs: billing arrays stay native and incompatible choices refuse before writes', async () => {
     const rows = { winnerRow: { customer_id: 'W', invoice_channels: null },
       loserRow: { customer_id: 'L', invoice_channels: ['email', 'push'] } };
@@ -786,7 +815,7 @@ describe('executeMerge', () => {
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
         state.repointUpdates.push(table);
-        state.events.push(['update', table]);
+        state.events.push(['update', table, q.args('where')?.[0], q.args('update')[0]]);
         return updates[table] ?? 1;
       }
       // blocker count checks (auto mode)
@@ -847,6 +876,19 @@ describe('executeMerge', () => {
     expect(state.events.slice(invoiceSweep).filter(([kind]) => kind === 'sessions_read')).toEqual([]);
     // ...and the loser's session is still actually cancelled in Stripe.
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_loser');
+  });
+
+  it('a prefs row moved whole to the kept profile has a legacy receipts-off cleared (owner ruling 2026-09-26)', async () => {
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    const prefsUpdates = state.events.filter(([kind, table]) => kind === 'update' && table === 'notification_prefs');
+    expect(prefsUpdates.map(([, , where, payload]) => [where, payload])).toEqual([
+      ['customer_id', { customer_id: WINNER }],
+      [{ customer_id: WINNER, payment_receipt: false }, { payment_receipt: true }],
+    ]);
   });
 
   it('takes the invoice-issued-closeout gate lock right after the property-preferences pair, sorted, before any customer row lock (GitHub r7 P2 #4127)', async () => {
@@ -3263,6 +3305,18 @@ describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared wi
       return artifacts[q.args('where')[0].customer_id] ? { id: 'row-1' } : null;
     });
   }
+
+  it('a legacy payment_receipt=false no longer blocks a merge in the shared preflight', async () => {
+    installDb((table, q) => {
+      if (table === 'notification_prefs') {
+        return q.args('where')[0].customer_id === 'W'
+          ? { customer_id: 'W', payment_receipt: false, payment_receipt_channels: ['email'] }
+          : { customer_id: 'L', payment_receipt_channels: ['email'] };
+      }
+      return null;
+    });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, { ...loser, billing_mode: null })).toBeNull();
+  });
 
   it('refuses an incompatible addressed winner whose only primary property is inactive', async () => {
     const addressedWinner = { ...winner, address_line1: '100 Main St' };

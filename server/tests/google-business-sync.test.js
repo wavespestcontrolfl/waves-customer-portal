@@ -18,6 +18,7 @@ function createDbMock(initialRows = {}) {
     rows: {
       google_reviews: [],
       customers: [],
+      email_template_automation_intents: [],
       ...initialRows,
     },
     inserts: [],
@@ -167,12 +168,13 @@ function createDbMock(initialRows = {}) {
           state.inserts.push({ table, row });
         }
         return {
-          returning: async () => {
+          returning: async (cols) => {
             if (duplicate) {
               const err = new Error('duplicate key value violates unique constraint "google_reviews_google_review_id_unique"');
               err.code = '23505';
               throw err;
             }
+            if (Array.isArray(cols)) return [Object.fromEntries(cols.map(c => [c, row[c]]))];
             return [{ id: row.id }];
           },
           onConflict: () => ({
@@ -181,6 +183,13 @@ function createDbMock(initialRows = {}) {
               if (existing && existing !== row) Object.assign(existing, mergeRecord);
               return [];
             },
+            // email_template_automation_intents' onConflict(...).ignore() —
+            // no real conflict simulation needed for these tests (nothing
+            // here seeds a colliding trigger_event_key+entity_id+occurred_at
+            // row), so this always keeps the fresh insert.
+            ignore: () => ({
+              returning: async (cols) => (Array.isArray(cols) ? [Object.fromEntries(cols.map(c => [c, row[c]]))] : [{ id: row.id }]),
+            }),
           }),
         };
       },
@@ -701,7 +710,7 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^stored-token lookup failed: Knex: Timeout/));
-    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }), expect.any(String));
+    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }), expect.any(String), expect.anything());
     expect(service._classifyLocationSyncHealth({ hasResource: true, source: 'places_fallback', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).not.toMatch(/credentials/);
     delete service._tokenLookupErrors.bradenton;
     degraded.mockRestore(); places.mockRestore(); health.mockRestore();
@@ -729,6 +738,25 @@ describe('Google Business review sync', () => {
       jest.useRealTimers();
       jest.dontMock('../services/review-incentives');
     }
+  });
+
+  test('a Places answer of no reviews reaches the health check as a confirmed zero and stores no stats row; a failed Places call confirms nothing', async () => {
+    const health = jest.spyOn(service, '_assessReviewSyncHealth').mockResolvedValue({});
+    const placesAnswers = (places) => {
+      global.fetch = jest.fn(async (url) => (String(url).includes('maps.googleapis.com')
+        ? { json: async () => places }
+        : jsonResponse({ reviews: [] })));
+    };
+
+    // The Venice shape: Google answers OK with no rating and no total.
+    placesAnswers({ status: 'OK', result: { name: 'Waves Pest Control Venice' } });
+    await service.syncAllReviews();
+    expect(health.mock.calls[0][4]).toEqual({ bradenton: 0 });
+    expect(db.__state.rows.google_reviews.filter((r) => r.reviewer_name === '_stats')).toHaveLength(0);
+
+    placesAnswers({ status: 'REQUEST_DENIED' });
+    await service.syncAllReviews();
+    expect(health.mock.calls[1][4]).toEqual({});
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {
@@ -1828,9 +1856,114 @@ describe('Google Business review sync', () => {
     const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('removal reconcile failing'));
     expect(degraded).toHaveLength(1);
     expect(degraded[0].body).toContain('pulled the GBP feed');
+    // Admin brevity guard (2026-09-28) is scoped to category ops_digest —
+    // this is a plain 'review' bell, so its body is stored unchanged.
     expect(degraded[0].body).toContain('REMOVALS will not be detected');
     const urls = global.fetch.mock.calls.map(c => String(c[0]));
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
+  });
+
+  test('records a durable review.linked_5star intent marker when an existing unmatched review is linked to a customer during an ordinary GBP sync (codex round 3 on #5154 — supersedes round 2\'s updated_at stamp)', async () => {
+    seedSyncedReview({ id: 'attr-1', customer_id: null });
+    db.__state.rows.customers.push({
+      id: 'cust-attr', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'attr-1');
+    expect(after.customer_id).toBe('cust-attr');
+    const marker = db.__state.rows.email_template_automation_intents.find(
+      (m) => m.entity_id === 'attr-1' && m.trigger_event_key === 'review.linked_5star',
+    );
+    expect(marker).toBeTruthy();
+    expect(JSON.parse(marker.payload).customer_id).toBe('cust-attr');
+  });
+
+  test('records NO intent marker when a synced review has no customer match (no transition)', async () => {
+    seedSyncedReview({ id: 'no-match-1', reviewer_name: 'Nobody Matches' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'Nobody Matches' },
+      starRating: 5,
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'no-match-1');
+    expect(after.customer_id).toBeFalsy();
+    expect(db.__state.rows.email_template_automation_intents).toHaveLength(0);
+  });
+
+  test('records NO intent marker for a four-star attribution (review.linked_5star is 5-star only)', async () => {
+    seedSyncedReview({ id: 'attr-4star', customer_id: null, star_rating: 4 });
+    db.__state.rows.customers.push({
+      id: 'cust-attr-4', first_name: 'Jane', last_name: 'Roe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'Jane Roe' },
+      starRating: 'FOUR',
+      comment: 'Good work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'attr-4star');
+    expect(after.customer_id).toBe('cust-attr-4');
+    expect(db.__state.rows.email_template_automation_intents).toHaveLength(0);
+  });
+
+  test('Places fallback also records a durable review.linked_5star intent marker when an existing unmatched row is linked to a customer (codex round 3 on #5154, second sync path)', async () => {
+    const existing = {
+      id: 'places-attr-1',
+      google_review_id: 'places_place-1_1779307999',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: new Date(1779307999 * 1000).toISOString(),
+      review_reply: null,
+      customer_id: null,
+      synced_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      missing_since: null,
+    };
+    db.__state.rows.google_reviews.push(existing);
+    db.__state.rows.customers.push({
+      id: 'cust-places-attr', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
+    });
+    service._getClient = jest.fn(async () => null); // force Places fallback
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Doe',
+          rating: 5,
+          text: 'Great work',
+          time: 1779307999,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'places-attr-1');
+    expect(after.customer_id).toBe('cust-places-attr');
+    const marker = db.__state.rows.email_template_automation_intents.find(
+      (m) => m.entity_id === 'places-attr-1' && m.trigger_event_key === 'review.linked_5star',
+    );
+    expect(marker).toBeTruthy();
+    expect(JSON.parse(marker.payload).customer_id).toBe('cust-places-attr');
   });
 
   test('an older overlapping runner YIELDS on an existing row: no content regression, no reviewer-edit park, no attribution side effects (codex r48)', async () => {
@@ -2135,6 +2268,8 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       expect(notifs[0].title).toContain('Auto-linked');
       expect(notifs[0].body).toContain('2m before');
+      // Admin brevity guard (2026-09-28) is scoped to category ops_digest —
+      // this 'review' bell's body is stored unchanged, whatever its length.
       expect(notifs[0].body).toContain('only click in the window');
     });
 
@@ -2217,8 +2352,11 @@ describe('Google Business review sync', () => {
       const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
       expect(notifs).toHaveLength(1);
       // The WHY is the matcher's evidence verbatim — no canned claim about
-      // other clicks the rung never checked (GH codex r2 P2).
-      expect(notifs[0].body).toContain("(the reviewer's last name matches this customer's; no other clicker at this location in the window)");
+      // other clicks the rung never checked (GH codex r2 P2). Admin brevity
+      // guard (2026-09-28) is scoped to category ops_digest — this 'review'
+      // bell's body is stored unchanged, whatever its length.
+      const evidenceText = "(the reviewer's last name matches this customer's; no other clicker at this location in the window)";
+      expect(notifs[0].body).toContain(evidenceText);
       expect(notifs[0].body).not.toContain('other clicks in the window were other names');
     });
 

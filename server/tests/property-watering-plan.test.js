@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('Unexpected DB query'); }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/termite-stations', () => ({}));
-jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 jest.mock('../services/irrigation-app-plan', () => ({ appPlanEnabled: jest.fn(), loadCustomerWateringPlan: jest.fn() }));
 jest.mock('../middleware/auth', () => ({ authenticate: (req, res, next) => {
   if (req.headers.authorization !== 'Bearer synthetic-session') return res.status(401).json({ error: 'Unauthorized' });

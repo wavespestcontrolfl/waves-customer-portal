@@ -93,9 +93,6 @@ const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   'server/routes/booking.js': [
     "createSelfBooking :: const [scheduledRow] = await trx( scheduled_services').insert({",
   ],
-  'server/routes/admin-dispatch.js': [
-    "post /:serviceId/schedule-followup :: const inserted = await trx( scheduled_services').insert(insertData",
-  ],
   'server/routes/admin-leads.js': [
     "post /:id/schedule-appointment :: const [appt] = await trx( scheduled_services').insert(insertData",
   ],

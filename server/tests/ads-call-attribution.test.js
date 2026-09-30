@@ -180,6 +180,12 @@ describe('attributionForSourceType', () => {
     expect(CallAttribution.attributionForSourceType('vehicle')).toEqual({ leadSource: 'van_wrap', isPaid: false });
     // Referral: its cost is the per-conversion reward (applied in fetchChannelAttribution).
     expect(CallAttribution.attributionForSourceType('referral')).toEqual({ leadSource: 'referral', isPaid: false });
+    // AI-assistant referral (owner-approved 2026-09-27) — resolveLeadSource
+    // (property-lookup / quote-calculate) resolves this source_type via the
+    // seeded lead_sources row (migration 20260928030000); this entry is what
+    // lets that resolution actually produce an ad_service_attribution funnel
+    // row instead of silently dropping (codex pre-push P1-a).
+    expect(CallAttribution.attributionForSourceType('ai_assistant')).toEqual({ leadSource: 'ai_assistant', isPaid: false });
     // NB: main_site maps to waves_website, but the caller suppresses the single
     // shared bridge-target number via google-call-bridge.isBridgeTargetNumber (so
     // paid Google calls on that line aren't pre-locked organic). The other

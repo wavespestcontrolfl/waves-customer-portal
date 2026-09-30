@@ -7,6 +7,7 @@
 
 const { etDateString } = require('./datetime-et');
 const { canonicalCatalogName } = require('../services/service-catalog-names');
+const { classifyTermiteScope, TERMITE_SCOPE } = require('../../shared/estimate-termite-scope.cjs');
 
 // ─── SERVICE TYPE NORMALIZATION ──────────────────────────────────
 
@@ -110,20 +111,13 @@ function stripServiceSuffixes(raw) {
     .trim();
 }
 
-// Foam labels pass through UNMODIFIED — deliberately no SERVICE_TYPE_MAP
-// entry: collapsing them would drop the cadence the schedule shows
-// ("Recurring Termite Foam Service (Quarterly)"), and the 2026-08-25
-// renamed forms carry a termite token that would otherwise collapse to
-// the generic "Termite Service" (codex #3484 P2). Same token family as
-// detectServiceCategory's foamTermiteToken, plus the renamed forms.
-const FOAM_LABEL_RE = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i;
-
 function normalizeServiceType(raw) {
   if (!raw) return 'General Service';
 
   const cleaned = stripServiceSuffixes(raw);
 
-  if (FOAM_LABEL_RE.test(cleaned)) return cleaned;
+  const termiteScope = classifyTermiteScope(cleaned);
+  if (termiteScope === TERMITE_SCOPE.FOAM || termiteScope === TERMITE_SCOPE.RECURRING_FOAM) return cleaned;
 
   // A real catalog identity passes through verbatim (case-normalized). The
   // regex map below exists for legacy/raw imports and free-text labels; on a
@@ -220,14 +214,7 @@ function detectServiceCategory(serviceType) {
   if (treeShrubToken && !lawnSurfaceToken && !s.includes('mosquito') && !s.includes('termite') && !s.includes('wdo')) return 'tree_shrub';
   if (s.includes('lawn') || s.includes('turf') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
   if (s.includes('mosquito')) return 'mosquito';
-  // Drill-and-foam termite forms only ("Foam Drill", "Drill-and-Foam",
-  // "Recurring Foam Treatment (Quarterly)", foam_drill / foam_recurring,
-  // Termidor Foam) — these carry no "termite" token of their own and fell
-  // through to 'pest'. Deliberately NOT a bare 'foam' substring: foam
-  // sealant is rodent-exclusion material, and "Rodent Exclusion — Foam
-  // Sealing" must reach the rodent branch below (codex 2026-08-08 P1).
-  const foamTermiteToken = /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring|termidor[\s_-]*foam/.test(s);
-  if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona') || foamTermiteToken) return 'termite';
+  if (classifyTermiteScope(s)) return 'termite';
   if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet') || s.includes('ornamental')) return 'tree_shrub';
   // 'bird box' / 'roof-entry' are rodent-exclusion hardware: the catalog
   // row "Roof-entry cover / bird box" (rodent_bird_box) carries no rodent

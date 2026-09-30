@@ -15,8 +15,9 @@
     "safety_line": "Stings hurt and can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "814c863d51f7155d41437769135e708b4ea7e2aaf21120706957ab3298fbac53"
     },
     "slug": "paper-wasp",
     "common_name": "Paper Wasp",
@@ -41,7 +42,7 @@
       {
         "slug": "yellowjacket",
         "difference": "Paper wasps build an open, exposed umbrella comb; yellowjackets build enclosed paper-covered nests, often underground or in a wall void.",
-        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "next_photo": "From a safe distance, photograph the whole nest shape.",
         "photo_can_confirm": true
       }
     ],
@@ -128,7 +129,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "9f8a2efa4da55a5c1777ae34587f17044915e4750ebeaec6cbca5575cebd4f91"
     },
     "slug": "yellowjacket",
     "common_name": "Yellowjacket",
@@ -142,7 +144,7 @@
     "scientific_name": "Vespula squamosa",
     "rank": "species",
     "group": "wasps-bees",
-    "subgroup": "social-wasps",
+    "subgroup": "high-risk-social-wasps",
     "site_category": "Stingers",
     "traits": [
       "Ground nest — steady insect traffic in and out of a hole in the yard (some nests are aerial)",
@@ -154,7 +156,7 @@
       {
         "slug": "paper-wasp",
         "difference": "Yellowjackets build enclosed, paper-covered nests (often in the ground); paper wasps build a small, open, exposed umbrella comb.",
-        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "next_photo": "From a safe distance, photograph the whole nest shape.",
         "photo_can_confirm": true
       }
     ],
@@ -234,7 +236,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor."
+      "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c73f32f4135cee7035be26fc7dcc1596052bb4f0e955b44bc006bae8eb8d490e"
     },
     "slug": "mud-dauber",
     "common_name": "Mud Dauber",
@@ -245,7 +248,7 @@
     "scientific_name": "Sceliphron / Trypoxylon spp.",
     "rank": "group",
     "group": "wasps-bees",
-    "subgroup": "solitary-wasps",
+    "subgroup": "medical-solitary-wasps",
     "site_category": "Stingers",
     "traits": [
       "Organ-pipe or urn-shaped mud tubes stuck to walls, eaves, or bridges",
@@ -257,7 +260,7 @@
       {
         "slug": "cicada-killer",
         "difference": "Mud daubers are slender-waisted and build mud tube nests on walls; cicada killers are much larger, dig burrows in bare soil, and have a thicker body.",
-        "next_photo": "A photo of the nest type (mud tube on a wall vs. a burrow in soil) and overall body size next to a coin.",
+        "next_photo": "From a safe distance, photograph the nest type (mud tube on a wall vs. a burrow in soil) and overall body size.",
         "photo_can_confirm": true
       }
     ],
@@ -336,7 +339,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "1851d6db2090d370b2b509dc07e296af8f4dc29a8aaa9b3d4dba357aa352dde7"
     },
     "slug": "honey-bee-swarm",
     "common_name": "Honey Bee (swarm)",
@@ -442,7 +446,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally."
+      "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "d7e2494411e677902c44e7c8d8fcd64a5570167cc3a9c3c44f45004faf5600b7"
     },
     "slug": "honey-bee-wall-colony",
     "common_name": "Honey Bee (wall colony)",
@@ -458,7 +463,7 @@
     "scientific_name": "Apis mellifera",
     "rank": "species",
     "group": "wasps-bees",
-    "subgroup": "bees",
+    "subgroup": "structure-bee-colonies",
     "site_category": "Stingers",
     "traits": [
       "Steady bee traffic in and out of one gap in soffit, wall, or meter box",
@@ -470,7 +475,7 @@
       {
         "slug": "honey-bee-swarm",
         "difference": "A wall colony has steady traffic in and out of one gap for weeks with comb inside; a swarm is a temporary, comb-free cluster hanging in the open.",
-        "next_photo": "A photo from the same spot a day or two apart to see if the activity is ongoing.",
+        "next_photo": "From a safe distance, photograph the same spot a day or two apart to see if the activity is ongoing.",
         "photo_can_confirm": true
       }
     ],
@@ -553,7 +558,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added."
+      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "a6abcf171a12076834d750bd9bb5ca1f226cead8211748071df6661a9afa71a8"
     },
     "slug": "carpenter-bee",
     "common_name": "Carpenter Bee",
@@ -565,7 +571,7 @@
     "scientific_name": "Xylocopa spp.",
     "rank": "genus",
     "group": "wasps-bees",
-    "subgroup": "bees",
+    "subgroup": "carpenter-bees",
     "site_category": "Stingers",
     "traits": [
       "Perfectly round, half-inch holes drilled in fascia, pergolas, or unpainted wood",
@@ -577,13 +583,13 @@
       {
         "slug": "bumble-bee",
         "difference": "Carpenter bees have a shiny, mostly bare black abdomen; bumble bees are fuzzy over the whole body, including the abdomen.",
-        "next_photo": "A close-up of the abdomen — shiny and bare versus fuzzy all over.",
+        "next_photo": "From a safe distance, zoom in on the abdomen — shiny and bare versus fuzzy all over.",
         "photo_can_confirm": true
       },
       {
         "slug": "woodpecker-damage",
         "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
-        "next_photo": "A close-up of one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "next_photo": "From a safe distance, zoom in on one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
         "photo_can_confirm": true
       }
     ],
@@ -643,6 +649,827 @@
     "links": {
       "site_page": "/pest-identifier/carpenter-bee/",
       "guides": []
+    }
+  },
+  {
+    "slug": "bald-faced-hornet",
+    "kind": "organism",
+    "common_name": "Bald-faced Hornet",
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "bald faced hornet",
+      "bald-faced hornet",
+      "dolichovespula maculata"
+    ],
+    "scientific_name": "Dolichovespula maculata",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "social-wasps",
+    "site_category": "Stingers",
+    "stages": [
+      "worker",
+      "queen",
+      "nest"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Black body with a bright white face and white markings near the tip of the abdomen",
+      "Large, egg-shaped gray paper nest hanging from a tree branch, bush or eave",
+      "Nest surface has a swirled, papery look, unlike the open honeycomb of a paper wasp nest",
+      "Workers fly out fast and in numbers if the nest is bumped or disturbed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellowjacket",
+        "difference": "Bald-faced hornet is black with a white face and nests in an enclosed aerial paper nest; yellowjacket is black-and-yellow and nests in the ground or a wall",
+        "next_photo": "A photo from a safe distance of the whole nest showing its shape and whether it hangs in the open or is in a hole",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio",
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Stings repeatedly when the nest is disturbed and can spray venom toward the face; keep well back. Call 911 if someone has trouble breathing, and see a doctor for a strong allergic reaction.",
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "An aggressive nest-defending hornet that will sting repeatedly if its large aerial paper nest is bumped or approached too closely. A nest near a walkway, patio or door is worth having removed rather than handled on your own.",
+      "fact": "It can squirt venom toward an intruder's eyes from a distance, which is an unusual extra layer of defense on top of its sting."
+    },
+    "tech_notes": "Aerial paper nest, often well above head height; approach with appropriate PPE and treat per label at dusk/dawn when activity is lowest. Do not attempt DIY removal near occupied areas.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Dolichovespula_maculata"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3ef7b6d2573c6dfabb9da5e72eca46a36aa9741318b6912e22cb310103537054"
+    }
+  },
+  {
+    "slug": "cicada-killer",
+    "kind": "organism",
+    "common_name": "Cicada Killer",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "cicada killer",
+      "cicada killer wasp",
+      "sphecius speciosus"
+    ],
+    "scientific_name": "Sphecius speciosus",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "solitary-wasps",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "One of the largest wasps around, often over an inch and a half long",
+      "Reddish-brown and black, hairy thorax with pale yellow bands on the abdomen",
+      "Digs a burrow about the width of a thumb in bare, sandy or sparse turf, leaving a small mound of dirt at the entrance",
+      "Males patrol and dive-bomb intruders near the burrows but cannot sting at all"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bald-faced-hornet",
+        "difference": "Cicada killer is solitary and digs single ground burrows in bare soil; bald-faced hornet lives in a large colony inside one hanging aerial paper nest",
+        "next_photo": "From a safe distance, photograph where the insect is coming from: a hole in bare ground versus a paper nest hanging in a tree or eave.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Males look aggressive but cannot sting; females rarely sting unless grabbed or stepped on barefoot, and the sting is mild for most people.",
+    "range": "common",
+    "active_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      7,
+      8
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A huge but mostly harmless wasp that digs burrows in bare, sunny turf and hunts cicadas to feed its young. The males' dive-bombing looks alarming, but they have no stinger at all, and a few scattered burrows in a lawn are more cosmetic than dangerous.",
+      "fact": "Only the female can sting, and even she rarely does; a documented sting has been described as feeling like little more than a pinprick."
+    },
+    "tech_notes": "Solitary ground-nesting; multiple burrows can appear in the same sunny, sparse turf area without being a true colony. Low sting risk overall; treatment is mainly cosmetic/turf-focused if burrow numbers bother the client.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Sphecius_speciosus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "6b3bbf26933b6eb8a83a409b52dad2f8d519f63e4b0af298c6005d803823c627"
+    }
+  },
+  {
+    "slug": "velvet-ant",
+    "kind": "organism",
+    "common_name": "Velvet Ant (cow killer)",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "cow killer"
+    ],
+    "aliases": [
+      "cow killer",
+      "dasymutilla occidentalis"
+    ],
+    "scientific_name": "Dasymutilla occidentalis",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "allergy-risk-velvet-ants",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dense, fuzzy, bright orange-red and black coloring, almost like fur",
+      "Females have no wings at all and only run across open ground; males have dark wings and fly",
+      "Larger and fuzzier than any true ant, moving in quick, jerky bursts",
+      "A hard, armored exoskeleton that looks tougher than a typical ant's"
+    ],
+    "look_alikes": [
+      {
+        "slug": "blue-winged-scoliid-wasp",
+        "difference": "Velvet ant females have no wings at all and only run on the ground; scoliid wasp has wings and flies low over the lawn",
+        "next_photo": "From a safe distance, photograph the insect from the side showing whether it has wings.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "ant-like",
+      "wasp-bee"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "One of the most painful stings of any local insect, though not actually dangerous to a healthy adult; see a doctor if you have a strong allergic reaction.",
+    "range": "common",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A fuzzy, brightly colored, wingless wasp often mistaken for a giant ant, with a sting that is famous for being extremely painful even though it is not medically dangerous. It wanders alone rather than nesting in a colony, so there is nothing to treat, but it is worth warning kids not to pick it up.",
+      "fact": "Despite the fearsome 'cow killer' nickname, it earned that name purely from how painful its sting feels, not from any real danger to a cow or a person."
+    },
+    "tech_notes": "Solitary wanderer (parasitizes ground-nesting bee/wasp broods); no nest on the property to treat. Sting pain is severe but medically minor for most people; educate rather than treat.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Dasymutilla_occidentalis"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 53: traits[3] previously described the audible squeak it makes 'if picked up' -- since this is one of the most painful stings around, that phrasing invited handling; replaced with a visible feature. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "325f1e032057c39739aa07c8038a79cec708ea502f8b85fb7b997a91308fd5d8"
+    }
+  },
+  {
+    "slug": "blue-winged-scoliid-wasp",
+    "kind": "organism",
+    "common_name": "Blue-winged Scoliid Wasp",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "blue winged scoliid wasp",
+      "scoliid wasp",
+      "scolia dubia"
+    ],
+    "scientific_name": "Scolia dubia",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "solitary-wasps",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Black head, thorax and front of the abdomen with a reddish-orange back half",
+      "Wings have a dark, blue-violet sheen in the right light",
+      "Flies low, fast, zig-zagging patterns just above the lawn rather than hovering high",
+      "Digs into the soil to reach and sting large white grubs, then lays an egg on the paralyzed grub"
+    ],
+    "look_alikes": [
+      {
+        "slug": "velvet-ant",
+        "difference": "Scoliid wasp has wings and flies low over the lawn; velvet ant females have no wings at all and only walk or run across the ground",
+        "next_photo": "From a safe distance, photograph the insect from the side showing whether it has wings.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Females can sting if handled, but they are not aggressive toward people and rarely sting unprovoked.",
+    "range": "common",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A beneficial wasp that hunts down destructive beetle grubs living in the lawn and uses them to raise its young, helping keep grub damage in check naturally. Seeing it fly low over the grass is a good sign, not a pest problem.",
+      "fact": "It targets green June beetle grubs specifically, stinging one underground and laying a single egg on it to feed its larva through the winter."
+    },
+    "tech_notes": "Beneficial biological control of white grubs (esp. green June beetle); low sting risk, not aggressive. No control action needed; note presence may indicate a grub population worth monitoring.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Scolia_dubia"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "cb96061d0703bbb9708038fea720cbf8c32669f2b202c5187db007be88012204"
+    }
+  },
+  {
+    "slug": "potter-wasp",
+    "kind": "organism",
+    "common_name": "Potter Wasp",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "potter wasp",
+      "potter wasps",
+      "eumeninae"
+    ],
+    "scientific_name": "Eumeninae",
+    "rank": "subfamily",
+    "group": "wasps-bees",
+    "subgroup": "solitary-wasps",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender black or brown wasp with yellow, white or orange markings",
+      "Builds a tiny, smooth, jug- or pot-shaped mud nest, often on a twig, wall or eave",
+      "Each little mud pot is sealed with a single paralyzed caterpillar or beetle larva inside for its young",
+      "Solitary; never found defending a shared nest with other wasps"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mud-dauber",
+        "difference": "Potter wasp builds small, rounded, jug-shaped mud pots one at a time; mud dauber builds longer tube-shaped mud cells lined up side by side",
+        "next_photo": "From a safe distance, zoom in on the mud structure showing whether it is a small rounded pot or a row of tube shapes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "trees-shrubs",
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Not aggressive and very unlikely to sting unless directly handled.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A solitary, non-aggressive wasp that builds tiny mud pots to raise its young on paralyzed caterpillars, helping keep those plant pests in check. A few little mud pots on a wall or eave are a sign of a beneficial insect, not a colony to worry about.",
+      "fact": "Each little mud pot she builds holds just one egg and one paralyzed caterpillar or beetle larva, sealed up as a ready-made meal for the larva inside."
+    },
+    "tech_notes": "Beneficial solitary predator of caterpillars/beetle larvae; low sting risk. No control action needed beyond scraping off old mud pots if cosmetically unwanted.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Eumeninae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "288ed0cbc13d73e63c33a5e608aa3c27474fa8b4eedb76af610777e1a321e126"
+    }
+  },
+  {
+    "slug": "great-golden-digger-wasp",
+    "kind": "organism",
+    "common_name": "Great Golden Digger Wasp",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "great golden digger wasp",
+      "sphex ichneumoneus"
+    ],
+    "scientific_name": "Sphex ichneumoneus",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "solitary-wasps",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Golden-orange fuzz covering the head and thorax",
+      "Reddish-orange legs and a partly reddish-orange body behind a black base",
+      "Digs a narrow burrow with side chambers in bare or sparsely planted soil",
+      "Carries paralyzed grasshoppers or crickets, larger than itself, back to the burrow to feed its young"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cicada-killer",
+        "difference": "Great golden digger wasp is smaller with golden fuzz and an orange-and-black body; cicada killer is much larger with pale yellow abdominal bands",
+        "next_photo": "From a safe distance, zoom in to compare overall body size and coloring to a typical wasp.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Not aggressive toward people and rarely stings unless handled directly.",
+    "range": "common",
+    "active_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A gentle, solitary wasp that digs small ground burrows and provisions them with grasshoppers and crickets for its young. It is not aggressive and helps keep those plant-eating insects in check.",
+      "fact": "It can drag a paralyzed grasshopper several times its own size back to its burrow, an impressive feat for a solitary insect working alone."
+    },
+    "tech_notes": "Beneficial predator of grasshoppers/crickets; solitary, low sting risk. No control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Sphex_ichneumoneus"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "ecafa15d8b08f9d5fe6d9756350c51a148074538f499560950e48f3af3c20d31"
+    }
+  },
+  {
+    "slug": "bumble-bee",
+    "kind": "organism",
+    "common_name": "Bumble Bee",
+    "role": "beneficial",
+    "risk": "medical",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "bumble bee",
+      "bumble bees",
+      "bumblebee",
+      "bumblebees",
+      "bombus"
+    ],
+    "scientific_name": "Bombus spp.",
+    "rank": "genus",
+    "group": "wasps-bees",
+    "subgroup": "beneficial-bees",
+    "site_category": "Stingers",
+    "stages": [
+      "worker",
+      "queen"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, round, noticeably fuzzy body compared to a honey bee",
+      "Bold black-and-yellow bands, though color can vary quite a bit by species",
+      "Slow, heavy, buzzing flight from flower to flower",
+      "Nests underground in old rodent burrows or in thick grass/mulch, not in a hanging paper nest or hive box"
+    ],
+    "look_alikes": [
+      {
+        "slug": "carpenter-bee",
+        "difference": "Bumble bee has a fully fuzzy abdomen; carpenter bee looks almost identical up front but has a shiny, hairless, black abdomen",
+        "next_photo": "From a safe distance, zoom in on the abdomen showing whether it is fuzzy all over or shiny and bare on top.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Generally docile and ignores people; stings only if its nest is threatened. See a doctor if you have a strong allergic reaction.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A gentle, important pollinator that mostly ignores people going about their day and only defends its nest if directly threatened. A small ground nest tucked in an out-of-the-way corner of the yard is usually best left alone.",
+      "fact": "Unlike a honey bee, its stinger has no barb, so it can sting more than once, though it very rarely chooses to sting at all."
+    },
+    "tech_notes": "Beneficial pollinator; low sting risk and generally docile. Leave nests undisturbed where practical; only address if nest location is a direct conflict (e.g. inside a wall).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Bumblebee"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "45acb095ee43c046ea5ea9ae8831968a74f621d1a5098d0fc096b0b0d74a0587"
+    }
+  },
+  {
+    "slug": "leafcutter-bee",
+    "kind": "organism",
+    "common_name": "Leafcutter Bee",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "leafcutter bee",
+      "leafcutter bees",
+      "megachile"
+    ],
+    "scientific_name": "Megachile spp.",
+    "rank": "genus",
+    "group": "wasps-bees",
+    "subgroup": "beneficial-bees",
+    "site_category": "Stingers",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark, somewhat stout bee, often with a hint of metallic sheen, similar in size to a honey bee",
+      "Carries pollen on hairs under the abdomen rather than on the back legs like a honey bee",
+      "Leaves neat, round or oval holes clipped from the edges of rose, hibiscus or citrus leaves",
+      "Solitary; nests in hollow stems, existing holes in wood or narrow gaps rather than a hive or colony"
+    ],
+    "look_alikes": [
+      {
+        "slug": "leaf-footed-bug",
+        "difference": "Leafcutter bee leaves clean round holes clipped from the leaf edge; leaf-footed bug causes stippled, wilted spots and has flared, leaf-like hind legs",
+        "next_photo": "From a safe distance, zoom in on the leaf damage showing whether it is a clean round cutout or a discolored, wilted patch.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Rarely stings and only if handled; the sting is mild for most people.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A gentle solitary pollinator that snips small, neat circles out of leaves to line its nest, which looks worse than it actually is for the plant. The leaf damage is cosmetic, and the bee itself is a beneficial visitor worth leaving alone.",
+      "fact": "It carries pollen on the underside of its abdomen instead of on its legs, which is one of the easiest ways to tell it apart from a honey bee up close."
+    },
+    "tech_notes": "Cosmetic leaf damage only; does not threaten plant health. Beneficial pollinator, solitary, low sting risk. No control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Megachile"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 54 (flagged as a low-value pair): kept the leaf-footed-bug look-alike rather than replacing it, since it answers a real customer question (a beneficial bee's clean leaf cutout vs. a pest bug's stippled/wilted damage) even though the insects themselves don't look alike; no better candidate among this catalog's other bee/wasp slugs (carpenter-bee, bumble-bee) is closer to this genus in size/behavior. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "b9cf5780399075b089847d4e16006dbc390c0d407fd044b8e2829942d6da6ab4"
     }
   }
 ]

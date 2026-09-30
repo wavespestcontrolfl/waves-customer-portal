@@ -59,6 +59,50 @@ describe('competitor-facts', () => {
     expect(cf.findCompetitor('Hulett')).toBeNull();
   });
 
+  test('legal-suffix normalization strips ONLY true legal-entity suffixes, never a descriptive word (#5146 r9)', () => {
+    // Direction 1: a true legal suffix still resolves to the curated record.
+    for (const [name, id] of [
+      ['Orkin, LLC', 'orkin'],
+      ['Massey Services, Inc.', 'massey-services'],
+      ['Massey Services Incorporated', 'massey-services'],
+      ['HomeTeam Pest Defense, Inc.', 'hometeam-pest-defense'],
+      ['Turner Pest Control Corp', 'turner-pest'],
+      ['Turner Pest Control Corporation', 'turner-pest'],
+      ['Turner Pest Control Co', 'turner-pest'],
+      ['Turner Pest Control Company', 'turner-pest'],
+      ['Turner Pest Control Ltd', 'turner-pest'],
+      ['Turner Pest Control LP', 'turner-pest'],
+      ['Turner Pest Control LLP', 'turner-pest'],
+      ['Turner Pest Control PLLC', 'turner-pest'],
+      // Dotted forms normalize to one-letter words and must rejoin.
+      ['Orkin, L.L.C.', 'orkin'],
+      ['Turner Pest Control, P.L.L.C.', 'turner-pest'],
+      ['Turner Pest Control L.P.', 'turner-pest'],
+      ['Massey Services Co. L.L.C.', 'massey-services'],
+    ]) {
+      expect(cf.findCompetitor(name)?.id).toBe(id);
+    }
+    // A one-letter run that spells no legal suffix is left alone.
+    expect(cf.findCompetitor('Orkin S.W.F.L.')).toBeNull();
+    // Direction 2: a descriptive word must NOT be stripped — an unrelated
+    // off-list company sharing an approved short prefix reads as unknown,
+    // never as the approved record ("Turner Services LLC" is not Turner
+    // Pest Control; "HomeTeam Services LLC" is not HomeTeam Pest Defense).
+    for (const name of [
+      'Turner Services LLC', 'Turner Services', 'Turner Global', 'Turner Group',
+      'Turner Holdings', 'Turner Holdings LLC', 'The Turner Company',
+      'HomeTeam Services LLC', 'HomeTeam Services', 'HomeTeam Group',
+    ]) {
+      expect(cf.findCompetitor(name)).toBeNull();
+      expect(cf.isKnownCompetitor(name)).toBe(false);
+    }
+  });
+
+  test('a real legal-name variant needing a descriptive word is a curated alias, not suffix-stripped (#5146 r9)', () => {
+    expect(cf.findCompetitor('Terminix Global Holdings')?.id).toBe('terminix');
+    expect(cf.isOwnerApprovedForAutopublish('Terminix Global Holdings')).toBe(true);
+  });
+
   test('findBusinessMentions flags allowlist vs unlisted businesses', () => {
     const text = 'We compared Orkin and Hulett for SWFL homes.';
     const mentions = cf.findBusinessMentions(text);
@@ -88,5 +132,28 @@ describe('competitor-facts', () => {
     expect(orkin.attributes.reach.value).toMatch(/National/);
     expect(orkin.attributes.reach.source).toMatch(/orkin\.com/);
     expect(orkin.attributes.reach.as_of).toBeTruthy();
+  });
+
+  test('owner autopublish list: the eight approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28)', () => {
+    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen', 'Aptive', 'Aptive Environmental', 'Aptive Pest Control', 'goaptive', 'Truly Nolen']) {
+      expect(cf.isOwnerApprovedForAutopublish(name)).toBe(true);
+    }
+    for (const name of ['Keller\'s Pest Control', 'Hughes Exterminators', 'Hulett', 'Hawx']) {
+      expect(cf.isOwnerApprovedForAutopublish(name)).toBe(false);
+    }
+    expect(cf.findBusinessMentions('HomeTeam installs TAEXX tubes.').map((m) => m.name)).toEqual(['HomeTeam Pest Defense']);
+    // Lowercase "hometeam" / "home team" / "turner" stay ordinary prose.
+    expect(cf.findBusinessMentions('Cheer for the home team; hometeam spirit; a pancake turner.')).toEqual([]);
+    expect(cf.findBusinessMentions('Turner runs its plan under TurnerGuard.').map((m) => m.name)).toEqual(['Turner Pest Control']);
+  });
+
+  test('Aptive has a curated record sourced from its own site (aptivepestcontrol.com — aptive.com is an unrelated company)', () => {
+    const rec = cf.findCompetitor('Aptive');
+    expect(rec).toMatchObject({ id: 'aptive', name: 'Aptive Environmental', hosts: ['aptivepestcontrol.com', 'goaptive.com'] });
+    expect(rec.hosts).not.toContain('aptive.com');
+    for (const a of Object.values(rec.attributes)) {
+      expect(a.source).toMatch(/^https:\/\/aptivepestcontrol\.com\//);
+      expect(a.asOf).toBe('2026-09-28');
+    }
   });
 });

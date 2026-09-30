@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// A browser SpeechRecognition session ends itself after a few seconds of
+// silence even with `continuous = true`. The SPEECH path below restarts the
+// same instance on every such `onend` so dictation keeps listening through
+// normal pauses, until the tech taps stop. See IDLE_STOP_MS below for the
+// one time-based cutoff that still ends it on its own.
+const IDLE_STOP_MS = 60000;
+
 /**
  * Voice dictation, extracted from CommunicationsPageV2 so the completion
  * notes box (and any other field) can reuse it.
@@ -11,18 +18,36 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
  *     setNotes((b) => (b ? `${b} ${text}` : text)));
  *
  * `onTranscript(text)` fires with each FINAL transcript chunk (trimmed); the
- * caller decides how to append. Continuous capture toggles off on a second
- * tap. Falls back to an alert on browsers without support (Firefox); iOS
- * Safari ships `webkitSpeechRecognition`.
+ * caller decides how to append. Falls back to an alert on browsers without
+ * support (Firefox); iOS Safari ships `webkitSpeechRecognition`.
+ *
+ * Keep-listening (SPEECH path only): the browser ends a recognition session
+ * on its own after a pause, so `onend` restarts the same instance and
+ * `listening` stays true, UNLESS one of these holds, in which case the
+ * session finishes (`listening` false, the ref cleared) instead:
+ *   - the tech tapped stop (second tap calls `stop()`)
+ *   - the hook unmounted (existing abort + handler nulling)
+ *   - a recognition error fired other than `no-speech` (`aborted` included)
+ *   - no FINAL transcript for IDLE_STOP_MS since the session started or the
+ *     last final result (a timer stops the live session; onend re-checks)
+ *   - the page is hidden (`document.visibilityState === "hidden"`; a
+ *     visibilitychange listener stops the live session; onend re-checks)
+ *   - the user clicks any button or link, submits a form, or presses a key
+ *     (Save, Send, Generate, Complete read the field on that action)
+ *   - 3 consecutive sessions each ended under 1000ms after their own
+ *     `start()` with no final result (a fast-end loop, e.g. mic denied by OS)
+ *   - `recognitionRef.current` no longer points at this instance
+ * If the restart `start()` itself throws, the session also finishes normally.
  *
  * Upload fallback (GATE_TECH_DICTATION_UPLOAD): pass
  * `{ uploadServiceId }` and, ONLY where SpeechRecognition is missing, the
  * hook asks `/tech/services/:id/dictation/availability`; when the server says
  * yes, the mic records with MediaRecorder and the clip is POSTed for server
  * transcription — one transcript per tap-to-stop, appended through the same
- * `onTranscript`. `mode` is "speech" | "upload" | null; `uploading` is true
- * while a clip is in flight. Browsers with SpeechRecognition never change
- * behavior.
+ * `onTranscript`. `mode` is "speech" | "upload" | null; `starting` is true
+ * from the tap until the microphone opens or is refused (a permission prompt
+ * can hold it open); `uploading` is true while a clip is in flight. Browsers
+ * with SpeechRecognition never change behavior.
  */
 export default function useSpeechDictation(onTranscript, options = {}) {
   const uploadServiceId = options.uploadServiceId ?? null;
@@ -32,8 +57,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // True from the first tap until getUserMedia settles: a second tap in that
-  // window must not open a second stream nobody can stop.
+  // window must not open a second stream nobody can stop. The ref answers
+  // that tap synchronously; `starting` shows the same window to the caller.
   const startingRef = useRef(false);
+  const [starting, setStarting] = useState(false);
   // Current dictation target; a transcript that arrives for a previous
   // target is dropped (the panel can move to another visit mid-upload).
   const serviceIdRef = useRef(uploadServiceId);
@@ -41,6 +68,26 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
+
+  // SPEECH path keep-listening state (see the hook's doc comment for the
+  // stop conditions these back). All reset at the start of a fresh toggle().
+  const stopRequestedRef = useRef(false); // set by the second (stop) tap
+  const fatalErrorRef = useRef(false); // set by onerror, except for no-speech
+  const lastFinalAtRef = useRef(0); // session start, bumped by each final result
+  const sessionStartedAtRef = useRef(0); // this internal session's start() time
+  const fastEndStreakRef = useRef(0); // consecutive fast, empty sessions
+  const gotResultThisSessionRef = useRef(false); // final result in this session
+  // Ends a session that stays open with no final result for IDLE_STOP_MS —
+  // a browser that honors `continuous` may never fire onend on its own.
+  const idleTimerRef = useRef(null);
+  // The element whose click started the live session: its own press is the
+  // normal tap-to-stop, never an "other button" stop that could let one
+  // gesture both stop and restart it.
+  const micElRef = useRef(null);
+  // Set by a stop the user did NOT make on the mic (another button, a form
+  // submit, a disabled mic): that action already read the field, so a final
+  // result still in flight is dropped instead of landing after it.
+  const discardResultsRef = useRef(false);
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -125,18 +172,23 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     }
     if (uploading || startingRef.current) return;
     startingRef.current = true;
+    setStarting(true);
+    const doneStarting = () => {
+      startingRef.current = false;
+      if (mountedRef.current) setStarting(false);
+    };
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      startingRef.current = false;
+      doneStarting();
       alert(`Microphone unavailable: ${e?.message || e}`);
       return;
     }
     if (!mountedRef.current) {
       // Unmounted while the permission prompt was open — release the mic.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       return;
     }
     const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -150,7 +202,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // Recorder construction can throw (unsupported options, device gone):
       // release the live mic and let the tech type.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       alert(`Dictation error: ${e?.message || "recorder unavailable"}`);
       return;
     }
@@ -183,16 +235,18 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // start() can throw synchronously (state / device errors): release the
       // mic and reset so the next tap starts clean.
       stream.getTracks().forEach((t) => t.stop());
-      startingRef.current = false;
+      doneStarting();
       alert(`Dictation error: ${e?.message || "could not start recording"}`);
       return;
     }
     recorderRef.current = rec;
-    startingRef.current = false;
+    // Both updates land in one render, so a caller watching
+    // `starting || listening` never sees a gap between them.
+    doneStarting();
     setListening(true);
   }, [uploadClip, uploading]);
 
-  const toggle = useCallback(() => {
+  const toggle = useCallback((event) => {
     const SR =
       typeof window !== "undefined"
         ? window.SpeechRecognition || window.webkitSpeechRecognition
@@ -207,37 +261,174 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       );
       return;
     }
-    // Second tap stops an in-progress session.
+    // Second tap stops an in-progress session; onend sees stopRequestedRef
+    // and finishes instead of restarting.
     if (recognitionRef.current) {
+      stopRequestedRef.current = true;
       recognitionRef.current.stop();
       return;
     }
     const rec = new SR();
+    // Idle cutoff as a real timer, not only an onend check: stop() ends the
+    // session through onend, which sees stopRequestedRef and finishes.
+    const armIdleTimer = () => {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => {
+        if (recognitionRef.current !== rec) return;
+        stopRequestedRef.current = true;
+        try {
+          rec.stop();
+        } catch {
+          /* already ending */
+        }
+      }, IDLE_STOP_MS);
+    };
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = "en-US";
     rec.onresult = (ev) => {
+      if (discardResultsRef.current) return;
       let append = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
       }
       const text = append.trim();
-      if (text && onTranscriptRef.current) onTranscriptRef.current(text);
+      if (text) {
+        gotResultThisSessionRef.current = true;
+        lastFinalAtRef.current = Date.now();
+        armIdleTimer();
+        if (onTranscriptRef.current) onTranscriptRef.current(text);
+      }
     };
     rec.onerror = (e) => {
-      if (e.error !== "aborted" && e.error !== "no-speech") {
-        alert(`Dictation error: ${e.error}`);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        fatalErrorRef.current = true;
+        alert(
+          "Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.",
+        );
+      } else if (e.error === "no-speech") {
+        // Not fatal — onend below still restarts unless another condition applies.
+      } else {
+        // Includes "aborted": ends the session, but (like the prior behavior)
+        // never alerts for it.
+        fatalErrorRef.current = true;
+        if (e.error !== "aborted") alert(`Dictation error: ${e.error}`);
       }
-      setListening(false);
     };
     rec.onend = () => {
-      setListening(false);
-      recognitionRef.current = null;
+      const now = Date.now();
+      const sessionDurationMs = now - sessionStartedAtRef.current;
+      const isFastEmptySession = sessionDurationMs < 1000 && !gotResultThisSessionRef.current;
+      fastEndStreakRef.current = isFastEmptySession ? fastEndStreakRef.current + 1 : 0;
+
+      const pageHidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      const idleTooLong = now - lastFinalAtRef.current >= IDLE_STOP_MS;
+      const shouldStop =
+        stopRequestedRef.current ||
+        fatalErrorRef.current ||
+        recognitionRef.current !== rec ||
+        pageHidden ||
+        idleTooLong ||
+        fastEndStreakRef.current >= 3;
+
+      if (shouldStop) {
+        clearTimeout(idleTimerRef.current);
+        setListening(false);
+        recognitionRef.current = null;
+        return;
+      }
+
+      try {
+        sessionStartedAtRef.current = Date.now();
+        gotResultThisSessionRef.current = false;
+        rec.start();
+      } catch {
+        clearTimeout(idleTimerRef.current);
+        setListening(false);
+        recognitionRef.current = null;
+      }
     };
+    stopRequestedRef.current = false;
+    discardResultsRef.current = false;
+    micElRef.current = event?.currentTarget instanceof Element ? event.currentTarget : null;
+    fatalErrorRef.current = false;
+    fastEndStreakRef.current = 0;
+    gotResultThisSessionRef.current = false;
+    lastFinalAtRef.current = Date.now();
+    sessionStartedAtRef.current = Date.now();
     recognitionRef.current = rec;
-    rec.start();
+    try {
+      rec.start();
+    } catch (e) {
+      // start() can throw synchronously (state / device errors). Never keep
+      // a session that never started: the next tap would only stop() it.
+      recognitionRef.current = null;
+      alert(`Dictation error: ${e?.message || "could not start dictation"}`);
+      return;
+    }
+    armIdleTimer();
     setListening(true);
   }, [mode, toggleUpload]);
+
+  // A live speech session ends the moment the user moves on, the way a pause
+  // used to end it before keep-listening:
+  //   - leaving the page (a browser that keeps a continuous session open
+  //     would otherwise record in the background);
+  //   - clicking any button or link, submitting a form, or pressing a key
+  //     (below). Save, Send,
+  //     Generate and Complete read the dictated field on that press, so
+  //     speech after it — and a final result still in flight — must not land
+  //     in state the action already took. The mic that started the session
+  //     is excluded: its press is the normal tap-to-stop, which still
+  //     delivers the last words. Another mic's press starts that field.
+  // The MediaRecorder upload path records until tap-to-stop and is unaffected.
+  useEffect(() => {
+    if (!listening || typeof document === "undefined") return undefined;
+    const stopLive = ({ discard = false } = {}) => {
+      const rec = recognitionRef.current;
+      if (!rec) return;
+      stopRequestedRef.current = true;
+      if (discard) discardResultsRef.current = true;
+      try {
+        rec.stop();
+      } catch {
+        /* already ending */
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") stopLive();
+    };
+    // Capture-phase click: fires for pointer AND keyboard (Enter / Space)
+    // activation, and on the document before the button's own handler runs.
+    const onClick = (event) => {
+      const el = event.target instanceof Element ? event.target : null;
+      if (!el || micElRef.current?.contains(el)) return;
+      if (el.closest('button, [role="button"], input[type="submit"], input[type="button"], a[href]')) {
+        stopLive({ discard: true });
+      }
+    };
+    const onSubmit = () => stopLive({ discard: true });
+    // Touching the keyboard ends it too: Enter in a prompt box can run the
+    // action straight from onKeyDown (charts Generate, the command bar) with
+    // no click or submit. A bare modifier key is not a keystroke.
+    const onKeyDown = (event) => {
+      if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)) return;
+      const el = event.target instanceof Element ? event.target : null;
+      if (el && micElRef.current?.contains(el)) return;
+      stopLive({ discard: true });
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("submit", onSubmit, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("submit", onSubmit, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [listening]);
 
   // Stop an in-progress session if the consumer unmounts (e.g. the completion
   // modal closes mid-dictation) so the mic isn't left recording and stale
@@ -247,6 +438,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      clearTimeout(idleTimerRef.current);
       const rec = recognitionRef.current;
       if (rec) {
         rec.onresult = null;
@@ -276,5 +468,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
   }, []);
 
-  return { listening, supported, toggle, mode, uploading };
+  // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
+  // disabled mic while its field is being rewritten) and drops any result
+  // still in flight. The MediaRecorder upload path records until
+  // tap-to-stop and has no in-flight speech results to drop.
+  const cancel = useCallback(() => {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+    stopRequestedRef.current = true;
+    discardResultsRef.current = true;
+    try {
+      rec.stop();
+    } catch {
+      /* already ending */
+    }
+  }, []);
+
+  return { listening, supported, toggle, cancel, mode, starting, uploading };
 }

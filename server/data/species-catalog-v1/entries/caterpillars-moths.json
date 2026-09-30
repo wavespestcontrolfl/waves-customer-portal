@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "04e944e4f29ea176b2f75963cd844aea9305a828b912a531d229da0418b8e578"
     },
     "slug": "fall-armyworm",
     "common_name": "Fall Armyworm",
@@ -121,7 +122,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "edd6c3905bf95cf57bc98c3b923e1eac9d87e4eff897b37496062010eed7c2c4"
     },
     "slug": "sod-webworm",
     "common_name": "Tropical Sod Webworm",
@@ -233,7 +235,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "22c50a8e8f006e6f50262b4f96e2d2775fa7af666b65b440725d6076a368b942"
     },
     "slug": "puss-caterpillar",
     "common_name": "Puss Caterpillar",
@@ -245,7 +248,7 @@
     "scientific_name": "Megalopyge opercularis",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "traits": [
       "Looks like a tiny blonde toupee — completely furry, teardrop-shaped, about 2.5 cm",
@@ -257,7 +260,7 @@
       {
         "slug": "io-moth-caterpillar",
         "difference": "Puss caterpillars are uniformly fuzzy with no visible spines; Io moth caterpillars are bright green with a red-and-white stripe and obvious branched spines.",
-        "next_photo": "From a few feet away, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
+        "next_photo": "From a safe distance, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
         "photo_can_confirm": true
       }
     ],
@@ -335,7 +338,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "cf182e76eb180b8e529d9c0f5025a955d0a9ac743f419be6233d12084af72d6d"
     },
     "slug": "io-moth-caterpillar",
     "common_name": "Io Moth Caterpillar",
@@ -347,7 +351,7 @@
     "scientific_name": "Automeris io",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "traits": [
       "Bright green with a red-and-white racing stripe down each side",
@@ -359,7 +363,7 @@
       {
         "slug": "puss-caterpillar",
         "difference": "Io moth caterpillars are green with branched spines and a red-white stripe; puss caterpillars are uniformly furry with no visible spines.",
-        "next_photo": "From a few feet away, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
+        "next_photo": "From a safe distance, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
         "photo_can_confirm": true
       }
     ],
@@ -422,6 +426,1175 @@
     "risk": "irritant",
     "action": "leave_alone",
     "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "saddleback-caterpillar",
+    "kind": "organism",
+    "common_name": "Saddleback Caterpillar",
+    "aka": [],
+    "aliases": [
+      "saddleback caterpillar",
+      "acharia stimulea"
+    ],
+    "scientific_name": "Acharia stimulea",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "venomous-caterpillars",
+    "site_category": "Stingers",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bright green body with a brown, oval 'saddle' patch outlined in white in the center of the back",
+      "Fleshy, spine-covered horns at both the front and back ends",
+      "Covered in short, stinging spines along the sides, not just the horns",
+      "Found on a wide range of shrubs and trees, including hibiscus, citrus, oak and palms"
+    ],
+    "look_alikes": [
+      {
+        "slug": "io-moth-caterpillar",
+        "difference": "Saddleback has an oval brown saddle patch on plain green skin; io moth caterpillar has a pale stripe along each side and even rows of spines with no saddle mark",
+        "next_photo": "From a safe distance, zoom in from directly above showing whether there is a distinct brown saddle-shaped patch.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "One of the most painful caterpillar stings in Florida; brush off spines with tape rather than fingers. Call 911 if someone has trouble breathing, and see a doctor for severe pain or a spreading rash.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A small caterpillar with an outsized sting, found on a wide range of shrubs and trees around the yard. It is worth pointing out to kids since the sting is memorably painful, and heavy numbers on a favorite plant can be knocked back with a targeted treatment.",
+      "fact": "Despite the intense sting, the caterpillar itself never touches you directly; hollow spines break off and release venom into the skin on contact."
+    },
+    "tech_notes": "Urticating spines cause significant local/systemic reaction in sensitive individuals; advise tape removal of spines rather than brushing with bare hands. Spot-treat heavily infested ornamentals per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Acharia_stimulea"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "b19a8ad5ce9bf1dbcf5661c6b4ea8c2e07cba6b2d13d0c11110fc35771ef0df0"
+    },
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "hag-moth-caterpillar",
+    "kind": "organism",
+    "common_name": "Hag Moth Caterpillar",
+    "aka": [
+      "monkey slug"
+    ],
+    "aliases": [
+      "hag moth caterpillar",
+      "monkey slug",
+      "phobetron pithecium"
+    ],
+    "scientific_name": "Phobetron pithecium",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "venomous-caterpillars",
+    "site_category": "Stingers",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Odd, flattened, brown, hairy shape that looks more like a bit of leaf debris or a shed spider skin than a caterpillar",
+      "Nine pairs of curly, hair-covered arm-like projections of different lengths along the body",
+      "Some of those curly projections can break off on contact without harming the caterpillar",
+      "Found on a variety of trees and shrubs, easy to overlook until you look closely"
+    ],
+    "look_alikes": [
+      {
+        "slug": "puss-caterpillar",
+        "difference": "Hag moth caterpillar is flattened with curly, uneven arm-like projections; puss caterpillar is a solid teardrop of long, silky fur with no projections",
+        "next_photo": "From a safe distance, zoom in showing whether the shape is flat with curly projections or a smooth, solid furry teardrop.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Contact with its hairy projections can irritate skin; avoid handling and see a doctor if a reaction is severe or does not improve.",
+    "range": "occasional",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "An oddly shaped caterpillar that looks like debris or a shed spider skin rather than an insect, which is exactly the disguise it is going for. It can irritate skin if touched, so it is best admired rather than handled.",
+      "fact": "Some of its curly, hair-covered projections are designed to break off on contact, a built-in decoy defense that leaves a predator with a mouthful of hair instead of the caterpillar."
+    },
+    "tech_notes": "Mild-to-moderate contact irritant from hairy tubercles; not a major structural or plant-health pest. No routine control action needed beyond advising against handling.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Phobetron_pithecium"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "92e830e3146d6bb0aff456f1fb95c222aad9d75d698460ca39e869b84d81e7db"
+    },
+    "role": "stinging_pest",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "buck-moth-caterpillar",
+    "kind": "organism",
+    "common_name": "Buck Moth Caterpillar",
+    "aka": [],
+    "aliases": [
+      "buck moth caterpillar",
+      "hemileuca maia"
+    ],
+    "scientific_name": "Hemileuca maia",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "venomous-caterpillars",
+    "site_category": "Stingers",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Jet black when young, gradually lightening to a pale, almost whitish body as it matures",
+      "Covered head to tail in rows of stiff, branching spines",
+      "Often seen feeding and moving in groups on oak trees",
+      "Can drop from oak canopy onto sidewalks, cars and people below in outbreak years"
+    ],
+    "look_alikes": [
+      {
+        "slug": "tussock-moth-caterpillar",
+        "difference": "Buck moth caterpillar is black to pale with even spines and feeds in groups on oaks; tussock moth has raised hair tufts and pencils and feeds on many trees",
+        "next_photo": "From a safe distance, zoom in showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "A sting can cause intense burning and welts, and some people react strongly; call 911 if someone has trouble breathing, and see a doctor if pain is severe or spreads.",
+    "range": "occasional",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A spiny caterpillar that feeds in groups on oak trees and can turn a shaded driveway or sidewalk into a hazard when numbers are high, since a sting can happen just from brushing against a fallen one. A technician evaluates the oak canopy and nearby foot traffic to decide whether treatment is warranted.",
+      "fact": "It often drops out of the oak canopy to pupate in the ground, which is why stings can happen just from walking under an infested tree, not only from touching one directly."
+    },
+    "tech_notes": "Seasonal oak-canopy outbreaks (spring into early summer in FL, after eggs laid Oct-Dec overwinter and hatch with new spring growth) can create real foot-traffic sting hazard under trees; targeted oak treatment per label during active infestations.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN834"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Corrected against UF/IFAS EDIS IN834 (Featured Creatures: Buck Moth): eggs laid Oct-Dec, hatch in spring with new plant growth, larvae feed through early summer before pupating near the ground -- peak months (Mar-May) match this documented cycle. IN834 describes the species' range as Maine to Florida and characterizes it as more of a north/central Florida oak-scrub specialist; it gives no SWFL-specific commonness figure. Range stays 'occasional' as the cautious, source-consistent default, and no SWFL-specific commonality is asserted in copy. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "94582bcafd7556bc30d851e439130215d69d7b6b8dbb437a6b5f65763b36da1e"
+    },
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "tussock-moth-caterpillar",
+    "kind": "organism",
+    "common_name": "Tussock Moth Caterpillar",
+    "aka": [],
+    "aliases": [
+      "tussock moth caterpillar",
+      "orgyia"
+    ],
+    "scientific_name": "Orgyia spp.",
+    "rank": "genus",
+    "group": "caterpillars-moths",
+    "subgroup": "stinging-caterpillars",
+    "site_category": "Stingers",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Distinct brush-like tufts of hair standing up in a row along the back",
+      "Two long, dark, pencil-like hair tufts sticking forward from the head and one from the tail",
+      "Body color ranges from grayish to yellowish, often with reddish spots",
+      "Found on a wide range of trees and shrubs, sometimes ballooning on silk threads to new plants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "buck-moth-caterpillar",
+        "difference": "Tussock moth has raised hair tufts and long pencil hairs at the head/tail; buck moth caterpillar has even, branching spines all over with no tufts",
+        "next_photo": "From a safe distance, zoom in showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "The hairs can cause an itchy rash on contact and are best avoided; see a doctor if a reaction is severe or does not improve.",
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      3,
+      4
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fuzzy caterpillar whose hair tufts can cause an itchy skin reaction on contact, even though it does not have a true venomous sting like some other spiny caterpillars. It feeds on a wide range of trees and shrubs and is best left alone rather than handled.",
+      "fact": "Its loose hairs can cause a reaction even without direct contact with the caterpillar itself, since they can rub off onto clothing, furniture, or blow around in the wind."
+    },
+    "tech_notes": "Urticating hairs cause contact dermatitis rather than a true venomous sting; hairs can persist on surfaces/clothing after the caterpillar is gone. Spot-treat heavily infested ornamentals per label if numbers are high.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1032"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN1032 (Featured Creatures: Fir Tussock Moth, Orgyia detrita): hair pencils, dorsal tussocks and two Florida color forms match this entry's traits; O. detrita is univoltine with eggs hatching late February, larvae maturing early April, adults emerging mid-April to early May -- peak months (Mar-Apr) match that documented cycle. Active_months is kept broader (through September) because UF/IFAS IPM community and county-extension resources independently confirm (without giving exact months) that the two rarer Florida Orgyia species (O. leucostigma, O. definita) do have a second, summer generation; no specific summer peak is claimed for the genus, only the well-documented spring peak of the common species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "f33a9023562734c0103fa564359213b46d2f5c981f9e01a111978275c4d578dc"
+    },
+    "role": "stinging_pest",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "oleander-caterpillar",
+    "kind": "organism",
+    "common_name": "Oleander Caterpillar",
+    "aka": [],
+    "aliases": [
+      "oleander caterpillar",
+      "syntomeida epilais"
+    ],
+    "scientific_name": "Syntomeida epilais",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "garden-caterpillars",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bright orange body covered in tufts of long black hairs",
+      "Feeds only on oleander (and occasionally a few related plants), never other landscape shrubs",
+      "Feeds in groups, often stripping whole branches of leaves in a short time",
+      "The long black hairs look intimidating but do not sting or cause irritation"
+    ],
+    "look_alikes": [
+      {
+        "slug": "monarch-caterpillar",
+        "difference": "Oleander caterpillar is solid orange with black hair tufts on oleander; monarch caterpillar is smooth with black/white/yellow bands on milkweed",
+        "next_photo": "A close-up showing whether the body is hairy and solid orange, or smooth with black-yellow-white bands",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless-to-touch but hungry caterpillar that feeds mainly on oleander and occasionally on a few related plants. Groups can strip a shrub's leaves quickly. Its black hair tufts look intimidating but cause no irritation; rapid defoliation is the real concern.",
+      "fact": "It feeds almost exclusively on oleander, a plant that is toxic to most animals, yet the caterpillar handles those toxins without any trouble."
+    },
+    "tech_notes": "Hairs are not urticating; safe to handle. Gregarious feeder that can rapidly defoliate oleander; spot-treat per label if defoliation is a concern to the homeowner.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Syntomeida_epilais"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Returned to draft after restoring the qualified related-host range in customer-facing copy; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "e08b82d51e98547beabeea94de07fb3d1d2c6811c6e5afe7ef90e3093826f0a6"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "orange-dog-caterpillar",
+    "kind": "organism",
+    "common_name": "Orange Dog (giant swallowtail caterpillar)",
+    "aka": [
+      "orangedog"
+    ],
+    "aliases": [
+      "orange dog caterpillar",
+      "orangedog",
+      "giant swallowtail caterpillar",
+      "papilio cresphontes"
+    ],
+    "scientific_name": "Papilio cresphontes",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "garden-caterpillars",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Mottled brown and green blotchy pattern that closely mimics a bird or lizard dropping",
+      "Large and plump, growing to about 2 inches long",
+      "Found on citrus leaves and stems, especially on young trees",
+      "If squeezed or handled, it can push out a forked, orange, snake-tongue-like organ with a sharp smell"
+    ],
+    "look_alikes": [
+      {
+        "slug": "tomato-hornworm",
+        "difference": "Orange dog is mottled brown-green like a bird dropping, on citrus; hornworm is bright green with white diagonal stripes and a horn, on tomato",
+        "next_photo": "A photo of the caterpillar next to the leaf it is eating, showing the plant type and overall color pattern",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, bird-dropping-mimicking caterpillar that feeds on citrus leaves and eventually becomes a giant swallowtail butterfly. A few on a mature tree are usually not worth worrying about, but a heavy cluster on a young citrus tree can slow its growth.",
+      "fact": "Its disguise is so effective that it is genuinely easy to mistake for actual bird droppings on a citrus leaf at a glance."
+    },
+    "tech_notes": "Non-stinging; disguise (bird-dropping mimicry) and osmeterium (forked orange defensive organ) are harmless to people. Usually tolerated on mature trees since it becomes a desirable butterfly; treat only heavy infestations on young/stressed citrus per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Papilio_cresphontes"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict is a judgment call: set to watch for citrus-damage reasons, but many homeowners prefer to leave it alone since it becomes a giant swallowtail butterfly; owner may prefer ally instead.",
+      "approval_hash": "9dd12dddde453f069af9ab4de5f7054176cf7d55ec4fb21ae485bc24ba238be1"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "tomato-hornworm",
+    "kind": "organism",
+    "common_name": "Hornworm",
+    "aka": [
+      "tomato hornworm",
+      "tobacco hornworm"
+    ],
+    "aliases": [
+      "tomato hornworm",
+      "tobacco hornworm",
+      "hornworm",
+      "hornworms",
+      "manduca"
+    ],
+    "scientific_name": "Manduca spp.",
+    "rank": "genus",
+    "group": "caterpillars-moths",
+    "subgroup": "garden-caterpillars",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, thick, bright green caterpillar that can grow up to about 4 inches long",
+      "White diagonal stripes running down each side of the body",
+      "A single curved horn near the tail end, which looks sharp but is soft and harmless",
+      "Found stripping leaves and green fruit from tomato, pepper and other Solanaceae plants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "orange-dog-caterpillar",
+        "difference": "Hornworm is bright green with white diagonal stripes and a horn, on tomato; orange dog is mottled brown-green like a bird dropping, on citrus",
+        "next_photo": "A photo of the caterpillar next to the leaf it is eating, showing the plant type and overall color pattern",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A large, harmless-to-touch caterpillar that can strip a tomato plant of leaves and fruit surprisingly fast despite its excellent camouflage. Hand-picking is usually the most practical fix for a home vegetable garden, since it can be hard to spot until the damage is already done.",
+      "fact": "Its tail horn looks intimidating but is completely soft and harmless; the caterpillar cannot sting or bite with it at all."
+    },
+    "tech_notes": "Not a stinging/biting species; safe to handle and remove by hand. Vegetable garden pest rather than a structural/ornamental one, so routine pest service is not the typical fix; hand removal or dedicated garden treatment per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Manduca_sexta"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "60e226535a73304d6f3e425104e31ea0ba0b61e6954941b25437fb6fa2e52cee"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "monarch-caterpillar",
+    "kind": "organism",
+    "common_name": "Monarch Caterpillar",
+    "aka": [],
+    "aliases": [
+      "monarch caterpillar",
+      "danaus plexippus"
+    ],
+    "scientific_name": "Danaus plexippus",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "pet-risk-garden-caterpillars",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Smooth body with bold black, white and yellow bands, no hairs or spines",
+      "Two pairs of thin, black, whip-like tentacles: one pair near the head, a shorter pair near the tail",
+      "Feeds only on milkweed plants and nowhere else",
+      "Grows quickly, often stripping a milkweed plant bare before moving to the next one"
+    ],
+    "look_alikes": [
+      {
+        "slug": "oleander-caterpillar",
+        "difference": "Monarch caterpillar is smooth with black/yellow/white bands, on milkweed; oleander caterpillar is solid orange with black hair tufts, on oleander",
+        "next_photo": "A close-up showing whether the body is smooth and banded, or hairy and solid orange",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Harmless to touch, but the milkweed toxins it stores can upset a pet's stomach if a large amount is eaten; keep an eye on pets that like to chew plants.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A beloved butterfly-to-be that feeds only on milkweed, so finding it means a butterfly garden is doing exactly what it is meant to do. Letting it eat its fill of milkweed is the whole point, not something to treat.",
+      "fact": "It stores toxins from the milkweed it eats in its own body, which is what makes both the caterpillar and the adult butterfly unappetizing to most predators."
+    },
+    "tech_notes": "Desirable species; do not treat milkweed plants hosting monarch caterpillars. No control action appropriate.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN780"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "UF/IFAS EDIS IN780 (Featured Creatures: Monarch Butterfly) confirms larvae accumulate milkweed cardiac glycosides that make the caterpillar and adult distasteful/toxic to predators. The ASPCA Animal Poison Control Center confirms milkweed (Asclepias) itself is toxic to pets via the same glycosides, though poisoning is uncommon due to the plant's bitter taste. No source (UF/IFAS, ASPCA, or general veterinary literature) documents a specific case of a pet becoming ill from eating a monarch caterpillar itself, so safety_line and copy state only the general glycoside-mechanism caution (toxic_to_pets true, risk low) and do not claim a documented case. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "bd5809b6403904756159902b9326bf45b53febad52582ae6ee12885f9c289f3b"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "bagworm",
+    "kind": "organism",
+    "common_name": "Bagworm",
+    "aka": [],
+    "aliases": [
+      "bagworm",
+      "bagworms",
+      "psychidae"
+    ],
+    "scientific_name": "Psychidae",
+    "rank": "family",
+    "group": "caterpillars-moths",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "A spindle-shaped bag made of silk and bits of leaf or twig, hanging from a branch",
+      "The caterpillar stays hidden inside, only poking its head and legs out to feed and move",
+      "Bags grow larger as the caterpillar grows, and get camouflaged with material from whatever plant it is on",
+      "Found dangling from junipers, palms, citrus and many other shrubs and trees"
+    ],
+    "look_alikes": [
+      {
+        "slug": "citrus-leafminer",
+        "difference": "Bagworm hangs a visible bag of silk and debris off a twig; citrus leafminer leaves shiny, winding silvery trails inside the leaf itself with no bag at all",
+        "next_photo": "A close-up showing whether there is a hanging bag on the twig or a silvery trail inside the leaf surface",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "worm-caterpillar",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A caterpillar that builds and lives inside its own camouflaged bag, feeding on the plant it hangs from. A few bags are mostly cosmetic, but a heavy cluster can noticeably thin out a shrub or small tree over time.",
+      "fact": "It carries its bag everywhere it goes, enlarging the same shelter throughout its whole life instead of ever leaving it exposed."
+    },
+    "tech_notes": "Bags are easy to hand-pick for light infestations; heavier infestations on ornamentals can be treated per label. Not a stinging/biting concern.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Psychidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Approval is pending after the resolver added not_matches for plaster bagworm / household casebearer. Per audit item 54: the citrus-leafminer pairing here is a low-value, same-category match rather than a real visual confusion. The genuine, well-documented bagworm mix-up is with the 'household casebearer' / 'plaster bagworm' (Phereoeca uterella) -- a small case-building moth larva homeowners commonly call a bagworm indoors (Waves' own site already has a blog post on plaster bagworms). That species has no slug anywhere in the 239-entry master list, so it can't be added as a look_alikes target without creating a new entry, which is outside this pass's scope; flagging for the owner as a catalog gap worth adding in a future slug batch. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "0ec8c238cd09685b56a048589f0d7bb7e7a075e592ac094afe818c63ff5d429b"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "not_matches": [
+      "plaster bagworm",
+      "household casebearer"
+    ]
+  },
+  {
+    "slug": "polka-dot-wasp-moth",
+    "kind": "organism",
+    "common_name": "Polka-dot Wasp Moth",
+    "aka": [],
+    "aliases": [
+      "polka dot wasp moth",
+      "syntomeida epilais adult"
+    ],
+    "scientific_name": "Syntomeida epilais (adult)",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark, metallic blue-black wings covered in bright white polka dots",
+      "Bright red-orange tip on the abdomen",
+      "Flies actively during the day, unlike most moths",
+      "Often seen fluttering around oleander, the same plant its caterpillar (the oleander caterpillar) feeds on"
+    ],
+    "look_alikes": [
+      {
+        "slug": "paper-wasp",
+        "difference": "Wasp moth has scale-covered, white-dotted wings, a red-tipped abdomen and no narrow waist or stinger; paper wasp has clear wings, a narrow waist and a stinger.",
+        "next_photo": "From a safe distance, zoom in on the wing surface (scaled and dotted versus clear) and whether there's a narrow waist or a visible stinger.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "moth-butterfly"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, day-flying moth that mimics a wasp's warning colors purely for protection; it has no stinger and cannot hurt anyone. It is the adult form of the oleander caterpillar, so seeing it fluttering around an oleander is completely normal.",
+      "fact": "It communicates with potential mates using ultrasonic clicks that are far too high-pitched for a person to hear."
+    },
+    "tech_notes": "Harmless wasp-mimic moth; no stinger. No control action needed for the adult; any concern is about caterpillar-stage defoliation of oleander.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Syntomeida_epilais"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "75e831837255734460a6ef8f412cecd2c121c46edfbc91bb8576deaa179feaca"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "citrus-leafminer",
+    "kind": "organism",
+    "common_name": "Citrus Leafminer",
+    "aka": [],
+    "aliases": [
+      "citrus leafminer",
+      "citrus leafminers",
+      "phyllocnistis citrella"
+    ],
+    "scientific_name": "Phyllocnistis citrella",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult moth"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Silvery, winding (serpentine) tunnel just under the surface of young citrus leaves, usually on the underside",
+      "A fine dark line of frass runs down the center of the tunnel",
+      "Leaf curls or puckers around and after the mine as the leaf keeps growing",
+      "Adult is a tiny (under 1/4 inch) silvery-white moth with a black spot on each wingtip, rarely seen in daylight"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-citrus-psyllid",
+        "difference": "Leafminer curling shows an internal tunnel with a dark frass line; psyllid curling has no tunnel, just tiny waxy-tubed nymphs on the underside",
+        "next_photo": "Hold the leaf up to light to check for an internal tunnel with a frass line, and check the underside for tiny insects with waxy threads",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "moth-butterfly",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mostly a cosmetic problem on established backyard citrus: it mines and curls new leaves but rarely threatens a mature tree's health on its own. It's worth more attention on young or newly planted citrus, where repeated flushes get hit hard.",
+      "fact": "The larva spends its whole feeding life inside the leaf, tunneling through it rather than chewing it from the outside."
+    },
+    "tech_notes": "Confirm serpentine mine with central frass line on new flush; on mature dooryard citrus, damage is usually tolerated, while young/nursery trees may warrant treatment timed to flush.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in165"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "618dd625684893a74183e8db68469984a7df5d61aff15adb69264118ad4ebf2b"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
     "verification": []
   }
 ]

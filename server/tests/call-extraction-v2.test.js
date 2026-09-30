@@ -32,6 +32,7 @@ function validModelOutput() {
       sms_consent_quote: 'Yes, you can text me at this number.',
       call_recording_disclosed: true,
       do_not_contact_request: false,
+      sms_declined: false,
     },
     property: {
       service_address: {
@@ -137,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.16.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.16.0');
+  test('schema version is 1.20.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.20.0');
   });
 
   describe('model-output schema', () => {
@@ -205,6 +206,27 @@ describe('schema validation', () => {
       expect(validatePersisted(persisted).valid).toBe(true);
     });
 
+    test('1.18.0: a family_member caller validates in both schemas', () => {
+      const out = validModelOutput();
+      out.caller.relationship_to_property = 'family_member';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const persisted = validPersisted();
+      persisted.meta.schema_version = SCHEMA_VERSION;
+      persisted.caller.relationship_to_property = 'family_member';
+      expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.18.0: family_member survives normalization unchanged (normalizeCaller spreads caller fields — no relationship_to_property allowlist to silently coerce it to "other"/"unknown")', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      data.caller.relationship_to_property = 'family_member';
+      data.caller.on_site_authorization = false;
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.caller.relationship_to_property).toBe('family_member');
+      expect(normalized.caller.on_site_authorization).toBe(false);
+    });
+
     test('1.16.0: a reschedule agreement and the appointment it moves survive validation, normalization and flattening', () => {
       const out = validModelOutput();
       out.scheduling.status = 'reschedule_requested';
@@ -233,6 +255,116 @@ describe('schema validation', () => {
       old.meta.schema_version = '1.15.0';
       expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
       expect(flatView(old)).toMatchObject({ caller_accepted_slot: false, moved_appointment_date: null });
+    });
+
+    test('1.17.0: agreed_slot_words and moved_appointment_words survive validation, normalization and flattening', () => {
+      const out = validModelOutput();
+      out.scheduling.status = 'reschedule_requested';
+      out.scheduling.confirmed_start_at = '2026-11-09T14:00:00-05:00';
+      out.scheduling.agent_committed_booking = true;
+      out.scheduling.caller_accepted_slot = true;
+      out.scheduling.moved_appointment_date = '2026-11-02';
+      out.scheduling.agreed_slot_words = { day: 'the 9th', hour: 'two', period: null };
+      out.scheduling.moved_appointment_words = 'the 2nd';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      Object.assign(data.scheduling, out.scheduling);
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.scheduling).toMatchObject({
+        agreed_slot_words: { day: 'the 9th', hour: 'two', period: null },
+        moved_appointment_words: 'the 2nd',
+      });
+      expect(flatView(normalized)).toMatchObject({
+        agreed_slot_words: { day: 'the 9th', hour: 'two', period: null },
+        moved_appointment_words: 'the 2nd',
+      });
+    });
+
+    test('1.17.0: agreed_slot_words and moved_appointment_words are null by default, and older rows without the fields still validate', () => {
+      const out = validModelOutput();
+      out.scheduling.agreed_slot_words = null;
+      out.scheduling.moved_appointment_words = null;
+      expect(validateModelOutput(out).valid).toBe(true);
+      const old = validPersisted();
+      old.meta.schema_version = '1.16.0';
+      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
+      expect(flatView(old)).toMatchObject({ agreed_slot_words: null, moved_appointment_words: null });
+    });
+
+    test('1.17.0: agreed_slot_words rejects extra keys, a missing key, and empty strings', () => {
+      const out = validModelOutput();
+      out.scheduling.agreed_slot_words = { day: 'Thursday', hour: 'two', period: 'pm', extra: 'nope' };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: 'Thursday', hour: 'two' };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: '', hour: 'two', period: null };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: null, hour: '', period: null };
+      expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    test('1.17.0: moved_appointment_words rejects an empty string', () => {
+      const out = validModelOutput();
+      out.scheduling.moved_appointment_words = '';
+      expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    // consent.sms_declined (schema 1.19.0, codex P1 on #5292): the
+    // booking-link dry run's removal of the sms_consent_given===false
+    // staging check also stopped catching an explicit refusal, which the
+    // model recorded the same way. Additive/optional in BOTH schemas
+    // (AGENTS.md: extraction schema changes are never added to `required`)
+    // — a pre-1.19 row, which never has the field at all, still validates.
+    // The booking-link staging check itself (not schema validation) is what
+    // fails closed on that absent-field shape (call-booking-link-text.js).
+    test('1.19.0: sms_declined is optional and nullable in the model output, and older rows without it still validate', () => {
+      const out = validModelOutput();
+      delete out.consent.sms_declined;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = null;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = false;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = true;
+      expect(validateModelOutput(out).valid).toBe(true);
+      const old = validPersisted();
+      old.meta.schema_version = '1.17.0';
+      delete old.consent.sms_declined;
+      expect(validatePersisted(old).valid).toBe(true);
+    });
+
+    test('1.19.0: sms_declined must be a boolean or null', () => {
+      const out = validModelOutput();
+      out.consent.sms_declined = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    // scheduling.definite_commitment / relative_date_used /
+    // moved_appointment_relative_date_used (schema 1.20.0, owner direction
+    // 2026-09-30): the extraction judges the promise's language; additive
+    // and optional in BOTH schemas, so a pre-1.20 row still validates and
+    // the reschedule applier fails closed on the absent flag instead.
+    test('1.20.0: the language judgements are optional, nullable booleans; older rows without them still validate', () => {
+      const FIELDS = ['definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used'];
+      const out = validModelOutput();
+      for (const field of FIELDS) delete out.scheduling[field];
+      expect(validateModelOutput(out).valid).toBe(true);
+      for (const value of [true, false, null]) {
+        for (const field of FIELDS) out.scheduling[field] = value;
+        expect(validateModelOutput(out).valid).toBe(true);
+      }
+      out.scheduling.relative_date_used = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.19.0';
+      for (const field of FIELDS) delete old.scheduling[field];
+      expect(validatePersisted(old).valid).toBe(true);
+      const current = validPersisted();
+      current.scheduling.definite_commitment = true;
+      current.scheduling.relative_date_used = false;
+      expect(validatePersisted(current).valid).toBe(true);
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {
@@ -770,6 +902,27 @@ describe('normalize extraction v2', () => {
     expect(validatePersisted(result).valid).toBe(true);
   });
 
+  // consent.sms_declined (schema 1.19.0, codex P1 on #5292) MUST survive
+  // normalizeExtractionV2 — the top-level spread passes `consent` through
+  // unchanged (no per-field consent normalizer exists), so it is never
+  // explicitly overridden. Asserted directly through the real normalizer
+  // rather than trusted from reading the source (pre-push review flagged
+  // the same gap for caller_id_disclaimed above, even though it was never
+  // actually dropped). call-booking-link-text.test.js separately proves the
+  // staging check reads it correctly after this same real normalization.
+  test('normalizeExtractionV2 preserves consent.sms_declined', () => {
+    const extraction = validModelOutput();
+    extraction.consent.sms_declined = true;
+    const result = normalizeExtractionV2(extraction);
+    expect(result.consent.sms_declined).toBe(true);
+    // The normalized shape still validates end to end.
+    result.meta.schema_version = SCHEMA_VERSION;
+    result.meta.call_id = '550e8400-e29b-41d4-a716-446655440000';
+    result.meta.extracted_at = '2026-09-28T00:00:00.000Z';
+    result.meta.extraction_model = 'test-model';
+    expect(validatePersisted(result).valid).toBe(true);
+  });
+
   test('normalizeExtractionV2 clamps an over-length phone_note to 160 chars', () => {
     const extraction = validModelOutput();
     extraction.caller.caller_id_disclaimed = true;
@@ -1164,6 +1317,30 @@ describe('extraction compat adapter', () => {
 
     v2.scheduling = { status: 'requested', confirmed_start_at: null, requested_date_range_start: '2026-05-28', blackout_dates: [] };
     expect(flatView(v2).preferred_date_time).toBeNull();
+  });
+
+  // sms_declined (schema 1.19.0, codex P1 on #5292) — tri-state like
+  // caller_id_disclaimed: null (never judged, including every pre-1.19 row,
+  // which lacks the field entirely) is distinct from an explicit false.
+  // Watched by replay variance (FIELD_GROUPS medium).
+  test('flatView maps consent.sms_declined, tri-state like caller_id_disclaimed', () => {
+    const v2 = validPersisted();
+    v2.consent.sms_declined = true;
+    expect(flatView(v2).sms_declined).toBe(true);
+    v2.consent.sms_declined = false;
+    expect(flatView(v2).sms_declined).toBe(false);
+    delete v2.consent.sms_declined;
+    expect(flatView(v2).sms_declined).toBeNull();
+  });
+
+  test('flatView maps the reschedule language judgements (schema 1.20.0), null when not judged', () => {
+    const v2 = validPersisted();
+    v2.scheduling.definite_commitment = true;
+    v2.scheduling.relative_date_used = false;
+    const flat = flatView(v2);
+    expect([flat.definite_commitment, flat.relative_date_used, flat.moved_appointment_relative_date_used]).toEqual([true, false, null]);
+    delete v2.scheduling.definite_commitment;
+    expect(flatView(v2).definite_commitment).toBeNull();
   });
 
   test('flatView preserves _v2 reference', () => {

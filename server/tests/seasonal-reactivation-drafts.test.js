@@ -51,6 +51,8 @@ function makeBuilder(table, cfg = {}) {
   for (const m of [
     'join', 'leftJoin', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot',
     'orWhere', 'orWhereNull', 'orderBy', 'select', 'groupBy', 'limit',
+    // The campaign cooldown's durable renewal-contact check (#4971).
+    'whereRaw', 'orWhereExists', 'from',
   ]) b[m] = jest.fn(() => b);
   b.where = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(b, b);

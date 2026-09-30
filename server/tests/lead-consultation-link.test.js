@@ -282,7 +282,7 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', {
       first_name: 'Pat',
       consultation_url: 'https://waves.link/l/abc123',
-    }, {}, { requiredVars: ['consultation_url'] });
+    }, {}, { requiredVars: ['consultation_url'], throwOnError: true });
     expect(result.url).toBe('https://waves.link/l/abc123');
     expect(result.standalone).toBe(true);
     // Collapsed to one line (no embedded newlines other than the
@@ -448,6 +448,69 @@ describe('buildLeadConsultationSmsLine', () => {
     expect(result.line).toBe('');
     expect(result.reason).toBeTruthy();
     expect(result.standalone).toBeUndefined();
+  });
+
+  // codex r8 P2: getTemplate's OWN try/catch already swallows a genuine
+  // infrastructure failure (a schema/query/render error) into a bare
+  // `null` — indistinguishable, before this fix, from "the template is
+  // deliberately missing or disabled." throwOnError (an EXISTING,
+  // additive admin-sms-templates.js option this builder now opts into)
+  // makes getTemplate re-throw ONLY that caught-exception path — every
+  // deliberate refusal (missing row, is_active===false, a lost required
+  // placeholder, unresolved placeholders) is a plain early return inside
+  // getTemplate's own try block and never reaches its catch, so it is
+  // never turned into a false transient by this.
+  test('an sms_templates availability query failure is flagged transient — retried by the worker, never a terminal skip (codex #5018 P2)', async () => {
+    const failing = chainBuilder();
+    failing.first = jest.fn(async () => { throw new Error('connection reset'); });
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: failing,
+    };
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.transient).toBe(true);
+    // A deliberately disabled template stays a plain refusal.
+    mockBuilders.sms_templates = chainBuilder({ firstRow: { is_active: false } });
+    const refused = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(refused.transient).toBeUndefined();
+  });
+
+  test('a getTemplate DB/render error during the DRY pre-check is flagged transient — safe to retry, never a terminal skip', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockRejectedValue(new Error('connection reset'));
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.transient).toBe(true);
+    expect(getTemplate).toHaveBeenCalledWith('lead_consultation_link', expect.any(Object), {}, expect.objectContaining({ throwOnError: true }));
+  });
+
+  test('a getTemplate DB/render error during the REAL render (after the dry pre-check passed) is also flagged transient', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate
+      .mockResolvedValueOnce('Pick a time: https://waves.link/l/preview Reply STOP to opt out.') // the dry pre-check passes
+      .mockRejectedValueOnce(new Error('connection reset')); // the real render fails
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.transient).toBe(true);
+    expect(getTemplate).toHaveBeenCalledTimes(2);
+  });
+
+  test('a genuinely missing template (getTemplate returns null, never throws — even with throwOnError) is a permanent skip, never transient', async () => {
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: chainBuilder({ firstRow: { is_active: true } }),
+    };
+    getTemplate.mockResolvedValue(null); // getTemplate's own deliberate-refusal path, e.g. a missing row — never throws
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.transient).toBeUndefined();
   });
 
   test('the sms_templates lookup itself throwing is unavailable — no bare fallback clause', async () => {

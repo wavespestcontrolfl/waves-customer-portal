@@ -31,6 +31,7 @@ const { invoiceAmountDue } = require('../invoice-helpers');
 const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
 const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
+const DunningSpacing = require('./dunning-spacing');
 
 const CHANNELS = new Set(['sms', 'email', 'push', 'voice', 'manual_call']);
 
@@ -134,6 +135,40 @@ function isSupervisedApprover(approvedBy) {
 const RND_STALENESS_DAYS = 90;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// GATE_DUNNING_SPACING_SHADOW, read at call time (strict 'true'), same
+// convention as invoice-followups.js's GATE_DUNNING_LADDER_90 reader. Gate
+// off: dunningSpacingShadowLog is never called — byte-identical to before
+// this lane.
+function dunningSpacingShadowLive() {
+  return process.env.GATE_DUNNING_SPACING_SHADOW === 'true';
+}
+
+// SHADOW ONLY (dunning-unification PR 1, re-sequenced narrow): logs what
+// the seven-day overdue-reminder spacing rule would have held, without
+// changing `result` in any way. Never throws into the caller — a shadow
+// read failing must never turn an allow into policy_evaluation_error.
+async function dunningSpacingShadowLog(customerId, {
+  channel, purpose, now, excludeLedgerIds, database, result, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null,
+}) {
+  if (!dunningSpacingShadowLive() || !DunningSpacing.OVERDUE_PURPOSES.has(purpose)) return;
+  // Observed only for a caller that names one of the designated reminder
+  // rails (Codex #5189 r3/r4): the in-call pay link, the voice dial and
+  // answer checks and the shadow sweep evaluate with an overdue purpose
+  // but are not reminder attempts, and pass no source (or an exempt one).
+  if (!source || !DunningSpacing.OVERDUE_SOURCES.has(source)) return;
+  try {
+    const holding = await DunningSpacing.lastOverdueReminderWithin7d(customerId, {
+      now, excludeLedgerIds, database, excludeIdempotencyKey: spacingExcludeKey, excludeEventKey: spacingExcludeEventKey,
+    });
+    if (!holding) return;
+    const hoursSince = (now.getTime() - new Date(holding.occurred_at).getTime()) / (60 * 60 * 1000);
+    const verdict = result.allowed ? 'allowed' : `denied:${result.denialReasons.join(',')}`;
+    logger.info(`[contact-policy] dunning_within_7d SHADOW would hold customer=${customerId} channel=${channel} purpose=${purpose} prevSource=${holding.source} hoursSince=${hoursSince.toFixed(1)} verdict=${verdict}`);
+  } catch (err) {
+    logger.warn(`[contact-policy] dunning_within_7d SHADOW check failed for customer ${customerId}: ${err.message}`);
+  }
+}
 
 function isVoiceLike(channel) {
   return channel === 'voice' || channel === 'manual_call';
@@ -241,7 +276,7 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null, database 
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -593,6 +628,14 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     }
 
     result.allowed = result.denialReasons.length === 0;
+
+    // SHADOW ONLY: observes what the seven-day overdue-reminder spacing
+    // rule would have held, logs it, and returns `result` UNCHANGED — see
+    // dunning-spacing.js's module header.
+    await dunningSpacingShadowLog(customerId, {
+      channel, purpose, now, excludeLedgerIds, database, result, source, spacingExcludeKey, spacingExcludeEventKey,
+    });
+
     return result;
   } catch (err) {
     logger.error(`[contact-policy] evaluation failed for customer ${customerId}: ${err.message}`);

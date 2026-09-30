@@ -287,7 +287,7 @@ describe('schema 1.1.0 additions + advisory routing', () => {
     return {
       meta: { is_voicemail: false, is_spam: false, transcript_word_count: 100, call_summary: 'Two rentals, quarterly pest, quote promised.' },
       caller: { first_name: 'Casey', last_name: 'Landlord', relationship_to_property: 'owner', on_site_authorization: true, decision_maker_present: true, phone_source: 'both' },
-      consent: { sms_consent_given: false, sms_consent_quote: null, call_recording_disclosed: true, do_not_contact_request: false },
+      consent: { sms_consent_given: false, sms_consent_quote: null, call_recording_disclosed: true, do_not_contact_request: false, sms_declined: false },
       property: {
         service_address: { raw_text: '123 Sample Home Way', street_line_1: '123 Sample Home Way', street_line_2: null, city: 'Bradenton', state: 'FL', postal_code: '34211', county: 'Manatee', subdivision_or_community: null, normalization_status: 'not_attempted' },
         property_type: 'single_family',

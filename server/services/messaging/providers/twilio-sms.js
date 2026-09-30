@@ -116,7 +116,10 @@ async function sendViaTwilio(input, hooks = {}) {
 }
 
 async function sendViaTwilioOnce(input, {
-  preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
+  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, onDispatchRejected, withSmsHandoff, providerHandoffReservation,
+  // codex #5018 structural fix (post-r7): threaded straight through, same
+  // as onDispatchStart/onDispatchAbort/onDispatchRejected above.
+  logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
   const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
@@ -189,6 +192,15 @@ async function sendViaTwilioOnce(input, {
       agentDecisionId: input.metadata && input.metadata.agentDecisionId,
       parkedDecisionIds: input.metadata && input.metadata.parkedDecisionIds,
       scheduledSmsLogId: input.metadata && input.metadata.scheduled_sms_log_id,
+      // Which sms_templates row rendered this body — set by callers that
+      // render through router.getTemplate / renderSmsTemplate /
+      // renderRequiredSmsTemplate and thread the exact key they requested
+      // into metadata.templateKey (never inferred here). Persisted on the
+      // accepted sms_log row as template_key/template_variant_id
+      // (services/twilio.js) and flows into messaging_audit_log.metadata
+      // as-is via input.metadata below.
+      templateKey: input.metadata && input.metadata.templateKey,
+      templateVariantId: input.metadata && input.metadata.templateVariantId,
       // Durable linkage back to the review ask this text IS. The
       // stranded-send reconciliation proves a send from it, so an ask
       // whose template carries no review link (the private check-ins)
@@ -207,7 +219,24 @@ async function sendViaTwilioOnce(input, {
       // template lookup, customer/location query).
       preSendCheck,
       providerPreSendCheck,
+      // The REAL attempt boundary (codex #5018 r15 P1) — awaited by
+      // twilio.js immediately before dispatchStarted flips true and
+      // messages.create() runs, AFTER providerPreSendCheck's own refusal
+      // path has already cleared.
+      onDispatchStart,
+      // codex #5018 r15 pre-push P1: lets the caller undo its own marker
+      // when twilio.js's post-onDispatchStart window recheck refuses.
+      onDispatchAbort,
+      // codex #5196 r4 P2: fired instead of onDispatchAbort when
+      // messages.create() throws a definitive rejection, still inside the
+      // handoff lock.
+      onDispatchRejected,
       withSmsHandoff,
+      // codex #5018 structural fix (post-r7): gates twilio.js's in-
+      // transaction sms_log insert (dispatch()'s own comment there).
+      // Omitted (the default), twilio.js falls back to origin/main's
+      // post-handoff, out-of-transaction insert.
+      logInHandoff,
       providerHandoffReservation: internalProviderReservation,
       // The opaque owner token is issued only from the complete canonical
       // input and callback contract. Raw Twilio callers cannot bypass the
@@ -238,7 +267,7 @@ async function sendViaTwilioOnce(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.eventVisibleAt ? { eventVisibleAt: result.eventVisibleAt } : {}), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
       return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
@@ -397,6 +426,9 @@ module.exports = {
   // may still have reached Twilio.
   classifyProviderFailure,
   SENDER_SIDE_TERMINAL_TWILIO_CODES,
+  // Shared with the booking-link lane, which treats a recipient-side
+  // rejection as an expected refusal rather than a lane failure.
+  RECIPIENT_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

@@ -166,4 +166,64 @@ describe('register provisioning hardening', () => {
     expect(res.statusCode).toBe(400);
     expect(inserts).toHaveLength(0);
   });
+
+  // Owner-only access model (owner ruling 2026-09-28): register is one of
+  // exactly two places a technicians row's email is ever written outside
+  // migrations (the other is admin-timetracking.js's createTechnician /
+  // updateTechnician), and ibFullAccess() keys authorization on that
+  // column — a non-owner admin registering a fresh admin account with the
+  // owner's email would otherwise grant themselves full IB access at their
+  // next login (log in, change the forced password, done).
+  describe('owner-only access model (full-access email assignment)', () => {
+    afterEach(() => {
+      delete process.env.IB_FULL_ACCESS_EMAILS;
+    });
+
+    test('a non-owner admin cannot register a new account with the full-access email', async () => {
+      const inserts = installDb();
+      const res = await invoke({
+        body: baseBody({ email: 'contact@wavespestcontrol.com', role: 'admin' }),
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(inserts).toHaveLength(0);
+    });
+
+    test('the full-access owner CAN register a new account with the full-access email', async () => {
+      const inserts = installDb();
+      const res = await invoke({
+        body: baseBody({ email: 'contact@wavespestcontrol.com', role: 'admin' }),
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+      expect(res.statusCode).toBe(201);
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0].email).toBe('contact@wavespestcontrol.com');
+    });
+
+    test('a mixed-case/whitespace variant of the full-access email is also refused for a non-owner', async () => {
+      const inserts = installDb();
+      const res = await invoke({
+        body: baseBody({ email: '  Contact@WavesPestControl.COM  ', role: 'admin' }),
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+      expect(res.statusCode).toBe(403);
+      expect(inserts).toHaveLength(0);
+    });
+
+    test('an IB_FULL_ACCESS_EMAILS override protects the NEW email at register too', async () => {
+      process.env.IB_FULL_ACCESS_EMAILS = 'owner@example.test';
+      const inserts = installDb();
+      const res = await invoke({
+        body: baseBody({ email: 'owner@example.test', role: 'admin' }),
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+      expect(res.statusCode).toBe(403);
+      expect(inserts).toHaveLength(0);
+    });
+  });
 });

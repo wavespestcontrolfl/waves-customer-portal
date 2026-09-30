@@ -491,11 +491,53 @@ describe('model-switchboard', () => {
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
     expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
+    // PLANT_ID_REFEREE (ROUTES.plantIdReferee, plant-engine.js's runReferee)
+    // sends the SAME photos as the Gemini/Sol legs it decides between — a
+    // vision selector, matching the other photo-model selectors, never text
+    // (Codex #5307 r1 finding 6).
+    expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
+    // LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29) sends the visit's photos
+    // the same way: a deep-safe vision selector.
+    expect(selectors.find((s) => s.key === 'LAWN_ASSESSMENT_REFEREE')).toMatchObject({ env: 'MODEL_LAWN_ASSESSMENT_REFEREE', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } });
     // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
+    // Codex #5307 r7 finding 3: LANES had no entry for either the plant
+    // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
+    // reported zero blast radius for GEMINI_VISION_BEST/OPENAI_PLANT_ID's
+    // plant use and for PLANT_ID_REFEREE entirely.
+    const plantId = lanes.find((l) => l.id === 'plant_id');
+    expect(plantId.primary.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.primary.model);
+    expect(plantId.fallback.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.fallback.model);
+    expect(plantId.inbound).toBe(true);
+    // Codex #5307 r8: the plant lane shows the shared GEMINI_VISION_MODEL pin
+    // like pest_id, sits under Photos with a description, and the engine's
+    // own call-ledger rows carry these exact lane ids (hub-read joins on id).
+    expect(plantId.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
+    for (const id of ['plant_id', 'plant_id_referee']) {
+      const lane = lanes.find((l) => l.id === id);
+      expect(lane.area).toBe('photos');
+      expect(lane.describe).toEqual(expect.any(String));
+    }
+    const plantReferee = lanes.find((l) => l.id === 'plant_id_referee');
+    expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
+    expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');
+    expect(plantReferee.fallback).toBeNull();
+    const lawnReferee = lanes.find((l) => l.id === 'lawn_assessment_referee');
+    expect(lawnReferee.area).toBe('photos');
+    expect(lawnReferee.describe).toEqual(expect.any(String));
+    expect(lawnReferee.primary.model).toBe(MODELS.ROUTES.lawnAssessmentReferee.model);
+    expect(lawnReferee.primary.selector).toBe('LAWN_ASSESSMENT_REFEREE');
+    expect(lawnReferee.fallback).toBeNull();
+    expect(lawnReferee.inbound).toBe(true);
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
-    expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
+    // NEWSLETTER is reached only through the newsletterWriter policy in
+    // llm/call.js, whose wire cap gives always-thinking models their floor;
+    // its default (Opus 5.5) is itself a requires:'deep' model.
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
+    expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
+    expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
+    expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
       expect(sb.MODEL_CATALOG[id].requires).toBe('deep');
     }
@@ -567,7 +609,7 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
   // The relay takes the shared VOICE_RELAY_MODEL only as an allowlisted
   // Anthropic id (gate or no gate — collections reads the same env), so the
   // inbound row must not show an OpenAI value as what inbound calls run on.
-  it('an OpenAI VOICE_RELAY_MODEL shows as rejected on voice_relay (runtime falls back) but as-is on collections', () => {
+  it('an OpenAI VOICE_RELAY_MODEL shows as rejected on voice_relay and on collections (both runtimes fall back)', () => {
     const savedGate = process.env.GATE_VOICE_RELAY_OPENAI;
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = 'gpt-6-sol';
@@ -580,7 +622,8 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       expect(inbound.primary.model).toBe(MODELS.VOICE);
       expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
       expect(inbound.primary.dependsOnEnvs).toContain('VOICE_RELAY_MODEL');
-      expect(collections.primary.model).toBe('gpt-6-sol');
+      // collections-conversation.js validates the same chain since #5151.
+      expect(collections.primary.model).toBe(MODELS.VOICE);
     } finally {
       if (savedGate === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedGate;
     }
@@ -589,9 +632,9 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
   // Codex r8 P2: the tab walks the same validated chain the relay does —
   // VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default.
   it.each([
-    ['a rejected VOICE_RELAY_MODEL over a valid MODEL_VOICE shows MODEL_VOICE', { VOICE_RELAY_MODEL: 'gpt-6-sol', MODEL_VOICE: 'claude-haiku-4-5-20251001' }, 'claude-haiku-4-5-20251001', 'gpt-6-sol'],
-    ['a MODEL_VOICE the relay refuses shows the code default', { MODEL_VOICE: 'gpt-6-sol' }, 'CODE_DEFAULT', 'gpt-6-sol'],
-  ])('%s — matching resolveSessionModel', (_label, env, inboundModel, collectionsModel) => {
+    ['a rejected VOICE_RELAY_MODEL over a valid MODEL_VOICE shows MODEL_VOICE', { VOICE_RELAY_MODEL: 'gpt-6-sol', MODEL_VOICE: 'claude-haiku-4-5-20251001' }, 'claude-haiku-4-5-20251001'],
+    ['a MODEL_VOICE the relay refuses shows the code default', { MODEL_VOICE: 'gpt-6-sol' }, 'CODE_DEFAULT'],
+  ])('%s — matching resolveSessionModel', (_label, env, inboundModel) => {
     const saved = { MODEL_VOICE: process.env.MODEL_VOICE };
     Object.assign(process.env, env);
     try {
@@ -602,7 +645,8 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       const expected = inboundModel === 'CODE_DEFAULT' ? require('../config/models').DEFAULTS.VOICE : inboundModel;
       expect(inbound.primary.model).toBe(expected);
       expect(resolveSessionModel({ sandbox: false }).model).toBe(expected);
-      expect(lanes.find((l) => l.id === 'voice_relay_collections').primary.model).toBe(collectionsModel);
+      // Collections walks the same validated chain (collections-conversation.js MODEL).
+      expect(lanes.find((l) => l.id === 'voice_relay_collections').primary.model).toBe(expected);
     } finally {
       if (saved.MODEL_VOICE === undefined) delete process.env.MODEL_VOICE; else process.env.MODEL_VOICE = saved.MODEL_VOICE;
     }
@@ -684,5 +728,80 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
     expect(inbound.primary.accepts.allowedIds).toContain('claude-haiku-4-5-20251001');
     expect(inbound.primary.accepts.allowedIds.some((id) => id.includes('fable'))).toBe(false);
+  });
+
+  // GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28, GPT-6 Luna): the
+  // voice_relay row must show what production inbound ACTUALLY resolves — a
+  // separate gate from GATE_VOICE_RELAY_OPENAI (sandbox/eval only).
+  describe('GATE_VOICE_RELAY_OPENAI_INBOUND', () => {
+    const INBOUND_GATE_ENV = 'GATE_VOICE_RELAY_OPENAI_INBOUND';
+    let savedGate;
+    beforeEach(() => { savedGate = process.env[INBOUND_GATE_ENV]; delete process.env[INBOUND_GATE_ENV]; });
+    afterEach(() => { if (savedGate === undefined) delete process.env[INBOUND_GATE_ENV]; else process.env[INBOUND_GATE_ENV] = savedGate; });
+
+    it('off — the picker allowlist is unchanged (Anthropic-only, same as before this gate existed)', () => {
+      const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+      const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+      expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
+      expect(inbound.primary.accepts.allowedIds).not.toContain('gpt-6-luna');
+      expect(inbound.primary.accepts.providers).toEqual(['anthropic']);
+    });
+
+    it('off — a gpt-6-luna VOICE_RELAY_INBOUND_MODEL shows as rejected, falling back to the shared chain', () => {
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const expected = require('../config/models').DEFAULTS.VOICE;
+      expect(inbound.primary.model).toBe(expected);
+      expect(inbound.primary.via).toMatch(/VOICE_RELAY_INBOUND_MODEL rejected/);
+      expect(resolveSessionModel({ sandbox: false }).model).toBe(expected);
+    });
+
+    it('on — the picker allowlist grows to include gpt-6-luna, and the row shows what production inbound resolves', () => {
+      process.env[INBOUND_GATE_ENV] = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      expect(inbound.primary.accepts.allowedIds).toContain('gpt-6-luna');
+      // The picker filters by provider before the allowlist (codex r1 P2 on #5209).
+      expect(inbound.primary.accepts.providers).toEqual(expect.arrayContaining(['anthropic', 'openai']));
+      expect(inbound.primary.model).toBe('gpt-6-luna');
+      expect(resolveSessionModel({ sandbox: false })).toEqual({ model: 'gpt-6-luna', fallbackReason: null });
+    });
+
+    // GATE_VOICE_RELAY_OPENAI (the sandbox/eval gate) must never be what the
+    // voice_relay row (production inbound) reads.
+    it('GATE_VOICE_RELAY_OPENAI alone never opens the voice_relay row to an OpenAI id', () => {
+      const savedOther = process.env.GATE_VOICE_RELAY_OPENAI;
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-luna';
+      try {
+        jest.resetModules();
+        const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+        expect(inbound.primary.accepts.allowedIds).not.toContain('gpt-6-luna');
+        expect(inbound.primary.model).toBe(require('../config/models').DEFAULTS.VOICE);
+      } finally {
+        if (savedOther === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedOther;
+      }
+    });
+
+    // The shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only
+    // regardless of this gate — collections-conversation.js shares it.
+    it('the shared chain still rejects an OpenAI VOICE_RELAY_MODEL with the inbound gate on', () => {
+      process.env[INBOUND_GATE_ENV] = 'true';
+      process.env.VOICE_RELAY_MODEL = 'gpt-6-luna';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+      const expected = require('../config/models').VOICE;
+      expect(inbound.primary.model).toBe(expected);
+      expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
+      expect(collections.primary.model).toBe(expected);
+    });
   });
 });

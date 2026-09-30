@@ -3778,6 +3778,25 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
   });
 
+  // Codex round 4 P1 follow-through: buildMemberLines (visit-completion-invoice.js)
+  // is another completionInvoiceAmount caller `primaryLinePrice` must reach.
+  // Without it, a packet member already stamped $0 net with a positive
+  // primary_line_price (the discount engine's own frozen shape) misread as
+  // unpriced, fell back to the whole-plan per_application_fee, failed the
+  // price===0 no-charge branch, and parked the WHOLE combined visit —
+  // including its normal-priced sibling member — as 'member_price_ambiguous'
+  // instead of billing the sibling and reviewing the discounted member's fee.
+  test('a stamped $0 net member with a positive primary_line_price never blocks its normal-priced sibling', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ per_application_fee: 100 });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] })
+      .update({ estimated_price: 0, primary_line_price: 100 });
+    const result = await saveVisitCompletionPacket(submission());
+    expect(result.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(120);
+  });
+
   test('a missing member price cannot inherit a whole-plan per-application fee', async () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: 'per_application', per_application_fee: 240 });
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ estimated_price: null });

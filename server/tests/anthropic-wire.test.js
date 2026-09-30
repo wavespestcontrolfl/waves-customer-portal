@@ -9,8 +9,8 @@ const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortFor, anthropicEffortConfig, THINKING_FLOOR_TOKENS } = require('../services/llm/anthropic-wire');
 
 describe('anthropicMaxTokens', () => {
-  test('raises the cap to the floor on models that think by default (Opus 5+, Fable, Mythos)', () => {
-    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+  test('raises the cap to the floor on models that think by default (Opus 5+, Sonnet 5.5+, Fable, Mythos)', () => {
+    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
       expect(anthropicMaxTokens(model, 200)).toBe(THINKING_FLOOR_TOKENS);
       expect(anthropicMaxTokens(model, 20000)).toBe(20000);
       expect(anthropicMaxTokens(model, undefined)).toBe(THINKING_FLOOR_TOKENS);

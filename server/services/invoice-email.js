@@ -30,6 +30,11 @@ const {
   loadBillingEmailContext, dispatchUnderBillingEmailAuthority,
 } = require('./billing-channel-email-authority');
 const { billingEmailRefusal } = require('./billing-email-sender');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+
+function acceptedInvoiceEmailEvidence(result) {
+  return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
+}
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -95,6 +100,23 @@ function appendPayUrlParams(url, params = null) {
     return url;
   }
 }
+
+// A pay/receipt link delivered to a third party is minted under the homeowner's
+// customerId: a payer-billed invoice goes to the payer's AP inbox, and an
+// operator's recipientOverride sends it to a one-off AP/bookkeeper inbox even
+// when the invoice has no payer. Marking the code lets the customer activity
+// timeline tell that recipient's click from the homeowner's engagement. The
+// marker follows the RESOLVED recipient: payer invoices, or a recipient that is
+// neither the customer's own email nor the customer's own billing contact.
+// Every other mint is byte-for-byte unchanged (the purpose stays
+// 'payer_invoice'; the timeline reads it as "invoice recipient").
+const payerCodeMarker = (invoice, recipient = null, ownEmails = []) => {
+  const marked = { channel: 'email', purpose: 'payer_invoice' };
+  if (invoice && invoice.payer_id) return marked;
+  const to = cleanEmail(recipient && recipient.email);
+  if (!to) return {};
+  return ownEmails.map(cleanEmail).filter(Boolean).includes(to) ? {} : marked;
+};
 
 function invoiceRecipientFor(customer, prefs, recipientOverride) {
   const overrideEmail = cleanEmail(recipientOverride?.email);
@@ -214,11 +236,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // never flip a delivered email into a reported send failure (the caller
   // restores the claim to draft on failure, and a later automatic resend
   // would duplicate the delivered email).
-  const markEmailDelivered = async () => {
+  const markEmailDelivered = async ({ deduped = false, sentAt = null } = {}) => {
     try {
       const updated = await db('invoices')
         .where({ id: invoice.id, send_claim_token: claimToken })
-        .update({ email_sent_at: new Date(), updated_at: new Date() });
+        .update({
+          email_sent_at: deduped
+            ? db.raw('COALESCE(email_sent_at, ?::timestamptz)', [sentAt])
+            : new Date(),
+          updated_at: new Date(),
+        });
       if (updated === 0) return;
     } catch (err) {
       logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
@@ -239,6 +266,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
+    ...payerCodeMarker(invoice, recipient, [customer.email, getInvoiceEmailRecipients(customer, prefs || {})[0]?.email]),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   invoiceForPdf.annual_prepay = await loadInvoiceAnnualPrepay(invoiceForPdf);
@@ -490,9 +518,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           ...(refusal.retryable ? { retryable: true } : {}),
           recipient: recipientPayload };
       }
-      await markEmailDelivered();
+      const evidence = acceptedInvoiceEmailEvidence(result);
+      await markEmailDelivered(evidence);
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
+      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
+        ...evidence };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
@@ -612,23 +642,14 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
   return { ok: false, error: String(block.reason || block.code || 'Receipt email refused'), code: 'receipt_handoff_aborted' };
 }
 
-async function sendReceiptEmail(invoiceId, options = {}) {
-  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
-  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
-  // retried delivery doesn't email the customer twice; manual operator
-  // resends from /admin/invoices intentionally omit it so the operator
-  // can always force a fresh send.
-  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
-    ? options.idempotencyKey.trim()
-    : null;
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice) return { ok: false, error: 'Invoice not found' };
-  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
-
-  // An open inspection-credit promise rides the receipt (dark behind the
-  // gate). An explicit caller memo always wins — never silently replaced.
-  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
-
+// The one answer to "who gets this paid receipt by email" — shared by
+// sendReceiptEmail (the receipt worker and the operator resends) and the
+// Intelligence Bar closeout repair's confirmation card, so the card can never
+// name a different inbox than the send reaches. Attaches the payer to
+// `invoice` (callers read invoice.payer afterwards). Returns
+// { ok: true, recipient, customer, authorityInput } or the same refusal sendReceiptEmail
+// answers with ({ ok: false, error, code? }).
+async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
@@ -637,9 +658,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // portal-wide switch come from the shared billing email authority (owner
   // ruling 2026-09-27), read here and again under its locks at the provider
   // handoff. A payer-billed receipt goes to the payer's AP inbox instead.
-  const authorityInput = options.billingDeliveryCategory && !invoice.payer_id ? {
+  const authorityInput = billingDeliveryCategory && !invoice.payer_id ? {
     customerId: invoice.customer_id, invoiceId: invoice.id, channel: 'email',
-    metadata: { billingDeliveryCategory: options.billingDeliveryCategory },
+    metadata: { billingDeliveryCategory: billingDeliveryCategory },
   } : null;
   let routedRecipient = null;
   if (authorityInput) {
@@ -670,6 +691,29 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
     : routedRecipient || getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
+  return { ok: true, recipient, customer, authorityInput };
+}
+
+async function sendReceiptEmail(invoiceId, options = {}) {
+  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
+  // retried delivery doesn't email the customer twice; manual operator
+  // resends from /admin/invoices intentionally omit it so the operator
+  // can always force a fresh send.
+  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+    ? options.idempotencyKey.trim()
+    : null;
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!invoice) return { ok: false, error: 'Invoice not found' };
+  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
+
+  // An open inspection-credit promise rides the receipt (dark behind the
+  // gate). An explicit caller memo always wins — never silently replaced.
+  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
+
+  const resolved = await resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: options.billingDeliveryCategory || null });
+  if (!resolved.ok) return resolved;
+  const { recipient, customer, authorityInput } = resolved;
 
   const payment = await db('payments')
     .where({ customer_id: invoice.customer_id })
@@ -699,6 +743,10 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     entityId: invoice.id,
     customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(invoice),
+    // A receipt has no recipient override: a non-payer receipt always goes to
+    // the customer's own (routed or default) billing contact, so only a
+    // payer-billed receipt is a third party's.
+    ...payerCodeMarker(invoice),
   });
   const invoiceForPdf = { ...invoice, customer, line_items: invoice.line_items || [] };
   let pdfBuffer;
@@ -849,6 +897,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
+  resolveReceiptEmailRecipient,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

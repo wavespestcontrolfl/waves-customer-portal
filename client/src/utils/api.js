@@ -472,6 +472,38 @@ export class ApiClient {
     return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
   }
 
+  // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): posts the SAME
+  // multipart FormData VisitPrepPhotoForm builds for the public appointment
+  // page, to the customer-authenticated twin of that route. Goes through
+  // fetchRaw directly rather than request() — request() always forces
+  // `Content-Type: application/json`, which would stop the browser from
+  // setting FormData's own multipart boundary. Mirrors request()'s error
+  // shape (an Error with .status/.code/.message) so VisitPrepPhotoForm's
+  // onSubmit contract (status 404 -> "gone", 409 -> "full", etc.) works
+  // unchanged for this caller too.
+  async sendVisitPrepPhotos(scheduledServiceId, formData) {
+    const response = await this.fetchRaw(`${API_BASE}/schedule/${scheduledServiceId}/prep-photos`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get('content-type') || '';
+      let message = '';
+      let errorBody = null;
+      if (contentType.includes('application/json')) {
+        errorBody = await response.json().catch(() => null);
+        message = errorBody?.error || errorBody?.message || '';
+      } else {
+        message = (await response.text().catch(() => '')).trim();
+      }
+      const requestErr = new Error(message || `Request failed (${response.status})`);
+      requestErr.status = response.status;
+      if (errorBody?.code) requestErr.code = errorBody.code;
+      throw requestErr;
+    }
+    return response.json();
+  }
+
   rescheduleAppointment(id, data) {
     return this.request(`/schedule/${id}/reschedule`, {
       method: 'POST',

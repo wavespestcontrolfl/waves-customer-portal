@@ -1,8 +1,9 @@
 /**
  * Missed-call text-back (services/missed-call-text-back.js) — pure
- * eligibility, the bounded-catch-up / after-hours scheduling math, the
- * from-number and callback-clause derivations, and the seeded copy itself
- * (no STOP line, no "Pest Control", correct callback_clause behavior).
+ * eligibility, the bounded-catch-up math (any hour of the day — owner
+ * ruling 2026-09-28 dropped the after-hours defer to 8 AM), the from-number
+ * and callback-clause derivations, and the seeded copy itself (no STOP
+ * line, no "Pest Control", correct callback_clause behavior).
  *
  * DB-backed claim/lease/one-per-number behavior is covered separately by
  * missed-call-text-back-postgres.test.js.
@@ -126,49 +127,42 @@ describe('bounded catch-up (tooOldToText) — one 30-minute send slot per call',
     expect(tooOldToText(row, Date.parse('2026-09-09T12:05:00Z'))).toBe(true); // 08:05 ET next day
   });
 
-  test('an after-hours call is textable 8:00-8:30 AM ET the next morning, not later', () => {
-    // 22:00 ET call.
+  test('an after-hours call is textable right after its own grace clears — no wait for 8 AM (owner ruling 2026-09-28)', () => {
+    // 22:00 ET call — after the old 8pm-8am moratorium this lane no longer
+    // checks at all.
     const row = endedAt('2026-09-09T02:00:00Z');
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:05:00Z'))).toBe(false); // 08:05 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:29:00Z'))).toBe(false); // 08:29 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:31:00Z'))).toBe(true); // 08:31 ET
+    expect(tooOldToText(row, Date.parse('2026-09-09T02:10:00Z'))).toBe(false); // 22:10 ET, same night
+    expect(tooOldToText(row, Date.parse('2026-09-09T02:34:00Z'))).toBe(false); // 22:34 ET, still in slot
+    expect(tooOldToText(row, Date.parse('2026-09-09T02:36:00Z'))).toBe(true); // 22:36 ET, slot closed
+    // Never held open for the next morning either — by 08:05 ET the slot
+    // that closed the night before is long gone.
+    expect(tooOldToText(row, Date.parse('2026-09-09T12:05:00Z'))).toBe(true); // 08:05 ET next day
   });
 
-  test('flipping the gate on mid-morning never texts last night\'s calls', () => {
-    const row = endedAt('2026-09-09T02:00:00Z'); // 22:00 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T14:00:00Z'))).toBe(true); // 10:00 ET
-  });
-
-  test('an early-morning call goes out in the same morning\'s slot', () => {
+  test('a 2 AM call is textable right after its own grace — no wait for daylight', () => {
     const row = endedAt('2026-09-09T06:00:00Z'); // 02:00 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:15:00Z'))).toBe(false); // 08:15 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:31:00Z'))).toBe(true); // 08:31 ET
+    expect(tooOldToText(row, Date.parse('2026-09-09T06:10:00Z'))).toBe(false); // 02:10 ET
+    expect(tooOldToText(row, Date.parse('2026-09-09T06:34:00Z'))).toBe(false); // 02:34 ET
+    expect(tooOldToText(row, Date.parse('2026-09-09T06:36:00Z'))).toBe(true); // 02:36 ET
   });
 
-  test('a call that clears its voicemail grace after 8 PM ET moves to the next 8 AM instead of being lost', () => {
+  test('a call that clears its voicemail grace after 8 PM ET is textable right then, not moved to the next 8 AM', () => {
     const row = endedAt('2026-09-08T23:57:00Z'); // 19:57 ET, ready at 20:02 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:10:00Z'))).toBe(false); // 08:10 ET next day
+    expect(tooOldToText(row, Date.parse('2026-09-09T00:05:00Z'))).toBe(false); // 20:05 ET, same night
+    expect(tooOldToText(row, Date.parse('2026-09-09T00:33:00Z'))).toBe(true); // 20:33 ET, slot closed
   });
 
-  test('a call whose in-hours slot would run past 8 PM ET can go now or at the next 8 AM', () => {
-    const row = endedAt('2026-09-08T23:40:00Z'); // 19:40 ET, ready at 19:45, slot would end 20:15
+  test('a call whose slot straddles the 8 PM cutoff runs its normal 30 minutes uninterrupted', () => {
+    const row = endedAt('2026-09-08T23:40:00Z'); // 19:40 ET, ready at 19:45, slot ends 20:15 ET
     expect(tooOldToText(row, Date.parse('2026-09-08T23:50:00Z'))).toBe(false); // 19:50 ET
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:10:00Z'))).toBe(false); // 08:10 ET next day
-    expect(tooOldToText(row, Date.parse('2026-09-09T12:31:00Z'))).toBe(true); // 08:31 ET next day
+    expect(tooOldToText(row, Date.parse('2026-09-09T00:10:00Z'))).toBe(false); // 20:10 ET — still in slot, past 8 PM
+    expect(tooOldToText(row, Date.parse('2026-09-09T00:20:00Z'))).toBe(true); // 20:20 ET, slot closed
   });
 
   test('no first-time text ever goes out past the overall 16h belt', () => {
     expect(MAX_CALL_AGE_MS).toBe(16 * 60 * MIN);
     const row = endedAt('2026-09-09T02:00:00Z');
     expect(tooOldToText(row, Date.parse('2026-09-09T02:00:00Z') + 17 * 60 * MIN)).toBe(true);
-  });
-
-  test('the night the clocks fall back keeps the whole 8:00–8:30 AM slot (14h+ of absolute time)', () => {
-    // 2026-10-31 19:25 EDT; its slot would run past 20:00, so it moves to
-    // Sun 2026-11-01 08:00–08:30 EST — a repeated hour makes that 14h05m.
-    const row = endedAt('2026-10-31T23:25:00Z');
-    expect(tooOldToText(row, Date.parse('2026-11-01T13:28:00Z'))).toBe(false); // 08:28 EST
-    expect(tooOldToText(row, Date.parse('2026-11-01T13:31:00Z'))).toBe(true); // 08:31 EST
   });
 
   test('a late or retried status callback that rewrites updated_at never reopens the slot', () => {

@@ -31,6 +31,12 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// submit_gsc_sitemap now resolves the real Search Console property live
+// (codex r3 P1 on #5275) — keep that off the network here too, like the
+// route-optimizer mock below.
+jest.mock('../services/seo/search-console-v2', () => ({
+  resolveAccessibleProperty: jest.fn(async (domain) => ({ siteUrl: `https://${domain}/`, permissionLevel: 'siteOwner' })),
+}));
 // Behavioral tests drive optimize_* far enough to invoke the optimizer —
 // keep it off the network.
 jest.mock('../services/route-optimizer', () => ({
@@ -82,7 +88,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -143,6 +149,23 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'repair_closeout',
+  // Outside-service writes (IB scope expansion item 1, owner ruling
+  // 2026-09-28) — full-access-only (write-gates.js
+  // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
+  // confirmed:true refuses in every one of these until a follow-up PR.
+  'resolve_sentry_issue',
+  'ignore_sentry_issue',
+  'assign_sentry_issue',
+  'purge_cloudflare_cache',
+  'retry_cloudflare_pages_build',
+  'redeploy_railway_service',
+  'restart_railway_service',
+  'rerun_failed_github_checks',
+  'add_github_pr_label',
+  'request_codex_review',
+  'submit_gsc_sitemap',
+  'cancel_queued_message',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -153,6 +176,7 @@ const CONFIRMED_ENDPOINT_WRITES = [
   'approve_seo_action',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
 ];
 
 // ── FROZEN ── by-name snapshot taken 2026-06-11 (issue #1568). Writes whose
@@ -244,7 +268,7 @@ const READ_ONLY = [
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
   'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
-  'list_call_partners', 'get_partner_call_history', 'get_open_commitments',
+  'list_call_partners', 'get_partner_call_history', 'get_open_commitments', 'list_queued_messages',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',
   'get_quarterly_estimate', 'get_pnl', 'get_advisor_alerts', 'get_mileage_summary', 'get_ar_aging',
   'get_lead_overview', 'query_leads', 'get_stale_leads', 'get_lead_funnel',
@@ -252,7 +276,7 @@ const READ_ONLY = [
   'get_inbox_summary', 'search_emails', 'get_email_thread', 'draft_email_reply',
   'get_vendor_invoices', 'get_email_stats', 'get_blocked_senders',
   'get_stripe_balance', 'get_payout_history', 'get_payout_details', 'get_cash_flow',
-  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
+  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts', 'list_pending_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'get_estimate_detail', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_neighborhood_grass_profile',
@@ -275,6 +299,9 @@ const READ_ONLY = [
   'search_call_research',
   // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
   'get_closeout_status', 'list_open_closeouts',
+  // gap-report-tools.js: read-only list over agent_gap_reports (rows are
+  // written server-side by agent-gap-reports.js, never by a model tool).
+  'list_gap_reports',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
@@ -570,7 +597,129 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         autopay_enabled: true, next_charge_date: null, termite_stations_rented: false,
       }],
     }],
+    // repair_closeout plans from getCloseoutStatus (spied below — its ~20
+    // probes are covered by closeout-status.test.js); the seeded record has
+    // no report link, so the plan has a publish step and reaches the gate.
+    ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
+      service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
+    }],
+    // Outside-service writes (IB scope expansion item 1) build their preview
+    // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
+    // below supplies the token env vars + mocked fetch responses these rows
+    // need. submit_gsc_sitemap is the one exception: it reads fleet_sites.
+    ['sentry-ops-tools', 'executeSentryOpsTool', 'resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-9Z' }],
+    ['sentry-ops-tools', 'executeSentryOpsTool', 'ignore_sentry_issue', { issue_short_id: 'WAVES-PORTAL-9Z' }],
+    ['sentry-ops-tools', 'executeSentryOpsTool', 'assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-9Z', assignee: 'adam@wavespestcontrol.com' }],
+    ['cloudflare-ops-tools', 'executeCloudflareOpsTool', 'purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' }],
+    ['cloudflare-ops-tools', 'executeCloudflareOpsTool', 'retry_cloudflare_pages_build', { project_name: 'bradenton-pest-control' }],
+    ['ops-tools', 'executeOpsTool', 'redeploy_railway_service', { service_name: 'portal-server' }],
+    ['ops-tools', 'executeOpsTool', 'restart_railway_service', { service_name: 'portal-server' }],
+    ['github-ops-tools', 'executeGithubOpsTool', 'rerun_failed_github_checks', { pr_number: 5230 }],
+    ['github-ops-tools', 'executeGithubOpsTool', 'add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
+    ['github-ops-tools', 'executeGithubOpsTool', 'request_codex_review', { pr_number: 5230 }],
+    ['seo-tools', 'executeSeoTool', 'submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' }, {
+      fleet_sites: [{ domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' }],
+    }],
+    // cancel_queued_message's preview reads the pinned sms_log row directly
+    // (no confirmed gate needed to find it) and reaches the confirmation
+    // gate once the row is still 'scheduled' and belongs to the named
+    // customer.
+    ['comms-tools', 'executeCommsTool', 'cancel_queued_message', {
+      message_id: '00000000-0000-0000-0000-00000000e001',
+      customer_id: '00000000-0000-0000-0000-00000000e002',
+      channel: 'sms',
+    }, {
+      sms_log: [{
+        id: '00000000-0000-0000-0000-00000000e001', customer_id: '00000000-0000-0000-0000-00000000e002',
+        direction: 'outbound', to_phone: '9415550100', message_type: 'manual', status: 'scheduled',
+        // Staff-scheduled from the inbox — the only kind the bar may cancel.
+        admin_user_id: '44444444-4444-4444-8444-444444444444',
+        scheduled_for: new Date('2099-01-01T12:00:00Z'),
+      }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Contract', last_name: 'Fixture' }],
+    }],
   ];
+
+  // Third-party API fixtures for the outside-write rows above: token env
+  // vars the executor's own "not configured" gate needs, and the JSON
+  // bodies its sequential fetch() calls receive, in call order.
+  function outsideWriteFetchResponse(body, status = 200) {
+    return { ok: status >= 200 && status < 300, status, json: async () => body };
+  }
+  const SENTRY_ISSUE_FIXTURE = [{
+    id: '999', shortId: 'WAVES-PORTAL-9Z', title: 'Synthetic issue for the write-gate contract',
+    culprit: 'test', level: 'error', count: '1', userCount: 1,
+    firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-01-01T00:00:00Z', permalink: 'https://sentry.io/x',
+  }];
+  const GITHUB_PR_FIXTURE = { number: 5230, title: 'Synthetic PR for the write-gate contract', head: { sha: 'abc123def456' }, labels: [] };
+  const OUTSIDE_WRITE_FIXTURES = {
+    resolve_sentry_issue: { env: { SENTRY_API_TOKEN: 'test-sentry-token' }, responses: [SENTRY_ISSUE_FIXTURE] },
+    ignore_sentry_issue: { env: { SENTRY_API_TOKEN: 'test-sentry-token' }, responses: [SENTRY_ISSUE_FIXTURE] },
+    // Second response is the org-member roster assign_sentry_issue now
+    // resolves the assignee against (codex r2 P2 on #5275).
+    assign_sentry_issue: {
+      env: { SENTRY_API_TOKEN: 'test-sentry-token' },
+      responses: [SENTRY_ISSUE_FIXTURE, [{
+        id: 'member-1', email: 'adam@wavespestcontrol.com', name: 'Adam Benetti',
+        user: { id: 'user-1', username: 'adam', name: 'Adam Benetti' },
+      }]],
+    },
+    purge_cloudflare_cache: {
+      env: { CF_API_TOKEN: 'test-cf-token' },
+      responses: [{ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }],
+    },
+    retry_cloudflare_pages_build: {
+      env: { CF_API_TOKEN: 'test-cf-token', CF_ACCOUNT_ID: 'acct-1' },
+      responses: [{
+        success: true,
+        result: [{
+          name: 'bradenton-pest-control',
+          latest_deployment: {
+            id: 'cf-dep-1',
+            latest_stage: { name: 'deploy', status: 'failure' },
+            deployment_trigger: { metadata: { branch: 'main' } },
+            created_on: '2026-01-01T00:00:00Z',
+          },
+        }],
+      }],
+    },
+    redeploy_railway_service: {
+      env: { RAILWAY_TOKEN: 'test-railway-token', RAILWAY_PROJECT_ID: 'proj-1', RAILWAY_ENVIRONMENT_ID: 'env-1' },
+      responses: [{
+        data: {
+          environment: {
+            name: 'production',
+            serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'portal-server', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
+          },
+        },
+      }],
+    },
+    restart_railway_service: {
+      env: { RAILWAY_TOKEN: 'test-railway-token', RAILWAY_PROJECT_ID: 'proj-1', RAILWAY_ENVIRONMENT_ID: 'env-1' },
+      responses: [{
+        data: {
+          environment: {
+            name: 'production',
+            serviceInstances: { edges: [{ node: { serviceId: 'svc-1', serviceName: 'portal-server', latestDeployment: { id: 'dep-1', status: 'SUCCESS', createdAt: '2026-01-01T00:00:00Z' } } }] },
+          },
+        },
+      }],
+    },
+    rerun_failed_github_checks: {
+      env: { GITHUB_TOKEN: 'test-github-token' },
+      // Third response is the /actions/runs?head_sha=… list the executor now
+      // resolves the failed check into a rerunnable WORKFLOW-RUN id from
+      // (codex r3 P1 on #5275 — a check-run id is not a workflow-run id).
+      responses: [
+        GITHUB_PR_FIXTURE,
+        { check_runs: [{ name: 'tests', status: 'completed', conclusion: 'failure', id: 111, app: { slug: 'github-actions' } }] },
+        { workflow_runs: [{ id: 999888, name: 'CI', status: 'completed', conclusion: 'failure' }] },
+      ],
+    },
+    add_github_pr_label: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE, [{ name: 'needs-review' }]] },
+    request_codex_review: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE] },
+    submit_gsc_sitemap: { env: { GOOGLE_SERVICE_ACCOUNT_JSON: '{"type":"service_account"}' }, responses: [] },
+  };
 
   test('harness sanity: the recording db actually records mutations', async () => {
     const { db, mutations } = makeRecordingDb();
@@ -603,10 +752,46 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // controlled prerequisite here; the real-DB estimate suite tests outages.
     const pricingSync = toolName === 'save_customer_estimate'
       ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
+    const closeoutStatus = toolName === 'repair_closeout'
+      ? jest.spyOn(require('../services/closeout-status'), 'getCloseoutStatus').mockResolvedValue({
+        found: true, packet: null, visit: { customerId: 'cust-1', technicianId: 'tech-1' },
+        record: { id: 'rec-closeout' },
+        reportRecordId: 'rec-closeout',
+        summary: { closedOut: false },
+        facts: {
+          completion: { state: 'done', reason: 'record_completed' },
+          report: { state: 'pending', reason: 'no_report_artifact', posture: 'internal_only' },
+          reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
+        },
+      }) : null;
+    // Outside-write previews call a real third-party API (fetch), never the
+    // DB — install this row's token env vars + a fetch mock that answers its
+    // calls in order, and restore both afterward so nothing leaks to the
+    // next row (or to another suite requiring the same cached module).
+    const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
+    const savedEnv = {};
+    const savedFetch = global.fetch;
+    if (outsideFixture) {
+      for (const [key, value] of Object.entries(outsideFixture.env)) {
+        savedEnv[key] = process.env[key];
+        process.env[key] = value;
+      }
+      const fetchMock = jest.fn();
+      for (const body of outsideFixture.responses) fetchMock.mockResolvedValueOnce(outsideWriteFetchResponse(body));
+      global.fetch = fetchMock;
+    }
     let result;
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
+      closeoutStatus?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+      if (outsideFixture) {
+        for (const [key, value] of Object.entries(savedEnv)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        global.fetch = savedFetch;
+      }
     }
 
     // The executor must have reached its confirmation gate — not an error or
@@ -664,6 +849,7 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
   const ENDPOINT_CALLS = [
     ['banking-tools', 'executeBankingTool', 'request_instant_payout', { amount: 50 }, { isAdmin: true }],
     ['banking-tools', 'executeBankingTool', 'request_standard_payout', { amount: 50 }, { isAdmin: true }],
+    ['banking-tools', 'executeBankingTool', 'cancel_pending_payout', { payout_id: 'po_test_synthetic' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'approve_seo_action', { action_id: '00000000-0000-0000-0000-000000000001' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'run_seo_pipeline', {}, { isAdmin: true }],
   ];

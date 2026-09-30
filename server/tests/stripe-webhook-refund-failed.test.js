@@ -50,7 +50,7 @@ jest.mock('../services/invoice-helpers', () => ({ ...jest.requireActual('../serv
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []), withTermiteGateForCharge: jest.fn(async (_keys, fn) => fn()) }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 // Fee-lane detection's guarded fallback retrieves the PI when no local
 // pointer row exists; model Stripe answering "not a fee PI" so the
@@ -66,6 +66,7 @@ const {
   _handleRefundFailed: handleRefundFailed,
   _handleChargeRefunded: handleChargeRefunded,
   _resolveOrphanSucceededPaymentIntentIfSettled: resolveOrphanSucceededPaymentIntentIfSettled,
+  _withDisputeRenewalGate: withDisputeRenewalGate,
 } = require('../routes/stripe-webhook');
 
 describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
@@ -654,5 +655,23 @@ describe('handleRefundFailed', () => {
     expect(db.transaction).not.toHaveBeenCalled();
     expect(notificationInsert).toHaveBeenCalledTimes(1);
     expect(notificationInsert.mock.calls[0][0].body).toContain('deposit ledger');
+  });
+});
+
+// Codex #4971 r11 P1: the dispute handlers run under the renewal gate for the
+// disputed money's termite terms (resolved from the charge / PaymentIntent),
+// held across their separate ledger and invoice transactions.
+describe('dispute handlers hold the renewal gate', () => {
+  test('withDisputeRenewalGate resolves the gate from the disputed charge and PaymentIntent and runs the handler inside it', async () => {
+    const handler = jest.fn(async () => 'handled');
+    await expect(withDisputeRenewalGate({ id: 'dp_1', charge: 'ch_1', payment_intent: 'pi_1' }, handler)).resolves.toBe('handled');
+    expect(AnnualPrepay.withTermiteGateForCharge).toHaveBeenCalledWith({ chargeId: 'ch_1', paymentIntentId: 'pi_1' }, handler);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  test('both charge.dispute.created and charge.dispute.closed dispatch through it (source contract)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    expect(src).toContain("case 'charge.dispute.created':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeCreated(event.data.object));");
+    expect(src).toContain("case 'charge.dispute.closed':\n          await withDisputeRenewalGate(event.data.object, () => handleDisputeClosed(event.data.object));");
   });
 });

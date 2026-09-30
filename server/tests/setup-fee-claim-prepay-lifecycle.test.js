@@ -1242,7 +1242,9 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     // Both revivals run inside a transaction closure now (r52): the flip
     // and the cleanup commit together, on the closure's handle.
     expect((renewals.match(/retireRodentSetupObligationForRevivedPrepay\(t, invoice\.id\)/g) || []).length).toBe(2);
-    expect((renewals.match(/typeof conn\.transaction === 'function' && !conn\.isTransaction/g) || []).length).toBe(3); // revivals + cancel branch (r53)
+    // revivals + cancel branch (r53) + the paid decided-pending renewal
+    // settle, which gates and stamps the parent in its own transaction (#4971 r8).
+    expect((renewals.match(/typeof conn\.transaction === 'function' && !conn\.isTransaction/g) || []).length).toBe(4);
   });
 });
 

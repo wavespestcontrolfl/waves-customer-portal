@@ -17,7 +17,7 @@ const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
 const replayMigration = require('../models/migrations/20260907000021_sms_replay_contact_preference');
 const irrigationRevisionMigration = require('../models/migrations/20260907000020_property_irrigation_revision');
@@ -324,7 +324,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(matched.message).toMatchObject({ id: queue.id, created_at: sentAt, message_body: provider.message_body,
         from_phone: provider.from_phone, to_phone: provider.to_phone });
       return require('../services/sms-operational-extractor').groundExtraction({ facts: [], additional_properties: [], obligations: [{
-        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise', answered_by_payment: false,
+        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise', promise_firm: true, due_date: null, answered_by_payment: false,
         property_id: context.properties[0].id, due_text: 'tomorrow at 10 AM', due_at: null,
       }] }, matched);
     });
@@ -766,6 +766,50 @@ postgres('SMS commitments on PostgreSQL', () => {
     const truncated = { ...evidence, failures: ['email_delivery_truncated'] };
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, truncated, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources', failures: ['email_delivery_truncated'] });
+  });
+
+  test.each(['same', 'other'])('an estimate-delivery email cited for a plain quote ask grounds on its estimate (%s property)', async (which) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'send_estimate', quote: 'Can I get a quote please',
+      description: 'get a quote', due_at: after.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const propertyId = which === 'same' ? context.properties[0].id
+      : (await mockPg('customer_properties').insert({ customer_id: message.customer_id, address_line1: '400 Other Lane',
+        city: 'Sarasota', zip: '34236', active: true }).returning('id'))[0].id;
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId,
+      status: 'sent', service_interest: 'Pest Control', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your customized Waves estimate is ready for review' }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `email_delivery:${email.id}`, quote: 'estimate is ready for review' } });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const verdict = await verifySmsFulfillment(commitment, evidence, { now });
+    if (which === 'other') {
+      expect(verdict).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+      return;
+    }
+    expect(verdict).toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: estimate.id });
+    await mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: message.customer_id }).forUpdate().first();
+      expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(true);
+    });
+  });
+
+  test('owner ruling 2026-09-28: the check is told a late record still keeps a promise (keptLate rings first)', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], basis: 'promise', kind: 'other', party: 'waves',
+      quote: result.obligations[0].quote, due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const now = new Date(message.created_at.getTime() + 5000);
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, { records: [{ ref: 'sms:x', type: 'sms', id: 'x', text: 'hi', created_at: now }], failures: [] }, { now });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)?.[1]?.text || '';
+    expect(prompt).toContain('a record after the promised day still fulfills it');
+    expect(prompt).not.toContain('on the promised day when sms_context.due_date names one');
   });
 
   test('revalidation of an estimate-delivery witness also holds the linked estimate without waiting', async () => {
@@ -1862,8 +1906,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
-  test('R2 rule 6: for a customer with a property history, a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
+  test('R2 rule 6: for a customer with a property history, a property-scoped ask takes the invoice\'s own visit property and an unlinked ledger payment, never a payment for another property', async () => {
     await giveFormerProperty(message.customer_id);
+    const [former] = await mockPg('customer_properties').where({ customer_id: message.customer_id, active: false }).pluck('id');
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: context.properties[0].id,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
@@ -1880,16 +1925,27 @@ postgres('SMS commitments on PostgreSQL', () => {
     // An unlinked ledger prepayment, same customer, tied to no property at all.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after });
+    // A payment toward a visit at the customer's former property.
+    const [elsewhere] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: former,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(after), window_start: '09:00:00', status: 'completed', created_at: before }).returning('id');
+    const [elsewhereInvoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0414',
+      title: 'Quarterly Pest Control', total: 95, subtotal: 95, line_items: '[]', status: 'paid', paid_at: after, scheduled_service_id: elsewhere.id }).returning('id');
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 95, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: elsewhereInvoice.id, settled_event_at: after.toISOString() }), created_at: after });
     const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify).toHaveBeenCalledTimes(1);
     const paymentRecords = verify.mock.calls[0][1].records.filter((r) => r.type === 'payment');
-    const linked = paymentRecords.find((r) => r.payment_source === 'invoice');
+    const linked = paymentRecords.find((r) => r.invoice_id === invoice.id);
+    const other = paymentRecords.find((r) => r.invoice_id === elsewhereInvoice.id);
     const ledger = paymentRecords.find((r) => r.payment_source === 'ledger');
     expect(linked.property_id).toBe(context.properties[0].id);
+    expect(other.property_id).toBe(former);
+    expect(ledger.property_id).toBeNull();
     const scopedAsk = { kind: 'other', sms_context: { property_id: context.properties[0].id, money_answerable: true } };
     expect(admissibleWitness(linked, scopedAsk)).toBe(true);
-    expect(admissibleWitness(ledger, scopedAsk)).toBe(false);
+    expect(admissibleWitness(ledger, scopedAsk)).toBe(true);
+    expect(admissibleWitness(other, scopedAsk)).toBe(false);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
@@ -2372,7 +2428,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     } finally { await writer.rollback(); }
   });
 
-  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and never when they have had another', async () => {
+  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and still counts for a scoped ask once they have had another', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const propertyId = context.properties[0].id;
@@ -2394,12 +2450,14 @@ postgres('SMS commitments on PostgreSQL', () => {
     }
     // An unscoped ask attributes nothing: it needs no property.
     expect((await payments(unscoped))[autopay.id].property_id).toBeNull();
-    // Once the customer has had another property, a payment with no link could be for either.
+    // Once the customer has had another property, a payment with no link is
+    // no longer attributed to either, but nothing ties it to the other one,
+    // so it still counts (owner ruling 2026-09-27).
     await giveFormerProperty(message.customer_id);
     const history = await payments(scoped);
     for (const id of [office.id, autopay.id]) {
       expect(history[id].property_id).toBeNull();
-      expect(admissibleWitness(history[id], scoped)).toBe(false);
+      expect(admissibleWitness(history[id], scoped)).toBe(true);
     }
   });
 
@@ -2744,45 +2802,240 @@ postgres('SMS commitments on PostgreSQL', () => {
     },
   );
 
-  test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
+  // Owner ruling 2026-09-28 (reverses R3, 2026-09-24): any text a person sends,
+  // or a call back a person places, after a general `other` ask closes it —
+  // no model judges whether it was enough, so the bell means nobody responded.
+  const generalAsk = async (quote, dueInMs = 1000) => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
-      quote: 'Can you separate the charges under two payment methods?',
-      description: 'Can you separate the charges under two payment methods?' };
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, quote, description: quote,
+      due_at: dueInMs == null ? null : new Date(message.created_at.getTime() + dueInMs).toISOString() };
     await recordMessageOperations(mockPg, message, result, context);
+    return new Date(message.created_at.getTime() + 1000);
+  };
+  const staffText = async (body, created_at, extra = {}) => (await mockPg('sms_log').insert({ ...message, id: randomUUID(),
+    direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_body: body, message_type: 'manual',
+    admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at, ...extra }).returning('id'))[0];
+  const outboundCall = async (created_at, extra = {}) => (await mockPg('call_log').insert({ customer_id: message.customer_id,
+    direction: 'outbound', from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed',
+    duration_seconds: 120, transcription: 'Talked it through with the customer.', v2_extraction_status: 'valid',
+    ai_extraction_enriched: { meta: { is_voicemail: false } }, created_at, ...extra }).returning('id'))[0];
+
+  test('owner ruling 2026-09-28 (reverses R3): the split-billing ask "separate the charges" closes on the person\'s "Done" reply, with no model call and no bell', async () => {
+    const after = await generalAsk('Can you separate the charges under two payment methods?', null);
     await mockPg('call_commitments').update({ due_at: null, due_basis: null });
-    const after = new Date(message.created_at.getTime() + 1000);
-    const now = new Date(after.getTime() + 1000);
-    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
-      from_phone: message.to_phone, to_phone: message.from_phone,
-      message_body: 'Done: your card is now the Auto Pay method.', message_type: 'manual',
-      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after });
-    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    const reply = await staffText('Done: your card is now the Auto Pay method.', after);
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 1000) });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 1 });
-    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+    const row = await mockPg('call_commitments').first();
+    expect(row.status).toBe('fulfilled');
+    expect(row.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'person_reply', record_type: 'sms', record_id: reply.id, quote: null });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('R3: a DUE "other" ask answered only by a staff SMS reaches the model, finds no admissible witness, and bells as today', async () => {
-    result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true,
-      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
-      quote: 'Can you separate the charges under two payment methods?',
-      description: 'Can you separate the charges under two payment methods?' };
-    await recordMessageOperations(mockPg, message, result, context);
-    const after = new Date(message.created_at.getTime() + 1000);
+  test('owner ruling 2026-09-28: a DUE general ask closes at its deadline on whatever a person replied, instead of ringing', async () => {
+    const after = await generalAsk('I thought it was 125 a quarter or something');
+    await staffText('You got it, let us know if you want to swap to annual prepay', after);
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-09-28: inside the window a reply waits for the deadline (R1), then closes the ask without a bell', async () => {
+    const after = await generalAsk('Did you treat my house yesterday?', 3600000);
+    await staffText('Currently en route!', after);
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 1000) })).toMatchObject({ skipped_not_due: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    const due = new Date((await mockPg('call_commitments').first()).due_at);
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(due.getTime() + 300000) })).toMatchObject({ fulfilled: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('Codex #5169 r1 P1: a text with no person\'s mark never closes a general ask — the composer\'s stamp does', async () => {
+    const after = await generalAsk("What's the Zelle number?");
+    const reply = await staffText('The Zelle number is 941-555-0101.', after, { admin_user_id: null });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The Zelle number is 941-555-0101.' } });
     const now = new Date(after.getTime() + 2000);
-    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
-      from_phone: message.to_phone, to_phone: message.from_phone,
-      message_body: 'Done: your card is now the Auto Pay method.', message_type: 'manual',
-      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after });
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    await mockPg('sms_log').where({ id: reply.id }).update({ metadata: JSON.stringify({ human_authored: true }) });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
+    // The model saw the unmarked text once; the marked one closed without it.
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: a call back that reached the customer closes a general ask; a robocall, a short call, voicemail, an unprocessed call or an unanswered card call never does', async () => {
+    const after = await generalAsk('Do you want to assess or should I contact a rodent specialist?');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const now = new Date(after.getTime() + 10000);
+    const at = (seconds) => new Date(after.getTime() + seconds * 1000);
+    await outboundCall(at(0), { source: 'collections_voice' });
+    await outboundCall(at(1), { source: 'tech-click', duration_seconds: 30 });
+    // Codex #5220 r1 P1: the staff leg ran 60 s or more, but the customer never talked.
+    await outboundCall(at(2), { source: 'admin-click', ai_extraction_enriched: { meta: { is_voicemail: true } } });
+    await outboundCall(at(3), { source: 'admin-click', v2_extraction_status: null, ai_extraction_enriched: null });
+    await outboundCall(at(4), { source: 'admin-callback', metadata: { customer_leg: { status: 'no-answer', duration_seconds: 0 } } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const staffCall = await outboundCall(at(5), { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 90 } } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: staffCall.id });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: a text a person queued before the ask and that went out after it is no reply; one queued after it is', async () => {
+    const after = await generalAsk('Did you treat my house yesterday?');
+    const now = new Date(after.getTime() + 2000);
+    const scheduledText = async (queuedAt) => {
+      const queue = await staffText('We will be there Tuesday.', queuedAt, { scheduled_for: after, status: 'sent' });
+      return staffText('We will be there Tuesday.', after, { metadata: { scheduled_sms_log_id: queue.id, human_authored: true } });
+    };
+    await scheduledText(new Date(message.created_at.getTime() - 60000));
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const reply = await scheduledText(new Date(message.created_at.getTime() + 500));
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'sms' });
+    expect([reply.id]).toContain((await mockPg('call_commitments').first()).fulfillment.record_id);
+  });
+
+  test('Codex #5169 r1 P2: a general ask that names an email address still closes on a person\'s reply', async () => {
+    const after = await generalAsk('Is sample.customer@example.com the email on my account?');
+    await staffText('Yes, that is the email we have on file.', after);
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('owner ruling 2026-09-28: an automated notice never closes a general ask, even when the model cites it', async () => {
+    const after = await generalAsk("What's the Zelle number?");
+    const notice = await staffText('Your appointment is confirmed for Tuesday.', after, { message_type: 'confirmation', admin_user_id: null });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${notice.id}`, quote: 'Your appointment is confirmed for Tuesday.' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('staff-promise plan (2026-09-28): a promise naming a day is due 8 PM ET that day, and its bell says a promise is owed', async () => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: 'Gonna knock out your quarterly spray tomorrow' };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    const tomorrow = etDateString(addETDays(message.created_at, 1));
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise', promise_firm: true,
+      quote: message.message_body, description: 'knock out your quarterly spray tomorrow', due_text: 'tomorrow', due_date: tomorrow };
+    await recordMessageOperations(mockPg, message, result, context);
+    const row = await mockPg('call_commitments').first();
+    expect(new Date(row.due_at).toISOString()).toBe(parseETDateTime(`${tomorrow}T20:00`).toISOString());
+    expect(row.due_basis).toBe('default_kind');
+    // The completion check reads the promised day (due_at is a UTC instant).
+    expect(row.sms_context).toMatchObject({ basis: 'promise', due_date: tomorrow });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await refreshSmsCommitments({ conn: mockPg, now: new Date(new Date(row.due_at).getTime() + 60000) });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise texted to a customer needs follow-up',
+      expect.any(String), expect.objectContaining({ bell: true }));
+  });
+
+  test('Codex #5248 r2: the promised item sent by an automated text closes a general staff promise', async () => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise', promise_firm: true,
+      quote: message.message_body, description: 'get the prep guide today', due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+      message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'sms', record_id: guide.id });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('owner ruling 2026-09-28 (Codex #5248 r3): a promise kept after its deadline rings the bell, then clears (bell suppressed: %s)', async (suppressed) => {
+    const actualNotifications = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation(suppressed
+      ? async () => ({ id: null, suppressed: true })
+      : actualNotifications.notifyAdmin.bind(actualNotifications));
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    const dueAt = new Date(message.created_at.getTime() + 1000);
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise', promise_firm: true,
+      quote: message.message_body, description: 'get the prep guide today', due_at: dueAt.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    // The guide goes out after the deadline, and no tick ran in between.
+    const late = new Date(dueAt.getTime() + 60000);
+    const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+      message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: late }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+    const first = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 2000) });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise texted to a customer needs follow-up',
+      expect.stringContaining('only after the promised deadline'), expect.objectContaining({ bell: true,
+        metadata: expect.objectContaining({ verification: 'kept_late' }) }));
+    if (suppressed) {
+      // No bell row to find next tick, so the row closes now.
+      expect(first).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+      return;
+    }
+    expect(first).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
+    await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+    const second = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 5 * 60000) });
+    expect(second).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'sms', record_id: guide.id });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(0);
+  });
+
+  test('owner ruling 2026-09-28: a promise staff texted is kept by doing it — a later reply never closes it; the model judges', async () => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise',
+      quote: message.message_body, description: "we'll get the prep guide today", due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ basis: 'promise' });
+    const after = new Date(message.created_at.getTime() + 1000);
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_body: 'Thanks!', created_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 2000) })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: intake stamps the ask\'s basis, no longer reply_answerable; money_answerable is unchanged', async () => {
+    await generalAsk("What's the Zelle number?");
+    const { sms_context: smsContext } = await mockPg('call_commitments').first();
+    expect(smsContext).toMatchObject({ basis: 'request', money_answerable: false });
+    expect(smsContext).not.toHaveProperty('reply_answerable');
+  });
+
+  test('owner ruling 2026-09-28: a person_reply verdict re-proves its reply when it commits; a reply that changed since never closes', async () => {
+    const after = await generalAsk('Can you separate the charges under two payment methods?');
+    const reply = await staffText('Done', after);
+    const now = new Date(after.getTime() + 2000);
+    const row = await mockPg('call_commitments').first();
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, row, message, now);
+    const verdict = await verifySmsFulfillment(row, evidence, { now });
+    expect(verdict).toMatchObject({ verdict: 'fulfilled', basis: 'person_reply', record_type: 'sms', record_id: reply.id });
+    expect(await mockPg.transaction((trx) => revalidateSmsFulfillment(trx, row, message, verdict, now))).toBe(true);
+    await mockPg('sms_log').where({ id: reply.id }).update({ status: 'failed' });
+    expect(await mockPg.transaction((trx) => revalidateSmsFulfillment(trx, row, message, verdict, now))).toBe(false);
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
   test.each([

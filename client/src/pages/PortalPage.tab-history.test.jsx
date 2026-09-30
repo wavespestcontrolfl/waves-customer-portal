@@ -110,22 +110,37 @@ describe('portal tab history sync', () => {
 
     expect(await screen.findByText(/hello pat/i)).toBeInTheDocument();
     expect(window.location.search).toBe('');
+    const scroll = vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
     await waitFor(() => expect(window.location.search).toBe('?tab=billing'));
+    expect(scroll).toHaveBeenCalledWith({ top: 0, left: 0, behavior: 'instant' });
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Refer' })[0]);
     await waitFor(() => expect(window.location.search).toBe('?tab=refer'));
+    scroll.mockClear();
 
     // Browser Back: returns to Billing (not out of the app), state follows.
     window.history.back();
     await waitFor(() => expect(window.location.search).toBe('?tab=billing'));
     expect(await screen.findByText('Billing & Payments')).toBeInTheDocument();
+    expect(scroll).not.toHaveBeenCalled();
 
     // Back again: dashboard.
     window.history.back();
     await waitFor(() => expect(window.location.search).toBe(''));
     expect(await screen.findByText(/hello pat/i)).toBeInTheDocument();
+  });
+
+  it('keeps useful shortcuts when document and payment history are empty', async () => {
+    window.history.replaceState({}, '', '/?tab=documents');
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(await screen.findByText('No documents yet')).toBeInTheDocument();
+    expect(screen.queryByRole('searchbox', { name: 'Search documents' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /open completed visits/i })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
+    expect(await screen.findByText('No payments yet')).toBeInTheDocument();
+    expect(screen.queryByText('No payments match your filters')).not.toBeInTheDocument();
   });
 
   it('keeps the completed-visits deep link through the Documents shortcut', async () => {

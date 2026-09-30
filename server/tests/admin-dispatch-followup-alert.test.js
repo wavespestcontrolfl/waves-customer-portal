@@ -27,6 +27,9 @@ const {
 } = require('../services/typed-followup-obligation');
 
 const dispatchSource = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
+// The CTA's gates + write moved out of the route into the shared booking
+// service (also used by the IB closeout repair); the route only relays it.
+const bookingSource = fs.readFileSync(path.join(__dirname, '../services/completion-followup-booking.js'), 'utf8');
 const jobStatusSource = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
 
 const BED_BUG_PROFILE = {
@@ -207,8 +210,8 @@ describe('/complete parks the alert atomically (source contracts)', () => {
 
 describe('/schedule-followup (source contracts)', () => {
   test('the CTA books the FROZEN completion verdict; legacy records fall back to the shared chain', () => {
-    const routeIdx = dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'");
-    const routeTail = dispatchSource.slice(routeIdx);
+    const routeIdx = bookingSource.indexOf('async function bookCompletionFollowup');
+    const routeTail = bookingSource.slice(routeIdx);
     const frozenIdx = routeTail.indexOf('const frozenCtaVerdict = preAuthFrozenVerdict;');
     expect(frozenIdx).toBeGreaterThan(-1);
     // Snapshot gate still fails closed on missing/mismatched snapshots —
@@ -219,7 +222,7 @@ describe('/schedule-followup (source contracts)', () => {
     // lane by itself — later profile mutations (deactivation, repoint,
     // policy clear) cannot reject the promise the completion made
     // (codex P2 r4).
-    expect(routeTail.slice(0, frozenIdx)).toContain("const untypedAlertProfile = !profile?.findingsType\n      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);");
+    expect(routeTail.slice(0, frozenIdx)).toContain("const untypedAlertProfile = !profile?.findingsType\n    && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);");
     expect(routeTail.slice(0, frozenIdx)).toContain('const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;');
     expect(routeTail.indexOf('const preAuthFrozenVerdict')).toBeLessThan(routeTail.indexOf('followup_not_typed'));
     const verdictBlock = routeTail.slice(frozenIdx, frozenIdx + 1100);
@@ -233,14 +236,14 @@ describe('/schedule-followup (source contracts)', () => {
   });
 
   test('EVERY booked-follow-up answer resolves the parked alert: fresh insert, idempotent retry, 23505 race winner', () => {
-    const routeIdx = dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'");
-    const routeTail = dispatchSource.slice(routeIdx);
+    const routeIdx = bookingSource.indexOf('async function bookCompletionFollowup');
+    const routeTail = bookingSource.slice(routeIdx);
     const helperIdx = routeTail.indexOf('const resolveOpenFollowupAlerts = async () => {');
     expect(helperIdx).toBeGreaterThan(-1);
     const helper = routeTail.slice(helperIdx, routeTail.indexOf('};', helperIdx));
     expect(helper).toContain("{ type: 'follow_up_needed', job_id: svc.id }");
     expect(helper).toContain(".whereNull('resolved_at')");
-    expect(helper).toContain('resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null })');
+    expect(helper).toContain('resolveAlert({ id: alert.id, resolvedBy: actorId || null })');
     expect(helper).toContain('logger.warn');
     const calls = routeTail.split('await resolveOpenFollowupAlerts();').length - 1;
     expect(calls).toBe(3);
@@ -255,7 +258,7 @@ describe('/schedule-followup (source contracts)', () => {
     expect(bookedTail).toContain('await resolveOpenFollowupAlerts();');
     // The tech's "new visit" card is queued BEFORE that await (and the
     // reminder registration): a reassignment during them must not overtake it.
-    const noticeIdx = bookedTail.indexOf("notifyTechVisitChange({\n        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,");
+    const noticeIdx = bookedTail.indexOf("notifyTechVisitChange({\n      visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: actorId || null,");
     expect(noticeIdx).toBeGreaterThan(-1);
     expect(noticeIdx).toBeLessThan(bookedTail.indexOf('await resolveOpenFollowupAlerts();'));
   });
@@ -327,7 +330,7 @@ describe('codex r3 — double-card, no_show coverage, storage-level dedupe, IB w
     // use the constant; no stranded literal pair remains.
     expect(moduleSource).not.toContain("whereNotIn('status', ['cancelled', 'skipped'])");
     // Route: schedule-followup existing + 23505 winner lookups use it.
-    const routeTail = dispatchSource.slice(dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'"));
+    const routeTail = bookingSource.slice(bookingSource.indexOf('async function bookCompletionFollowup'));
     expect(routeTail.split("whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)").length - 1).toBe(2);
     // Shared writer hook fires on no_show too.
     expect(jobStatusSource).toContain("['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))");
@@ -433,7 +436,11 @@ describe('codex r5 — IB idempotent retry re-park + atomic reason (source contr
     const trxBlock = fn.slice(fn.indexOf('await db.transaction(async (trx) => {'));
     expect(trxBlock.indexOf('transitionJobStatus({')).toBeGreaterThan(-1);
     expect(trxBlock).toContain('trx,');
-    expect(trxBlock.indexOf("await trx('scheduled_services')")).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
+    // The reason-append notes UPDATE (not the round-3 P1a identity-lock
+    // READ, which runs BEFORE transitionJobStatus by design — see
+    // intelligence-bar-cancel-appointment-impact-drift.test.js's own
+    // source-contract test for that ordering) comes after the transition.
+    expect(trxBlock.indexOf('notes: trx.raw(')).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
     // No stray post-commit notes write remains.
     expect(fn).not.toContain("await db('scheduled_services').where('id', appointment_id).update({");
   });

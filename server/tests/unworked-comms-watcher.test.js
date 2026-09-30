@@ -14,7 +14,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runUnworkedCommsWatcher,
-  _private: { composeUnworkedCommsDigest },
+  _private: { composeUnworkedCommsDigest, unworkedCommsHeadlineAndSummary },
 } = require('../services/unworked-comms-watcher');
 
 beforeEach(() => {
@@ -43,6 +43,33 @@ const request = (over = {}) => ({
 });
 
 describe('composeUnworkedCommsDigest', () => {
+  test('itemKeys are lane-prefixed so ids from different tables never collide', () => {
+    const out = composeUnworkedCommsDigest({ callbacks: [callback({ id: 42, total_count: 1 })], followUps: [followUp({ id: 42, total_count: 1 })] });
+    // The follow-up key also carries its status (see the next test) —
+    // followUp()'s default status is 'expired'.
+    expect(out.itemKeys).toEqual(expect.arrayContaining(['call:42', 'task:42:expired']));
+  });
+
+  // Follow-up to #5269 (codex r8 P1): a task silently going pending/
+  // in_progress -> expired (or resurfacing through the bogus-verified
+  // branch) at the SAME task id is a new incident, not the same set — the
+  // key must carry the task's own status, mirroring reschedule-intent-
+  // watcher.js's visit_status.
+  test('a follow-up task\'s status rides the item key, so a silent expiry at the same id is a new item', () => {
+    const pending = composeUnworkedCommsDigest({ followUps: [followUp({ id: 7, status: 'in_progress', total_count: 1 })] });
+    const expired = composeUnworkedCommsDigest({ followUps: [followUp({ id: 7, status: 'expired', total_count: 1 })] });
+    expect(pending.itemKeys).toEqual(['task:7:in_progress']);
+    expect(expired.itemKeys).toEqual(['task:7:expired']);
+    expect(pending.itemKeys).not.toEqual(expired.itemKeys);
+  });
+
+  test('texts key on the latest unanswered inbound message, so a new text from the same peer is a new item', () => {
+    const first = composeUnworkedCommsDigest({ unanswered: [thread({ id: 'm1', source: 'canonical', endpoint: 'ep1', total_count: 1 })] });
+    const again = composeUnworkedCommsDigest({ unanswered: [thread({ id: 'm2', source: 'canonical', endpoint: 'ep1', total_count: 1 })] });
+    expect(first.itemKeys).toEqual(['text:canonical:ep1:m1']);
+    expect(again.itemKeys).toEqual(['text:canonical:ep1:m2']);
+  });
+
   test('card totals retain disposition-only callback details and their own overflow count', () => {
     const out = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 2 }),
       { id: 'ledger-summary', callback_card_summary: true, total_count: 4 }] });
@@ -141,6 +168,63 @@ describe('composeUnworkedCommsDigest', () => {
     });
     expect(composed.subject).toContain('14 open requests');
     expect(composed.text).toContain('…and 13 more not shown');
+  });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy —
+  // headline leads with callbacks; summary lists whatever else is nonzero.
+  test('headline/summary lead with callbacks when present', () => {
+    const composed = composeUnworkedCommsDigest({
+      callbacks: [callback({ total_count: 7 })],
+      followUps: [followUp(), followUp({ id: 't2' })],
+      unanswered: [thread()],
+      requests: [request()],
+    });
+    expect(composed.headline).toBe('Comms — 7 callbacks waiting');
+    expect(composed.summary).toBe('Plus 1 unanswered text, 2 follow-ups due and 1 open request.');
+  });
+
+  // Zero-guard (coordinator fix, 2026-09-28): a day with NO callbacks must
+  // never read "Comms — 0 callbacks waiting" — lead with the next nonzero
+  // bucket in priority order.
+  test('headline/summary never lead with a zero bucket — no callbacks today, lead with unanswered texts', () => {
+    const composed = composeUnworkedCommsDigest({
+      unanswered: [thread({ total_count: 93 })],
+      followUps: [followUp({ total_count: 128 })],
+      requests: [request({ total_count: 31 })],
+    });
+    expect(composed.headline).toBe('Comms — 93 unanswered texts');
+    expect(composed.summary).toBe('Plus 128 follow-ups due and 31 open requests.');
+  });
+
+  test('a single nonzero bucket has no "Plus" summary line', () => {
+    const composed = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 1 })] });
+    expect(composed.headline).toBe('Comms — 1 callback waiting');
+    expect(composed.summary).toBeNull();
+  });
+
+  test('a lane failure gets no headline/summary — the ops-digest.js FIX default (engineering, Activity-only) applies', () => {
+    const composed = composeUnworkedCommsDigest(
+      { unanswered: [thread()] },
+      [{ lane: 'callbacks', message: 'query timed out' }],
+    );
+    expect(composed.subject).toMatch(/^FIX:/);
+    expect(composed.headline).toBeUndefined();
+    expect(composed.summary).toBeUndefined();
+  });
+});
+
+describe('unworkedCommsHeadlineAndSummary (pure)', () => {
+  test('every bucket nonzero: callbacks leads, the rest follow in priority order', () => {
+    expect(unworkedCommsHeadlineAndSummary({ callbacks: 7, unanswered: 93, followUps: 128, requests: 31 })).toEqual({
+      headline: 'Comms — 7 callbacks waiting',
+      summary: 'Plus 93 unanswered texts, 128 follow-ups due and 31 open requests.',
+    });
+  });
+  test('singular counts read naturally', () => {
+    expect(unworkedCommsHeadlineAndSummary({ callbacks: 1, unanswered: 0, followUps: 1, requests: 0 })).toEqual({
+      headline: 'Comms — 1 callback waiting',
+      summary: 'Plus 1 follow-up due.',
+    });
   });
 });
 

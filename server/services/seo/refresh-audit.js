@@ -29,7 +29,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { _internals: miner } = require('./gsc-opportunity-miner');
 // Same claim-budget ceiling claimNext/peek enforce — the re-enqueue CASE below
 // resets exhausted counts against this exact number, never a private copy.
-const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
+const { _internals: { maxClaimAttempts, supersedeCitabilityBackfillsForPage } } = require('../content/opportunity-queue');
 
 // Astro/GSC canonical hub origin (used only for DISPLAY + a never-seeded
 // fallback — gsc_pages/decay matching below is path-keyed and domain-scoped).
@@ -66,7 +66,24 @@ function hostRegistrableSql(col) {
 // bind placeholders (same trick as gsc-opportunity-miner). `col` is an internal
 // literal, never user input.
 function canonPathSql(col) {
-  return `regexp_replace(regexp_replace(split_part(${col}, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
+  return `regexp_replace(regexp_replace(split_part(split_part(${col}, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
+}
+
+function findInflightPageEdit(runner, { path, targetDomain }) {
+  const query = runner('opportunity_queue')
+    .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
+    .whereIn('status', ['pending', 'claimed', 'pending_review'])
+    .where(function () {
+      this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
+    })
+    .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
+    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN '${HUB_DOMAIN}' ELSE ${hostRegistrableSql('page_url')} END = ?`, [targetDomain]);
+  query.whereRaw("(bucket <> 'citability_backfill' OR NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded'))");
+  // A disabled lane cannot publish, so it must not reserve an operator's page.
+  if (!require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
+    query.where('bucket', '<>', 'citability_backfill');
+  }
+  return query.first();
 }
 
 function slugPath(slug) {
@@ -466,16 +483,7 @@ class RefreshAudit {
     // rewrite_title_meta edits the same Astro file a refresh would — the
     // miner's arbitration treats the two as one conflict class
     // (PAGE_EDITING_ACTIONS), so this producer must too.
-    const inflightRefreshFor = (runner) => runner('opportunity_queue')
-      .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
-      .whereIn('status', ['pending', 'claimed', 'pending_review'])
-      .where(function () {
-        this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
-      })
-      .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
-      .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
-      .first();
-    const inflight = await inflightRefreshFor(db);
+    const inflight = await findInflightPageEdit(db, { path, targetDomain });
     if (inflight) {
       return { queued: false, own: inflight.dedupe_key === dedupeKey, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
@@ -555,9 +563,9 @@ class RefreshAudit {
     // observe no row and insert competing edits for one page.
     const result = await db.transaction(async (trx) => {
       await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
-      const inflightNow = await inflightRefreshFor(trx);
+      const inflightNow = await findInflightPageEdit(trx, { path, targetDomain });
       if (inflightNow) return { __inflight: inflightNow };
-      return trx.raw(
+      const inserted = await trx.raw(
       `INSERT INTO opportunity_queue
          (bucket, action_type, query, page_url, service, city,
           score, score_breakdown, signal_metadata, status,
@@ -626,6 +634,13 @@ class RefreshAudit {
         maxClaimAttempts(),
         ]
       );
+      if (inserted.rows?.[0]?.status === 'pending') {
+        await supersedeCitabilityBackfillsForPage(trx, {
+          pageUrl,
+          ordinaryDedupeKey: dedupeKey,
+        });
+      }
+      return inserted;
     });
     if (result.__inflight) {
       return { queued: false, own: result.__inflight.dedupe_key === dedupeKey, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
@@ -651,5 +666,6 @@ const refreshAudit = new RefreshAudit();
 // canonical path) — never a raw URL string comparison. Duplicating these
 // expressions per caller is how two lanes end up disagreeing about identity.
 refreshAudit._identity = { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain };
+refreshAudit.findInflightPageEdit = findInflightPageEdit;
 
 module.exports = refreshAudit;

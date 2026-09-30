@@ -55,9 +55,15 @@ function makeConn(handler) {
       const calls = [];
       const b = {};
       const record = (name) => (...args) => { calls.push([name, ...args]); return b; };
-      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate']) {
+      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate', 'noWait']) {
         b[m] = record(m);
       }
+      // The sibling mint-lock candidate read (owner ruling 2026-09-28)
+      // conditionally adds its own date filter inside `.modify()` — invoke
+      // the callback against this SAME builder (so its `.where(...)` lands
+      // in this query's own `calls`, not the real targetQuery's) and keep
+      // chaining.
+      b.modify = (cb) => { calls.push(['modify']); if (typeof cb === 'function') cb(b); return b; };
       b.first = (...args) => {
         calls.push(['first', ...args]);
         return Promise.resolve(handler({ table, calls, op: 'first' }));
@@ -82,6 +88,8 @@ function makeConn(handler) {
       hasColumn: async () => false,
     };
     fn.fn = { now: () => new Date() };
+    // The sibling mint try-lock (pg_try_advisory_xact_lock) — always free here.
+    fn.raw = async () => ({ rows: [{ acquired: true }] });
     return fn;
   };
   return make();
@@ -382,6 +390,9 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     // Targets are row-locked up front so a concurrent invoice mint can't
     // mint from the old price after the reconcile probes ran.
     expect(targetQueries[0].some(([name]) => name === 'forUpdate')).toBe(true);
+    // NOWAIT (Codex r6 P2 on #5253): a peer 'following' save's row maps to
+    // VISIT_BUSY_RETRY instead of a raw deadlock abort.
+    expect(targetQueries[0].some(([name]) => name === 'noWait')).toBe(true);
   });
 
   it('keeps an explicitly free series an explicit $0, never NULL', async () => {

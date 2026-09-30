@@ -29,8 +29,8 @@ jest.mock('../services/logger', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { createSelfBooking } = require('../routes/booking')._internals;
-const { mintSlotOfferField, SLOT_OFFER_TTL_MS } = require('../utils/slot-offer-token');
+const { createSelfBooking, bookInsertionOffersLive } = require('../routes/booking')._internals;
+const { mintSlotOfferField, SLOT_OFFER_TTL_MS, BOOK_INSERTION_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const SLOT_DATE = etDateString(addETDays(new Date(), 3));
@@ -104,6 +104,18 @@ function offerPayload(overrides = {}) {
     startMinutes: 9 * 60,
     technicianId: TECH_ID,
     durationMinutes: 60,
+    // Codex round 2 P1 on PR #5231: mirrors production — buildBookingAvailability
+    // mints with capacityPlacement: bookInsertionOffersLive(), read at mint
+    // time. Defaulting it here the same way means every pre-existing test
+    // in this file (most of which mint and confirm under the SAME env, and
+    // don't care about the policy tag) keeps minting a REALISTIC offer for
+    // whatever gate state it set before calling this — an untagged offer
+    // when the gate is off, a tagged one when both GATE_BOOK_CAPACITY_COMMIT
+    // and GATE_SCHEDULING_CAPACITY are on. Tests that specifically exercise
+    // a gate flip BETWEEN mint and confirm, or want a deliberate mismatch,
+    // pass an explicit `policy` override (undefined included), which always
+    // wins over this default.
+    policy: bookInsertionOffersLive() ? BOOK_INSERTION_OFFER_POLICY : undefined,
     ...overrides,
   };
 }
@@ -250,6 +262,61 @@ describe('createSelfBooking — service + location scope binding (round 3)', () 
     // (404 sentinel), proving the caller-chosen minutes were ignored.
     const sig = mintSlotOfferField(offerPayload());
     const result = await createSelfBooking(confirmPayload(sig, { duration_minutes: 90 }));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+});
+
+describe('createSelfBooking — mid-route insertion policy tag (Codex round 2, PR #5231)', () => {
+  const ENV_KEYS = ['GATE_BOOK_CAPACITY_COMMIT', 'GATE_SCHEDULING_CAPACITY'];
+  const saved = {};
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTables();
+    for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('an insertion-tagged offer confirmed after bookInsertionOffersLive() flips OFF → 409, never reaches the post-gate work', async () => {
+    // Minted as if buildBookingAvailability ran with capacityPlacement true
+    // (offerPolicy = BOOK_INSERTION_OFFER_POLICY); gates stay unset (off)
+    // for the confirm — a rollback/mixed-deploy window landing here.
+    const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+  });
+
+  test('an untagged (append-only) offer confirmed after bookInsertionOffersLive() flips ON → 409', async () => {
+    const sig = mintSlotOfferField(offerPayload()); // no policy — as buildBookingAvailability mints with capacityPlacement false/omitted
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+  });
+
+  test('a matching insertion-tagged offer with the gate ON clears the signature check (reaches the same post-gate sentinel as any valid offer)', async () => {
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+
+  test('a matching untagged offer with the gate OFF still clears the gate — the pre-existing default path is unaffected', async () => {
+    const sig = mintSlotOfferField(offerPayload());
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+
+  test('GATE_BOOK_CAPACITY_COMMIT alone (GATE_SCHEDULING_CAPACITY off) does not turn on the insertion policy — an untagged offer still matches', async () => {
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    // GATE_SCHEDULING_CAPACITY stays unset.
+    const sig = mintSlotOfferField(offerPayload());
+    const result = await createSelfBooking(confirmPayload(sig));
     expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
   });
 });

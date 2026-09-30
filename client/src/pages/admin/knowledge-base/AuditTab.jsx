@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ActionFeedback,
   Badge,
@@ -110,6 +111,13 @@ export default function AuditTab({ showFeedback, onRefresh }) {
                         </Badge>
                       </div>
                       <p className="mt-2 text-ui-body text-ink-secondary">{result.summary}</p>
+                      {result.fixLink && (
+                        <p className="mt-2 text-ui-body">
+                          <Link to={result.fixLink} className="text-zinc-900 underline">
+                            Fix in {result.fixLabel}
+                          </Link>
+                        </p>
+                      )}
                       {result.issues?.length > 0 && (
                         <ul className="mt-3 list-disc space-y-1 pl-5 text-ui-body text-alert-fg">
                           {result.issues.map((issue, issueIndex) => (

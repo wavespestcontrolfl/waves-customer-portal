@@ -1030,6 +1030,7 @@ describe('extraction plumbing for the new booking fields', () => {
         sms_consent_quote: 'Yes, text me the confirmation.',
         call_recording_disclosed: true,
         do_not_contact_request: false,
+        sms_declined: false,
       },
       property: {
         service_address: {

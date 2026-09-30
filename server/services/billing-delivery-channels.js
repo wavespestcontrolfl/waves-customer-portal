@@ -83,7 +83,8 @@ function mergeLegacyChannels(prefs, category) {
 
 function channelEnabledAfterMerge(winner, loser, category, channel) {
   const enabled = (field) => [winner, loser].every((row) => row?.[field] !== false);
-  if (category === 'payment_receipt' && !enabled('payment_receipt')) return false;
+  // No payment_receipt check: customers cannot turn payment receipts off
+  // (owner ruling 2026-09-26), so a legacy false never narrows a merge.
   // Billing email is not governed by the portal-wide email switch.
   if (channel === 'email') return true;
   if (channel === 'push') return enabled('push_enabled');

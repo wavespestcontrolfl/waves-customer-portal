@@ -47,7 +47,6 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
   test.each([
     ['new', { id: 'bell-new', deduped: false }, true],
     ['refreshed', { id: 'bell-refreshed', deduped: true, refreshed: true }, true],
-    ['stale dedupe', { id: 'bell-stale', deduped: true }, false],
   ])('native retry preserves only a %s bell witness', async (_label, bell, expectedWitness) => {
     mockNotifyCustomer.mockResolvedValue({
       ...bell,
@@ -68,7 +67,6 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
 
   test.each([
     ['new', { id: 'bell-new', deduped: false }, true],
-    ['stale dedupe', { id: 'bell-stale', deduped: true }, false],
   ])('push-in-flight preserves only a %s bell witness', async (_label, bell, expectedWitness) => {
     mockNotifyCustomer.mockResolvedValue({
       ...bell,
@@ -98,5 +96,27 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
       reason: 'push_attempt_failed',
       bellPersisted: true,
     });
+  });
+
+  test.each(['dedupe_payload_changed', 'push_in_flight'])('an existing billing bell retires its event on %s', async (reason) => {
+    const visibleAt = new Date(Date.now() - 86400000);
+    mockNotifyCustomer.mockResolvedValue({ id: 'original-bell', created_at: visibleAt, deduped: true, push: { accepted: 0, reason } });
+    expect(await attemptPushFirst(input)).toEqual({
+      delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt,
+    });
+  });
+
+  test('a first native acceptance on an unchanged old bell remains the original billing event', async () => {
+    const visibleAt = new Date(Date.now() - 86400000);
+    mockNotifyCustomer.mockResolvedValue({ id: 'original-bell', created_at: visibleAt,
+      deduped: true, push: { accepted: 1, deduped: false } });
+
+    expect(await attemptPushFirst(input)).toEqual({
+      delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt,
+    });
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    // The existing bell settled billing at visibleAt; no second billing
+    // contact or retry-time sms_log proof is written for its native transport.
+    expect(mockDb).not.toHaveBeenCalledWith('sms_log');
   });
 });

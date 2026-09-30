@@ -126,8 +126,17 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
+  'estimate_service_details_send',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
+  // Owner ruling 2026-09-28: a caller reaching out to us — a missed call or
+  // a voicemail — is a customer action just like a form submit (the same
+  // idea as the 2026-08-29 ruling above). Both automated first-touch texts
+  // go out immediately, at any hour: missed-call-text-back.js drops its own
+  // independent window check entirely (this exemption is what lets it),
+  // and voicemail-lead-sms.js's quiet-hours re-queue path (QUIET_HOURS_HOLD)
+  // simply never fires for this entry point any more.
+  'missed_call_text_back',
   'promotions_upsell_interest',
   'public_estimate_add_service_request',
   'public_estimate_extension_request',
@@ -135,6 +144,9 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'referral_engine_invite',
   'referrals_legacy_invite',
   'referrals_v2_invite',
+  // Owner ruling 2026-09-28 (see missed_call_text_back above) — same
+  // customer-action reasoning for the voicemail quote-link text-back.
+  'voicemail_lead_sms',
 ]);
 
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {

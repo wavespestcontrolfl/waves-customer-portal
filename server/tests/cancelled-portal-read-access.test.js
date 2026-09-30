@@ -55,6 +55,7 @@ function builder(table) {
     return b;
   };
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
+  b.whereNotNull = (col) => { conds.push((r) => r[norm(col)] != null); return b; };
   b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[norm(col)]))); return b; };
   b.whereRaw = (sql, params) => {
     if (/regexp_replace/.test(sql)) {
@@ -94,6 +95,7 @@ function builder(table) {
   b.limit = () => b;
   b.forUpdate = () => b;
   b.first = async () => sorted()[0] || null;
+  b.pluck = async (col) => sorted().map((r) => r[norm(col)]);
   b.update = async (patch) => { const hit = rows(); hit.forEach((r) => Object.assign(r, patch)); return hit.length; };
   b.insert = (row) => {
     const list = (tables[table] ||= []);

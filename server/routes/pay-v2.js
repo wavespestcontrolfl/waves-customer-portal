@@ -587,6 +587,17 @@ router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
 // =========================================================================
 // POST /api/pay/:token/setup — Create Stripe PaymentIntent for invoice
 // =========================================================================
+// Codex #4971 r26 P1: a delivered termite-renewal pay link whose parent plan
+// has since been cancelled, refunded or moved must not start a payment. Keyed
+// on the invoice's own term link, so an ordinary invoice costs no query.
+async function rejectIfRenewalNotPayable(invoice, res) {
+  if (!invoice?.annual_prepay_term_id) return false;
+  const refusal = await require('../services/termite-annual-renewal-charge').renewalPaymentRefusal(invoice);
+  if (!refusal) return false;
+  res.status(409).json({ error: refusal.message, renewalNotPayable: true });
+  return true;
+}
+
 router.post('/:token/setup', async (req, res, next) => {
   let invoice = null;
   try {
@@ -622,6 +633,7 @@ router.post('/:token/setup', async (req, res, next) => {
     // for repeated saved-card clicks. Do not mint a public PaymentIntent
     // while an off-session charge is active or awaiting reconciliation.
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -780,6 +792,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // route that can mutate that PI while a saved-card collection owns the
     // invoice, not only the route that creates new PIs.
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -842,6 +855,7 @@ router.post('/:token/quote', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -880,6 +894,7 @@ router.post('/:token/finalize', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -887,7 +902,20 @@ router.post('/:token/finalize', async (req, res, next) => {
     }
 
     // Required-save invoices force the flag server-side (see /setup).
-    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) });
+    // Codex #4971 r26 P1: a termite renewal's payment is finalized UNDER the
+    // renewal gate, re-checked there (an ordinary invoice runs straight
+    // through).
+    const finalizeOptions = { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) };
+    let result;
+    try {
+      result = await require('../services/termite-annual-renewal-charge')
+        .withRenewalPaymentClearance(invoice, () => StripeService.finalizeInvoicePayment(invoice.id, quoteToken, finalizeOptions));
+    } catch (clearanceErr) {
+      if (clearanceErr && clearanceErr.code === 'RENEWAL_NOT_PAYABLE') {
+        return res.status(409).json({ error: clearanceErr.message, renewalNotPayable: true });
+      }
+      throw clearanceErr;
+    }
     res.json(result);
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {

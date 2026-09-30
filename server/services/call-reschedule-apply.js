@@ -17,16 +17,25 @@
  *     reschedule_requested, the agent committed the booking, and the
  *     scheduling_window confidence clears MIN_SCHEDULING_CONFIDENCE, and
  *     the existing trusted-speaker-label gate is enabled
+ *   - the AUTOMATIC path (not humanOverride) moves only on the extraction's
+ *     own judgement that the caller accepted the final slot
+ *     (scheduling.caller_accepted_slot, schema 1.16.0), grounded by
+ *     call-reschedule-agreement.js: the agent's commitment, the caller's
+ *     acceptance and the agreed-slot quote each appear word for word in a
+ *     turn of their speaker, and the words the extraction recorded for the
+ *     agreed time (scheduling.agreed_slot_words, schema 1.17.0) sit in that
+ *     quote and state the slot
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE upcoming live visit (pending or confirmed — a row parked
  *     at 'rescheduled' awaits a real rebook and stays a card; not dispatch-
  *     owned pending, not an unactivated AI office-review booking, not
  *     grouped) of the service the call names — matched on the row's CATALOG
  *     identity, never on a label a repoint can leave stale — at the
- *     identified property, within CANDIDATE_SPAN_DAYS of the target date.
- *     Two is ambiguous (V2 records the new slot, not which visit it
- *     replaces); none in span means the call was about a visit we don't
- *     have (the booking lane owns that). A call naming no service or one
+ *     identified property, on the date of the appointment being moved when
+ *     the extraction grounded one (scheduling.moved_appointment_date),
+ *     within CANDIDATE_SPAN_DAYS of the target date. Two is ambiguous; none
+ *     in span means the call was about a visit we don't have (the booking
+ *     lane owns that). A call naming no service or one
  *     that matches nothing, a call V2 files under more than one service
  *     category, or a visit at the property with no service identity to weigh
  *     (its catalog row gone, or the catch-all placeholder) stays in review.
@@ -68,10 +77,12 @@
  */
 
 const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
+const { callStartedAt } = require('../utils/call-timeline');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { groundRescheduleAgreement } = require('./call-reschedule-agreement');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -233,7 +244,16 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const onHour = humanOverride ? parts.minute === 0 && target.getUTCSeconds() === 0 : confirmedStartOnTheHour(scheduling.confirmed_start_at);
   if (!onHour || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
   if (!humanOverride && !transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
-  if (!humanOverride && !hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
+  // The automatic path moves a visit only on the extraction's own judgement
+  // that the caller agreed, grounded in its verbatim quotes
+  // (call-reschedule-agreement.js), which also yields the appointment being
+  // moved when the call named one. humanOverride is a person's decision.
+  let movedDate = null;
+  if (!humanOverride) {
+    const agreement = groundRescheduleAgreement({ v2, transcript: call.transcription, callStartedAt: callStartedAt(call) || call.created_at });
+    if (!agreement.ok) return skip('reschedule_not_agreed', { agreementReason: agreement.reason });
+    movedDate = agreement.movedDate;
+  }
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
   if (etWallClockOfConfirmedStart(targetStart) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
@@ -280,13 +300,16 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     const upcoming = atProperty.filter((row) => dateOnly(row.scheduled_date) >= today
       && serviceNameCandidates(authoritativeServiceName(row)).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
     if (!upcoming.length) return skip('service_needs_review');
-    // V2 records only the new slot, never WHICH visit it replaces, so nothing
-    // on the call ties it to one of several upcoming visits: nearness picks
-    // September for "move December to October 1", and even a time change on
-    // the destination day can mean another ("move the later one to the 24th
-    // at noon"). Only a sole upcoming visit within the span is taken.
-    if (upcoming.length > 1) return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
-    nearby = upcoming.filter((row) => Math.abs(calendarDaysBetween(dateOnly(row.scheduled_date), newDate)) <= CANDIDATE_SPAN_DAYS);
+    // Which visit the call moves: the one on the date the extraction grounded
+    // as the appointment being moved (scheduling.moved_appointment_date).
+    // Without it nothing on the call ties it to one of several upcoming
+    // visits: nearness picks September for "move December to October 1", and
+    // even a time change on the destination day can mean another ("move the
+    // later one to the 24th at noon"). Only a sole candidate within the span
+    // is taken; a named date with no visit of the service is one we don't have.
+    const moving = upcoming.filter((row) => !movedDate || dateOnly(row.scheduled_date) === movedDate);
+    if (moving.length > 1) return skip('ambiguous_visit', { candidateIds: moving.map((r) => r.id) });
+    nearby = moving.filter((row) => Math.abs(calendarDaysBetween(dateOnly(row.scheduled_date), newDate)) <= CANDIDATE_SPAN_DAYS);
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];

@@ -24,6 +24,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { gsmSafeName, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 const { countSegments } = require('./messaging/segment-counter');
 const { isEnabled } = require('../config/feature-gates');
+const { establishedContactLinkedDraft } = require('./booking-contact-linked-handoff');
 const { etDateString } = require('../utils/datetime-et');
 const Experiments = require('./experimentation/growthbook');
 
@@ -99,6 +100,29 @@ async function hasActiveBooking(intent) {
     logger.warn(`[booking-recovery] active-booking check skipped: ${e.message}`);
     return false; // fail open
   }
+}
+
+// Structural backstop for the B11 contact-linked quote-wizard handoff. With
+// the customers-only booking gate on, a draft linked to an ESTABLISHED
+// customer (by the unverified contact an anonymous quoter typed) can never
+// book without the portal OTP, so it must never message that customer about
+// "almost booking". capture-intent and the refused confirm already retire
+// such intents, but those writes are best effort — this re-checks at SEND
+// time, so a failed suppression write can never lead to a message. A hit is
+// marked suppressed (best effort) and skipped; a LOOKUP ERROR fails closed
+// (skip this tick, retry next). Gate off → the flow still books, so nothing
+// here applies.
+async function blockedByContactLinkedHandoff(intent) {
+  if (!intent.pricing_estimate_id || !isEnabled('bookingCustomersOnly')) return false;
+  try {
+    if (!(await establishedContactLinkedDraft(db, intent.pricing_estimate_id))) return false;
+  } catch (e) {
+    logger.warn(`[booking-recovery] contact-link check failed for intent ${intent.id} — skipping (fail closed): ${e.message}`);
+    return true;
+  }
+  logger.info(`[booking-recovery] skip ${intent.id}: handoff draft is contact-linked to an established customer`);
+  await db('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: db.fn.now() }).catch(() => {});
+  return true;
 }
 
 // Honor an existing customer's email opt-out (notification_prefs.email_enabled).
@@ -247,7 +271,12 @@ function serviceLabelOf(intent) {
 // single segment. The email keeps the canonical name.
 const SMS_SERVICE_LABELS = { bora_care: 'Bora-Care' };
 function smsServiceLabelOf(intent) {
-  return SMS_SERVICE_LABELS[String(intent.service_id || '').trim()] || serviceLabelOf(intent);
+  const key = String(intent.service_id || '').trim();
+  // Owner report 2026-09-28: an unknown/bundle service id fell back to the
+  // email path's 'your service', rendering "Your your service spot…" — the
+  // template already says "Your". The SMS path's own fallback is just
+  // 'service'; the email path's serviceLabelOf/'your service' is untouched.
+  return SMS_SERVICE_LABELS[key] || SERVICE_LABELS[key] || 'service';
 }
 
 async function bookingUrlFor(intent) {
@@ -345,6 +374,7 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
       }
+      if (await blockedByContactLinkedHandoff(intent)) continue;
       const body = await renderOneSegmentSms(intent);
       if (!body) continue; // missing template — don't claim, retry next tick
 
@@ -357,6 +387,12 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: booked after select (pre-send recheck)`);
         continue;
       }
+      // B11 last look, AFTER the claim and immediately before the send: the
+      // pre-claim check above is a cheap filter, but a promotion to
+      // established (or a new established sibling) can land between it and
+      // here. Blocked or lookup error → nothing is sent; `continue` releases
+      // the claim and a hit is already marked suppressed.
+      if (await blockedByContactLinkedHandoff(intent)) continue;
 
       const result = await sendCustomerMessage({
         to: intent.phone,
@@ -452,6 +488,7 @@ async function runEmailStage(now, sentPhones) {
         logger.info(`[booking-recovery] email skip ${intent.id}: customer-replied-recently`);
         continue;
       }
+      if (await blockedByContactLinkedHandoff(intent)) continue;
       if (!(await claimStage(intent.id, 'followup_email_sent', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
       // Re-check active booking AFTER claiming (race-safe; see SMS stage).
@@ -459,13 +496,17 @@ async function runEmailStage(now, sentPhones) {
         logger.info(`[booking-recovery] email skip ${intent.id}: booked after select (pre-send recheck)`);
         continue;
       }
+      const bookingUrl = await bookingUrlFor(intent);
+      // B11 last look, AFTER the claim and right before dispatch (see the SMS
+      // stage): blocked or lookup error → no send, claim released.
+      if (await blockedByContactLinkedHandoff(intent)) continue;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'booking.abandonment_recovery',
         to: intent.email,
         payload: {
           first_name: firstNameOf(intent),
           service_type: serviceLabelOf(intent),
-          booking_url: await bookingUrlFor(intent),
+          booking_url: bookingUrl,
         },
         recipientType: intent.customer_id ? 'customer' : 'lead',
         recipientId: intent.customer_id || null,
@@ -501,5 +542,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
+  _internals: { blockedByContactLinkedHandoff, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
 };

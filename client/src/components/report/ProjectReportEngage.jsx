@@ -8,20 +8,17 @@
 import { useState } from 'react';
 import { COLORS as B } from '../../theme-brand';
 import Icon from '../Icon';
+// AW-06: the shipped chip list lives ONCE in shared/ — server's
+// projectReportAskPrompts() (project-report-assistant.js) and the routing
+// test that enumerates every shipped chip (report-question-routing.test.js)
+// import this same file, so the client's chips can never drift from what the
+// server whitelists as an explicit intent. Each chip carries its own explicit
+// answer intent so its click always reaches the right answer function even
+// if its label is later reworded — the server whitelists `intent` and falls
+// back to free-text routing when it's missing or unrecognized.
+import PROMPTS from '../../../../shared/project-report-ask-prompts.json';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-// Mirrors server/services/project-report-assistant.js projectReportAskPrompts.
-// Each chip carries its own explicit answer intent (AW-06) so its click
-// always reaches the right answer function even if its label is later
-// reworded — the server whitelists `intent` and falls back to free-text
-// routing when it's missing or unrecognized.
-const PROMPTS = [
-  { text: 'What did you find?', intent: 'findings' },
-  { text: 'What was treated?', intent: 'treatment' },
-  { text: 'What should I do next?', intent: 'recommendations' },
-  { text: 'When is my next visit?', intent: 'next_visit' },
-];
 
 // Same office → review-link resolution as the service report (REVIEW_LOCATIONS
 // in ReportViewPage.jsx); matched against the report's own address strings.
@@ -110,7 +107,10 @@ export function ProjectAskWaves({ token }) {
       </div>
       {answer && (
         <div className="waves-ask-answer" role="status">
-          <span>{answer}</span>
+          {/* AW-06 line-break fix: multi-fact answers (findings/treatment) join
+              their recorded lines with "\n" — preserve that without
+              dangerouslySetInnerHTML (mirrors ReportViewPage's FloatingAskWaves). */}
+          <span className="waves-ask-answer-text">{answer}</span>
           <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">
             <Icon name="close" size={16} strokeWidth={2} />
           </button>

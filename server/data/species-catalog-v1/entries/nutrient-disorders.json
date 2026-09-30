@@ -1,0 +1,1088 @@
+[
+  {
+    "slug": "nitrogen-deficiency-turf",
+    "kind": "disorder",
+    "common_name": "Nitrogen Deficiency (lawn)",
+    "aka": [],
+    "aliases": [
+      "nitrogen deficiency",
+      "nitrogen deficient lawn"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "turf-nutrient",
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Uniform pale yellow-green color across the whole lawn, most visible on older, lower blades",
+      "Growth slows and the lawn thins evenly with no distinct pattern",
+      "No lesions, pustules or pattern of spots on the blade"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A uniform pale yellow-green lawn, worse on older blades, can suggest low nitrogen, but early disease or a root problem can look similar. A photo cannot confirm it; a technician checks the pattern and times any nutrition within the local fertilizer rules.",
+      "fact": "Florida's sandy soils hold nitrogen poorly, so it can wash below the root zone with heavy rain well before a lawn shows visible signs of running low."
+    },
+    "tech_notes": "Rule out rust and disease first; nitrogen timing is restricted by the local fertilizer blackout (Jun 1 - Sep 30) for nitrogen and phosphorus.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep236"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "84639f6292fd4c6249d2f6fa50cbd26f8c1c1450a1add1f918e97f918bc010c1"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Uniform pale yellow-green color across the whole lawn, most visible on older, lower blades",
+        "Growth slows and the lawn thins evenly with no distinct pattern"
+      ],
+      "required_signature": {
+        "text": "A photo cannot confirm this on its own, since early disease or a root problem can look similar; a technician checks the pattern and times any nutrition within the local fertilizer rules.",
+        "elements": [
+          "Uniform pale yellow-green color across the whole lawn, most visible on older, lower blades",
+          "Growth slows and the lawn thins evenly with no distinct pattern"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "iron-deficiency-turf",
+          "difference": "Nitrogen deficiency is a uniform pale color on older blades; iron deficiency stripes the newest blades with green veins and yellow tissue between them.",
+          "next_observation": "A close-up comparing the newest blades to the older ones.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "magnesium-deficiency-turf",
+          "difference": "Nitrogen deficiency pales the whole older blade evenly; magnesium deficiency shows blotchy, interveinal yellowing on older blades.",
+          "next_observation": "A close-up of an older blade checking whether the yellowing is even or blotchy.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "turf-rust",
+          "difference": "Nitrogen deficiency has no pustules; rust shows orange, powdery pustules on the blade that rub off on a finger.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Color often improves within two to three weeks once nutrition is corrected."
+    }
+  },
+  {
+    "slug": "iron-deficiency-turf",
+    "kind": "disorder",
+    "common_name": "Iron Deficiency (lawn)",
+    "aka": [],
+    "aliases": [
+      "iron deficiency",
+      "iron chlorosis"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "turf-nutrient",
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Interveinal yellowing on the newest blades, giving a striped look while the veins stay green",
+      "Leaves can turn nearly white in severe cases while older blades stay green",
+      "Most common in spring after new growth outpaces the roots' ability to take up iron"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "peak_months": [
+      3,
+      4
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Yellow-striped new blades with green veins can suggest low iron, most common in spring, but a photo cannot rule out a disease. A technician checks the pattern and times any nutrition within the local fertilizer rules.",
+      "fact": "Iron is usually present in Florida soil; the shortage is more often about roots being too immature in spring to take it up fast enough."
+    },
+    "tech_notes": "Common after spring nitrogen applications outpace root uptake capacity on bahiagrass, centipedegrass and St. Augustinegrass.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP551"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b748f8a0ce418c1f22c42035a611e541b1e1235136eecbb527b63214df0b7649"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Interveinal yellowing on the newest blades, giving a striped look while the veins stay green",
+        "Leaves can turn nearly white in severe cases while older blades stay green"
+      ],
+      "required_signature": {
+        "text": "A photo cannot rule out disease on its own; a technician checks the interveinal, yellow-striped pattern on new blades and times any nutrition within the local fertilizer rules.",
+        "elements": [
+          "Interveinal yellowing on the newest blades, giving a striped look while the veins stay green",
+          "Leaves can turn nearly white in severe cases while older blades stay green"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "nitrogen-deficiency-turf",
+          "difference": "Iron deficiency stripes the newest blades with green veins and yellow tissue between them; nitrogen deficiency is a uniform pale color on older blades.",
+          "next_observation": "A close-up comparing the newest blades to the older ones.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "magnesium-deficiency-turf",
+          "difference": "Iron deficiency stripes the newest blades; magnesium deficiency shows blotchy, interveinal yellowing on older blades.",
+          "next_observation": "A close-up comparing the newest blades to the oldest ones.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "herbicide-injury",
+          "difference": "Iron deficiency stripes new blades lawn-wide; herbicide injury matches where and when something was applied, whether a small area or the whole lawn.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "recent_fertilizer"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Color often improves within two to three weeks as new blades emerge after nutrition is corrected."
+    }
+  },
+  {
+    "slug": "magnesium-deficiency-turf",
+    "kind": "disorder",
+    "common_name": "Magnesium Deficiency (lawn)",
+    "aka": [],
+    "aliases": [
+      "magnesium deficiency",
+      "magnesium deficient lawn"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "turf-nutrient",
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Blotchy, interveinal yellowing on older blades, sometimes with a reddish tinge along the margins",
+      "Turf looks pale or 'hungry' even when mowing and watering are adequate",
+      "Most visible on older, lower leaves rather than new growth"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Blotchy, interveinal yellowing on older blades, sometimes with a reddish tinge at the margins, can suggest low magnesium, but a photo cannot rule out other causes. A technician checks the pattern and times any nutrition within the local fertilizer rules.",
+      "fact": "Magnesium leaches easily from Florida's sandy soils, and research has found the response to added magnesium varies a lot by region and soil type."
+    },
+    "tech_notes": "Response to added magnesium is inconsistent between regions; confirm soil test values before recommending it as the primary fix.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep555"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "fa17834264065c3f8bbf5d5c9203a11ea30c9b129524aa54bb62bfe7870f0d4a"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Blotchy, interveinal yellowing on older blades, sometimes with a reddish tinge along the margins",
+        "Turf looks pale or 'hungry' even when mowing and watering are adequate"
+      ],
+      "required_signature": {
+        "text": "A photo cannot rule out other causes; a technician checks the blotchy, interveinal yellowing pattern on older blades and times any nutrition within the local fertilizer rules.",
+        "elements": [
+          "Blotchy, interveinal yellowing on older blades, sometimes with a reddish tinge along the margins",
+          "Turf looks pale or 'hungry' even when mowing and watering are adequate"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "nitrogen-deficiency-turf",
+          "difference": "Magnesium deficiency shows blotchy, interveinal yellowing on older blades; nitrogen deficiency pales the whole older blade evenly.",
+          "next_observation": "A close-up of an older blade checking whether the yellowing is even or blotchy.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "iron-deficiency-turf",
+          "difference": "Magnesium deficiency shows blotchy yellowing on older blades; iron deficiency stripes the newest blades with green veins between yellow tissue.",
+          "next_observation": "A close-up comparing the newest blades to the oldest ones.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "herbicide-injury",
+          "difference": "Magnesium deficiency shows blotchy, interveinal yellowing lawn-wide; herbicide injury matches where and when something was applied, spot or lawn-wide.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Color often improves gradually over several weeks once nutrition is corrected."
+    }
+  },
+  {
+    "slug": "potassium-deficiency-palm",
+    "kind": "disorder",
+    "common_name": "Potassium Deficiency (palm)",
+    "aka": [],
+    "aliases": [
+      "potassium deficiency",
+      "potassium deficient palm"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "palm-nutrient",
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Translucent yellow-orange spotting or marginal and tip necrosis confined to the oldest fronds",
+      "Affected older leaflets can look withered and frizzled while newer fronds stay normal",
+      "Symptoms progress in stages from translucent spotting to necrotic tips to whole leaflet death as the deficiency deepens"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Translucent spotting or necrotic, frizzled leaflet tips confined to the oldest fronds can suggest low potassium, but early lethal bronzing looks the same. A technician asks about early fruit drop or blackened flower stalks and checks the pattern before timing nutrition within local rules.",
+      "fact": "Because potassium moves within the plant, a palm short on it pulls potassium out of its oldest fronds first to support new growth, which is why symptoms always start on the oldest leaves."
+    },
+    "tech_notes": "Confirm symptoms are confined to oldest fronds only (newer fronds normal) to separate from lethal bronzing, which progresses upward through the whole canopy; ask about early fruit drop or blackened flower stalks. This is the single most common nutrient problem in Florida landscape palms.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP269"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c6b6b95487f644f007336487dbb0075fdd937534f2ec61dd0bed4009c2e4b6fe"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Translucent yellow-orange spotting or marginal and tip necrosis confined to the oldest fronds",
+        "Affected older leaflets can look withered and frizzled while newer fronds stay normal"
+      ],
+      "required_signature": {
+        "text": "A close-up of the oldest fronds showing translucent spotting or necrotic, frizzled leaflet tips, while newer fronds stay normal.",
+        "elements": [
+          "Translucent yellow-orange spotting or marginal and tip necrosis confined to the oldest fronds",
+          "Affected older leaflets can look withered and frizzled while newer fronds stay normal"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lethal-bronzing",
+          "difference": "Potassium deficiency and early lethal bronzing can look identical on the oldest fronds alone; only the pattern over time and a lab test tell them apart.",
+          "next_observation": "Ask about early fruit drop or blackened flower stalks; a repeat wide canopy photo in 2-3 weeks checks for upward movement, then a lab test confirms.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "magnesium-deficiency-palm",
+          "difference": "Potassium deficiency shows spotting or necrosis on the oldest fronds; magnesium deficiency bands the oldest fronds' margins with a green center.",
+          "next_observation": "A close-up of an affected frond checking for spotting versus a margin band.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "cold-damage",
+          "difference": "Potassium deficiency develops gradually and stays on the oldest fronds; cold damage appears within days of a cold snap and can affect many fronds at once.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Existing damaged leaflets do not recover, but new fronds emerge healthier over several months once nutrition is corrected."
+    }
+  },
+  {
+    "slug": "magnesium-deficiency-palm",
+    "kind": "disorder",
+    "common_name": "Magnesium Deficiency (palm)",
+    "aka": [],
+    "aliases": [
+      "magnesium deficiency",
+      "magnesium deficient palm"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "palm-nutrient",
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Broad yellow bands along the margins of the oldest fronds with the center staying green",
+      "Symptoms appear only on the oldest fronds; newer growth stays normal",
+      "Common where sandy soil has leached out magnesium over time"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A broad yellow band on the margins of the oldest fronds, with the center staying green, suggests low magnesium. It does not rule out other causes; a technician checks the pattern before timing any nutrition within the local rules.",
+      "fact": "When a palm is short on both magnesium and potassium at once, the oldest fronds show the potassium pattern while magnesium symptoms show up on the middle fronds instead."
+    },
+    "tech_notes": "Best prevented in containers with dolomite amendment; in the landscape, confirm the band is confined to oldest fronds before recommending nutrition.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep266"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bc1739f1c426bc7b137a8921bf7837fe43661052b6caaba660cc95381ca82e9f"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Broad yellow bands along the margins of the oldest fronds with the center staying green",
+        "Symptoms appear only on the oldest fronds; newer growth stays normal"
+      ],
+      "required_signature": {
+        "text": "A close-up of the oldest fronds showing the broad yellow margin bands with a green center.",
+        "elements": [
+          "Broad yellow bands along the margins of the oldest fronds with the center staying green",
+          "Symptoms appear only on the oldest fronds; newer growth stays normal"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lethal-bronzing",
+          "difference": "Magnesium deficiency stays confined to the oldest fronds with a green center; lethal bronzing discolors the whole frond and moves upward through the canopy.",
+          "next_observation": "A wider photo of the whole canopy checking how far the discoloration has spread.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "potassium-deficiency-palm",
+          "difference": "Magnesium deficiency bands the margin with a green center on the oldest fronds; potassium deficiency shows spotting or necrosis on the oldest fronds instead.",
+          "next_observation": "A close-up of an affected frond checking for a margin band versus spotting.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New fronds emerge healthier over several months once nutrition is corrected; older affected fronds do not recover."
+    }
+  },
+  {
+    "slug": "manganese-deficiency-palm",
+    "kind": "disorder",
+    "common_name": "Manganese Deficiency (palm)",
+    "aka": [
+      "frizzle top"
+    ],
+    "aliases": [
+      "manganese deficiency",
+      "frizzle top",
+      "frizzletop"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "palm-nutrient",
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Newest emerging leaves are yellow with streaky, dead lines running along their length",
+      "New leaflets look withered, curled and 'frizzled', worst near the base of the leaf",
+      "Common on palms grown in alkaline, high-pH soil"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Streaky yellow, withered, 'frizzled' new leaves suggest low manganese, common in alkaline soil. It can be serious for pygmy date palms in particular; a technician checks the soil and the newest growth before timing any nutrition within the local rules.",
+      "fact": "This is sometimes called frizzle top because the newest leaflets curl inward around the leaf's central rib, giving the whole young leaf a frizzled look."
+    },
+    "tech_notes": "Common in pygmy date palms on alkaline soil; unlike potassium deficiency, this starts on the newest leaves, not the oldest.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep267"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b186680bfe4d28c2926e50d29a07bde57123ca7949ddef7b4ad2cba06b842ca"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Newest emerging leaves are yellow with streaky, dead lines running along their length",
+        "New leaflets look withered, curled and 'frizzled', worst near the base of the leaf"
+      ],
+      "required_signature": {
+        "text": "A close-up of the newest emerging leaf showing the streaky yellow, withered, frizzled leaflets.",
+        "elements": [
+          "Newest emerging leaves are yellow with streaky, dead lines running along their length",
+          "New leaflets look withered, curled and 'frizzled', worst near the base of the leaf"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "boron-deficiency-palm",
+          "difference": "Manganese deficiency frizzles and streaks the newest whole leaf; boron deficiency shows hooked leaflet tips or a spear leaf that fails to fully open.",
+          "next_observation": "A close-up of the newest leaf comparing frizzled streaking to hooked tips.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "iron-deficiency-palm",
+          "difference": "Manganese deficiency streaks and withers the newest leaf's leaflets; iron deficiency yellows the newest leaves between the veins without withering them.",
+          "next_observation": "A close-up of the newest leaf checking for withered streaking versus even interveinal yellowing.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New fronds emerge healthier within a few months once nutrition is corrected; already frizzled leaves do not recover."
+    }
+  },
+  {
+    "slug": "boron-deficiency-palm",
+    "kind": "disorder",
+    "common_name": "Boron Deficiency (palm)",
+    "aka": [],
+    "aliases": [
+      "boron deficiency",
+      "hookleaf"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "palm-nutrient",
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Newest spear leaf fails to open fully, or emerges with sharply bent, hooked leaflet tips",
+      "Transverse translucent streaking on the newest leaflets",
+      "Symptoms are limited to the newest growth; older fronds stay normal"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Hooked leaflet tips or a spear leaf that will not fully open suggest low boron. A technician checks whether the spear leaf is failing to open versus something more serious, then times any nutrition within the local rules.",
+      "fact": "A palm can be temporarily short on boron just from heavy rain leaching it from the soil, even when the soil normally has enough."
+    },
+    "tech_notes": "Symptoms are confined to newest growth; distinguish a spear leaf that fails to open from one that pulls free easily (bud rot).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pdffiles/EP/EP26400.pdf"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "833286f8dc8bc9fc59fc43a7a53c9157ed71b55759561e4ad4ba3fe44c10d9f9"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Newest spear leaf fails to open fully, or emerges with sharply bent, hooked leaflet tips",
+        "Transverse translucent streaking on the newest leaflets"
+      ],
+      "required_signature": {
+        "text": "A close-up of the newest leaf showing the hooked leaflet tips or the spear leaf failing to open.",
+        "elements": [
+          "Newest spear leaf fails to open fully, or emerges with sharply bent, hooked leaflet tips"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "manganese-deficiency-palm",
+          "difference": "Boron deficiency shows hooked leaflet tips or a spear leaf that fails to fully open; manganese deficiency frizzles and streaks the whole newest leaf.",
+          "next_observation": "A close-up of the newest leaf comparing hooked tips to frizzled streaking.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "palm-bud-rot",
+          "difference": "Boron deficiency keeps the spear leaf attached even if it will not open; bud rot leaves discolor, wilt and pull free easily from the crown.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "iron-deficiency-palm",
+          "difference": "Boron deficiency shows hooked tips or a stuck spear leaf; iron deficiency yellows the newest leaves between the veins without hooking or streaking them.",
+          "next_observation": "A close-up of the newest leaf checking for hooked tips versus even interveinal yellowing.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "sandy_high_ph",
+        "infrequent_irrigation"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New fronds emerge more normally within a few months once nutrition is corrected."
+    }
+  },
+  {
+    "slug": "iron-deficiency-palm",
+    "kind": "disorder",
+    "common_name": "Iron Deficiency (palm)",
+    "aka": [],
+    "aliases": [
+      "iron deficiency",
+      "iron chlorosis"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "nutrient-disorders",
+    "subgroup": "palm-nutrient",
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Interveinal or uniform yellowing on the newest leaves while older leaves stay green",
+      "New leaflets may show necrotic tips and stunted growth in severe cases",
+      "Usually tied to poor soil aeration or planting depth rather than a lack of iron in the soil"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Yellowing newest leaves, while older leaves stay green, suggest low iron. This is usually about the roots and drainage rather than a lack of iron in the soil; a technician checks planting depth and drainage before timing any nutrition within the local rules.",
+      "fact": "Iron deficiency in palms is usually not a shortage of iron in the soil at all; wet, low-oxygen roots simply cannot take up the iron that is already there."
+    },
+    "tech_notes": "Check for deep planting or waterlogged soil around the root zone before assuming a soil nutrient shortage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep265"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "58cd6ba4ecd354b42ac3e387bed6f4329e1e8e9c6f277598b5452f81059b7f7a"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Interveinal or uniform yellowing on the newest leaves while older leaves stay green",
+        "New leaflets may show necrotic tips and stunted growth in severe cases"
+      ],
+      "required_signature": {
+        "text": "A close-up of the newest leaves showing the interveinal yellowing while older fronds stay green.",
+        "elements": [
+          "Interveinal or uniform yellowing on the newest leaves while older leaves stay green"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "manganese-deficiency-palm",
+          "difference": "Iron deficiency yellows the newest leaves between the veins without withering them; manganese deficiency streaks and withers the newest leaf's leaflets.",
+          "next_observation": "A close-up of the newest leaf checking for even yellowing versus withered streaking.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "boron-deficiency-palm",
+          "difference": "Iron deficiency yellows the newest leaves between the veins; boron deficiency shows hooked leaflet tips or a stuck, unopened spear leaf.",
+          "next_observation": "A close-up of the newest leaf checking for even yellowing versus hooked tips.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "poor_drainage",
+        "deep_planting"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "New fronds emerge greener within a few months once drainage or planting depth is corrected."
+    }
+  }
+]

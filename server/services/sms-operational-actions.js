@@ -19,6 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
@@ -195,6 +196,38 @@ const TOPIC_CLAUSE = new RegExp(
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }
+
+// Owner ruling 2026-09-28: the exact same-day tokens that still leave a
+// Waves obligation undated below ("today", "tonight", the day-part trio,
+// "later today", "eod", "end of (the) day") — the subset of STATED_TIMING's
+// own vocabulary that names TODAY specifically, never a longer span ("this
+// week/month" stay out on purpose: those keep the legacy undated behavior).
+// NOT_POSSESSIVE follows every form, as in STATED_TIMING, so "today's
+// appointment" or "tonight's visit" names the topic and is left to the
+// existing per-kind handling (Codex #5170 r3 P2). A qualifier bound to the
+// same-day form ("later tonight", "any time today", "sometime this
+// afternoon") is part of it, so stripping takes it too and it never reads
+// as a later option below (r3 P2).
+const SAME_DAY_QUALIFIER = String.raw`(?:(?:later|any ?time|some ?time|early|late) )?`;
+const SAME_DAY_TIMING = new RegExp([
+  String.raw`\btoday\b${NOT_POSSESSIVE}`,
+  String.raw`\btonight\b${NOT_POSSESSIVE}`,
+  String.raw`\bthis (?:morning|afternoon|evening)\b${NOT_POSSESSIVE}`,
+  String.raw`\beod\b${NOT_POSSESSIVE}`,
+  String.raw`\bend of (?:the )?day\b${NOT_POSSESSIVE}`,
+].map((form) => String.raw`\b${SAME_DAY_QUALIFIER}${form.slice(2)}`).join('|'), 'i');
+// Global twin used only to strip every same-day occurrence before re-testing
+// STATED_TIMING on what is left (Codex conventions keep the stateful global
+// regex out of resolveDueDeadline's own module-level .test() calls).
+const SAME_DAY_TIMING_STRIP = new RegExp(SAME_DAY_TIMING.source, 'gi');
+// A later option offered beside the same-day timing ("today or next visit",
+// "today, otherwise whenever") that STATED_TIMING does not recognize on its
+// own (a bare "next visit" needs a preposition there) keeps the legacy
+// undated row: a same-day deadline would bell before the option the customer
+// allowed (Codex #5170 r1 P2). Only a later OPTION counts, never the bare
+// word "or": "today or not", "call or text me today" and "this afternoon or
+// tonight" stay same-day (r2 P2).
+const SAME_DAY_ALTERNATIVE = /\bnext (?:visit|appointment|service|time)\b|\b(?:whenever|any ?time|some ?time|later(?! today)|another (?:day|time)|some ?other (?:day|time)|a different (?:day|time))\b/i;
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before
@@ -399,9 +432,36 @@ const DEFAULT_DEADLINE_HOURS = Object.freeze({
 const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 
 // due_basis: 'stated' when the extractor grounded an explicit deadline in
-// the source text; 'default_kind' when this per-kind/basis table filled one
-// in instead; null when the kind has no default and nothing was stated
-// (legacy behavior — refreshSmsCommitments' null-due branch still applies).
+// the source text; 'default_kind' when either this per-kind/basis table or
+// the same-day rule below filled one in instead; null when the kind has no
+// default and nothing was stated (legacy behavior — refreshSmsCommitments'
+// null-due branch still applies).
+//
+// due_basis reuse (owner ruling 2026-09-28): the same-day rule below could
+// have introduced its own 'same_day' value, but call_commitments carries a
+// CHECK constraint enumerating due_basis ('stated' | 'suggested' |
+// 'default_kind' — see migrations 20260901000010/20260925000001/…000002),
+// and NEVER EDIT AN EXISTING MIGRATION rules out widening it in place; a new
+// value needs a new migration for a distinction no reader currently needs.
+// Every due_basis reader was checked (grep -rn due_basis server/): the Calls
+// tab only special-cases 'suggested' for its "(suggested)" label
+// (CallIntelligencePanel.jsx); nothing anywhere branches on 'default_kind'
+// specifically. A same-day deadline IS a default this per-kind/basis table
+// would otherwise have filled in — it fires only where R5's table already
+// would have — so it reuses 'default_kind' rather than add a migration and
+// an enum value for a rendering distinction no surface asks for.
+// End of the business day on an ET calendar date (8 PM ET matches the
+// follow-up SLA's 8 AM–8 PM ET window). Less than an hour after the text
+// (it lands after ~7 PM ET) pushes the deadline to 9 AM ET the next morning
+// instead of bell-in-an-hour. parseETDateTime does the DST-correct
+// wall-clock -> instant conversion; never hand-roll the offset here.
+function endOfBusinessDay(day, messageDate) {
+  const endOfDay = parseETDateTime(`${day}T20:00`);
+  return endOfDay.getTime() - messageDate.getTime() < 3600000
+    ? parseETDateTime(`${etDateString(addETDays(endOfDay, 1))}T09:00`)
+    : endOfDay;
+}
+
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
@@ -422,8 +482,39 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // this obligation only when its own quote states a clock ("Call me at 3
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
+  // A staff promise naming a day but no clock ("I'll stop by today",
+  // "tomorrow", "Wednesday", "this weekend"): the extraction names the day
+  // and groundExtraction checked it (due_date). Due at the end of that
+  // business day (owner-approved staff-promise plan, 2026-09-28).
+  if (item.basis === 'promise' && item.due_date && !unresolvedClock) {
+    return { due_at: endOfBusinessDay(item.due_date, new Date(messageCreatedAt)).toISOString(), due_basis: 'default_kind' };
+  }
   // Quotes are short excerpts; the cap keeps the timing regexes bounded.
-  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(String(item.quote || '').slice(0, 500)))) return { due_at: null, due_basis: null };
+  const strippedQuote = withoutTopics(String(item.quote || '').slice(0, 500));
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(strippedQuote)) {
+    // Owner ruling 2026-09-28: an ask about TODAY ("Did you come to my house
+    // today?", "Should we skip today?") used to leave the row undated like
+    // any other stated timing, so it never bells staff. Give it an
+    // end-of-business-day deadline instead — but ONLY when every stated
+    // timing in play is a same-day token and no clock was stated at all: an
+    // unresolved clock (above) always wins undated, and a resolved due_at
+    // already returned 'stated' before reaching here.
+    // "Only same-day timing": strip the same-day tokens from both the
+    // topic-stripped quote and due_text, then re-run STATED_TIMING on each
+    // remainder. Either remainder still matching ("today or tomorrow",
+    // "today, else Friday", a due_text that names more than the same day)
+    // keeps the legacy undated behavior — the safer side, since a missed
+    // bell is worse than an early one (comment above).
+    const sameDayRemainderClear = (text) => !STATED_TIMING.test(String(text || '').replace(SAME_DAY_TIMING_STRIP, ' '));
+    const sameDayOnly = !unresolvedClock
+      && SAME_DAY_TIMING.test(strippedQuote) && sameDayRemainderClear(strippedQuote)
+      && !SAME_DAY_ALTERNATIVE.test(strippedQuote.replace(SAME_DAY_TIMING_STRIP, ' '))
+      && !SAME_DAY_ALTERNATIVE.test(String(item.due_text || '').replace(SAME_DAY_TIMING_STRIP, ' '))
+      && sameDayRemainderClear(item.due_text);
+    if (!sameDayOnly) return { due_at: null, due_basis: null };
+    const messageDate = new Date(messageCreatedAt);
+    return { due_at: endOfBusinessDay(etDateString(messageDate), messageDate).toISOString(), due_basis: 'default_kind' };
+  }
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
@@ -494,7 +585,10 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           // payment-method change never is, however worded). Payment
           // admissibility and the event page read it, since an ask's words
           // never change after intake (Codex #4996 r6).
-          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}) },
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
+          // The day a staff promise named (groundExtraction checked it): the
+          // completion check reads it, since due_at alone is a UTC instant.
+          ...(item.basis === 'promise' && item.due_date ? { due_date: item.due_date } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -647,6 +741,9 @@ const KIND_LABELS = {
   send_appointment_confirmation: 'A promised appointment confirmation needs attention',
   other: 'An SMS request needs follow-up',
 };
+// A promise staff texted (basis 'promise') carries its own title, whatever its
+// kind (owner-approved staff-promise plan, 2026-09-28).
+const PROMISE_LABEL = 'A promise texted to a customer needs follow-up';
 
 // Only the customer profile opts into SMS rows. Call queues and workers
 // continue using their call-scoped reader and implicit deadline rules.
@@ -781,20 +878,32 @@ async function lockLiveCommitment(trx, row, message) {
 const OVERDUE_BELL_BODY = {
   uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
   open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+  late: (when) => `Promised in the ${when} ET conversation. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
 };
+
+// Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
+// clears. The deadline tick normally rings before the late record lands; when
+// verification runs only after both (Codex #5248 r3), the late record rings
+// the bell first and closes the row on a later tick.
+function keptLate(row, verdict) {
+  return verdict.verdict === 'fulfilled' && row.sms_context?.basis === 'promise' && row.due_at != null
+    && new Date(verdict.matched_at) > new Date(row.due_at);
+}
 
 // The deadline passed and the records do not establish completion.
 async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
-  const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
-  const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+  const body = (OVERDUE_BELL_BODY[verdict.late ? 'late' : verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
+  const title = row.sms_context?.basis === 'promise' ? PROMISE_LABEL : (KIND_LABELS[row.kind] || KIND_LABELS.other);
+  const notification = await NotificationService.notifyAdmin('alert', title, body,
     { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
       metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  return notification;
 }
 
 // One open row: skip, verify, and close or bell. Returns what happened so
@@ -860,6 +969,12 @@ async function refreshSmsCommitment(conn, row, now, verify) {
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     persisted = true;
+    if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')) {
+      // A suppressed bell leaves no row to find next tick: close now instead.
+      const bell = await ringOverdueBell(trx, { row, message, verdict: { ...verdict, late: true }, dedupeKey });
+      if (!bell.suppressed) return;
+    }
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,

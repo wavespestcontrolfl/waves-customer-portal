@@ -34,6 +34,13 @@ const SERVICE_KEYWORDS = [
 // job boards, lawn/pest MARKETPLACES (lead-gen aggregators, not businesses we'd
 // mine for local-partner links), and trade orgs. Matched by exact host OR suffix
 // (so en.wikipedia.org, locations.trulynolen.com, scgov.net's subdomains, etc.).
+// Social / content platforms — a named subset so ai-citation-classifier.js
+// can import the same list (a profile there is never a local competitor, and
+// never an enqueued backlink target either).
+const SOCIAL_HOSTS = Object.freeze([
+  'facebook.com', 'linkedin.com', 'instagram.com', 'youtube.com', 'twitter.com', 'x.com',
+  'tiktok.com', 'reddit.com', 'pinterest.com',
+]);
 const NON_COMPETITOR_HOSTS = new Set([
   // directories / review aggregators
   'yelp.com', 'angi.com', 'angieslist.com', 'thumbtack.com', 'bbb.org', 'yellowpages.com',
@@ -41,8 +48,7 @@ const NON_COMPETITOR_HOSTS = new Set([
   'nextdoor.com', 'expertise.com', 'threebestrated.com', 'clutch.co', 'provenexpert.com',
   'birdeye.com', 'chamberofcommerce.com', 'manateechamber.com',
   // social / search / retail / encyclopedias
-  'facebook.com', 'linkedin.com', 'instagram.com', 'youtube.com', 'twitter.com', 'x.com',
-  'tiktok.com', 'reddit.com', 'pinterest.com', 'google.com', 'bing.com', 'apple.com',
+  ...SOCIAL_HOSTS, 'google.com', 'bing.com', 'apple.com',
   'amazon.com', 'wikipedia.org', 'homedepot.com', 'lowes.com',
   // pest/lawn products & DIY retail (not service competitors)
   'domyown.com', 'getsunday.com', 'biogents.com', 'mosquitomagnet.com', 'diypestcontrol.com',
@@ -68,6 +74,9 @@ const NATIONAL_CHAINS = new Set([
   'mosquitosquad.com', 'lawndoctor.com', 'crittercontrol.com', 'trutechinc.com',
   'westernexterminator.com', 'pestbear.com', 'arrowservices.com', 'aaanimalcontrol.com',
   'uslawns.com', 'masseyservices.com', 'trulynolen.com', 'crittercontrolsarasota.com',
+  // National DIY pest-control subscription — a competitor (owner ruling
+  // 2026-09-28); national press profile, same harvest trade-off as above.
+  'pestie.com',
 ]);
 
 // Our own properties — the hub + the canonical Astro spoke fleet (bradentonfl-
@@ -143,4 +152,4 @@ async function discoverCompetitors({ markets = MARKETS, keywords = SERVICE_KEYWO
 }
 
 module.exports = { discoverCompetitors, MARKETS, SERVICE_KEYWORDS };
-module.exports._internals = { normHost, isNonCompetitor, isNationalChain, inHostSet, itemsOf, NON_COMPETITOR_HOSTS, NATIONAL_CHAINS, OWN_HOSTS };
+module.exports._internals = { normHost, isNonCompetitor, isNationalChain, inHostSet, itemsOf, NON_COMPETITOR_HOSTS, NATIONAL_CHAINS, OWN_HOSTS, SOCIAL_HOSTS };

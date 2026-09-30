@@ -513,6 +513,33 @@ async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review
   }
 }
 
+const INTENDED_ACTIONS_MAX = 10;
+const INTENDED_ACTION_NOTE_MAX = 200;
+
+/**
+ * Sanitize intended_actions for persistence on a published review card
+ * (Codex r3 P1): an action-bearing draft that cannot auto-send reaches
+ * publishSuggestion, which is the reviewer's only chance to see what the
+ * draft promises before it goes out. Absent/malformed input (anything that
+ * isn't an array) returns null — the caller omits the key entirely, so the
+ * input_snapshot shape stays byte-identical for every publishSuggestion
+ * caller that predates this field. A present array is capped and each
+ * entry reduced to {type, note?} — type a non-empty string, note trimmed to
+ * 200 chars — so an oversized or malformed action never bloats
+ * input_snapshot or breaks its JSON.
+ */
+function sanitizeIntendedActions(intendedActions) {
+  if (!Array.isArray(intendedActions)) return null;
+  return intendedActions
+    .filter((a) => a && typeof a.type === 'string' && a.type.trim())
+    .slice(0, INTENDED_ACTIONS_MAX)
+    .map((a) => {
+      const entry = { type: a.type.trim() };
+      if (typeof a.note === 'string' && a.note.trim()) entry.note = a.note.trim().slice(0, INTENDED_ACTION_NOTE_MAX);
+      return entry;
+    });
+}
+
 /**
  * Publish one suggested draft into the comms composer: supersede any older
  * pending suggestion for the customer (one card per thread, newest inbound
@@ -521,7 +548,7 @@ async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -590,6 +617,17 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       }
 
       const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
+      const sanitizedIntendedActions = sanitizeIntendedActions(intendedActions);
+      // Codex #5194 P2: the instant the drafter rendered the SLA phrase into
+      // factsBlock (sms-shadow-drafter's generateGroundedDraft), not this
+      // publish's own timestamp — a card can sit in the composer a while
+      // before a human sends it, but the promise's deadline is anchored to
+      // when the facts were generated, read back by slaDraftedAt
+      // (sms-followup-sla.js). null on a caller that predates this field or
+      // passed something unusable — the read side falls back to created_at.
+      const factsGeneratedAtIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime())
+        ? factsGeneratedAt.toISOString()
+        : null;
       const [row] = await trx('agent_decisions')
         .insert({
           workflow: SUGGEST_WORKFLOW,
@@ -615,6 +653,19 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             sms: { body: inboundMessage },
             draft_id: draftId,
             ...(Array.isArray(lintFailures) && lintFailures.length ? { comms_lint: lintFailures } : {}),
+            // Pre-push audit P2: carried from the draft so the send-time
+            // choke point (verifyAgentDecisionForSend) can recheck quoted
+            // OPEN TIMES without a live re-fetch at publish time — this is
+            // just the snapshot, never a probe.
+            ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            // Codex r3 P1: the actions this draft promises (payment link,
+            // booking, escalation…) must ride the same snapshot a reviewer's
+            // card reads — otherwise a card can promise an action the
+            // reviewer never sees or executes. null (not passed by the
+            // caller) omits the key so the snapshot shape is unchanged for
+            // callers that predate this field.
+            ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
+            ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',
@@ -1226,6 +1277,7 @@ module.exports = {
   listIntentModes,
   setIntentMode,
   publishSuggestion,
+  sanitizeIntendedActions,
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,

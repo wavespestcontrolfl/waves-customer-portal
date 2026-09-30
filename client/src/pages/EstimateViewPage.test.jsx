@@ -1,12 +1,28 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { setGlassDefault } from '../lib/estimate-glass-copy';
+import WavesShell from '../components/brand/WavesShell';
+import TrustFooter from '../components/brand/TrustFooter';
+import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
-afterEach(() => cleanup());
+const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
+
+const routerState = vi.hoisted(() => ({ token: 'mixed-termite-token' }));
+vi.mock('react-router-dom', () => ({ useParams: () => ({ token: routerState.token }) }));
+vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
+
+afterEach(() => {
+  cleanup();
+  routerState.token = 'mixed-termite-token';
+  window.history.replaceState({}, '', '/');
+  setGlassDefault(false);
+  vi.unstubAllGlobals();
+});
 
 describe('regulated certificate estimate surfaces', () => {
   it('detects a pre-slab line inside a mixed pest estimate', () => {
@@ -55,6 +71,70 @@ describe('ServiceSection', () => {
     included: [{ key: 'service', label: 'Recurring service' }],
     addOns: [{ key: 'interior_spray', label: 'Interior spraying', preChecked: true }],
   };
+
+  it('uses guarantee-free approval microcopy when the server marks a mixed estimate noGuaranteeClaims', () => {
+    const section = {
+      key: 'pest_control',
+      label: 'Pest Control',
+      isRecurring: true,
+      isPest: true,
+      frequencies: [baseFrequency],
+      copy: { priceWording: {} },
+    };
+    const props = {
+      section,
+      selectedFrequencyKey: 'standard',
+      selectedAddOns: new Set(),
+      onFrequencyChange: vi.fn(),
+      onAddOnToggle: vi.fn(),
+      renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
+      showGetServiceCta: true,
+    };
+    const { rerender } = render(<ServiceSection {...props} />);
+    expect(screen.getByText(/money-back guarantee/i)).toBeInTheDocument();
+
+    rerender(<ServiceSection {...props} noGuarantee />);
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/licensed & insured · no pressure/i)).toBeInTheDocument();
+  });
+
+  it('a section states its own terms, while its approve line covers the whole estimate', () => {
+    // Owner ruling 2026-09-27: the pest service keeps its own plan terms
+    // beside rodent work; the approve line covers every service, so it
+    // follows the estimate's scope.
+    setGlassDefault(true);
+    try {
+      const section = {
+        key: 'pest_control',
+        label: 'Pest Control',
+        isRecurring: true,
+        isPest: true,
+        termsScope: 'all',
+        frequencies: [{
+          ...baseFrequency,
+          perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4, termsScope: 'all' }],
+        }],
+        copy: { priceWording: {} },
+      };
+      const props = {
+        selectedFrequencyKey: 'standard',
+        selectedAddOns: new Set(),
+        onFrequencyChange: vi.fn(),
+        onAddOnToggle: vi.fn(),
+        renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
+        showGetServiceCta: true,
+      };
+      const { rerender } = render(<ServiceSection {...props} section={section} guaranteeScope="satisfaction" />);
+      fireEvent(window, new Event('beforeprint'));
+      expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
+      expect(screen.getByText(/^Licensed & insured · Satisfaction guaranteed · No pressure/)).toBeInTheDocument();
+
+      rerender(<ServiceSection {...props} section={section} guaranteeScope="none" />);
+      expect(screen.queryByText(/callbacks|money-back|satisfaction guaranteed/i)).not.toBeInTheDocument();
+    } finally {
+      setGlassDefault(false);
+    }
+  });
 
   it('hides the frequency slider when a section has one frequency', () => {
     render(
@@ -404,33 +484,543 @@ describe('ServiceSection', () => {
   });
 });
 
+describe('mixed-estimate approval microcopy', () => {
+  const documentPayload = (proposalNoGuaranteeClaims, estimateNoGuaranteeClaims) => ({
+    glassDefault: false,
+    documentRender: true,
+    publicOrigin: 'https://portal.wavespestcontrol.com',
+    estimate: {
+      token: 'mixed-termite-token', slug: 'EST-2099-4982', customerName: 'Casey Example',
+      customerPhone: '+19415551234', customerEmail: 'casey@example.com',
+      address: '1 Document Policy Way', createdAt: '2026-09-27T12:00:00.000Z',
+      expiresAt: '2026-10-27T12:00:00.000Z', licenseNumber: 'JB351547',
+      category: 'RESIDENTIAL', noGuaranteeClaims: estimateNoGuaranteeClaims,
+      isOneTimeOnly: false, intelligence: null, satelliteUrl: null,
+    },
+    proposal: {
+      enabled: false, synthesized: false, noGuaranteeClaims: proposalNoGuaranteeClaims,
+      pestRecurringOnly: proposalNoGuaranteeClaims === false, title: 'Service Proposal',
+      preparedFor: 'Casey Example', propertyAddress: '1 Document Policy Way', terms: null,
+      buildings: [{
+        name: '1 Document Policy Way', note: null,
+        lineItems: proposalNoGuaranteeClaims
+          ? [{ description: 'Termite trenching', quantity: 1, unitPrice: 1200, amount: 1200,
+            frequency: 'one_time', frequencyLabel: 'One-time', taxable: false }]
+          : [{ description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55,
+            frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false }],
+      }],
+      totals: proposalNoGuaranteeClaims
+        ? { annualRecurring: 0, monthlyEquivalent: 0, oneTime: 1200, totalTax: 0,
+          firstYearTotal: 1200, hasTax: false, isMultiBuilding: false }
+        : { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 0, totalTax: 0,
+          firstYearTotal: 660, hasTax: false, isMultiBuilding: false },
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+
+  it.each([
+    ['retained termite rows override current eligible pest pricing', true, false, /Written estimate scope and terms apply/i],
+    ['eligible proposal rows override a stale estimate-level suppression', false, true, /Backed by the Waves Guarantee/i],
+  ])('uses the document policy for its visible shell footer: %s', async (
+    _name, proposalNoGuaranteeClaims, estimateNoGuaranteeClaims, expectedFooter,
+  ) => {
+    window.history.replaceState({}, '', '/estimate/mixed-termite-token?mode=pdf');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => documentPayload(proposalNoGuaranteeClaims, estimateNoGuaranteeClaims),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText(proposalNoGuaranteeClaims ? 'Termite trenching' : 'Pest Control');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(expectedFooter)).toBeInTheDocument();
+    if (proposalNoGuaranteeClaims) {
+      expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    } else {
+      expect(footer.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+    }
+  });
+
+  it('the document footer follows the document scope, which honors the page decision (engine commercial marks)', async () => {
+    window.history.replaceState({}, '', '/estimate/mixed-termite-token?mode=pdf');
+    const payload = documentPayload(false, false);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ ...payload, estimate: { ...payload.estimate, noEstimateWideGuarantee: true } }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('Pest Control');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+  });
+
+  it('scopes the server no-guarantee decision to the estimate shell beside one-time termite work', async () => {
+    const frequency = {
+      key: 'standard',
+      label: 'Standard',
+      monthly: 50,
+      annual: 600,
+      included: [{ key: 'service', label: 'Recurring service' }],
+      addOns: [],
+    };
+    const services = [
+      {
+        key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true,
+        frequencies: [frequency], copy: { priceWording: {} },
+      },
+      {
+        key: 'lawn_care', label: 'Lawn Care', isRecurring: true, isPest: false,
+        frequencies: [{ ...frequency, monthly: 80, annual: 960 }], copy: { priceWording: {} },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Mixed Service Way',
+          serviceCategory: 'bundle',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          acceptedServiceMode: null,
+          acceptedFrequencyKey: null,
+          noGuaranteeClaims: true,
+        },
+        pricing: {
+          services,
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 1200,
+            items: [
+              { service: 'termite_trenching', label: 'Termite Trenching', detail: 'Linear-foot trench treatment', amount: 1200, kind: 'charge' },
+              { service: 'mosquito', label: 'Mosquito follow-up', detail: 'Rain re-spray guarantee', amount: 0, kind: 'included' },
+            ],
+          },
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<>
+      <section data-testid="estimate-shell"><WavesShell><EstimateViewPage /></WavesShell></section>
+      <section data-testid="other-shell"><WavesShell><div>Unrelated customer route</div></WavesShell></section>
+      <section data-testid="standalone-footer"><TrustFooter /></section>
+    </>);
+
+    await waitFor(() => {
+      expect(screen.getByText('Termite Trenching')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Licensed & insured · No pressure — approve when you’re ready')).toBeInTheDocument();
+    expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Mosquito follow-up')).toBeInTheDocument();
+    expect(screen.queryByText(/Rain re-spray guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Linear-foot trench treatment')).toBeInTheDocument();
+    const estimateShell = within(screen.getByTestId('estimate-shell'));
+    await waitFor(() => {
+      expect(estimateShell.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+      expect(estimateShell.getByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    });
+    expect(within(screen.getByTestId('other-shell')).getByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+    expect(within(screen.getByTestId('standalone-footer')).getByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+  });
+
+  it('retains the standard footer guarantee for an ordinary recurring estimate', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Recurring Service Way',
+          serviceCategory: 'pest_control',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: false,
+        },
+        pricing: {
+          services: [{
+            key: 'pest_control',
+            label: 'Pest Control',
+            isRecurring: true,
+            isPest: true,
+            frequencies: [{
+              key: 'standard', label: 'Standard', monthly: 50, annual: 600,
+              included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
+            }],
+            copy: { priceWording: {} },
+          }],
+          askChips: [],
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('1 Recurring Service Way');
+    expect(await screen.findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+  });
+
+  it('neutralizes the footer when not every service carries the plan terms (a rodent plan)', async () => {
+    // noGuaranteeClaims stays false (no termite work), but the server marks
+    // the estimate noEstimateWideGuarantee: rodent carries no money-back plan
+    // terms, so no guarantee line covers the whole estimate.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Rodent Plan Way',
+          serviceCategory: 'rodent',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noEstimateWideGuarantee: true,
+        },
+        pricing: {
+          services: [{
+            key: 'rodent_bait',
+            label: 'Rodent Bait Stations',
+            isRecurring: true,
+            isPest: false,
+            frequencies: [{
+              key: 'standard', label: 'Standard', monthly: 40, annual: 480,
+              included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
+            }],
+            copy: { priceWording: {} },
+          }],
+          askChips: [],
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('1 Rodent Plan Way');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the footer neutral during initial and next-token loads, then restores ordinary shell copy on unmount', async () => {
+    const deferred = [];
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/data')
+      ? new Promise((resolve) => deferred.push(resolve))
+      : Promise.resolve({ ok: true, status: 200, json: async () => ({}) })));
+    const payload = (noGuaranteeClaims) => ({
+      glassDefault: false,
+      estimate: {
+        customerFirstName: 'Casey', address: '1 Policy Way', serviceCategory: 'pest_control',
+        acceptance: { mode: 'standard_slot_pick' }, defaultServiceMode: 'recurring',
+        isOneTimeOnly: false, showOneTimeOption: false, billByInvoice: false,
+        membership: null, intelligence: null, noGuaranteeClaims,
+      },
+      pricing: { services: [], askChips: [], defaultServiceMode: 'recurring', renderFlags: {} },
+      cta: { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false },
+    });
+    const resolveLoad = (index, noGuaranteeClaims) => deferred[index]({
+      ok: true, status: 200, json: async () => payload(noGuaranteeClaims),
+    });
+    const { rerender } = render(<WavesShell><EstimateViewPage /></WavesShell>);
+    const footer = () => within(screen.getByRole('contentinfo'));
+
+    expect(footer().queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    expect(footer().queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+    expect(footer().getByText(/Licensed & insured/i)).toBeInTheDocument();
+
+    resolveLoad(0, true);
+    expect(await footer().findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+
+    routerState.token = 'ordinary-estimate-token';
+    rerender(<WavesShell><EstimateViewPage /></WavesShell>);
+    await waitFor(() => expect(deferred).toHaveLength(2));
+    expect(footer().queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    expect(footer().queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+
+    resolveLoad(1, false);
+    expect(await footer().findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+
+    routerState.token = 'second-no-guarantee-token';
+    rerender(<WavesShell><EstimateViewPage /></WavesShell>);
+    await waitFor(() => expect(deferred).toHaveLength(3));
+    resolveLoad(2, true);
+    expect(await footer().findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+
+    rerender(<WavesShell><div>Ordinary customer route</div></WavesShell>);
+    expect(await footer().findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+  });
+
+  it('strips stale server-resolved German-roach hero and row guarantees while preserving priced scope', async () => {
+    const rawRow = {
+      service: 'german_roach', label: 'German Roach Cleanout', amount: 350, kind: 'charge', visits: 2,
+    };
+    const rawCopy = resolveOneTimeServiceCopy(rawRow);
+    const rawServiceCopy = oneTimeOnlyIntelligenceCopy([rawRow]);
+    expect(rawCopy.outcome).toMatch(/100% guaranteed/i);
+    expect(rawCopy.includes.join(' ')).toMatch(/100% guaranteed/i);
+    expect(rawServiceCopy.hero.sub).toMatch(/100% guaranteed/i);
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: true,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Mixed Service Way, Sarasota, FL 34236',
+          serviceCategory: 'pest_control',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'one_time',
+          isOneTimeOnly: true,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: true,
+        },
+        pricing: {
+          services: [],
+          frequencies: [],
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 350,
+            items: [{ ...rawRow, copy: rawCopy }],
+          },
+          oneTimeServiceCopy: rawServiceCopy,
+          defaultServiceMode: 'one_time',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<EstimateViewPage />);
+
+    expect(await screen.findByRole('heading', { name: /German roach cleanout quote is ready/i })).toBeInTheDocument();
+    expect(screen.queryByText(/100% guaranteed/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/actual property/i)).toBeInTheDocument();
+    expect(screen.getByText('$350.00')).toBeInTheDocument();
+    expect(screen.getByText(/Two targeted visits that clear the roaches/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText(/Gel bait placed where German roaches actually live/i)).toBeInTheDocument();
+    expect(screen.queryByText(/100% guaranteed|Waves Guarantee/i)).not.toBeInTheDocument();
+  });
+
+  it('a commercial one-time job states its scope but no guarantee or no-contract term (Codex #4982)', async () => {
+    // Commercial service carries only its satisfaction clause: the server
+    // marks the estimate noEstimateWideGuarantee while noGuaranteeClaims
+    // stays false, and the itemized row follows that scope.
+    const rawRow = {
+      service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, kind: 'charge', warrantyEligible: true,
+    };
+    const rawCopy = resolveOneTimeServiceCopy(rawRow);
+    expect(rawCopy.assurance).toMatch(/30-day guarantee/i);
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Commercial Plaza, Sarasota, FL 34236',
+          serviceCategory: 'bed_bug',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'one_time',
+          isOneTimeOnly: true,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: false,
+          noEstimateWideGuarantee: true,
+        },
+        pricing: {
+          services: [],
+          frequencies: [],
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 650,
+            items: [{ ...rawRow, copy: rawCopy }],
+          },
+          defaultServiceMode: 'one_time',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<EstimateViewPage />);
+
+    expect(await screen.findByText('Bed Bug Heat Treatment')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
+    expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('OneTimeBreakdownCard', () => {
-  it('renders the service copy pack a row carries — outcome, visit bullets, terms — like a plan card', () => {
-    render(<OneTimeBreakdownCard breakdown={{ total: 350, items: [{
+  it('renders the actual server-resolved service copy for a normal control', () => {
+    const row = {
       service: 'german_roach',
       label: 'German Roach Cleanout Service — 2 Visit Program',
       amount: 350,
       visits: 2,
-      copy: {
-        key: 'german_roach',
-        outcome: 'Your kitchen back. Two targeted visits that clear the roaches and the eggs they left behind — 100% guaranteed.',
-        includes: [
-          'Visit 1 — gel bait where German roaches actually live: kitchen, bath, hinges, appliances, and plumbing voids',
-          'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
-        ],
-        assurance: 'If they come back, so do we — 100% guaranteed with the Waves Guarantee',
-        terms: 'Pay on service day. No recurring schedule, no contract.',
-      },
+    };
+    render(<OneTimeBreakdownCard breakdown={{ total: 350, items: [{
+      ...row,
+      copy: resolveOneTimeServiceCopy(row),
     }] }} />);
-    expect(screen.getByText(/Your kitchen back\. Two targeted visits/)).toBeInTheDocument();
+    expect(screen.getByText(/Your home back.+Two targeted visits/)).toBeInTheDocument();
     // Bullets sit behind the same "See everything included" dropdown the
     // recurring PriceCard rows use — collapsed until tapped.
-    expect(screen.queryByText(/Visit 1 — gel bait where German roaches actually live/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /See everything included \(2\)/ }));
-    expect(screen.getByText(/Visit 1 — gel bait where German roaches actually live/)).toBeInTheDocument();
+    expect(screen.queryByText(/Gel bait placed where German roaches actually live/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/ }));
+    expect(screen.getByText(/Gel bait placed where German roaches actually live/)).toBeInTheDocument();
     expect(screen.getByText('If they come back, so do we — 100% guaranteed with the Waves Guarantee')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day. No recurring schedule, no contract.')).toBeInTheDocument();
     expect(screen.getByText('$350.00')).toBeInTheDocument();
+  });
+
+  it('the satisfaction scope drops a row guarantee and no-contract term but keeps the sold scope', () => {
+    const row = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 650, items: [{
+      ...row,
+      copy: resolveOneTimeServiceCopy(row),
+    }] }} />);
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
+    expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
+
+  it('each one-time row states its own service terms (server termsScope)', () => {
+    const bedBug = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true };
+    const commercialBedBug = { ...bedBug, label: 'Bed Bug Heat Treatment — Suite 200' };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 1300, items: [
+      { ...bedBug, termsScope: 'all', copy: resolveOneTimeServiceCopy(bedBug) },
+      { ...commercialBedBug, termsScope: 'satisfaction', copy: resolveOneTimeServiceCopy(commercialBedBug) },
+    ] }} />);
+    for (const button of screen.getAllByRole('button', { name: /See everything included/i })) fireEvent.click(button);
+    expect(screen.getAllByText('Written 30-day guarantee on the treated areas')).toHaveLength(1);
+    expect(screen.getByText('Pay on service day. No contract.')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
+  });
+
+  it('keeps a canonically purchased trenching warranty while filtering generic promises', () => {
+    const row = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      chemistryType: 'non_repellent', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117,
+    };
+    const resolved = resolveOneTimeServiceCopy(row);
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 900, items: [{
+      ...row,
+      detail: 'Lifetime guarantee with free retreatments',
+      copy: {
+        ...resolved,
+        includes: [...resolved.includes, 'Unlimited free callbacks'],
+      },
+    }] }} />);
+
+    expect(screen.queryByText(/Lifetime guarantee/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Annual inspection during the warranty period')).toBeInTheDocument();
+    expect(screen.queryByText(/Unlimited free callbacks/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['missing warranty price metadata', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: null }],
+    ['no warranty selected', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['unknown service row', { service: 'one_time_pest', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+  ])('does not trust a warranty bullet from %s', (_label, override) => {
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 900, items: [{
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      ...override,
+      copy: {
+        outcome: 'Treatment follows the written scope.',
+        includes: ['Measured trenching scope', 'Annual inspection during the warranty period'],
+        assurance: null,
+        terms: 'Written service terms apply.',
+      },
+    }] }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Measured trenching scope')).toBeInTheDocument();
+    expect(screen.queryByText('Annual inspection during the warranty period')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['selected extended', true, 'Extended 5-yr warranty', '1,850 sf | Termidor SC | 12 oz | Extended 5-yr warranty'],
+    ['basic', false, 'Basic 1-yr warranty', '1,850 sf | Termidor SC | 12 oz'],
+  ])('a pre-slab row keeps its scope under the no-guarantee policy, with a %s warranty', (_label, extended, warranty, expected) => {
+    // Owner ruling 2026-09-27: a selected pre-slab warranty is stated; the
+    // policy drops plan-terms parts of the detail, never the scope.
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 950, items: [{
+      service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      detail: `1,850 sf | Termidor SC | 12 oz | ${warranty}`,
+      warrantyExtendedSelected: extended,
+      warrantyStatus: extended ? 'Extended 5-year warranty' : 'No extended warranty selected',
+    }] }} />);
+    expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
   it('a row without a copy pack renders exactly as before (no bullets, no outcome line)', () => {
@@ -575,6 +1165,43 @@ describe('OneTimeBreakdownCard', () => {
 });
 
 describe('oneTimePriceCopy', () => {
+  it('drops the callback term on an estimate the server marks noGuaranteeClaims (Codex #4982 r4)', () => {
+    // The rowless fallback (OneTimePriceCard) reaches the default copy.
+    expect(oneTimePriceCopy({ total: 400, items: [] })).toMatch(/30-day callback period/);
+    const neutral = oneTimePriceCopy({ total: 400, items: [] }, { noGuarantee: true });
+    expect(neutral).not.toMatch(/callback|guarantee/i);
+    expect(neutral).toMatch(/pay on service day/);
+  });
+
+  it('a two-visit flea package states no retreat guarantee on a noGuaranteeClaims estimate', () => {
+    const breakdown = { total: 350, items: [{ service: 'flea', label: 'Flea Elimination', amount: 350, visits: 2 }] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/Retreat guarantee/);
+    const neutral = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(neutral).not.toMatch(/guarantee|warranty/i);
+    expect(neutral).toMatch(/two interior treatments/);
+  });
+
+  it('a rodent guarantee renewal states no warranty terms on a noGuaranteeClaims estimate', () => {
+    const breakdown = { total: 199, items: [{ service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 }] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/12-month re-entry warranty/);
+    const neutral = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(neutral).not.toMatch(/guarantee|warranty/i);
+    expect(neutral).toMatch(/No service visit to schedule/);
+  });
+
+  it('drops the Waves Guarantee from a German roach cleanout on a noGuaranteeClaims estimate', () => {
+    // The one-time card prices every one-time row: a cleanout quoted beside
+    // termite trenching must not read as a guarantee on the whole charge.
+    const breakdown = { total: 1600, items: [
+      { service: 'german_roach', label: 'German Roach Cleanout', amount: 400, visits: 3 },
+      { service: 'termite_trenching', label: 'Termite Trenching', amount: 1200 },
+    ] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/100% guaranteed/);
+    const noGuarantee = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(noGuarantee).not.toMatch(/guarantee/i);
+    expect(noGuarantee).toMatch(/break the breeding cycle/);
+  });
+
   it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
     const copy = oneTimePriceCopy({ total: 1051, items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }] });
     expect(copy).toMatch(/borate wood treatment/i);
@@ -1476,6 +2103,150 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('ContactGapFields — missing-contact capture on accept', () => {
+  const noop = () => {};
+
+  it('renders nothing when there are no gaps', () => {
+    const { container } = render(<ContactGapFields gaps={null} />);
+    expect(container.textContent).toBe('');
+  });
+
+  it('renders nothing when both gaps are false', () => {
+    const { container } = render(<ContactGapFields gaps={{ lastName: false, email: false }} />);
+    expect(container.textContent).toBe('');
+  });
+
+  it('shows only the last name field when only that gap is present', () => {
+    render(<ContactGapFields gaps={{ lastName: true, email: false }} lastName="" onLastNameChange={noop} />);
+    expect(screen.getByText('Last name')).toBeInTheDocument();
+    expect(screen.queryByText('Email (for your service reports and receipts)')).not.toBeInTheDocument();
+  });
+
+  it('shows only the email field when only that gap is present', () => {
+    render(<ContactGapFields gaps={{ lastName: false, email: true }} email="" onEmailChange={noop} />);
+    expect(screen.getByText('Email (for your service reports and receipts)')).toBeInTheDocument();
+    expect(screen.queryByText('Last name')).not.toBeInTheDocument();
+  });
+
+  it('shows both fields when both gaps are present', () => {
+    render(<ContactGapFields gaps={{ lastName: true, email: true }} lastName="" onLastNameChange={noop} email="" onEmailChange={noop} />);
+    expect(screen.getByText('Last name')).toBeInTheDocument();
+    expect(screen.getByText('Email (for your service reports and receipts)')).toBeInTheDocument();
+  });
+
+  it('shows no inline error for a blank last name before it has been touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName=""
+        onLastNameChange={noop}
+        lastNameTouched={false}
+      />,
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows the inline required error for a blank last name once touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName=""
+        onLastNameChange={noop}
+        lastNameTouched
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('Please enter your last name.');
+  });
+
+  it('does not show the required error once a last name is typed, even if touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName="Sample"
+        onLastNameChange={noop}
+        lastNameTouched
+      />,
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('email field is never marked required and carries no inline error state', () => {
+    render(<ContactGapFields gaps={{ lastName: false, email: true }} email="" onEmailChange={noop} />);
+    const emailInput = screen.getByPlaceholderText('you@example.com (optional)');
+    expect(emailInput).not.toHaveAttribute('aria-required');
+    expect(emailInput).toHaveAttribute('type', 'email');
+    expect(emailInput).toHaveAttribute('autoComplete', 'email');
+  });
+
+  it('calls onLastNameChange / onEmailChange as the customer types', () => {
+    const onLastNameChange = vi.fn();
+    const onEmailChange = vi.fn();
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: true }}
+        lastName=""
+        onLastNameChange={onLastNameChange}
+        email=""
+        onEmailChange={onEmailChange}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText('Last name'), { target: { value: 'Sample' } });
+    fireEvent.change(screen.getByPlaceholderText('you@example.com (optional)'), { target: { value: 'sample@example.com' } });
+    expect(onLastNameChange).toHaveBeenCalledWith('Sample');
+    expect(onEmailChange).toHaveBeenCalledWith('sample@example.com');
+  });
+  it('renders a required first-name field only when the first-name gap is set', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ firstName: false, lastName: true, email: false }} lastName="" onLastNameChange={noop} />);
+    expect(screen.queryByPlaceholderText('First name')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ firstName: true, lastName: true, email: false }} firstName="" onFirstNameChange={noop} lastName="" onLastNameChange={noop} />);
+    const input = screen.getByPlaceholderText('First name');
+    expect(input).toHaveAttribute('aria-required', 'true');
+    expect(input).toHaveAttribute('autoComplete', 'given-name');
+  });
+
+  it('shows the email format error only when the caller flags it invalid', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} emailInvalid />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Please check your email address, or leave it blank.');
+    expect(screen.getByPlaceholderText('you@example.com (optional)')).toHaveAttribute('aria-invalid', 'true');
+  });
+});
+
+describe('ReviewPhase — missing-contact capture wiring', () => {
+  const noop = () => {};
+  const baseProps = {
+    slotId: 'slot-1',
+    existingAppointment: null,
+    paymentPreference: 'pay_at_visit',
+    secondsRemaining: 600,
+    onConfirm: noop,
+    onCancel: noop,
+    serviceMode: 'recurring',
+    depositNote: null,
+  };
+
+  it('renders contactSlot right above the confirm button when supplied', () => {
+    render(
+      <ReviewPhase
+        {...baseProps}
+        contactSlot={<div data-testid="contact-gap-fields">contact fields</div>}
+      />,
+    );
+    expect(screen.getByTestId('contact-gap-fields')).toBeInTheDocument();
+  });
+
+  it('renders nothing extra when contactSlot is absent (byte-identical to before this lane)', () => {
+    render(<ReviewPhase {...baseProps} />);
+    expect(screen.queryByTestId('contact-gap-fields')).not.toBeInTheDocument();
+  });
+
+  it('disables Confirm via confirmDisabled the same way an existing disabling condition does', () => {
+    render(<ReviewPhase {...baseProps} confirmDisabled />);
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
 });
 

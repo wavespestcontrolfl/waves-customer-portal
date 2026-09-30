@@ -220,7 +220,23 @@ async function deterministicVisitFacts(svc, dbh = db) {
       products,
     };
   }
-  return { access, last_visit: lastVisit };
+  // customerFlagged (PR 3a — customer photos before a visit, dark behind
+  // GATE_VISIT_PREP_PHOTOS): present ONLY when the gate is live AND the
+  // stop's CURRENT membership has submissions — visitPrepPhotosLive() is
+  // the canonical reader (server/config/feature-gates.js), read fresh on
+  // every call, same convention as every other gate check in this file.
+  // Gate off ⇒ the key is never even attempted, so facts stay byte-
+  // identical to before this lane. Fail-soft like every other block here:
+  // an outage omits the key rather than failing the whole facts read.
+  let customerFlagged = null;
+  if (require('../config/feature-gates').visitPrepPhotosLive()) {
+    try {
+      customerFlagged = await require('./visit-prep').customerFlaggedFacts(svc, dbh);
+    } catch (err) {
+      logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
+    }
+  }
+  return { access, last_visit: lastVisit, ...(customerFlagged ? { customerFlagged } : {}) };
 }
 
 // Order-independent stringify (visit-summary-narrative precedent) so the

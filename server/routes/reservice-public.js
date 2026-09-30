@@ -68,6 +68,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
+const { recordPageView } = require('../services/customer-page-views');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
@@ -241,7 +242,7 @@ async function loadLaneCatalog() {
 // (Codex #4992 P1). Nothing resolvable, no offers.
 async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
   const booking = require('./booking');
-  const { customerBookingLocation, buildBookingAvailability } = booking._internals;
+  const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
 
   const location = await customerBookingLocation(customer);
   if (!location) return null;
@@ -265,6 +266,16 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     // filters the offered slot set, so the commit-time re-validation below
     // still accepts exactly what days[].slots offers.
     rankProfile: 'reservice',
+    // This route's commit (line ~533 below) is createSelfBooking — while
+    // bookInsertionOffersLive() is live it re-verifies with traffic and
+    // persists the certified route order, so an inserted offer here is safe
+    // to commit at the position it was offered (see the capacityPlacement
+    // comment inside buildBookingAvailability, booking.js). This callback
+    // flow skips the signed-offer HMAC (its anti-forgery proof is a fresh
+    // rebuild in the same request, a few lines before createSelfBooking) —
+    // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
+    // and the commit's own preparedCapacity gate reading the same env.
+    capacityPlacement: bookInsertionOffersLive(),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
@@ -318,6 +329,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const customer = await loadByToken(req.params.token);
     if (!customer) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'reservice', customerId: customer.id, subjectType: 'customer', subjectId: customer.id });
 
     const laneCatalog = await loadLaneCatalog();
     const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);

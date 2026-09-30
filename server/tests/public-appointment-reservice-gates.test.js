@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn() }));
 jest.mock('../services/tech-photo', () => ({ resolveTechPhotoUrl: jest.fn() }));
+// services/visit-prep.js (loaded by the appointment router) requires the S3
+// PhotoService, which builds its client from config.s3 at load time.
+jest.mock('../services/photos', () => ({ deletePhoto: jest.fn() }));
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -170,6 +173,22 @@ test.each(SURFACES.filter(([, , method]) => method === 'POST'))(
     expect(db).not.toHaveBeenCalled();
   },
 );
+
+test('visit-prep photos, gate on: a well-formed unknown token with a malformed or oversized JSON body is the generic 404, not the shared parser 400/413', async () => {
+  // Codex #5176 r4 P0: the photos route takes multipart only, so index.js's
+  // pre-parser guard refuses every other body before the shared parsers.
+  const prevPrep = process.env.GATE_VISIT_PREP_PHOTOS;
+  process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+  try {
+    for (const body of ['{', JSON.stringify({ data: 'x'.repeat(1024 * 1024) })]) {
+      expectPrivate404(await request(composedOrigin, `${PREFIXES[0]}/${TOKEN}/photos`, { method: 'POST', body }));
+    }
+    expect(db).not.toHaveBeenCalled();
+  } finally {
+    if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS;
+    else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep;
+  }
+});
 
 test.each(SURFACES)('%s retains its local budget while enabled and bypasses it while dark', async (_name, family, method, suffix, budget) => {
   const invalidUrl = `${PREFIXES[family]}/invalid${suffix}`;

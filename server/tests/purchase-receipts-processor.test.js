@@ -90,7 +90,7 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 
-const { processReceiptLine, classifyItem } = require('../services/purchase-receipts/receipt-processor');
+const { processReceiptLine, classifyItem, lineDisposition } = require('../services/purchase-receipts/receipt-processor');
 const { matchTitleToProduct } = require('../services/purchase-receipts/product-matcher');
 
 const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
@@ -107,6 +107,37 @@ beforeEach(() => {
   mockDbState.lockedProducts = [];
   mockAdjustStock.mockClear();
   matchTitleToProduct.mockClear();
+});
+
+// The one disposition processReceiptLine applies, shared with the read-only
+// replay tool so it hands the agent exactly the lines the live lane would.
+describe('lineDisposition', () => {
+  const product = { id: 'p1', name: 'Taurus SC' };
+  const logged = { status: 'logged', productId: 'p1', product, receivedQty: 78, receivedUnit: 'fl_oz' };
+
+  test('a hold applies once a product matched, without the amount it would have posted', () => {
+    expect(lineDisposition(logged, { holdAs: 'unverified' })).toEqual({ status: 'unverified', productId: 'p1', product });
+  });
+
+  test('an unmatched held line keeps its own classification, and is never handed to the agent', () => {
+    const unmatched = { status: 'unmatched', productId: null };
+    expect(lineDisposition(unmatched, { holdAs: 'returned' }, { agentOn: true })).toBe(unmatched);
+  });
+
+  test('with the agent on, the three statuses it resolves are handed off, keeping where they came from', () => {
+    for (const status of ['unmatched', 'needs_size', 'size_mismatch']) {
+      expect(lineDisposition({ status, productId: null, product: null }, {}, { agentOn: true }))
+        .toEqual({ status: 'agent_pending', productId: null, product: null, handoffFrom: status });
+    }
+  });
+
+  test('with the agent off, or a forced placeholder, nothing is handed off', () => {
+    const unmatched = { status: 'unmatched', productId: null };
+    expect(lineDisposition(unmatched, {}, { agentOn: false })).toBe(unmatched);
+    const placeholder = { status: 'no_items', productId: null, product: null };
+    expect(lineDisposition(placeholder, { forcedStatus: 'no_items' }, { agentOn: true })).toBe(placeholder);
+    expect(lineDisposition(logged, {}, { agentOn: true })).toBe(logged);
+  });
 });
 
 describe('classifyItem', () => {

@@ -1,15 +1,22 @@
+const crypto = require('crypto');
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
+const { estimateFollowupBlockedReason } = require('./estimate-comms-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit.
 const APPOINTMENT_CLOSED_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
 
-const FINAL_STATUSES = new Set(['sent', 'blocked', 'skipped', 'failed']);
+// 'shadow' is a terminal outcome too (the shadow-mode counterpart of
+// 'sent') — a shadow run is done, never picked up again by processDueRuns
+// or re-executed by loadRunAndAutomation.
+const FINAL_STATUSES = new Set(['sent', 'blocked', 'skipped', 'failed', 'shadow']);
 const RUNNABLE_STATUSES = ['queued', 'scheduled', 'retry_scheduled'];
 const DEFAULT_RETRY_POLICY = { max_attempts: 2, backoff_minutes: [15, 60] };
 const RUNNING_STALE_AFTER_MS = 30 * 60 * 1000;
@@ -90,6 +97,20 @@ const TRIGGER_MAPPINGS = {
     entityIdKeys: ['customer_id', 'id'],
     recipientType: 'customer',
     recipientIdKeys: ['customer_id', 'id'],
+    emailKeys: ['customer_email', 'email'],
+  },
+  'estimate.expired': {
+    entityType: 'estimate',
+    entityIdKeys: ['estimate_id', 'id'],
+    recipientType: 'lead',
+    recipientIdKeys: ['customer_id', 'lead_id'],
+    emailKeys: ['customer_email', 'email'],
+  },
+  'review.linked_5star': {
+    entityType: 'review',
+    entityIdKeys: ['review_id', 'id'],
+    recipientType: 'customer',
+    recipientIdKeys: ['customer_id'],
     emailKeys: ['customer_email', 'email'],
   },
 };
@@ -291,7 +312,7 @@ function staleRunningCutoff(now = new Date()) {
   return new Date(now.getTime() - RUNNING_STALE_AFTER_MS);
 }
 
-function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, payload, recipient, automation }) {
+function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, payload, recipient, automation, mode }) {
   const context = {
     ...(payload || {}),
     trigger_event_key: triggerEventKey,
@@ -308,6 +329,14 @@ function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, pay
     context.entity_id = entityId;
     context[`${entityType}_id`] = context[`${entityType}_id`] || entityId;
   }
+  // Stamped at CREATION time so a delayed/retried run remembers the mode
+  // that promised its outcome (codex P1): 'shadow' must finalize shadow
+  // however long it sits in run_after, even if the gate flips to 'true'
+  // before it becomes due. Only the shadow->live promotion path
+  // (createRunUnlocked) may advance this to 'live' — see there. Never
+  // referenced by an idempotency_key_template (no catalog row predates
+  // this field), so adding it here cannot change any existing dedup key.
+  if (mode) context.origin_mode = mode;
   return context;
 }
 
@@ -349,6 +378,9 @@ function recipientFor(triggerEventKey, input = {}, automation = {}) {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     const err = new Error('recipient email is required for automation execution');
     err.status = 400;
+    // Stable token the lifecycle emitters classify on (a permanent
+    // condition: the intent marker settles 'unrecoverable', never retried).
+    err.code = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
     throw err;
   }
   const type = cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer');
@@ -383,6 +415,50 @@ function entityFor(triggerEventKey, input = {}) {
   const entityType = cleanString(input.entityType || input.entity_type || mapping.entityType, '');
   const entityId = cleanString(input.entityId || input.entity_id || firstDefined(payload, mapping.entityIdKeys), '');
   return { entityType, entityId };
+}
+
+// Newer emitters (e.g. review.linked_5star) deliberately pass only ids —
+// recipient EMAIL resolution is centralized HERE rather than duplicated per
+// emitter.
+// recipientFor() stays a pure, DB-free function (its own contract, see
+// above); this is the one place processTrigger reaches the database before
+// the automations loop, and only when there is nothing to resolve from the
+// payload/recipient already. No-op (returns payload unchanged) whenever an
+// email is already resolvable, or no customer id is available to look up.
+async function resolveEmailForTrigger(eventKey, payload, recipient) {
+  const mapping = TRIGGER_MAPPINGS[eventKey] || {};
+  const already = cleanString(recipient?.email || firstDefined(payload, mapping.emailKeys) || payload?.recipient_email);
+  if (already) return payload;
+  const customerId = cleanString(recipient?.id || firstDefined(payload, mapping.recipientIdKeys), '');
+  if (!customerId) return payload;
+  let row;
+  try {
+    // Live customers only (pre-push audit P1) — the same whereNull('deleted_at')
+    // predicate every customer-addressed sender uses (automation-enroll.js's
+    // review thank-you enrollment, prep-guide-sender.js). A soft-deleted /
+    // merged-away customer resolves NO address, so recipientFor's
+    // recipient-email-required error skips the trigger instead of mailing a
+    // retired record.
+    row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+  } catch (err) {
+    // A FAILED lookup is not "this customer has no email" (codex P2 round 5
+    // on #5154): swallowing it let recipientFor raise the deterministic
+    // AUTOMATION_RECIPIENT_EMAIL_REQUIRED (status 400), which the lifecycle
+    // emitter settles 'unrecoverable' on first sight — one DB hiccup
+    // permanently lost the event. Rethrown as a TRANSIENT error (status
+    // 503, its own code, never 400) so every caller's retry path handles it
+    // like any other infrastructure failure: the emitter counts a failed
+    // attempt and the intent sweep replays the marker.
+    const safe = scrubSentryText(err && err.message ? err.message : err);
+    logger.warn(`[email-template-automation] recipient email lookup failed for ${eventKey} customer ${customerId}: ${safe}`);
+    throw Object.assign(new Error(`recipient email lookup failed: ${safe}`), {
+      status: 503,
+      code: 'AUTOMATION_RECIPIENT_LOOKUP_FAILED',
+      retryable: true,
+    });
+  }
+  if (row && row.email) return { ...payload, customer_email: row.email };
+  return payload;
 }
 
 async function loadAutomations(triggerEventKey, automationKey) {
@@ -531,7 +607,7 @@ async function resolveRecipientUnderLock(conn, recipient) {
   return { recipient, blockReason: null };
 }
 
-async function createRun({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
+async function createRun({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode }) {
   // LOCK ORDER: the advisory lock is the transaction's FIRST statement —
   // before the idempotency read, before the recipient's customer row is
   // read, and before the insert. Resolving recipient state first and
@@ -634,13 +710,13 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
           recipient, payload, context, idempotencyKey, runAfter,
           status: leadBlockReason ? 'skipped' : status,
           exitReason: leadBlockReason || exitReason,
-          retryPolicy,
+          retryPolicy, mode,
         });
       });
     }
     return createRunUnlocked({
       conn: db, automation, triggerEventKey, triggerEventId, entityType, entityId,
-      recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+      recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode,
     });
   }
   return db.transaction(async (trx) => {
@@ -654,34 +730,23 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
       // executeRun's claim so nothing can deliver to the stale address.
       status: blockReason ? 'skipped' : status,
       exitReason: blockReason || exitReason,
-      retryPolicy,
+      retryPolicy, mode,
     });
   });
 }
 
-async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
-  const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
-  if (existing) {
-    // conn, never the global pool — see logRunEvent's contract (the parent
-    // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
-    await logRunEvent(existing.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
-      trigger_event_key: triggerEventKey,
-      trigger_event_id: triggerEventId || null,
-    }, conn);
-    return { run: existing, deduped: true };
-  }
-
-  // A trigger replay can commit the same idempotency_key between the read
-  // above and this insert. That race must NEVER surface as a raised unique
-  // violation: when conn is the locked transaction (createRun's customer
-  // path, r14), a raised 23505 ABORTS the transaction — every later
-  // statement fails 25P02 until rollback, so a catch-then-select recovery
-  // can never run there. ON CONFLICT (idempotency_key) DO NOTHING absorbs
-  // the race inside the statement instead: zero rows back means a
-  // concurrent replay won, and the recovery fetch + audit event run on a
-  // still-healthy connection. Any OTHER error still throws and rolls the
-  // transaction back as before.
-  const [run] = await conn('email_template_automation_runs').insert({
+// The one place every automation-derived run FIELD is built, used by BOTH
+// the fresh insert below and the shadow->live promotion (codex P1: the two
+// must not drift — a promotion that hand-rolled its own subset once left
+// template_key/template_version_id at their shadow-era values while the
+// live automation had since republished a corrected template, so the
+// first live attempt sent stale content under the CURRENT automation's
+// suppression settings). Everything the automation itself decides —
+// template identity/version, automation_key/id, max_attempts — reflects
+// THIS call's automation row; recipient/payload/context reflect THIS
+// call's freshly resolved values.
+function automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }) {
+  return {
     automation_id: automation.id || null,
     automation_key: automation.automation_key,
     trigger_event_key: triggerEventKey,
@@ -701,7 +766,84 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     payload: JSON.stringify(payload || {}),
     context: JSON.stringify(context || {}),
     completed_at: status === 'skipped' ? new Date() : null,
-  }).onConflict('idempotency_key').ignore().returning('*');
+  };
+}
+
+async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode }) {
+  const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
+  if (existing) {
+    // A run already finalized 'shadow' (would-send, nothing dispatched)
+    // never blocks a LATER live attempt for the same idempotency key — two
+    // weeks of shadow volume must not silently swallow the first real send
+    // once the gate flips to 'true'. Simplest correct rule, no orphaned
+    // second row and no unique-constraint race: PROMOTE the same row back
+    // to a fresh runnable state (this live attempt's status/run_after/
+    // payload/context), rather than inserting a new row or deduping this
+    // one away. Only a genuinely 'live' attempt promotes — a shadow replay
+    // (mode still 'shadow') and an off-mode replay (mode 'off': nothing
+    // should be created or dispatched at all) keep the ordinary dedupe path
+    // below, same as any replay of an already-live/terminal row.
+    if (existing.status === 'shadow' && mode === 'live') {
+      // The UPDATE's WHERE also re-checks status='shadow' (codex P1): two
+      // concurrent replays can both read this same 'shadow' row before
+      // either writes. An unconditional update here would let the SECOND
+      // replay blindly overwrite whatever the FIRST one already advanced
+      // the row to (running/sent) and re-arm it for a duplicate send.
+      // Zero rows back means this replay lost that race — fall through to
+      // an ordinary dedupe against the row as it now stands, never a
+      // fabricated runnable row.
+      const promotedRows = await conn('email_template_automation_runs')
+        .where({ id: existing.id, status: 'shadow' })
+        .update({
+          // Built from the SAME field set the fresh insert below uses
+          // (codex P1) — template_key/template_version_id/automation_id/
+          // max_attempts refresh to THIS live attempt's automation row, not
+          // the shadow-era values, and recipient/payload/context (whose
+          // origin_mode is already 'live' — contextFor stamped it from this
+          // call's own `mode`) refresh to this attempt's freshly resolved
+          // values. Never the stale address/content a corrected template
+          // or a since-changed recipient would otherwise leave behind.
+          ...automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }),
+          attempts: 0,
+          last_error: null,
+          updated_at: new Date(),
+        }).returning('*');
+      if (promotedRows.length) {
+        await logRunEvent(existing.id, 'promoted_from_shadow', 'Prior shadow run promoted to a live attempt on the same idempotency key', {
+          trigger_event_key: triggerEventKey,
+          trigger_event_id: triggerEventId || null,
+        }, conn);
+        return { run: promotedRows[0], deduped: false };
+      }
+      const current = await conn('email_template_automation_runs').where({ id: existing.id }).first();
+      await logRunEvent((current || existing).id, 'deduped', 'Automation trigger replay ignored by idempotency key (lost the shadow-promotion race)', {
+        trigger_event_key: triggerEventKey,
+        trigger_event_id: triggerEventId || null,
+      }, conn);
+      return { run: current || existing, deduped: true };
+    }
+    // conn, never the global pool — see logRunEvent's contract (the parent
+    // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
+    await logRunEvent(existing.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
+      trigger_event_key: triggerEventKey,
+      trigger_event_id: triggerEventId || null,
+    }, conn);
+    return { run: existing, deduped: true };
+  }
+
+  // A trigger replay can commit the same idempotency_key between the read
+  // above and this insert. That race must NEVER surface as a raised unique
+  // violation: when conn is the locked transaction (createRun's customer
+  // path, r14), a raised 23505 ABORTS the transaction — every later
+  // statement fails 25P02 until rollback, so a catch-then-select recovery
+  // can never run there. ON CONFLICT (idempotency_key) DO NOTHING absorbs
+  // the race inside the statement instead: zero rows back means a
+  // concurrent replay won, and the recovery fetch + audit event run on a
+  // still-healthy connection. Any OTHER error still throws and rolls the
+  // transaction back as before.
+  const [run] = await conn('email_template_automation_runs')
+    .insert(automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }))
+    .onConflict('idempotency_key').ignore().returning('*');
   if (!run) {
     const replayed = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
     if (!replayed) {
@@ -750,8 +892,29 @@ async function processTrigger({
   }
   const eventId = cleanString(triggerEventId || snakeTriggerEventId, '');
   const targetAutomationKey = cleanString(automationKey || snakeAutomationKey, '');
+  // Read once per trigger call — mode can only change process-wide anyway,
+  // and every automation matched below needs the same answer for the
+  // shadow-promotion dedupe rule (createRunUnlocked). Fail-closed FIRST:
+  // 'off' means no run is created, promoted, or dispatched — a caller that
+  // still reaches this function despite the gate being off (a stale
+  // frozen boolean, a caller that skipped its own isEnabled check) gets a
+  // pure no-op, not a live send (codex P1: the boolean gate alone does not
+  // stop dispatch once execution reaches the executor).
+  const mode = emailTemplateAutomationsMode();
+  if (mode === 'off') {
+    // disabled:true tells a caller holding a durable intent marker that
+    // NOTHING was evaluated (codex P1 round 4) — distinct from a live
+    // zero-automation result — so it leaves the marker pending for replay
+    // instead of settling it 'processed'.
+    return { trigger_event_key: eventKey, automation_count: 0, results: [], disabled: true };
+  }
   const automations = await loadAutomations(eventKey, targetAutomationKey);
   const results = [];
+  // DB hit only when something actually matched — an unknown/unwired
+  // trigger key stays a pure, zero-write no-op (loadAutomations returns []).
+  if (automations.length) {
+    payload = await resolveEmailForTrigger(eventKey, payload, recipient);
+  }
 
   for (const automation of automations) {
     const resolvedRecipient = recipientFor(eventKey, { payload, recipient }, automation);
@@ -769,6 +932,7 @@ async function processTrigger({
       payload,
       recipient: resolvedRecipient,
       automation,
+      mode,
     });
     const idempotencyTemplate = cleanString(automation.idempotency_key_template);
     if (!idempotencyTemplate) {
@@ -798,6 +962,7 @@ async function processTrigger({
       status,
       exitReason,
       retryPolicy,
+      mode,
     });
 
     if (created.deduped || status === 'skipped' || status === 'scheduled' || !executeImmediately) {
@@ -859,7 +1024,38 @@ async function livePayloadForRun(run, storedPayload = {}) {
 
   if (entityType === 'estimate') {
     const row = await loadEntityRow('estimates', id);
+    // estimate.expired's defining fact ONLY (codex P1 round 3 on #5154—
+    // scoped to that ONE trigger key: every other estimate-entity
+    // automation, e.g. estimate.extension_notice/estimate.viewed_gone_quiet,
+    // legitimately runs with the estimate at 'sent'/'viewed'/anything, so a
+    // blanket "must still be expired" check on every estimate run would
+    // wrongly block them). Staff can revive an expired estimate back to
+    // sent/viewed through POST /:id/extend before a delayed or retried
+    // estimate.expired run comes due — extendEstimate changes the row's
+    // status and texts the customer a new deadline, but nothing here
+    // enforced that THAT run's own defining fact ("this estimate is still
+    // expired") still held at execution. Enforced exactly like the review
+    // branch below enforces ITS defining facts: __blocked skips the run
+    // instead of sending stale expiration copy right after the customer was
+    // told their estimate was extended.
+    if (run.trigger_event_key === 'estimate.expired') {
+      if (!row) return { __blocked: 'linked estimate no longer exists' };
+      if (row.status !== 'expired') {
+        return { __blocked: `linked estimate is no longer expired (status is ${row.status})` };
+      }
+    }
     if (!row) return {};
+    // Every estimate-entity automation (estimate.sent / viewed /
+    // expiring_soon / auto_renewed / expired — all follow-up outreach) obeys
+    // the ONE shared follow-up rule the engagement engine, follow-up cron,
+    // auto-renew and extension flow read (codex P1 round 6 on #5154):
+    // estimate-comms-eligibility.js — never an archived estimate (staff
+    // parked it; archiving an expired estimate leaves status 'expired'),
+    // never one stamped estimate_data.noEngagementAutomation. Judged HERE,
+    // against the live row, so a pending, delayed or retried run re-judges
+    // it at execution, whatever was true when it was created.
+    const followupBlocked = estimateFollowupBlockedReason(row);
+    if (followupBlocked) return { __blocked: followupBlocked };
     const live = {};
     setLiveValue(live, 'estimate_id', row.id);
     if (hasOwn(row, 'status')) {
@@ -986,6 +1182,25 @@ async function livePayloadForRun(run, storedPayload = {}) {
       setLiveValue(live, 'customer_type', row.recurring ? 'recurring' : '');
     }
     return live;
+  }
+
+  // review.linked_5star's revalidation (codex P1): unlike every other
+  // entity type above, a review can be legitimately un-attributed,
+  // reattributed to a DIFFERENT customer, edited below five stars, or
+  // dismissed/removed from Google in the window between queueing (a delay
+  // or a retry) and dispatch — sending stale five-star follow-up copy off
+  // the ORIGINAL match would be wrong. __blocked signals executeRun to
+  // markRunSkipped with a stable reason instead of a normal field refresh.
+  if (entityType === 'review') {
+    const row = await loadEntityRow('google_reviews', id);
+    if (!row) return { __blocked: 'linked review no longer exists' };
+    if (row.dismissed) return { __blocked: 'linked review was dismissed' };
+    if (row.missing_since) return { __blocked: 'linked review is no longer visible on Google' };
+    if (Number(row.star_rating) !== 5) return { __blocked: 'linked review is no longer five-star' };
+    if (String(row.customer_id || '') !== String(run.recipient_id || '')) {
+      return { __blocked: 'linked review is attributed to a different customer now' };
+    }
+    return {};
   }
 
   return {};
@@ -1119,6 +1334,115 @@ async function finalizeSentRun(run, result) {
   return { status, updated: updated || { ...run, status } };
 }
 
+// Shadow mode's dispatch counterpart to finalizeSentRun — never calls the
+// email library, never claims/touches the prep page, never takes the
+// prep-send lock. The 'would_send' event's metadata is deliberately
+// audit-safe: automation/template/trigger identity and entity ids, plus the
+// recipient email's DOMAIN and a short sha256 prefix of the lowercased
+// address — never the address itself.
+function recipientDomain(email) {
+  const parts = String(email || '').trim().toLowerCase().split('@');
+  return parts.length === 2 ? parts[1] : '';
+}
+function recipientHash(email) {
+  return crypto.createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex').slice(0, 12);
+}
+// Delivery-guards slice (re-cut of #4569): an estimate-triggered automation
+// run (auto-renew's estimate.auto_renewed, expiring reminders, etc.) shares
+// the same chokepoint every other estimate sender routes through — this
+// executor is generic across entity types, so only an 'estimate' run carries
+// its id through. ONE function for both the live send (dispatchRun) and the
+// shadow preflight, so the two always guard the same estimate.
+function annualGuardArgsFor(run) {
+  return run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {};
+}
+
+// Email-division ledger fence (codex P1 round 7 on #5154; owner ruling
+// 2026-09-28: FENCE now, wire later). This executor is not the email
+// division's ledger: a run whose template resolves to a marketing stream
+// (the library's own isMarketingSend over the resolved template and the
+// automation's suppression group — e.g. nurture.expired_1 on
+// marketing_nurture) must send ONLY through email-division/ledger.js
+// sendWithLedger (eligibility, frequency caps, reservation idempotency,
+// the final recipient/consent fence), which the planned wiring PR adds.
+// Passed to BOTH the live send (dispatchRun) and the shadow preflight so
+// they refuse identically: live settles the run skipped (guard
+// ledger_required — no provider call, no email_messages row), shadow
+// records would_block with the same code, i.e. shadow reports exactly what
+// live would do.
+const EXECUTOR_SEND_POLICY = Object.freeze({ marketingRequiresLedger: true });
+function isLedgerRequiredRefusal(err) {
+  const code = EmailTemplates.LEDGER_REQUIRED_CODE;
+  return !!code && err?.code === code;
+}
+
+// Runs the SAME pre-provider checks dispatchRun's sendTemplate call would
+// hit (codex P2): disabled/missing template, required-variable validation,
+// recipient suppression, and the estimate annual-offer guard. A block
+// records the same audit-safe would_send metadata under event type
+// 'would_block' with the library's own reason instead of finalizing
+// 'shadow' — a suppressed recipient, an invalid template or a withheld
+// annual offer no longer counts as rollout-readiness evidence it isn't.
+// Never calls the provider, never writes email_messages, never throws into
+// the caller: a preflight infrastructure hiccup (not a real block — the
+// annual guard's own lookup failing included) fails OPEN to would_send,
+// same posture as every other best-effort check in this file — an
+// evidence-collection bug must not make shadow mode itself unreliable.
+async function shadowPreflight(run, executionPayload, automation) {
+  try {
+    return await EmailTemplates.preflightTemplateSend({
+      templateKey: run.template_key,
+      versionId: run.template_version_id || undefined,
+      payload: executionPayload,
+      to: run.recipient_email,
+      suppressionGroupKey: automation.suppression_group_key || undefined,
+      // The same estimate id the live dispatchRun hands the annual-offer
+      // guard (codex P2 round 5) — preflightTemplateSend runs the guard
+      // itself (sendgrid-mail.js applyAnnualOfferGuard), so a withheld offer
+      // is a would_block here exactly as it is a block live.
+      ...annualGuardArgsFor(run),
+      ...EXECUTOR_SEND_POLICY,
+    });
+  } catch (err) {
+    logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
+    return { ok: true };
+  }
+}
+async function finalizeShadowRun(run, automation, executionPayload = {}) {
+  const preflight = await shadowPreflight(run, executionPayload, automation);
+  const wouldSendMetadata = {
+    automation_key: automation.automation_key,
+    template_key: run.template_key,
+    trigger_event_key: run.trigger_event_key,
+    entity_type: run.entity_type || null,
+    entity_id: run.entity_id || null,
+    recipient_domain: recipientDomain(run.recipient_email),
+    recipient_hash: recipientHash(run.recipient_email),
+  };
+  if (!preflight.ok) {
+    const [blocked] = await db('email_template_automation_runs').where({ id: run.id }).update({
+      status: 'skipped',
+      exit_reason: preflight.reason || 'would_block',
+      last_error: null,
+      completed_at: new Date(),
+      updated_at: new Date(),
+    }).returning('*');
+    await logRunEvent(run.id, 'would_block', preflight.reason || 'Shadow mode: the live send would have blocked pre-provider', {
+      ...wouldSendMetadata,
+      guard: isLedgerRequiredRefusal(preflight) ? 'ledger_required' : (preflight.code || 'preflight'),
+    });
+    return blocked || { ...run, status: 'skipped', exit_reason: preflight.reason || 'would_block' };
+  }
+  const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'shadow',
+    last_error: null,
+    completed_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata);
+  return updated || { ...run, status: 'shadow' };
+}
+
 // Claim → send → settle / release for a prep run happen under the manual
 // sender's per-customer `prep-send:<customer>` lock — the same lease the
 // Communications composer's prep-link send and the Send prep guide button
@@ -1160,12 +1484,8 @@ async function dispatchRun(run, automation, executionPayload) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
-      // Delivery-guards slice (re-cut of #4569): an estimate-triggered
-      // automation run (auto-renew's estimate.auto_renewed, expiring
-      // reminders, etc.) shares the same chokepoint every other estimate
-      // sender routes through — this executor is generic across entity
-      // types, so only an 'estimate' run carries its id through.
-      ...(run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {}),
+      ...annualGuardArgsFor(run),
+      ...EXECUTOR_SEND_POLICY,
     });
     // Pre-push audit P1: a pre-dispatch abort (result.aborted — the annual
     // guard's own row lookup threw, or any other onQueued-style abort) is
@@ -1245,6 +1565,8 @@ async function loadRunAndAutomation(runOrId, automation) {
   return { run, resolvedAutomation };
 }
 
+const GATE_OFF_REASON = 'email template automations gate is off';
+
 async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   const { run, resolvedAutomation } = await loadRunAndAutomation(runOrId, automation);
   if (FINAL_STATUSES.has(run.status)) return run;
@@ -1280,12 +1602,35 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   });
   const claimedRun = { ...run, ...running };
 
+  // Gate OFF terminalizes, before anything else (codex P1 round 6 on
+  // #5154): the scheduler now runs processDueRuns in off mode too, ONLY so
+  // due delayed/retry runs are settled skipped (guard gate_off) instead of
+  // sitting runnable through the outage and then sending stale copy the
+  // moment the gate returns — the same drop-on-rollback posture as the
+  // live -> shadow rollback below. No entity reads, no shadow preflight, no
+  // provider call. A skipped run is terminal, so re-enabling the gate never
+  // sends it.
+  if (emailTemplateAutomationsMode() === 'off') {
+    return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
+  }
+
   try {
     const storedPayload = asObject(claimedRun.payload);
-    const executionPayload = {
-      ...storedPayload,
-      ...await livePayloadForRun(claimedRun, storedPayload),
-    };
+    const livePayload = await livePayloadForRun(claimedRun, storedPayload);
+    // Hard invariant, not a catalog-configurable exit/condition (codex P1):
+    // a review.linked_5star run whose review was reattributed, edited below
+    // five stars, dismissed, or removed since it was queued — or an
+    // estimate.expired run whose estimate was revived through /extend or no
+    // longer exists (codex P1 round 3) — must never dispatch on stale
+    // evidence. livePayloadForRun's 'review'/'estimate' branches signal this
+    // with __blocked rather than a normal field refresh.
+    if (livePayload.__blocked) {
+      return markRunSkipped(claimedRun, livePayload.__blocked, {
+        guard: `${String(claimedRun.entity_type || 'entity')}_invalid`,
+        attempt: attemptNumber,
+      });
+    }
+    const executionPayload = { ...storedPayload, ...livePayload };
     const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);
     if (exitReason) {
       return markRunSkipped(claimedRun, exitReason, { guard: 'exit_conditions', attempt: attemptNumber });
@@ -1294,6 +1639,40 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (conditionFailure) {
       return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
     }
+    // Shadow/off chokepoint: the run has cleared every guard a live send
+    // would clear (exit conditions, conditions) and is exactly at the point
+    // dispatchRun would call the email library. This single spot covers
+    // BOTH callers of executeRun (processTrigger's immediate path and
+    // processDueRuns' due-run sweep), since both funnel through here.
+    // origin_mode (stamped at creation, contextFor) OUTRANKS the current
+    // gate read for 'shadow' (codex P1): a run created while shadow was
+    // promised to finalize as would_send must keep that promise even if a
+    // delay/retry lets the gate flip to 'true' before it becomes due — only
+    // the shadow->live promotion path may advance origin_mode to 'live'.
+    // Absent a stamp (rows predating this fix) falls through to today's
+    // current-gate read.
+    // Rollback semantics (documented per pre-push audit): the current-gate
+    // read also means a LIVE-origin run that comes due after the gate is
+    // rolled back true -> shadow finalizes 'shadow', unsent. Deliberate:
+    // shadow is the stop-sending lever, and a rollback that let already
+    // queued live sends keep going would not stop anything. That run's send
+    // is dropped, not deferred — its trigger's intent marker was settled
+    // 'processed' when the run was created, so nothing replays it; a later
+    // re-flip to live sends only events from then on.
+    const originMode = asObject(claimedRun.context).origin_mode;
+    const dispatchMode = emailTemplateAutomationsMode();
+    if (originMode === 'shadow' || dispatchMode === 'shadow') {
+      return finalizeShadowRun(claimedRun, resolvedAutomation, executionPayload);
+    }
+    // Fail-closed (codex P1): a run already sitting in the queue (created
+    // while the gate was on) must not dispatch a real email just because
+    // the gate read 'off' by the time this run became due — the boolean
+    // entry callers gate creation on is a load-time snapshot in non-prod
+    // (always true) and can be stale in prod too. Skipped, not silently
+    // dropped: the row + event stay as an audit trail of what didn't send.
+    if (dispatchMode === 'off') {
+      return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
+    }
     const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
     if (outcome.skipReason) {
       return markRunSkipped(claimedRun, outcome.skipReason, { guard: 'prep_page_owned', attempt: attemptNumber });
@@ -1301,6 +1680,12 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     return outcome.updated;
   } catch (err) {
     if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
+    // A deterministic refusal, not a failure: never retried (the template's
+    // stream cannot change under a retry), settled skipped with its own
+    // guard so it reads as "belongs to the ledger", not "broke".
+    if (isLedgerRequiredRefusal(err)) {
+      return markRunSkipped(claimedRun, err.message, { guard: 'ledger_required', attempt: attemptNumber });
+    }
     if (attemptNumber < retryPolicy.maxAttempts) {
       return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }

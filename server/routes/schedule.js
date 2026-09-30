@@ -43,6 +43,20 @@ const {
   resolveSessionScope,
   resolvedScopePayload,
 } = require('../services/account-properties');
+// Visit prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
+// entry"): GATE_VISIT_PREP_PHOTOS. `visitPrep` owns eligibility/storage;
+// `appointment-public.js` (required lazily below, never at module top — it
+// requires visit-prep.js itself, so a top-level require here would still be
+// fine, but every OTHER cross-route reuse in this file already requires
+// lazily inline, e.g. `./reschedule-public` above) is the public token
+// route's own module and is reused here for its exported
+// deriveVisitPrepEligibility / reloadEligibleVisitPrepRowCore / visitPrepUpload
+// / notifyOfficeVisitPrepSubmission / dispatchOwnedUnreviewed — never a
+// second copy of any of them.
+const { visitPrepPhotosLive } = require('../config/feature-gates');
+// Lazy: visit-prep.js loads routes/requests.js at require time, which this
+// router must not pull in for every caller (and its tests' auth mocks).
+const visitPrepService = () => require('../services/visit-prep');
 
 router.use(authenticate);
 
@@ -780,6 +794,36 @@ router.get('/properties-next', async (req, res, next) => {
   }
 });
 
+// GATE_VISIT_PREP_PHOTOS additive summary for the Next Visit card's
+// `prepPhotos` field — the SAME shape and eligibility rule as
+// appointment-public.js's own GET payload (via its exported
+// deriveVisitPrepEligibility), so the appointment page and the app can never
+// disagree about whether a visit currently takes photos. Gate off: `{}` (key
+// absent, payload byte-identical to before this lane). Fails soft: a lookup
+// error omits the key rather than 500ing the card. `customerActive` comes
+// from the authenticated session's own customer row (`req.customer.active`)
+// — never re-queried here — since `visitPrepEligibility` needs it and the
+// plain `scheduled_services` row this route already read carries no
+// `customers` join.
+async function appPrepPhotosField(svc, customerActive) {
+  if (!visitPrepPhotosLive()) return {};
+  try {
+    const appointmentPublic = require('./appointment-public');
+    const eligibility = await appointmentPublic.deriveVisitPrepEligibility({ ...svc, customer_active: customerActive });
+    const summary = await visitPrepService().visitPrepSummary(svc);
+    return {
+      prepPhotos: {
+        eligible: eligibility.eligible,
+        photoCount: summary.photoCount,
+        photosRemaining: summary.photosRemaining,
+      },
+    };
+  } catch (err) {
+    logger.warn(`[schedule] prepPhotos summary failed for ${svc.id}: ${err.message}`);
+    return {};
+  }
+}
+
 router.get('/next', async (req, res, next) => {
   try {
     // Same allProperties escape hatch as GET / (plan-coverage evidence).
@@ -851,11 +895,175 @@ router.get('/next', async (req, res, next) => {
         calendarExpiresAt: nextCalVerdict
           ? (groupedCalendarUrl(nextService, nextCalVerdict) ? nextCalVerdict.endsAt.toISOString() : null)
           : calendarExpiresAtFor(nextService),
+        // GATE_VISIT_PREP_PHOTOS (dark): additive only. Gate off = key
+        // absent, payload byte-identical to before this lane.
+        ...(await appPrepPhotosField(nextService, req.customer?.active === true)),
       },
     });
   } catch (err) {
     next(err);
   }
 });
+
+// The columns visit-prep eligibility/creation needs off a scheduled_services
+// row, shared by the pre-check (global pool) and the locked recheck (the
+// write's own transaction) below — never a customers join: `customer_active`
+// is threaded in separately from the caller (the pre-check from the
+// authenticated session's own `req.customer.active`; the recheck from a
+// FOR SHARE read taken under the lock, mirroring appointment-public.js's own
+// customer-then-visit lock order, Codex r3 P1).
+const VISIT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const VISIT_PREP_SVC_COLUMNS = [
+  'id', 'customer_id', 'technician_id', 'status', 'scheduled_date',
+  'window_start', 'window_end', 'service_type', 'is_recurring',
+  'recurring_parent_id', 'recurring_pattern', 'visit_id',
+  'source_action', 'customer_confirmed', 'property_id',
+];
+
+// Locked recheck for the app-authenticated write — the SAME lock order and
+// the SAME member-lock + eligibility core as appointment-public.js's own
+// reloadEligibleVisitPrepRow (reused via its exported
+// reloadEligibleVisitPrepRowCore, never a second copy): the customer row
+// FOR SHARE first (a deactivation must wait for this transaction), then the
+// scheduled_services row FOR UPDATE, then a fresh reload, then an ownership
+// re-check (the row could in principle have been reassigned to another
+// customer between the pre-check and the lock — defense in depth; there is
+// no token here for a regroup to invalidate, unlike the public route, since
+// this route always addresses the SAME scheduled_services id throughout).
+async function reloadEligibleVisitPrepRowForApp(id, expectedCustomerId, expectedPropertyId, trx) {
+  const customer = await trx('customers').where({ id: expectedCustomerId }).whereNull('deleted_at')
+    .forShare().first('id', 'active');
+  if (!customer) return null;
+  await trx('scheduled_services').where({ id }).forUpdate().first('id');
+  const svc = await trx('scheduled_services').where({ id }).first(...VISIT_PREP_SVC_COLUMNS);
+  if (!svc || String(svc.customer_id) !== String(expectedCustomerId)) return null;
+  // The property the scoped precheck authorized: a staff move to another
+  // property between the precheck and this lock invalidates the upload.
+  if (String(svc.property_id || '') !== String(expectedPropertyId || '')) return null;
+  const appointmentPublic = require('./appointment-public');
+  return appointmentPublic.reloadEligibleVisitPrepRowCore(
+    { ...svc, customer_active: customer.active === true },
+    trx,
+  );
+}
+
+// POST /:id/prep-photos — customer-authenticated twin of the public token
+// route's POST /:token/photos (customer-visit-photos-scope-20260928.md PR 4,
+// "app entry"). Reuses visit-prep.js's createVisitPrepSubmission and
+// appointment-public.js's exported eligibility/lock/multer/office-notify
+// helpers rather than a second copy of any of them. Differences from the
+// public route: auth is the logged-in customer (this router's own
+// `authenticate`, applied above) instead of a bearer token; the visit must
+// belong to THIS customer (the SAME generic 404 an ineligible or gate-off
+// visit gets — never a distinguishable 403, so a probed id reveals nothing);
+// `property_id` always comes from the VISIT row itself (never the app's
+// currently-selected property — the visit is loaded and rechecked by its own
+// id throughout, so there is no selection to leak in); `entry` is fixed to
+// `'app'`. Gate off, unknown id, or another customer's visit: 404, before
+// multer ever touches the body (same ordering the public route uses:
+// auth + gate + ownership + eligibility, THEN multer).
+// Own limiter for the upload, keyed by the authenticated customer (the
+// router's `authenticate` runs first): a customer sends at most a couple of
+// times per visit, and the per-visit caps bound storage, but not how often
+// a script can retry the pre-check + multipart parse.
+const visitPrepAppLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `visit-prep-app:${req.customerId}`,
+  message: { error: 'Too many attempts. Please try again in a minute.' },
+});
+
+router.post(
+  '/:id/prep-photos',
+  // Gate first: dark is the generic 404 before the limiter or anything else.
+  (req, res, next) => (visitPrepPhotosLive() ? next() : res.status(404).json({ error: 'Not found' })),
+  visitPrepAppLimiter,
+  async (req, res, next) => {
+    try {
+      // A malformed id would reach the uuid column as a 22P02 (500); it is
+      // just another unknown visit (Codex #5306 r2 P2).
+      if (!VISIT_ID_RE.test(String(req.params.id || ''))) return res.status(404).json({ error: 'Not found' });
+      // Saved-property scope (GATE_APP_PROPERTY_SCOPE), same predicate as
+      // confirm/reschedule: a visit at another of the customer's properties
+      // is not this session's (Codex #5306 r1 P1).
+      const scope = await resolveSessionScope(req);
+      const rowQuery = db('scheduled_services').where({ id: req.params.id });
+      applyPropertyPredicate(rowQuery, scope);
+      const row = await rowQuery.first(...VISIT_PREP_SVC_COLUMNS);
+      // Ownership gets the SAME generic 404 as an unknown id or a dark gate
+      // — a customer probing another customer's visit id must not learn
+      // anything from the response.
+      if (!row || String(row.customer_id) !== String(req.customerId)) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      const svc = { ...row, customer_active: req.customer?.active === true };
+      const appointmentPublic = require('./appointment-public');
+      const eligibility = await appointmentPublic.deriveVisitPrepEligibility(svc);
+      if (!eligibility.eligible) return res.status(404).json({ error: 'Not found' });
+      req.visitPrepSvc = svc;
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  },
+  // Multer runs ONLY now — gate, ownership and eligibility have already
+  // refused a 404 without ever touching the multipart body.
+  (req, res, next) => {
+    const appointmentPublic = require('./appointment-public');
+    appointmentPublic.visitPrepUpload.array('photos', visitPrepService().VISIT_PREP_LIMITS.photosPerSubmission)(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Each photo must be 5 MB or smaller.' });
+      }
+      return res.status(400).json({ error: 'Could not read the uploaded photos.' });
+    });
+  },
+  async (req, res, next) => {
+    const expectedId = req.visitPrepSvc.id;
+    const expectedCustomerId = req.customerId;
+    const expectedPropertyId = req.visitPrepSvc.property_id || null;
+    try {
+      const result = await visitPrepService().createVisitPrepSubmission({
+        svc: req.visitPrepSvc,
+        files: req.files || [],
+        note: req.body?.note,
+        topic: req.body?.topic,
+        locationOnProperty: req.body?.locationOnProperty,
+        entry: 'app',
+        // Re-proves eligibility on FRESH state under the stop lock, on the
+        // write's own transaction — never the global pool (see the loader
+        // above).
+        recheck: (trx) => reloadEligibleVisitPrepRowForApp(expectedId, expectedCustomerId, expectedPropertyId, trx),
+      });
+      // Office feed item — same rule as the public route (scope §5.4 item
+      // 2/3): ONE per NEW submission, detached, never awaited, built from
+      // the RECHECKED row.
+      if (result.created) {
+        const appointmentPublic = require('./appointment-public');
+        Promise.resolve()
+          .then(() => appointmentPublic.notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic))
+          .catch((err) => logger.error(`[schedule] visit-prep office item failed for ${result.svc?.id}: ${err.message}`));
+      }
+      return res.status(result.created ? 201 : 200).json({
+        ok: true,
+        prepPhotos: {
+          eligible: true,
+          photoCount: result.summary.photoCount,
+          photosRemaining: result.summary.photosRemaining,
+          photosAdded: result.stored,
+        },
+      });
+    } catch (err) {
+      if (err && err.visitPrep) {
+        if (err.statusCode === 404) return res.status(404).json({ error: 'Not found' });
+        return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      }
+      return next(err);
+    }
+  },
+);
 
 module.exports = router;

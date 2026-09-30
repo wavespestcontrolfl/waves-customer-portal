@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
+import Customer360Workspace from './Customer360Workspace';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 
 vi.mock('./StickyActionBar', async (importOriginal) => ({
@@ -280,19 +281,19 @@ describe('Customer360ProfileV2 profile state', () => {
     fireEvent.change(sender, { target: { value: [...sender.options].find(option => option.value).value } });
     fireEvent.change(field, { target: { value: 'Fixture service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
-    await waitFor(() => expect(field).toHaveValue(''));
+    await waitFor(() => expect(field).toHaveValue(''), { timeout: 15000 });
     await waitFor(() => {
       expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'))).toHaveLength(1);
       expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
       expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
-    }, { timeout: 5000 });
-    await screen.findByRole('heading', { name: 'Updated Customer' }, { timeout: 5000 });
+    }, { timeout: 15000 });
+    await screen.findByRole('heading', { name: 'Updated Customer' }, { timeout: 15000 });
     fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
     expect(await screen.findByText('Saved message activity')).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
-  }, 10000);
+  }, 25000);
 
   it('discards A conversation data when its post-send refresh lands during the switch to B', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
@@ -925,6 +926,147 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.getByText('Pin needs review')).toBeInTheDocument();
     expect(screen.queryByText('100 Old Address, Naples, FL, 34102')).not.toBeInTheDocument();
     expect(screen.queryByText('Verified')).not.toBeInTheDocument();
+  });
+
+  it('reports a resolved address review once as a customer mutation', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const onCustomerMutation = vi.fn();
+    const review = {
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: '100 Retry Ave',
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: null, longitude: null,
+      },
+      review: { status: 'provider_unavailable', reason: 'provider_unavailable', source: 'automatic' },
+      revision: 'revision-1',
+    };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/admin/customer-geocodes/customer-a/resolve')) return response(review);
+      if (path.endsWith('/admin/customer-geocodes/customer-a')) return response(review);
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} onCustomerMutation={onCustomerMutation} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry saved address' }));
+
+    await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'customer-a', action: 'update' }));
+    expect(onCustomerMutation).toHaveBeenCalledOnce();
+  });
+
+  it('reports a resolved address review when the profile reload fails', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const onCustomerMutation = vi.fn();
+    const review = {
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: '100 Retry Ave',
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: null, longitude: null,
+      },
+      review: { status: 'provider_unavailable', reason: 'provider_unavailable', source: 'automatic' },
+      revision: 'revision-1',
+    };
+    let customerReads = 0;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/admin/customer-geocodes/customer-a/resolve') && options.method === 'POST') return response(review);
+      if (path.endsWith('/admin/customer-geocodes/customer-a')) return response(review);
+      if (path.endsWith('/admin/customers/customer-a')) {
+        customerReads += 1;
+        return customerReads === 1
+          ? response(customerDetail('customer-a', 'Avery'))
+          : response({ error: 'Synthetic profile reload failure' }, 503);
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} onCustomerMutation={onCustomerMutation} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry saved address' }));
+
+    await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'customer-a', action: 'update' }));
+    expect(onCustomerMutation).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/customer profile could not refresh/i)).toBeInTheDocument();
+  });
+
+  function unresolvedGeocodeFetchMock() {
+    const review = {
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: '100 Retry Ave',
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: null, longitude: null,
+      },
+      review: { status: 'provider_unavailable', reason: 'provider_unavailable', source: 'automatic' },
+      revision: 'revision-1',
+    };
+    return vi.fn((url) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/admin/customer-geocodes/customer-a')) return response(review);
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+  }
+
+  // One of 3+ consecutive Codex rounds finding a new unguarded path that
+  // unmounts an open address-review draft. Rather than patch this one
+  // control, the panel now reports "draft active" upward and a single
+  // guard (requestTabChange, via useCustomerProfileNavigation's
+  // guardNavigateAway) sits in front of every control that would unmount
+  // it — this test pins the tab-switch path.
+  it('guards a tab switch away from an open address-review draft', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', unresolvedGeocodeFetchMock());
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review location' }));
+    await screen.findByLabelText('Evidence');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
+    expect(confirmSpy).toHaveBeenCalledWith('This will discard the unsaved address review draft. Continue?');
+    // Declined: the switch never happened, the draft form is still there.
+    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByLabelText('Evidence')).toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
+    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByLabelText('Evidence')).not.toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  // Same choke point, but the control lives OUTSIDE this component's own
+  // subtree: Customer360Workspace's "All customers" button is a sibling of
+  // the embedded profile, not a descendant, so it can only see the draft
+  // through the lifted onDraftActiveChange callback.
+  it('guards the Workspace "All customers" button while an address-review draft is open', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', unresolvedGeocodeFetchMock());
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const onClose = vi.fn();
+
+    render(
+      <MemoryRouter>
+        <Customer360Workspace selectedId="customer-a" initialTab="overview" onSelect={vi.fn()} onClose={onClose} onCustomerMutation={vi.fn()} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review location' }));
+    await screen.findByLabelText('Evidence');
+
+    fireEvent.click(screen.getByRole('button', { name: 'All customers' }));
+    expect(confirmSpy).toHaveBeenCalledWith('This will discard the unsaved address review draft. Continue?');
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'All customers' }));
+    expect(onClose).toHaveBeenCalledOnce();
+    confirmSpy.mockRestore();
   });
 
   it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {

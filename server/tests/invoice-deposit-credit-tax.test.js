@@ -271,7 +271,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
   // setupDb plus the service-record spine createFromService walks, and a
   // pass-through transaction (the atomicity itself is exercised against the
   // real knex by the converter/accept paths; here we test the wiring).
-  function setupServiceDb({ sourceEstimateId = 'est-1' } = {}) {
+  function setupServiceDb({ sourceEstimateId = 'est-1', sourceEstimateLookupThrows = false } = {}) {
     let insertedInvoice = null;
     db.mockImplementation((table) => {
       if (table === 'service_records') {
@@ -297,7 +297,14 @@ describe('createFromService — estimate-deposit roll-forward', () => {
         return q;
       }
       if (table === 'scheduled_services') {
-        const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => ({ source_estimate_id: sourceEstimateId })) };
+        const q = {
+          where: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async (col) => {
+            if (sourceEstimateLookupThrows && col === 'source_estimate_id') throw new Error('db blip');
+            return { source_estimate_id: sourceEstimateId };
+          }),
+        };
         return q;
       }
       if (table === 'customers') {
@@ -397,6 +404,37 @@ describe('createFromService — estimate-deposit roll-forward', () => {
 
     expect(getInsertedInvoice().total).toBe(151);
     expect(mockConsumeDepositCredit).toHaveBeenCalled();
+  });
+
+  it('refuseDepositCredit (IB closeout repair) refuses 409 on the LOCKED deposit read — nothing minted or consumed, no alert', async () => {
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
+
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/deposit credit/) });
+    expect(mockPendingDepositCredit).toHaveBeenCalled();
+    expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    expect(getInsertedInvoice()).toBeFalsy();
+
+    // Unreadable deposit provenance fails closed too (GH Codex P1).
+    setupServiceDb({ sourceEstimateLookupThrows: true });
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Deposit provenance/) });
+
+    // An unreadable deposit ledger in refusal mode is a quiet 409 — never the
+    // retry/alert path (the IB preview must not raise a real alert).
+    setupServiceDb();
+    mockPendingDepositCredit.mockRejectedValueOnce(new Error('ledger read failed'));
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Deposit balance could not be verified/) });
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+
+    // No open balance: the refusal never fires and the plain invoice mints.
+    setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue(null);
+    const inv = await InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true });
+    expect(inv.total).toBe(250);
   });
 
   it('an allocation mismatch holds invoicing and alerts instead of returning an uncredited invoice', async () => {
@@ -642,9 +680,15 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
       if (table === 'scheduled_services') {
         const q = {
           where: jest.fn(() => q),
+          // Codex #5244 r7 P0: create()'s bare advisory-lock branch now
+          // re-reads the visit under FOR UPDATE before minting (a live
+          // status here — 'confirmed' — matches this describe's
+          // still-scheduled completion visit; a terminal status would
+          // correctly 409 SCHEDULED_VISIT_NOT_LIVE instead).
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => ({
             payer_id: 9, po_number: null, self_pay_override: false,
-            source_estimate_id: sourceEstimateId,
+            source_estimate_id: sourceEstimateId, status: 'confirmed',
           })),
         };
         return q;

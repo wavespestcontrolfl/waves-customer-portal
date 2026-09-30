@@ -10,17 +10,18 @@
  *
  * Built for GATE_VOICE_RELAY_OPENAI (server/services/voice-agent/
  * relay-conversation.js) — Sandy's benchmark/sandbox lane running on an
- * OpenAI model, never production inbound by default. Production callers stay
- * on Anthropic; this file is never imported by anything that isn't provider
- * === 'openai' for the pinned session model.
+ * OpenAI model — and, separately, GATE_VOICE_RELAY_OPENAI_INBOUND for
+ * production inbound (dark by default). This file is never imported by
+ * anything that isn't provider === 'openai' for the pinned session model.
  *
- * NO SILENT FALLBACK: this client never substitutes Claude on any failure —
- * an OpenAI error, a bad response shape, or an aborted stream all reject
+ * This client never substitutes Claude itself on any failure — an OpenAI
+ * error, a bad response shape, or an aborted stream all reject
  * `finalMessage()` with a descriptive Error (or one named 'AbortError'), the
- * exact shape relay-conversation.js's existing model-round catch block
- * already handles (increments `_modelFailures`, runs the provider-failure
- * handoff policy). A benchmark candidate that hits an OpenAI outage must
- * fail visibly, never quietly re-run on Sonnet.
+ * exact shape relay-conversation.js's model-round catch block handles. That
+ * caller decides what happens next: a live call switches to Claude for the
+ * rest of the call (_runModelRound); an eval-harness session counts it as an
+ * ordinary model failure, so a benchmark candidate that hits an OpenAI
+ * outage fails visibly, never quietly re-run on Sonnet.
  *
  * Request mapping (Anthropic-shaped params → OpenAI Responses body):
  *   system (array of {type:'text', text, cache_control?})  → instructions
@@ -286,13 +287,33 @@ function buildOpenAIRequest(params = {}) {
 /** Anthropic-shape usage from a Responses `usage` block (see file header). */
 function mapUsage(usage) {
   if (!usage || typeof usage !== 'object') return undefined;
-  const cached = Number(usage.input_tokens_details?.cached_tokens) || 0;
-  const totalInput = Number(usage.input_tokens) || 0;
+  const validCount = (value) => Number.isInteger(value) && value >= 0;
+  const details = usage.input_tokens_details;
+  const detailsValid = details == null || (typeof details === 'object' && !Array.isArray(details));
+  const cachedPresent = detailsValid && details != null && Object.prototype.hasOwnProperty.call(details, 'cached_tokens');
+  const cached = cachedPresent ? details.cached_tokens : 0;
+  const valid = validCount(usage.input_tokens)
+    && validCount(usage.output_tokens)
+    && detailsValid
+    && validCount(cached)
+    && cached <= usage.input_tokens;
+  // Preserve the distinction between no usage block (undefined above) and a
+  // provider block whose required counters are missing or malformed. The
+  // replay sees this object, extracts null counters and marks the model round
+  // incomplete instead of silently recording a free zero-token round.
+  if (!valid) {
+    return {
+      input_tokens: null,
+      cache_read_input_tokens: null,
+      cache_creation_input_tokens: null,
+      output_tokens: null,
+    };
+  }
   return {
-    input_tokens: Math.max(0, totalInput - cached),
+    input_tokens: usage.input_tokens - cached,
     cache_read_input_tokens: cached,
     cache_creation_input_tokens: 0,
-    output_tokens: Number(usage.output_tokens) || 0,
+    output_tokens: usage.output_tokens,
   };
 }
 

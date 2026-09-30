@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
-const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+const { signedMapImagePathFromLiveConfig } = require('../services/signed-map-image');
 const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 
 // Cap the JSON body for this route family. The global limit is generous;
@@ -23,140 +23,27 @@ router.get('/watering-plan', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-const shortText = Joi.string().trim().allow('', null).max(200);
-const longText = Joi.string().trim().allow('', null).max(2000);
-const petSchema = Joi.object({
-  name: Joi.string().trim().allow('', null).max(60),
-  species: Joi.string().trim().allow('', null).max(40),
-  breed: Joi.string().trim().allow('', null).max(60),
-  friendly: Joi.boolean(),
-  secured: Joi.boolean(),
-  notes: Joi.string().trim().allow('', null).max(300),
-}).unknown(true);
-
-const PREFS_FIELD_SCHEMAS = {
-  neighborhoodGateCode: shortText,
-  propertyGateCode: shortText,
-  garageCode: shortText,
-  lockboxCode: shortText,
-  parkingNotes: longText,
-  sideGateAccess: shortText,
-  petCount: Joi.number().integer().min(0).max(20),
-  petDetails: longText,
-  petsSecuredPlan: longText,
-  petsStructured: Joi.array().items(petSchema).max(20),
-  preferredDay: shortText,
-  preferredTime: shortText,
-  contactPreference: shortText,
-  blackoutStart: Joi.date().allow(null, ''),
-  blackoutEnd: Joi.date().allow(null, ''),
-  irrigationControllerLocation: shortText,
-  irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
-  irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
-  // Minutes each zone runs on a watering day — the natural-unit schedule
-  // @waves/irrigation-runtime converts to inches (× days × head type).
-  // 1–240 with null-to-clear: the runtime treats <= 0 as missing, so a
-  // persisted 0 would show in the portal while the email claims no minutes
-  // are on file. Zero is not a schedule — clearing is.
-  irrigationRunMinutes: Joi.number().integer().min(1).max(240).allow(null),
-  irrigationScheduleNotes: longText,
-  // Same seven keys the pills emit — mirrors mowingDays below. A length-only
-  // check would persist "Monday" with a 200, and @waves/irrigation-runtime
-  // normalizes against the canonical keys, so the day would silently vanish
-  // from the derivation and the email would claim the days are missing.
-  wateringDays: Joi.array().items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')).unique().max(7),
-  // Customers can have multiple sprinkler types on one property. Accept an
-  // array (current client) or a legacy scalar string for backward compat;
-  // the route normalizes to an array before storage. Vocabulary is the three
-  // types the portal pills emit and @waves/irrigation-runtime has rates or
-  // rules for — an unknown type would persist fine and then derail the
-  // derivation into unknown_head_type copy. Legacy rows keep whatever they
-  // hold; only new writes are restricted.
-  irrigationSystemType: Joi.alternatives().try(
-    Joi.array().items(Joi.string().valid('spray', 'drip', 'rotor')).unique().max(3),
-    Joi.string().valid('spray', 'drip', 'rotor', '')
-  ).allow(null),
-  rainSensor: Joi.boolean(),
-  irrigationIssues: longText,
-  // Same seven keys the pills emit. A length-only check would persist
-  // "Monday" with a 200, and both the portal summary and mowingAlertText
-  // filter against the canonical keys — so the day would silently vanish
-  // from the customer's view AND the technician's alert.
-  mowingDays: Joi.array()
-    .items(Joi.string().valid('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'))
-    .unique()
-    .max(7),
-  // Controlled vocabulary, not free text: the column is varchar(30), so a
-  // longer value would turn a client mistake into a Postgres 22001 → 500.
-  // The four keys mirror the portal's Typical Time pills.
-  mowingTimeOfDay: Joi.string().trim().valid('', 'morning', 'midday', 'afternoon', 'varies').allow(null),
-  mowingNotes: longText,
-  hoaName: shortText,
-  hoaRestrictions: longText,
-  hoaCompany: shortText,
-  hoaPhone: shortText,
-  hoaEmail: Joi.string().trim().allow('', null).email().max(254),
-  hoaLawnHeight: shortText,
-  hoaSignageRules: longText,
-  hoaTimingRestrictions: longText,
-  hoaInspectionPeriod: shortText,
-  accessNotes: longText,
-  specialInstructions: longText,
-};
+const {
+  PREFS_FIELD_SCHEMAS,
+  ALLOWED_FIELDS,
+  validatePrefsBody: validatePrefsBodyWithSchemas,
+  camelToSnake,
+  snakeToCamel,
+  transformKeys,
+  customerHasLawnCare,
+  customerQualifiesForLawnInches,
+  normalizeUpdatesForStorage,
+} = require('../services/property-preferences-schema');
 
 const prefsSchema = Joi.object(PREFS_FIELD_SCHEMAS).unknown(false);
 
-// Validates each field in the body INDEPENDENTLY so one permanently-invalid
-// field (e.g. a badly typed HOA email) can never reject every OTHER valid
-// field in the same autosave batch — the 2026-09-11 prod incident: a
-// half-typed hoaEmail 400'd 8 consecutive saves while everything else the
-// customer typed was silently discarded. Returns the coerced value for every
-// field that validated, plus a `rejected` list of { field, message } for
-// every field present in the body that did not — same message text the
-// combined-schema validator produced (label(key) reproduces the "<key> ..."
-// phrasing), so this is a strict superset of the old error detail.
-// Unknown keys are silently dropped (matches the previous
-// `stripUnknown: true` behavior) — they are not reported as rejected.
+// Thin wrapper keeping this route's own single-arg call shape (and its
+// `_private.validatePrefsBody` test surface) over the shared, schema-set
+// implementation in services/property-preferences-schema — see that
+// module for the full behavior contract (2026-09-11 partial-batch fix).
 function validatePrefsBody(body) {
-  const source = body && typeof body === 'object' ? body : {};
-  const value = {};
-  const rejected = [];
-  let presentCount = 0;
-  for (const [key, raw] of Object.entries(source)) {
-    // OWN keys only (codex r1 P2): `constructor` / `toString` / `__proto__`
-    // in the JSON body would otherwise resolve to an inherited
-    // Object.prototype member, and calling .label() on it throws a 500
-    // instead of stripping the unknown key.
-    const fieldSchema = Object.prototype.hasOwnProperty.call(PREFS_FIELD_SCHEMAS, key)
-      ? PREFS_FIELD_SCHEMAS[key]
-      : null;
-    if (!fieldSchema) continue; // unknown field — stripped, not reported
-    presentCount += 1;
-    const { value: fieldValue, error: fieldError } = fieldSchema.label(key).validate(raw);
-    if (fieldError) {
-      rejected.push({ field: key, message: fieldError.message });
-    } else {
-      value[key] = fieldValue;
-    }
-  }
-  return { value, rejected, presentCount };
+  return validatePrefsBodyWithSchemas(PREFS_FIELD_SCHEMAS, body);
 }
-
-const ALLOWED_FIELDS = [
-  'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
-  'parking_notes', 'side_gate_access',
-  'pet_count', 'pet_details', 'pets_secured_plan', 'pets_structured',
-  'preferred_day', 'preferred_time', 'contact_preference',
-  'blackout_start', 'blackout_end',
-  'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
-  'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
-  'rain_sensor', 'irrigation_issues',
-  'mowing_days', 'mowing_time_of_day', 'mowing_notes',
-  'hoa_name', 'hoa_restrictions', 'hoa_company', 'hoa_phone', 'hoa_email',
-  'hoa_lawn_height', 'hoa_signage_rules', 'hoa_timing_restrictions',
-  'hoa_inspection_period',
-  'access_notes', 'special_instructions',
-];
 
 const CUSTOMER_EMAIL_FIELDS = {
   preferred_day: 'Preferred service day',
@@ -201,40 +88,6 @@ function propertyChangeItems(updates = {}, existing = {}) {
       newValue: displayPrefValue(updates[field]),
       scope: 'Property profile',
     }));
-}
-
-function camelToSnake(str) {
-  return str.replace(/[A-Z]/g, l => `_${l.toLowerCase()}`);
-}
-
-function snakeToCamel(str) {
-  return str.replace(/_([a-z])/g, (_, l) => l.toUpperCase());
-}
-
-function transformKeys(obj, fn) {
-  const result = {};
-  for (const [k, v] of Object.entries(obj)) {
-    result[fn(k)] = v;
-  }
-  return result;
-}
-
-function customerHasLawnCare(customer = {}) {
-  const tier = String(customer.waveguard_tier || customer.tier || '').trim();
-  return ['Silver', 'Gold', 'Platinum'].includes(tier) || !!String(customer.lawn_type || '').trim();
-}
-
-// Weekly Inches eligibility. The tier / lawn_type shortcut misses standalone
-// lawn-plan customers with no turf type on file, so fall back to live
-// lawn-service evidence (any live lawn-flavored visit in the trailing window
-// — see hasLawnServiceEvidence). Used by BOTH the GET (render gate) and the
-// PUT (store gate) so the field can never render and then be silently
-// dropped on save. THROWS on a lookup failure: the GET fails soft (field
-// hidden this load), the PUT must fail the save — a false here would delete
-// the customer's inches with a 200 (GH codex P2 on #3557).
-async function customerQualifiesForLawnInches(customer = {}) {
-  if (customerHasLawnCare(customer)) return true;
-  return hasLawnServiceEvidence(customer.id);
 }
 
 // Irrigation is ON by default (owner ruling 2026-08-27: no toggle). The
@@ -362,19 +215,9 @@ router.put('/preferences', async (req, res, next) => {
       ? { irrigation_system: true }
       : {};
 
-    // Normalize irrigation system type to an array (accepts legacy scalar)
-    if ('irrigation_system_type' in updates) {
-      const v = updates.irrigation_system_type;
-      updates.irrigation_system_type = Array.isArray(v) ? v : (v ? [v] : []);
-    }
-
-    // Stringify JSON fields for DB storage
-    const JSON_FIELDS = ['watering_days', 'pets_structured', 'irrigation_system_type', 'mowing_days'];
-    for (const jf of JSON_FIELDS) {
-      if (jf in updates && typeof updates[jf] !== 'string') {
-        updates[jf] = JSON.stringify(updates[jf]);
-      }
-    }
+    // Normalize irrigation_system_type (legacy scalar -> array) and
+    // stringify JSON columns for DB storage.
+    normalizeUpdatesForStorage(updates);
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No valid fields to update' });
@@ -537,7 +380,10 @@ router.get('/station-map', async (req, res, next) => {
       height: 340,
       mapType: 'satellite',
     });
-    if (!liveConfig?.imageUrl) {
+    // The provider's keyed image URL embeds the server Maps key; the portal gets a
+    // short-lived signed proxy path instead (routes/public-map-image.js).
+    const liveImagePath = liveConfig?.imageUrl ? signedMapImagePathFromLiveConfig(liveConfig) : null;
+    if (!liveImagePath) {
       return res.json({ available: false, reason: 'provider_config_unavailable', programs: {} });
     }
 
@@ -566,7 +412,7 @@ router.get('/station-map', async (req, res, next) => {
     const satelliteMap = {
       available: true,
       live: {
-        url: liveConfig.imageUrl,
+        url: liveImagePath,
         width: liveConfig.width || 640,
         height: liveConfig.height || 340,
       },
@@ -837,6 +683,7 @@ const DECLINE_REFUSAL_MESSAGES = {
   not_active: 'This plan is not currently eligible to decline renewal.',
   conflict: 'Something changed while we were saving this. Please refresh and try again.',
   not_covered: 'This plan will not renew, and its coverage is no longer active.',
+  renewal_payment_clearing: 'Your renewal payment is still processing, so this plan can’t be changed right now. Please try again once it clears.',
 };
 
 router.post('/termite-annual-plan/decline', async (req, res, next) => {

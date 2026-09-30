@@ -268,9 +268,9 @@ const LEAD_EVIDENCE_CHANNELS = CUSTOMER_ORIGINATED_LEAD_CHANNELS.filter(
 // scoped to the form/quote channels latestQuoteFormLead checks) — "a lead
 // record" in the owner's own list of what counts as prior contact
 // (2026-09-26, outbound return-message gate).
-async function anyLeadRecord({ phoneLast10, before }) {
+async function anyLeadRecord({ phoneLast10, before, conn = db }) {
   if (!phoneLast10) return null;
-  return db('leads')
+  return conn('leads')
     .whereNull('deleted_at')
     .where('created_at', '<', before)
     .whereRaw(nanpStoredPhoneClause('phone'), [phoneLast10])
@@ -307,7 +307,7 @@ async function anyLeadRecord({ phoneLast10, before }) {
 // classifier (isSubstantiveText's emoji/reaction regexes) still runs in JS,
 // REUSED rather than reimplemented in SQL, over that now-narrowed set —
 // with no `.limit()` this time.
-async function existsQualifyingInboundCall({ phoneLast10, before }) {
+async function existsQualifyingInboundCall({ phoneLast10, before, conn = db }) {
   if (!phoneLast10) return false;
   // SERVICE_CONTACT_NATURES, an ALLOWLIST (codex r8 P1). The earlier
   // NON_SERVICE_NATURES denylist let through a null (indeterminate) nature
@@ -324,7 +324,7 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
   // Both exclusions apply together; neither alone is sufficient for every
   // call's vintage.
   const dispositions = [...NON_SERVICE_DISPOSITIONS];
-  const row = await whereNotSandboxCall(db('call_log')
+  const row = await whereNotSandboxCall(conn('call_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before))
     .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
@@ -355,11 +355,11 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
   return !!row;
 }
 
-async function existsQualifyingInboundText({ phoneLast10, before }) {
+async function existsQualifyingInboundText({ phoneLast10, before, conn = db }) {
   if (!phoneLast10) return false;
   const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-  const rows = await db('sms_log')
+  const rows = await conn('sms_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before)
     .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
@@ -398,11 +398,28 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
  * plus an existing customer link, through the EXISTS-style probes above
  * (never the capped latestInboundCall/latestInboundText, which would miss
  * an old genuine contact behind newer spam/acknowledgements).
- * Fails CLOSED (no prior contact) on a probe error: the caller only uses
- * this to ENABLE customer-facing sends, never to block one, so treating an
- * unknown answer as "no" is the safe direction.
+ *
+ * `conn` (codex #5018 pre-push P1) threads a caller's own held connection —
+ * a transaction, or the same pool slot a phone-locked handoff already
+ * occupies — through every probe below instead of opening a fresh one on
+ * the shared pool. Required under the supported DB_POOL_MAX=2: a caller
+ * that already holds the pool's other slot (a cron's exclusive lock, a
+ * handoff transaction) would otherwise starve these probes into a
+ * connection-acquire timeout. Defaults to the shared pool for a caller with
+ * no transaction of its own.
+ *
+ * Deliberately does NOT catch a probe failure here and fold it into `false`
+ * — this used to fail closed on ANY error, but a starved-pool timeout is an
+ * infrastructure hiccup, not a genuine "no prior contact" answer, and
+ * folding the two together made an outage indistinguishable from a real
+ * negative — permanently refusing an otherwise-eligible send instead of
+ * letting the caller's own retry/defer path (every current caller has one:
+ * call-booking-link-text.js's staging/dispatch/neverSendRecheck rails,
+ * call-recording-processor.js's own wrapping try/catch) pick it back up. A
+ * caller that genuinely wants fail-closed-on-error keeps that as its own
+ * explicit try/catch.
  */
-async function hasPriorContact({ customerId = null, phone = null, before = new Date() } = {}) {
+async function hasPriorContact({ customerId = null, phone = null, before = new Date(), conn = db } = {}) {
   if (customerId) return true;
   // NANP-only evidence matching (codex pre-push r7 P1): phoneIdentityKey
   // returns the bare 10-digit form ONLY for a NANP (+1) number; anything
@@ -418,17 +435,12 @@ async function hasPriorContact({ customerId = null, phone = null, before = new D
   if (!identityKey || !/^\d{10}$/.test(identityKey)) return false;
   const phoneLast10 = identityKey;
   const at = new Date(before);
-  try {
-    const [inboundCall, inboundText, leadRow] = await Promise.all([
-      existsQualifyingInboundCall({ phoneLast10, before: at }),
-      existsQualifyingInboundText({ phoneLast10, before: at }),
-      anyLeadRecord({ phoneLast10, before: at }),
-    ]);
-    return !!(inboundCall || inboundText || leadRow);
-  } catch (e) {
-    logger.warn(`[outbound-call-reason] hasPriorContact probe failed — treating as no prior contact: ${e.code || e.name || 'db_error'}`);
-    return false;
-  }
+  const [inboundCall, inboundText, leadRow] = await Promise.all([
+    existsQualifyingInboundCall({ phoneLast10, before: at, conn }),
+    existsQualifyingInboundText({ phoneLast10, before: at, conn }),
+    anyLeadRecord({ phoneLast10, before: at, conn }),
+  ]);
+  return !!(inboundCall || inboundText || leadRow);
 }
 
 /**
@@ -591,8 +603,12 @@ module.exports = {
   nonServiceCaller,
   isSubstantiveText,
   hasPriorContact,
+  // Promoted to a real export (codex #5018 r15 P2): call-booking-link-
+  // text.js's own unlinked-customer phone match reuses this SAME SQL-side
+  // NANP matcher rather than hand-roll a second regex — a private,
+  // test-only export is the wrong way to share it across modules.
+  nanpStoredPhoneClause,
   _private: {
     last10, callNature, parseMetadata, existsQualifyingInboundCall, existsQualifyingInboundText,
-    nanpStoredPhoneClause,
   },
 };

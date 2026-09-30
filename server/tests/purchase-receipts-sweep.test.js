@@ -45,7 +45,7 @@ jest.mock('../models/db', () => {
   return jest.fn(() => q);
 });
 
-const { processReceiptEmail, runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
+const { processReceiptEmail, runPurchaseReceiptRestockSweep, amazonEmailLines } = require('../services/purchase-receipts/sweep');
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
 const logger = require('../services/logger');
@@ -81,6 +81,27 @@ beforeEach(() => {
   logger.warn.mockClear();
   delete process.env.GATE_PURCHASE_RECEIPT_RESTOCK;
   delete process.env.PURCHASE_RECEIPT_SINCE;
+});
+
+// The Amazon line builder processReceiptEmail records from, shared with the
+// read-only replay tool.
+describe('amazonEmailLines', () => {
+  test('each item goes through amazonLine: an unreadable quantity or no order number holds it', () => {
+    expect(amazonEmailLines({ subject: 'Delivered: 2 items' }, { orderNumber: '111-2222222-3333333', items: [
+      { title: 'Taurus SC Termiticide 78 oz', quantity: 2 },
+      { title: 'Bifen XTS Insecticide 96 oz', quantity: null },
+    ] })).toEqual([
+      { item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, holdAs: undefined },
+      { item: { title: 'Bifen XTS Insecticide 96 oz', quantity: 0 }, holdAs: 'unverified' },
+    ]);
+    expect(amazonEmailLines({ subject: 'x' }, { orderNumber: null, items: [{ title: 'Taurus SC Termiticide 78 oz', quantity: 1 }] }))
+      .toEqual([{ item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, holdAs: 'no_order_number' }]);
+  });
+
+  test('an itemless Delivered email is one no_items placeholder titled with its subject', () => {
+    expect(amazonEmailLines({ subject: 'Delivered: 2 Lawn & Garden items' }, { orderNumber: '111-2222222-3333333', items: [] }))
+      .toEqual([{ item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, forcedStatus: 'no_items' }]);
+  });
 });
 
 describe('gating', () => {

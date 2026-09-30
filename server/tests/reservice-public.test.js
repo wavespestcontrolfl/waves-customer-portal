@@ -18,6 +18,15 @@ const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomer
 jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   isEnabled: jest.fn((name) => (name in gateState ? gateState[name] : true)),
+  // GATE_BOOK_CAPACITY_COMMIT (owner 2026-09-28, PR #5231 rounds 1-2):
+  // routes/booking.js is NOT mocked in this file, so buildAvailabilityFor
+  // Customer's real capacityPlacement: bookInsertionOffersLive() call runs
+  // the real booking.js function, which reads this mock (bookCapacityCommitLive
+  // && capacityEnabled() — the AND short-circuits here without needing
+  // capacityEnabled mocked too). Off by default — this file is not about
+  // that gate, and false matches this route's pre-existing (append-only)
+  // behavior for every test that doesn't override it.
+  bookCapacityCommitLive: jest.fn(() => false),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js

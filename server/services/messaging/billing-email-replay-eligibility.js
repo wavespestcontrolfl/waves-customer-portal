@@ -175,6 +175,8 @@ async function collectionsPolicyRefusal(meta, database) {
     channel: 'email',
     purpose: meta.source_entry_point === 'balance_reminder_workflow' ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
+    // The rail whose email this replays (shadow spacing only).
+    source: meta.source_entry_point === 'invoice_followup_sequence' ? 'invoice_followups' : meta.source_entry_point,
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
     detail: true,
     database,
@@ -184,6 +186,10 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
+    if (meta?.source_entry_point === 'previsit_balance_reminder') {
+      const verdict = await require('../previsit-balance-reminder').previsitReplayQuoteEligible(meta, database);
+      return verdict.ok === true ? { eligible: true } : refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
+    }
     const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);

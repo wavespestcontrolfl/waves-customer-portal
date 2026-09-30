@@ -1,4 +1,7 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const {
+  aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, wateringPlanCondition, wateringRestrictionAction,
+} = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
@@ -34,6 +37,44 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
+// A watering question is any question naming watering — the safe default,
+// since a watering hold or unverified aftercare instruction must reach every
+// one of them ("Can I leave the sprinklers off?", "Should the lawn be
+// watered?"). Only incidental phrases are taken out first: water or
+// irrigation as a noun modifier ("water damage", "the irrigation meter"),
+// standing water, and a location ("mushrooms by the sprinkler"). Exact word
+// forms, so "waterproof" is not watering.
+const WATERING_WORD_RE = /\b(?:water|waters|watered|watering|irrigat\w*|sprinklers?|run\s?times?)\b/;
+const INCIDENTAL_WATERING_PHRASE_RE = new RegExp([
+  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?|heaters?|softeners?|filters?|bowls?|features?|areas?)\b|\bwater\s+(?:lines?|pipes?|mains?)\b`,
+  String.raw`(?<!\b(?:turn|switch|run|start|restart|resume|set|keep|leave|use|kick)\s+(?:(?:the|my|our|your|those|these)\s+)?)\b(?:broken|damaged|leaking|leaky|clogged|cracked|missing|misaligned|faulty)\s+(?:sprinklers?|sprinkler\s+\w+|irrigation(?:\s+\w+)?|water\s+lines?)\b`,
+  String.raw`\b(?:standing|pooling|pooled|surface|salt|rain)\s+water\b`,
+  String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:(?:the|my|a|your|our|some|any)\s+)?(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
+].join('|'), 'g');
+// Recommendation copy about watering, withheld while the aftercare
+// restricts watering. Same inversion as the question matcher: any watering
+// word counts once the incidental phrases are out ("Set the sprinklers for
+// 20 minutes", "Schedule two irrigation cycles", "Water deeply"), plus the
+// controller language that names no watering word ("Run each zone for 20
+// minutes", "Add another cycle", "Resume the normal schedule"). A noun with
+// no watering in it stays ("Replace the controller battery", "Watch the
+// sprinkler area for mushrooms", "Fix the standing water").
+const CONTROLLER_DIRECTIVE_RE = /\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b|\b(?:another|extra|additional|second)\s+cycles?\b|\b(?:normal|regular|usual)\s+schedule\b|\b(?:over|under)-?water\w*/i;
+function isWateringRecommendation(text) {
+  const copy = String(text).toLowerCase();
+  return WATERING_WORD_RE.test(copy.replace(INCIDENTAL_WATERING_PHRASE_RE, ' ')) || CONTROLLER_DIRECTIVE_RE.test(copy);
+}
+// A request for the customer's own next move ("What do I need to do about
+// the mushrooms I observed?", "Anything we should do…", "Any action needed…",
+// "How do I handle…"). Observation words inside it qualify the request; they
+// do not turn it into a findings recap. "…, do you know what they are?" asks
+// Waves, not the customer, and "I" or "we" must be the subject of "do" ("I
+// found brown spots, do they indicate damage?" asks about the spots).
+// "Action" counts only as an action requested of the customer ("Any action needed…", "What action should I take?"), never
+// what Waves did ("What action did you take…?", "…was taken…") or a cause
+// ("What mowing action caused the damage?").
+const CUSTOMER_ACTION_SRC = String.raw`\b(?:any|what|which)\s+actions?\s+(?:is\s+|are\s+)?(?:needed|required|necessary|recommended)\b|\bactions?\s+(?:needed|required|necessary|items?|to\s+take)\b|\bactions?\s+(?:should|do|can|could|must|would)\s+(?:i|we)\b`;
+const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\s+(?:(?:can|could|should|must|will|would|need\s+to|have\s+to|ought\s+to|want\s+to|going\s+to)\s+)?(?:do|handle)\b(?!\s+you\b)|\b(?:do|does|should|can|could|must|would)\s+(?:i|we)\s+(?:(?:need\s+to|have\s+to)\s+)?(?:do|handle)\b|${CUSTOMER_ACTION_SRC}|\bnext\s+steps?\b`);
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -92,7 +133,7 @@ function isReentryIntent(q) {
 const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
-const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|next\s+step)\b/;
+const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*(?<!\b(?:before|until|till|by|prior\s+to|ahead\s+of)\s+(?:(?:my|the|our|your|next|upcoming)\s+){0,2})\b(?:appointments?|appts?|visits?|next\s+services?)\b|[^?.!]*\b(?:schedul\w*|reschedul\w*)\b)|next\s+step)\b|${CUSTOMER_ACTION_SRC}`);
 // Explicit scheduling/appointment wording. Shared by the treatment guard
 // below (codex #4839 round-4 P2 4109926457: "What are you applying at my
 // next appointment?" must reach the appointment answer, not treatment) and
@@ -385,13 +426,24 @@ function targetsFromApplications(applications = []) {
 }
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
+  // Scoped to the visit's own plan week — a reopened report's generic
+  // "what's next" answer must never promote a historical confirmation/
+  // credit as though it were this visit's task (codex P2 #5033 r7).
+  const aftercare = normalizeLawnAftercare(data.reportV2?.aftercare);
+  const weekPlan = data.reportV2?.water?.weekPlan;
+  const wateringTask = aftercareCustomerTask(aftercare, weekPlan);
+  // While the aftercare restricts watering (review / hold), its task is the
+  // only watering instruction: a stored card or recommendation that changes
+  // watering ("Increase irrigation to twice this week") would contradict it.
+  const restrictsWatering = Boolean(wateringRestrictionAction(aftercare, weekPlan));
+  const answerable = (text) => Boolean(text) && !(restrictsWatering && isWateringRecommendation(text));
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
     const cards = Array.isArray(lawnAssessment.recommendationCards) ? lawnAssessment.recommendationCards : [];
     const cardLines = cards
       .map((card) => cleanText(card.customerCopy || card.title))
-      .filter(Boolean)
+      .filter(answerable)
       .slice(0, 2);
     const watchItems = Array.isArray(lawnAssessment.snapshot.nextWatchItems)
       ? lawnAssessment.snapshot.nextWatchItems.map(cleanText).filter(Boolean)
@@ -401,6 +453,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
       ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
       : '';
     return [
+      wateringTask,
       cardLines.length ? `Recommended next step: ${cardLines[0]}` : '',
       cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).join(' ')}` : '',
       watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
@@ -408,10 +461,12 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
       nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
     ].filter(Boolean).join('\n') || lawnAssessment.snapshot.summary;
   }
-  const primaryMove = dynamic.premiumExperience?.primaryMove?.title
-    || dynamic.aiSummary?.recommendedNextStep?.text
-    || pickRecommendedFinding(Array.isArray(data.findings) ? data.findings : [])?.recommendation;
-  const recommendations = recommendationList(data);
+  const primaryMove = [
+    dynamic.premiumExperience?.primaryMove?.title,
+    dynamic.aiSummary?.recommendedNextStep?.text,
+    pickRecommendedFinding(Array.isArray(data.findings) ? data.findings : [])?.recommendation,
+  ].find(answerable);
+  const recommendations = recommendationList(data).filter(answerable);
   const applications = Array.isArray(data.applications) ? data.applications : [];
   const scope = applicationScope(data);
   const targetText = targetsFromApplications(applications).slice(0, 3).join(', ');
@@ -422,6 +477,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
 
   if (primaryMove || recommendations.length) {
     return [
+      wateringTask,
       primaryMove ? `Priority next step: ${primaryMove}` : `Recommended next step: ${recommendations[0]}`,
       recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).join(' ')}` : '',
       reentry ? `Re-entry: ${reentry}` : '',
@@ -442,7 +498,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
     : '';
 
   return [
-    'No special repair or prep was flagged for you on this report.',
+    wateringTask || 'No special repair or prep was flagged for you on this report.',
     scopeLine,
     reentry ? `Re-entry: ${reentry}` : '',
     rinseLine,
@@ -551,15 +607,21 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // Same guards as the rendered card: a credited watering-in only for a
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
-  const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
-  const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-  // A HOLD plan beside a required watering-in: the answer must carry the
-  // plan's no-extra-runs guidance too — the label instruction alone reads
-  // as permission to resume the normal schedule (codex gh-r45).
-  const holdBeside = !reduced && aftercare.waterInRequired === true
-    && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+  const recordedWaterIn = hasCreditableWaterIn(aftercare, weekPlan);
+  const shown = renderedWeekPlan(aftercare, weekPlan);
+  const reduced = shown && shown !== weekPlan ? shown : null;
+  // Keep the full plan beside uncredited aftercare. A HOLD plan also stays
+  // beside an affirmative water-in so it cannot read as permission to resume.
+  const planBeside = !reduced && weekPlan?.title
+    && (!recordedWaterIn
+      || (weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false))
     ? weekPlan : null;
-  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
+}
+
+function answerConditionalWateringPlan({ weekPlan, aftercare }) {
+  const plan = weekPlan?.title ? [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ') : '';
+  return [aftercare.watering, wateringPlanCondition(aftercare, weekPlan), plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
@@ -572,17 +634,53 @@ function questionRoutingRules({
   data, nextAppointment, weekPlan, aftercare, wateringIntent,
 }) {
   return [
-    // Aftercare/watering answers first — never re-entry or generic copy
-    // under the plan shown on the same page (codex #3565 gh-r29).
+    // Explicit observation intent outranks incidental watering vocabulary
+    // ("What did you find by the sprinkler?") and treatment inflections
+    // ("What did you find while treating?" — codex #4839 P2). A watering
+    // request in the same question ("I found dry spots; can I turn my
+    // sprinklers back on?") is still a watering question, so any unresolved
+    // aftercare task reaches it.
+    {
+      test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q)
+        && !ADVICE_RE.test(q) && !CUSTOMER_ACTION_RE.test(q) && !wateringIntent,
+      topic: 'findings',
+      answer: () => answerFindings({ data }),
+    },
+    // Preserve unverified or restricted aftercare before any watering plan.
+    {
+      // Deliberately unscoped: a direct watering question still states the
+      // recorded note beside the plan even for a historical (visitInPlanWeek
+      // === false) aftercare — report-assistant-honesty.test.js pins this;
+      // wateringPlanCondition below (which IS scoped) already keeps such a
+      // visit from gating the CURRENT plan on an unresolved historical note.
+      test: () => wateringIntent
+        && Boolean(aftercare?.watering)
+        && Boolean(wateringRestrictionAction(aftercare)),
+      topic: 'watering',
+      answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
+    },
     {
       test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
+      topic: 'watering',
       answer: () => answerWateringAftercare({ data, weekPlan, aftercare }),
     },
     {
       test: () => Boolean(weekPlan?.title) && wateringIntent,
+      topic: 'watering',
       answer: () => [weekPlan.title, weekPlan.detail].filter(Boolean).join(' '),
     },
-    { test: (q) => /\b(irrigation)\b/.test(q), answer: () => answerReentry({ data }) },
+    // An observation-qualified action request is a next-step question, ahead
+    // of the findings wording below ("What are the next steps for the
+    // mushrooms you found?"), so it carries any mandatory aftercare task.
+    {
+      test: (q) => OBSERVATION_QUESTION_RE.test(q) && CUSTOMER_ACTION_RE.test(q) && !APPOINTMENT_RE.test(q),
+      topic: 'next_steps',
+      answer: () => answerNextSteps({ data, nextAppointment }),
+    },
+    // With no watering plan or aftercare to quote, an irrigation request gets
+    // the re-entry answer, so it is recorded under that answer's topic. An
+    // incidental noun ("Is the irrigation meter broken?") is not a request.
+    { test: (q) => wateringIntent && /\b(irrigation)\b/.test(q), topic: 'reentry', answer: () => answerReentry({ data }) },
     // AW-06: exact-word matching missed inflections ("treated", "applying",
     // "products", "used") — this is the branch "What was applied outside
     // today?" and "Why was <product> used?" must reach. A question naming
@@ -591,23 +689,22 @@ function questionRoutingRules({
     // codex #4839 round-4 P2 4109926457: explicit appointment wording
     // outranks a treatment inflection ("What are you applying at my next
     // appointment?" answers with the appointment, not today's application).
-    // Observation verbs outrank treatment inflections ("What did you find
-    // while treating?") — codex #4839 P2.
-    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    // Observation verbs already outrank treatment inflections and watering
+    // vocabulary in the first rule above ("What did you find while treating?").
     // Preparation wording outranks appointment nouns — codex #4839 P2.
-    { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => PREP_ADVICE_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit advice outranks treatment inflections ("What do you recommend
     // after spraying?") — codex #4839 P2.
     // Only an actual scheduling request ("Should I schedule my next
     // appointment?") outranks advice — "What do you recommend before my next
     // appointment?" is still advice.
-    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Scheduled returns go to the appointment.
-    { test: (q) => SCHEDULED_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => SCHEDULED_RETURN_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
     // Future treatment timing is scheduling, not today's application.
     {
       test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_VERB_RE.test(q),
-      answer: () => answerNextAppointment({ nextAppointment }),
+      topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }),
     },
     {
       // A pressure/score question with only the generic "used" ("What is the
@@ -617,15 +714,16 @@ function questionRoutingRules({
       test: (q) => TREATMENT_QUESTION_RE.test(q) && (!APPOINTMENT_RE.test(q) || PAST_TENSE_RE.test(q) || /\b(?:last|today'?s?|previous)\b/.test(q))
         && !(TREND_CORE_RE.test(q) && !/\b(?:products?|spray\w*|appl\w*|treat\w*|chemicals?|baits?)\b/.test(q)),
       // "Is the treatment working?" asks about results, not what was applied.
+      topic: (q) => (EFFECTIVENESS_RE.test(q) ? 'results' : 'applied'),
       answer: (q) => (EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data })),
     },
     // Explicit scheduling wording outranks the broad advice phrases ("Should
     // I schedule my next appointment?") and treatment inflections above.
-    { test: (q) => APPOINTMENT_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
-    { test: (q) => ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => APPOINTMENT_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => ADVICE_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit findings wording outranks the broad lawn subjects ("What
     // damage did you find?" on a pest report).
-    { test: (q) => /\b(find|found|finding|findings)\b/.test(q), answer: () => answerFindings({ data }) },
+    { test: (q) => /\b(find|found|finding|findings)\b/.test(q), topic: 'findings', answer: () => answerFindings({ data }) },
     // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
     // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
     // which all read from this same score breakdown in answerTrend. codex
@@ -634,24 +732,31 @@ function questionRoutingRules({
     // "color"/"stress" describe a finding, not a lawn score.
     {
       test: (q) => TREND_CORE_RE.test(q) || (isLawnReport(data) && LAWN_TREND_SUBJECT_RE.test(q)),
-      answer: () => answerTrend({ data }),
+      topic: 'results', answer: () => answerTrend({ data }),
     },
     // "watch" added (AW-06): "What should I watch for next?" is advisory
     // next-steps intent, not an appointment-date lookup — checked before the
     // bare "next" appointment rule below.
     {
       test: (q) => /\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q),
-      answer: () => answerNextSteps({ data, nextAppointment }),
+      topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }),
     },
-    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
     {
       test: (q) => /\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q),
-      answer: () => answerFindings({ data }),
+      topic: 'findings', answer: () => answerFindings({ data }),
     },
   ];
 }
 
-function answerServiceReportQuestion({
+// Every answer a report question can get, by what it answered: the topic
+// recorded on the report_question_asked event (never the question text —
+// the report ask route stores only its length and this key).
+const REPORT_QUESTION_TOPICS = Object.freeze([
+  'reentry', 'watering', 'findings', 'next_steps', 'next_visit', 'applied', 'results', 'summary', 'unrouted',
+]);
+
+function routeServiceReportQuestion({
   question,
   data,
   nextAppointment,
@@ -664,11 +769,11 @@ function answerServiceReportQuestion({
   // see isReentryIntent — so "What was applied outside today?" reaches the
   // treatment answer below instead of being hijacked here.
   if (isReentryIntent(q)) {
-    return answerReentry({ data });
+    return { topic: 'reentry', answer: answerReentry({ data }) };
   }
 
   const weekPlan = data?.reportV2?.water?.weekPlan;
-  const aftercare = data?.reportV2?.aftercare;
+  const aftercare = normalizeLawnAftercare(data?.reportV2?.aftercare);
   // Controller phrasing without the word "water" — "How long should I run
   // each zone?", "how many minutes per zone" — is a watering question too
   // (codex gh-r38); the safety-intent guard above still wins.
@@ -676,22 +781,36 @@ function answerServiceReportQuestion({
   // must fall through to the appointment router (codex gh-r46).
   const zoneRuntimeIntent = !/\btime\s*zones?\b/.test(q)
     && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
-  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
+  // Every watering branch below — the unresolved-aftercare task, the
+  // credited watering-in, the weekly plan — reads this one intent.
+  const wateringIntent = WATERING_WORD_RE.test(q.replace(INCIDENTAL_WATERING_PHRASE_RE, ' ')) || zoneRuntimeIntent;
 
   const rules = questionRoutingRules({
     data, nextAppointment, weekPlan, aftercare, wateringIntent,
   });
   const matched = rules.find((rule) => rule.test(q));
-  if (matched) return matched.answer(q);
+  if (matched) {
+    const topic = typeof matched.topic === 'function' ? matched.topic(q) : matched.topic;
+    return { topic, answer: matched.answer(q) };
+  }
 
   const summary = data?.dynamicContext?.aiSummary;
   if (summary?.headline || summary?.body) {
-    return [summary.headline, summary.body].filter(Boolean).join(' ');
+    return { topic: 'summary', answer: [summary.headline, summary.body].filter(Boolean).join(' ') };
   }
-  return 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.';
+  return {
+    topic: 'unrouted',
+    answer: 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.',
+  };
+}
+
+function answerServiceReportQuestion(args = {}) {
+  return routeServiceReportQuestion(args).answer;
 }
 
 module.exports = {
+  REPORT_QUESTION_TOPICS,
+  routeServiceReportQuestion,
   answerServiceReportQuestion,
   answerAppliedToday,
   answerNextSteps,

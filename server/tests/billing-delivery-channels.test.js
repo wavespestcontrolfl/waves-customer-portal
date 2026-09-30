@@ -53,15 +53,17 @@ describe('billing delivery channel contract', () => {
       { payment_issue_channels: ['sms'] })).toEqual({ payment_issue_channels: ['sms'] });
   });
 
-  test.each(['email', 'push', 'sms'])('payment_receipt=false rejects merged %s receipts', (channel) => {
+  // Owner ruling 2026-09-26: customers cannot turn payment receipts off, so a
+  // legacy payment_receipt=false no longer blocks or narrows a merge.
+  test.each(['email', 'push', 'sms'])('a legacy payment_receipt=false does not block merged %s receipts', (channel) => {
     expect(() => mergedBillingChannelUpdates(
       { payment_receipt: false, payment_receipt_channels: [channel] },
       { payment_receipt_channels: [channel] },
-    )).toThrow('Billing notification choices conflict');
+    )).not.toThrow();
     expect(() => mergedBillingChannelUpdates(
       { payment_receipt_channels: [channel] },
       { payment_receipt: false, payment_receipt_channels: [channel] },
-    )).toThrow('Billing notification choices conflict');
+    )).not.toThrow();
   });
 
   test('receipt Text opt-out still allows selected Email or App after merge', () => {

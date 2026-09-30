@@ -56,6 +56,22 @@ function areaTreatedSqft(sp) {
   return n != null && n > 0 ? Math.round(n) : null;
 }
 
+// An application that puts NITROGEN down: a fertilizer whose catalog name
+// carries an N-P-K with N > 0 (or names urea/ammonium/nitrogen) — the SAME
+// test the blackout rule itself applies (application-limits
+// isNitrogenFertilizer) — a legacy 'lawn' row, or an active ingredient that
+// names nitrogen. A 0-0-25 potassium product is filed as fertilizer but is
+// exactly what the June–September blackout tells technicians to use
+// instead, so it never counts. The category is compared case-insensitively:
+// older history rows copied "Fertilizer" from the catalog before categories
+// were lowercased.
+function isNitrogenApplication(app = {}) {
+  const category = String(app.category || '').trim().toLowerCase();
+  if (category === 'lawn') return true;
+  if (String(app.active_ingredient || '').toLowerCase().includes('nitrogen')) return true;
+  return applicationLimits.isNitrogenFertilizer({ category, product_name: app.product_name });
+}
+
 const ComplianceService = {
 
   /**
@@ -380,9 +396,7 @@ const ComplianceService = {
       } else if (limit.match_type === 'moa_group') {
         matchingApps = apps.filter(a => a.moa_group === limit.match_value);
       } else if (limit.match_type === 'nitrogen') {
-        matchingApps = apps.filter(a =>
-          a.category === 'fertilizer' || a.category === 'lawn' || a.active_ingredient?.toLowerCase().includes('nitrogen')
-        );
+        matchingApps = apps.filter(isNitrogenApplication);
       }
 
       let status = 'ok';
@@ -470,17 +484,17 @@ const ComplianceService = {
       const county = inferCountyFromZipInternal(c.zip) || applicationLimits.getCounty(c);
       const isBlackout = activeBlackouts.some(b => b.jurisdiction === county);
 
-      const nApps = await db('property_application_history')
+      const candidateApps = await db('property_application_history')
         .where({ customer_id: c.id })
         .where('application_date', '>=', yearStart)
-        .whereNull('retracted_at')
+        .whereNull('property_application_history.retracted_at')
         .where(function () {
-          this.where('category', 'fertilizer')
-            .orWhere('category', 'lawn')
-            .orWhere('active_ingredient', 'ilike', '%nitrogen%');
+          this.whereRaw("lower(property_application_history.category) in ('fertilizer', 'lawn')")
+            .orWhere('property_application_history.active_ingredient', 'ilike', '%nitrogen%');
         })
-        .count('* as count')
-        .first();
+        .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
+        .select('property_application_history.category', 'property_application_history.active_ingredient', 'products_catalog.name as product_name');
+      const nitrogenAppsYTD = candidateApps.filter(isNitrogenApplication).length;
 
       statuses.push({
         customerId: c.id,
@@ -490,7 +504,7 @@ const ComplianceService = {
         county: county || 'unknown',
         lawnType: c.lawn_type,
         blackoutActive: isBlackout,
-        nitrogenAppsYTD: parseInt(nApps.count),
+        nitrogenAppsYTD,
       });
     }
 
@@ -602,3 +616,4 @@ module.exports = ComplianceService;
 // Exported for testing — verifies ZIP→county inference is unchanged after the
 // shared-array extraction.
 module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
+module.exports.isNitrogenApplication = isNitrogenApplication;

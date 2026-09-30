@@ -12,7 +12,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
-import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
+import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
 /**
@@ -814,6 +814,12 @@ export default function ProjectReportViewPage() {
             service report's footer line, not the Text Us / Call Us CTA. */}
         <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
           Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page; the closing strip renders on every project report. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: ESTIMATE_TEXT, fontWeight: 700 }}>
+            See every product we use and our safety protocol
+          </a>.
           {' '}This report is provided for your records.
         </footer>
 

@@ -20,6 +20,10 @@ const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
@@ -162,6 +166,17 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, 
   }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
+  // opposed to a genuinely blank row) is this visit's own price, never the
+  // monthly_rate fallback below — same predicate the completion resolver
+  // uses (completionInvoiceAmount). Guarded explicitly by the live gate
+  // (not just the predicate's own internal check) because this function
+  // never consulted the predicate at all before, so it must stay
+  // byte-identical while the gate is off.
+  if (stampedZeroFreeLive()
+    && hasAuthoritativeZeroPrice(scheduledService.estimated_price, scheduledService.primary_line_price)) {
+    return 0;
+  }
   // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
   // for recurring/WaveGuard customers — they must never fall back to the
   // monthly rate, or the completion billing guard would either bill a month's

@@ -887,7 +887,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false, windowUnknown = false } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -896,8 +896,10 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
   // the honest record is an UNKNOWN window for the anchor plus the
   // supersession proof for its siblings — refusing to write anything left
   // every one of those visits on its older window (codex P1 round 15).
+  // windowUnknown is the same honest record for a single notice that quoted
+  // no window (a windowless reschedule: "at a time we'll confirm").
   const known = startAtMs != null && Number.isFinite(Number(startAtMs));
-  if (!visitId || (!known && !seriesMoveId)) return false;
+  if (!visitId || (!known && !seriesMoveId && !windowUnknown)) return false;
   const at = new Date(communicatedAt);
   if (!Number.isFinite(at.getTime())) return false;
   try {
@@ -1667,4 +1669,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, byVisit, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { textActuallyWentOut, enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, byVisit, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };

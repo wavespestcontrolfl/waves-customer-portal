@@ -52,7 +52,7 @@ test('rates exclude legacy, no-answer and unresolved evidence rather than record
     measured(), measured({ measurement_version: null, waves_mentioned: true, waves_cited_urls: [WAVES] }),
     measured({ answer_available: false }), measured({ citations_complete: false }),
   ]);
-  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, mentionRate: 33, citationRate: 33, legacy: 1, noAnswer: 1, unresolved: 1 });
+  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, recommended: 0, unclassified: 1, mentionRate: 33, citationRate: 33, recommendedRate: 0, legacy: 1, noAnswer: 1, unresolved: 1 });
   expect(summarizeObservations([])).toMatchObject({ citationRate: null, mentionRate: null });
 });
 
@@ -95,6 +95,124 @@ test('the frozen benchmark excludes custom queries and does not blend provider m
   expect(dashboard.benchmark.byPlatform).toHaveLength(2);
   expect(dashboard.grid[0].target_cited).toBe(true);
   expect(dashboard.summary.measured).toBe(3);
+});
+
+test('recommended counts a mentioned, positively-sentimented, top-3-ranked answer; missing counts unobserved question x engine pairs', () => {
+  const question2 = benchmark.questions[1].query;
+  const rows = [
+    // Q1 on chatgpt: mentioned + positive + rank 1 -> recommended.
+    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 1 }),
+    // Q1 on gemini: mentioned but negative sentiment -> not recommended.
+    measured({ llm_platform: 'gemini', waves_mentioned: true, sentiment: 'negative', rank_position: 1 }),
+    // Q2 on chatgpt: mentioned + positive but rank 4 (outside top 3) -> not recommended.
+    measured({ query: question2, waves_mentioned: true, sentiment: 'positive', rank_position: 4 }),
+  ];
+  const dashboard = buildDashboard(rows, benchmark.questions);
+  // 40 active questions x 2 configured engines (chatgpt, gemini) = 80 expected
+  // pairs; observed pairs are Q1::chatgpt, Q1::gemini, Q2::chatgpt = 3.
+  expect(dashboard.benchmark).toMatchObject({
+    activeQuestions: 40, measured: 3, recommended: 1, recommendedRate: 33,
+    expectedObservations: 80, missing: 77,
+  });
+  expect(dashboard.summary).toMatchObject({ measured: 3, recommended: 1 });
+});
+
+// Codex r4 on #5123: a mentioned answer whose sentiment was never classified
+// (NULL) is neither recommended nor a miss — it leaves the denominator.
+test('a mentioned answer with unclassified sentiment is excluded from the recommended rate and counted', () => {
+  const result = summarizeObservations([
+    measured({ waves_mentioned: true, sentiment: 'positive', sentiment_status: 'classified', rank_position: 1 }),
+    measured({ waves_mentioned: true, sentiment: null, sentiment_status: 'unclassified', rank_position: 1 }),
+    measured({ sentiment: 'neutral' }),
+  ]);
+  expect(result).toMatchObject({ measured: 3, mentioned: 2, recommended: 1, unclassified: 1, recommendedRate: 50, mentionRate: 67 });
+  expect(summarizeObservations([measured({ waves_mentioned: true, sentiment: null, sentiment_status: 'unclassified' })])).toMatchObject({ unclassified: 1, recommendedRate: null });
+});
+
+// Codex r5 on #5123: rows written before sentiment_status existed stored
+// 'neutral' on any failure, so an old mentioned 'neutral' is not trusted as
+// a verdict; old positive/negative labels were real classifications.
+test('a pre-status mentioned neutral is unclassified; pre-status positive/negative and new classified neutral count', () => {
+  const result = summarizeObservations([
+    measured({ waves_mentioned: true, sentiment: 'neutral', rank_position: 1 }), // old row: ambiguous
+    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 2 }), // old row: real label
+    measured({ waves_mentioned: true, sentiment: 'negative', rank_position: 1 }), // old row: real label
+    measured({ waves_mentioned: true, sentiment: 'neutral', sentiment_status: 'classified', rank_position: 1 }), // new real neutral
+  ]);
+  expect(result).toMatchObject({ measured: 4, recommended: 1, unclassified: 1, recommendedRate: 33 });
+});
+
+// Codex r4 on #5123: a provider's model change leaves two cohort rows on one
+// question x engine pair. The rates keep the cohorts apart; coverage
+// classifies each pair once, by its newest observation, so it partitions the
+// expected pairs.
+test('coverage partitions the expected pairs by each pair\'s newest observation across model cohorts', () => {
+  const [q1, q2] = benchmark.questions.map(q => q.query);
+  const managed = [{ query: q1, active: true }, { query: q2, active: true }];
+  const rows = [ // newest first, as getDashboard orders them
+    measured({ model_version: 'new-search', check_date: '2026-08-02' }),
+    measured({ model_version: 'old-search', check_date: '2026-08-01', answer_available: false }),
+    measured({ llm_platform: 'gemini', check_date: '2026-08-01', citations_complete: false }),
+    measured({ query: q2, llm_platform: 'perplexity' }), // perplexity is not configured
+  ];
+  const dashboard = buildDashboard(rows, managed, { configuredPlatforms: ['chatgpt', 'gemini'] });
+  const { coverage } = dashboard.benchmark;
+  expect(coverage).toEqual({ expected: 4, measured: 1, noAnswer: 0, legacy: 0, unresolved: 1, missing: 2 });
+  expect(coverage.measured + coverage.noAnswer + coverage.legacy + coverage.unresolved + coverage.missing).toBe(coverage.expected);
+  // The rates still count each model cohort separately — never blended.
+  expect(dashboard.benchmark).toMatchObject({ measured: 2, noAnswer: 1, unresolved: 1 });
+});
+
+test('missing never goes negative when every expected pair is observed', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()];
+  const dashboard = buildDashboard(rows, oneQuestion);
+  expect(dashboard.benchmark).toMatchObject({ activeQuestions: 1, expectedObservations: 1, missing: 0 });
+});
+
+test('a deactivated question\'s historical observation cannot shrink the active cohort\'s missing count', () => {
+  const [q1, q2, q3] = benchmark.questions.map(q => q.query);
+  const managed = [{ query: q1, active: true }, { query: q3, active: true }]; // q2 is deactivated
+  const rows = [measured({ query: q2 })]; // only a (deactivated) q2 observation exists
+  const dashboard = buildDashboard(rows, managed);
+  // Both active questions (q1, q3) x 1 engine are unobserved — q2's leftover
+  // observation must not count toward either of them.
+  expect(dashboard.benchmark).toMatchObject({ activeQuestions: 2, expectedObservations: 2, missing: 2 });
+});
+
+// Codex r1 (PR #5123): the engine denominator is the configured provider set.
+// runDaily skips null probes, so an engine that is newly enabled or failing
+// for the whole window has no rows — deriving engines from rows would turn a
+// total outage into apparent full coverage.
+test('a configured engine with no observations in the window counts as missing', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()]; // chatgpt only; perplexity configured but produced nothing
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt', 'perplexity'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 2, missing: 1 });
+  expect(dashboard.summary.configuredPlatforms).toEqual(['chatgpt', 'perplexity']);
+  expect(dashboard.summary.platforms).toEqual(['chatgpt']);
+});
+
+test('a no-answer observation is reported as noAnswer, not missing', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured({ answer_available: false })];
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 1, missing: 0, noAnswer: 1 });
+});
+
+test('a removed engine\'s leftover rows cannot offset a configured engine\'s gap', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured({ llm_platform: 'gemini' })]; // gemini no longer configured
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 1, missing: 1 });
+});
+
+test('an explicitly EMPTY configured provider set stays empty — never repopulated from history', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()]; // historical chatgpt rows exist, but nothing is configured now
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: [] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 0, missing: 0 });
+  expect(dashboard.summary.configuredPlatforms).toEqual([]);
 });
 
 test('Gemini attributes only supported chunks and ignores thinking text', async () => {
@@ -199,6 +317,30 @@ test('probe rotation honors same-day dedupe', async () => {
   });
   await prober.runDaily();
   expect(probe.mock.calls.map(args => args[0]).sort()).toEqual(['newer', 'older']);
+});
+
+// Codex r5 on #5123: each mentioned row records whether its sentiment was
+// actually classified; an unmentioned row carries no status.
+test('runDaily stores sentiment_status: classified, unclassified (NULL sentiment), or none when Waves is absent', async () => {
+  const prober = new LLMMentionProber();
+  jest.spyOn(prober, 'getQueries').mockResolvedValue([{ query: 'q-classified' }, { query: 'q-failed' }, { query: 'q-absent' }]);
+  const answers = {
+    'q-classified': 'Waves Pest Control is a strong local choice.',
+    'q-failed': 'Waves Pest Control also serves this area.',
+    'q-absent': 'Inspect first.',
+  };
+  Object.defineProperty(prober, 'providers', { value: { chatgpt: async question => ({ text: answers[question], model: 'test' }) } });
+  jest.spyOn(prober, 'classifySentiment').mockImplementation(async context => (/strong/.test(context) ? 'positive' : null));
+  const inserted = [];
+  db.mockReturnValue({
+    where: () => ({ select: async () => [] }),
+    insert: row => { inserted.push(row); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
+  });
+  await prober.runDaily();
+  const byQuery = Object.fromEntries(inserted.map(row => [row.query, row]));
+  expect(byQuery['q-classified']).toMatchObject({ sentiment: 'positive', sentiment_status: 'classified' });
+  expect(byQuery['q-failed']).toMatchObject({ sentiment: null, sentiment_status: 'unclassified' });
+  expect(byQuery['q-absent']).toMatchObject({ sentiment: 'neutral', sentiment_status: null });
 });
 
 test('disabling all managed queries does not reactivate fallback probes', async () => {

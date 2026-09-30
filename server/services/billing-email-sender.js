@@ -10,6 +10,7 @@ const logger = require('./logger');
 const { loadBillingEmailContext } = require('./billing-channel-email-authority');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { isDefiniteRejection } = require('./sendgrid-mail');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
 
 // Final refusals keep the reasons the callers already settle on, and a
 // suppression stays a "Suppressed: " refusal. Anything else did not deliver
@@ -92,7 +93,8 @@ async function billingEmailSendOutcome(result, state, log) {
     return refusal;
   }
   if (result.deduped) {
-    return { ok: !!result.sent, deduped: true, blocked: !!result.blocked, reason: result.reason || null };
+    const sentAt = storedEmailAcceptedAt(result.message);
+    return { ok: !!result.sent, deduped: true, sentAt, blocked: !!result.blocked, reason: result.reason || null };
   }
   const message = result.message || {};
   await log({

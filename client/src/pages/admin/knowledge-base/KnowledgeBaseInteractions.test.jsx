@@ -3,6 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { UiSurface } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
 import AuditTab from "./AuditTab";
@@ -168,6 +169,23 @@ describe("Knowledge base interactions", () => {
 
     await act(async () => { finishAudit({ audited: 0, flagged: 0, results: [] }); });
     expect(force).not.toHaveAttribute("aria-busy", "true");
+  });
+
+  it("links a generated entry's finding to the screen where its source is fixed", async () => {
+    adminFetch.mockResolvedValue({
+      audited: 2,
+      flagged: 1,
+      results: [
+        { title: "Sample SC", status: "flag", summary: "Formulation missing.", fixLabel: "Products catalog", fixLink: "/admin/inventory?tab=products" },
+        { title: "Rodent Service Phases", status: "pass", summary: "Solid." },
+      ],
+    });
+    surface(<MemoryRouter><AuditTab showFeedback={vi.fn()} onRefresh={vi.fn()} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Audit stale & low-confidence" }));
+
+    const link = await screen.findByRole("link", { name: "Fix in Products catalog" });
+    expect(link).toHaveAttribute("href", "/admin/inventory?tab=products");
+    expect(screen.getAllByRole("link")).toHaveLength(1);
   });
 
   it("guards create against two synchronous submissions", async () => {

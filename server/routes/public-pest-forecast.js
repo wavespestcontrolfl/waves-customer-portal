@@ -10,6 +10,7 @@
  *   GET /api/public/pest-forecast?location=bradenton-fl   → forecast payload
  *   GET /api/public/pest-forecast?zip=34205               → forecast (zip resolve)
  *   GET /api/public/pest-forecast/locations               → curated location list
+ *   GET /api/public/pest-forecast/nearest                 → visitor's nearest FL city
  *
  * Responses are cached upstream (per-location, until the forecast's
  * freshUntil) and carry CDN-friendly Cache-Control capped at the same instant
@@ -20,7 +21,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
 const { getForecastWithFreshness } = require('../services/pest-forecast/forecast');
-const { listLocations } = require('../services/pest-forecast/locations');
+const { listLocations, nearestFloridaLocation } = require('../services/pest-forecast/locations');
 
 // CORS (Access-Control-Allow-Origin: * + OPTIONS preflight) is handled at the
 // app level in server/index.js, mounted ABOVE the global credentialed cors()
@@ -30,6 +31,23 @@ const { listLocations } = require('../services/pest-forecast/locations');
 router.get('/locations', (_req, res) => {
   res.set('Cache-Control', 'public, max-age=86400');
   res.json({ locations: listLocations() });
+});
+
+// A first-time blog visitor's nearest forecast city, from Cloudflare's
+// visitor-location request headers (an IP-based estimate; zone Managed
+// Transform "Add visitor location headers"). Florida visitors get a curated
+// slug, everyone else null — the widget then keeps its Bradenton default.
+// Only the slug leaves: the location values are never logged or stored.
+// Differs per visitor, so it is never cached anywhere.
+router.get('/nearest', (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  const nearest = nearestFloridaLocation({
+    country: req.get('cf-ipcountry'),
+    regionCode: req.get('cf-region-code'),
+    latitude: req.get('cf-iplatitude'),
+    longitude: req.get('cf-iplongitude'),
+  });
+  res.json({ location: nearest ? nearest.slug : null });
 });
 
 router.get('/', async (req, res) => {

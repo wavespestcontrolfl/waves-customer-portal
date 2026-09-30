@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const WORKFLOW = 'estimate_conversion_sms';
 const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
@@ -196,9 +197,7 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
     };
   }
 
-  const firstName = firstNameFrom(context.customer?.first_name || context.customer?.name);
   const scenarioLabel = classifyServiceSchedulingScenario(text, { activeSchedulingThread, rainReschedule });
-  const offeredWindows = extractOfferedSchedulingWindows(text);
   return {
     intent: rainReschedule ? 'service_reschedule_weather_question' : 'service_scheduling_window_reply',
     confidence: rainReschedule ? 0.82 : 0.86,
@@ -219,13 +218,20 @@ function classifyServiceSchedulingSmsIntent(body, context = {}) {
       'never_create_subscription',
       'never_charge_card',
     ],
-    suggestedMessage: buildServiceSchedulingDraft({ firstName, scenarioLabel, offeredWindows }),
+    // No template draft for this lane. The old fill-in template split the
+    // customer's text at commas and "or" and pasted the pieces back as "the
+    // windows you offered" (a re-service request came back quoting the
+    // customer's own words about roaches and glue traps). The grounded LLM
+    // draft in processInboundSms is the only draft; when it is unavailable
+    // this row carries no draft and a person writes the reply (/agent-draft
+    // may still show an older pending card on the thread, which the send
+    // check refuses as superseded).
+    suggestedMessage: null,
     reasoningSummary: activeSchedulingThread
       ? 'existing customer text answers a recent service scheduling prompt; route as service scheduling, not estimate conversion.'
       : 'existing customer text references service availability or a scheduling window; route as service scheduling, not estimate conversion.',
     metadata: {
       scenarioLabel,
-      offeredWindows,
     },
   };
 }
@@ -344,43 +350,6 @@ function classifyServiceSchedulingScenario(text, { activeSchedulingThread = fals
   if (dayMatches.length > 1 || (dayMatches.length >= 1 && timeMatches.length > 1)) return 'scheduling_multi_window';
   if (activeSchedulingThread && timeMatches.length && !dayMatches.length) return 'scheduling_time_only';
   return 'scheduling_general';
-}
-
-function extractOfferedSchedulingWindows(text) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return [];
-  const pieces = normalized
-    .split(/\s*(?:,|;|\bor\b|\bthen\b|\bif you're not free then\b|\bif you are not free then\b)\s*/i)
-    .map((piece) => piece.trim().replace(/[.?!]+$/g, ''))
-    .filter((piece) => piece.length >= 3)
-    .filter((piece) => SCHEDULE_WINDOW_RE.test(piece) || TIME_AVAILABILITY_RE.test(piece));
-  return [...new Set(pieces)].slice(0, 4);
-}
-
-function buildServiceSchedulingDraft({ firstName, scenarioLabel, offeredWindows = [] } = {}) {
-  const name = firstName || 'there';
-  const windows = offeredWindows.filter(Boolean);
-  if (scenarioLabel === 'rain_reschedule') {
-    return `Hello ${name}! I see the weather concern. I can check the radar and route timing before deciding whether we need to adjust the appointment.`;
-  }
-  if (scenarioLabel === 'scheduling_time_only' && windows.length) {
-    return `Hello ${name}! ${windows[0]} helps. I can check the route timing and confirm whether that window works before locking it in.`;
-  }
-  if (scenarioLabel === 'scheduling_multi_window' && windows.length) {
-    const list = formatWindowList(windows);
-    return `Hello ${name}! Thanks, ${list} gives us good options. I can check the route and confirm the best available window before locking anything in.`;
-  }
-  if (windows.length) {
-    return `Hello ${name}! ${formatWindowList(windows)} should help. I can check the route and confirm the best available option before locking anything in.`;
-  }
-  return `Hello ${name}! That helps. I can check the route and confirm the best available option before locking anything in.`;
-}
-
-function formatWindowList(items = []) {
-  const clean = items.map((item) => String(item || '').trim()).filter(Boolean);
-  if (clean.length <= 1) return clean[0] || 'that window';
-  if (clean.length === 2) return `${clean[0]} or ${clean[1]}`;
-  return `${clean.slice(0, -1).join(', ')}, or ${clean[clean.length - 1]}`;
 }
 
 function hasActiveServiceSchedulingThread(thread = []) {
@@ -609,7 +578,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -621,13 +590,34 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
       inboundMessage: body,
       intent: { intent: decision.intent, confidence: decision.confidence },
       schedulingIntent: hasSchedulingIntent(body),
+      // Real-answers OPEN TIMES (pre-push audit P1): without city,
+      // fetchOpenTimesBlock always returns null even for a matched
+      // customer with a known city, and GATE_SMS_REAL_ANSWERS's rewritten
+      // prompt would tell the model to offer times it was never given.
+      // Same customer row + convention draftShadowReply uses.
+      city: customer?.city || null,
+      // Live, sendable draft: a visit-backed offer may run with no city
+      // (GATE_SMS_OFFERS_SCHEDULER; replay/backfill callers never pass this).
+      liveOpenTimes: true,
+      // Pre-push audit P2: the ALREADY-RESOLVED estimate (resolveEstimateContext,
+      // above this call in processInboundSms) so the offered slots reflect
+      // THAT estimate's own service minutes — the same second argument
+      // check_availability itself passes to getAvailableSlots.
+      // A message linked to the estimate (its short code, or estimate or
+      // quote wording — Codex #5194 r2) is priced with it. An unlinked open
+      // estimate is one of the jobs the reply may be about: the drafter's
+      // service identity step decides between it, the customer's visits
+      // and any service they ask for ("can you add lawn service Tuesday?"
+      // is about lawn, never the estimate — Codex #5194 r3/r4).
+      estimateId: estimate?.id && estimateLinked ? estimate.id : null,
+      openEstimate: estimate?.id && !estimateLinked ? { id: estimate.id, service: estimate.service_interest || null } : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -637,14 +627,41 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
       return null;
     }
-    // House rule: no prices in customer SMS. This lane's draft lands in the
-    // composer's Use Draft button — same delivery boundary as suggest-mode,
-    // same deterministic guard (a priced draft falls back to the template).
-    if (parsed.reply && require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
-      logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
-      return null;
+    // House rule: no UNGROUNDED prices in customer SMS. This lane's draft
+    // lands in the composer's Use Draft button — same delivery boundary as
+    // suggest-mode. With GATE_SMS_REAL_ANSWERS off, this stays the old
+    // blanket hasPriceQuote reject (byte-identical). With the gate on, the
+    // house-voice prompt is instructed to answer billing questions with
+    // exact grounded amounts (Codex r3: rejecting every hasPriceQuote match
+    // here discarded every verified v12 answer in favor of the template) —
+    // reuse the shared authoritative-amount guard so only a FABRICATED or
+    // unverifiable amount falls back; a real balance/invoice/dues figure
+    // passes.
+    if (parsed.reply) {
+      if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context)) {
+          logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
+          return null;
+        }
+      } else if (require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
+        logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
+        return null;
+      }
     }
-    return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
+    // The version THIS draft actually used (pre-push audit P1) — resolved
+    // per call inside generateGroundedDraft off the ACTUAL gate state, not
+    // the static drafter.PROMPT_VERSION (which stays house_voice_v11
+    // forever once GATE_SMS_REAL_ANSWERS goes live). Persisted onto
+    // agent_decisions.prompt_version below (processInboundSms), so this
+    // must record what generated THIS row, not a label that never moves.
+    // Pre-push audit P1: the actions this draft promises (payment link,
+    // booking, escalate for a follow-up) ride to the review card the same
+    // way the suggestion lane's do, so /agent-draft can show them.
+    return {
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
+      factsGeneratedAt: factsGeneratedAt ?? null,
+    };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
     return null;
@@ -683,16 +700,34 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+    // Follow-up #8 (Codex r9): the resolved estimate reaches the drafter's
+    // availability lookup only when the inbound is routed as an ESTIMATE
+    // interaction — a reschedule of an existing visit is priced with that
+    // visit's service, not an unrelated open estimate's service_interest.
+    // Only the estimate's own short code pins it (Codex #5194 r2/r8): "about
+    // my estimate" or "can you quote lawn service?" leaves it one job the
+    // reply may be about, and the drafter's service identity step weighs it
+    // against the customer's visits and the service they name.
+    const estimateLinked = Boolean(shortCode);
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
     // The house no-price rule applies to WHATEVER text lands in the composer
-    // card — the deterministic scheduling templates echo raw inbound text, so
-    // a customer's own "Tuesday for $50 works" would flow into the draft
-    // whenever the LLM path is rejected or unavailable. NULL = the agent
-    // offers no draft; the human writes the reply.
+    // card when the LLM path is rejected or unavailable. The scheduling lane
+    // offers no template at all (it used to echo raw inbound text); the
+    // remaining templates are fixed copy, but the guard stays as a backstop.
+    // NULL = the agent offers no draft; the human writes the reply.
     const reviewDraftText = llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage;
-    const reviewSuggestedMessage = reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
-      ? null
-      : reviewDraftText;
+    // llmDraft is only ever returned once its own reply already cleared the
+    // gate-aware amount guard above (grounded amount allowed on, blanket
+    // hasPriceQuote reject off) — re-running hasPriceQuote here would throw
+    // away that verified v12 answer (Codex r3). The deterministic template
+    // (decision.suggestedMessage) never passed
+    // any guard, so it keeps the unconditional hasPriceQuote reject
+    // regardless of gate state.
+    const reviewSuggestedMessage = llmDraft
+      ? reviewDraftText
+      : (reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
+        ? null
+        : reviewDraftText);
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;
@@ -726,6 +761,23 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         review_draft: llmDraft
           ? { source: 'llm', passes: llmDraft.passes, no_reply: !llmDraft.reply }
           : { source: 'template' },
+        // Codex P2 (open-times send-time recheck): the minimum needed to
+        // revalidate quoted OPEN TIMES windows before this decision is ever
+        // sent — read back by verifyAgentDecisionForSend (admin-communications.js)
+        // at /sms and /schedule-sms time. Absent for template drafts and for
+        // any llm draft whose reply never quoted an open-times window.
+        ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // Same sanitized shape publishSuggestion persists, read back by
+        // GET /agent-draft (pre-push audit P1). Template drafts carry none.
+        ...(llmDraft && Array.isArray(llmDraft.intendedActions)
+          ? { intended_actions: require('./sms-suggest-mode').sanitizeIntendedActions(llmDraft.intendedActions) || [] }
+          : {}),
+        // Codex #5194 P2: the instant the drafter rendered FOLLOW-UP SLA
+        // RIGHT NOW, read back by slaDraftedAt (sms-followup-sla.js) at both
+        // send seams in place of this row's later created_at.
+        ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
+          ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
+          : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
@@ -765,12 +817,11 @@ module.exports = {
   routeEstimateOrCustomerReply,
   _test: {
     buildInputSnapshot,
-    buildServiceSchedulingDraft,
     classifyCustomerSmsTriageIntent,
     classifyServiceSchedulingScenario,
-    extractOfferedSchedulingWindows,
     confidenceLabel,
     hasActiveServiceSchedulingThread,
     resolveRecentSmsThread,
+    generateLlmReviewDraft,
   },
 };

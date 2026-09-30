@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled } = require('./scheduling/policy');
+const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1719,14 +1719,38 @@ function stampSlotRainChances(slots, outlook) {
 }
 
 // Sign the final customer-facing slots (booking-audit round 2): the HMAC
-// binds surface + THIS estimate + date/start/tech/duration + expiry, and the
-// sig+exp ride INSIDE the slotId (`base.exp.sig`) so every client — SlotPicker,
-// EstimateViewPage, the server-rendered estimate page — keeps sending
-// `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
-// so the constraint checks it also runs are defense-in-depth, not the gate.
+// binds surface + THIS estimate + date/start/tech/duration + arrival grace +
+// expiry, and the sig+exp+arrivalGrace ride INSIDE the slotId
+// (`base.exp.arrivalGrace.sig`) so every client — SlotPicker, EstimateViewPage,
+// the server-rendered estimate page — keeps sending `{ slotId }` untouched.
+// reserveSlot refuses any slotId that doesn't verify, so the constraint
+// checks it also runs are defense-in-depth, not the gate.
 // Runs LAST (after dedupe/spread/selection, which key off the base slotId).
+//
+// arrivalGrace (owner ruling 2026-09-28, Codex round 2 on #5314): the exact
+// grace value THIS slot was offered under — never re-derived live at
+// reserve/accept time, which could read a since-changed env value for a
+// hold that was already validly certified under the value at THIS instant.
+// Signed as 0 (no grace) for anything OTHER than a find-time/packCapacityEnds
+// capacity slot (`slot.routeMode === 'arrival_windows'`, stamped by
+// classifySlot from find-time's own route_mode, deleted below before the
+// slot ever reaches the client) — the ONLY generator that runs every
+// candidate through packCapacityEnds' grace-aware buffer waiver and
+// withinArrivalGrace filter before a slot survives to be signed at all
+// (Codex r2 P1 fallback-audit finding on 95e1f84fdb: signing the live grace
+// onto EVERY slot regardless of origin would let a future non-route-mode
+// generator's slot carry a leniency it was never checked against, and
+// reserveSlot's real whole-route re-simulation could then refuse it with
+// 'arrival_grace' at a bound TIGHTER than the 120-minute promise such a
+// slot was always meant to keep — grace must only ever ADD leniency, never
+// subtract it). buildAsapCapacitySlots already self-guards to `[]` under
+// capacity mode today (so this is not a live gap), but signing must not
+// depend on staying correct by accident in a different function.
 function signCustomerFacingSlots(slots, estimateId) {
   return (Array.isArray(slots) ? slots : []).map((slot) => {
+    const arrivalGrace = slot.routeMode === 'arrival_windows'
+      ? selfServeArrivalGraceMinutes({ date: slot.date })
+      : 0;
     const offer = signSlotOffer({
       surface: 'estimate',
       scopeId: String(estimateId),
@@ -1735,8 +1759,9 @@ function signCustomerFacingSlots(slots, estimateId) {
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
       policy: capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined,
+      arrivalGrace,
     });
-    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, { ...offer, arrivalGrace }) };
     delete publicSlot.routeMode;
     return publicSlot;
   });
@@ -2047,6 +2072,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // both ends of a real route gap instead of one earliest-only
       // candidate — see find-time.js's packEnds option.
       packEnds: true,
+      // Self-serve arrival grace (owner ruling 2026-09-28) — the estimate
+      // picker is the ONLY caller that opts in (guard-tested); its commit
+      // path (slot-reservation.js reserveSlot/commitReservation) has no
+      // pre-verify strict travel probe under capacity, unlike /book and the
+      // rebooker, so a grace-kept slot here is actually committable.
+      arrivalGrace: true,
       // The resolved whole-visit credit (above) — find-time must not
       // re-derive it from one service key.
       expectedMinutes: candidateExpectedMinutes,
@@ -2277,6 +2308,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
     packEnds: true,
+    // Same grace opt-in as the live path — this debug view must show what
+    // the customer is actually offered (owner ruling 2026-09-28).
+    arrivalGrace: true,
     serviceKey: serviceProfile.services[0]?.catalogServiceKey || serviceProfile.services[0]?.engineKey || null,
     // Same customer-facing day close as the live path (see above).
     dayEndHour: currentDayEndMinutes() / 60,

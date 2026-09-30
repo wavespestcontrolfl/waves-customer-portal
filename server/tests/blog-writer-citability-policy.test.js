@@ -1,0 +1,60 @@
+/**
+ * Writer-prompt ↔ quality-gate parity for the citability nudges (2026-09-25).
+ *
+ * The four weight-0 supporting-blog checks (citability_*) are only useful if
+ * the writer is told the same rules under the same codes, so the redraft
+ * feedback ("quality nudges (non-blocking): citability_comparison") maps to
+ * an instruction it has already read. This pins that parity and the two
+ * guardrails the section must never loosen: no stat quota, no invented
+ * sources.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+
+const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
+const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
+const { PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+
+describe('writer-agent-config CITABILITY section', () => {
+  const system = WRITER_AGENT_CONFIG.system;
+
+  test('carries a CITABILITY block with every gate nudge code', () => {
+    expect(system).toContain('CITABILITY');
+    const codes = PAGE_TYPE_CHECKS['supporting-blog']
+      .filter((c) => c.name.startsWith('citability_'))
+      .map((c) => `[${c.name.toUpperCase()}]`);
+    expect(codes).toHaveLength(4);
+    for (const code of codes) expect(system).toContain(code);
+    for (const code of codes) expect(REFRESH_AGENT_CONFIG.system).toContain(code);
+  });
+
+  test('scopes the structural citability guidance to blog targets in both agents (Codex r5 P2)', () => {
+    for (const prompt of [system, REFRESH_AGENT_CONFIG.system]) {
+      expect(prompt).toMatch(/CITABILITY \(blog posts only: a new supporting-blog brief, or a refresh\s+whose target is a blog post/);
+      expect(prompt).toMatch(/For city-service pages, customer-question pages, and any other refresh\s+target, skip this whole section/);
+    }
+  });
+
+  test('tells both agents to skip ComparisonTable on legacy .md refresh targets (Codex r7 P2)', () => {
+    for (const prompt of [system, REFRESH_AGENT_CONFIG.system]) {
+      expect(prompt).toMatch(/file_path \(from\s+get_existing_page\) ends in \.md/);
+      expect(prompt).toMatch(/never add a <ComparisonTable>: publishing rejects any MDX\s+component in a \.md file/);
+    }
+  });
+
+  test('keeps the no-quota and no-invented-source guardrails explicit', () => {
+    expect(system).toMatch(/This is not a quota/);
+    expect(system).toMatch(/There is NO quota for statistics/);
+    expect(system).toMatch(/Never invent an\s+agency, publication, program, or business/);
+    expect(system).toMatch(/never a dollar amount/);
+  });
+
+  test('ties the comparison and how-to-choose rules to the ComparisonTable CATEGORY mode', () => {
+    expect(system).toMatch(/render ONE <ComparisonTable> with the decision/);
+    expect(system).toMatch(/CATEGORY mode is the default/);
+    // The named-competitor exception survives (Codex P2, 2026-09-26).
+    expect(system).toMatch(/keeps NAMED-COMPETITOR mode/);
+    expect(system).toMatch(/H2 that reads\s+"How to choose/);
+    expect(system).toMatch(/Do NOT bolt a generic "DIY vs pro" table/);
+  });
+});

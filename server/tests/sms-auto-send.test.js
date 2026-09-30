@@ -183,3 +183,55 @@ describe('server-enforced eligibility — escalation short-circuit (no DB)', () 
     expect(r.blockers.join(' ')).toMatch(/escalation/i);
   });
 });
+
+// The one deliberate DB-touching case in this otherwise pure-logic file:
+// gratitudeCandidatePage's own query-builder shape is the exact surface the
+// pre-push audit's P1 flagged (a v11-only filter would silently stop
+// discovering real-answers-drafted candidates once GATE_SMS_REAL_ANSWERS
+// goes live). Isolated per-test via jest.doMock + resetModules so the rest
+// of the file stays DB-free.
+describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized prompt version (pre-push audit P1)', () => {
+  afterEach(() => {
+    jest.dontMock('../models/db');
+    jest.resetModules();
+  });
+
+  test('the candidate query matches PROMPT_VERSION, the bare REAL_ANSWERS_PROMPT_VERSION, or any +category-suffixed variant of it', () => {
+    // A fixed 2-value whereIn (the round-1 fix) would stop matching the
+    // moment a per-category gate joins the master one, since
+    // currentPromptVersion() then suffixes the version with the active
+    // category tags (pre-push audit P1 round 2) — this must be a LIKE-
+    // prefix match instead, covering every such variant without
+    // enumerating them.
+    jest.resetModules();
+    const whereCalls = [];
+    const orWhereCalls = [];
+    const query = {};
+    for (const method of [
+      'join', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists', 'whereIn',
+    ]) query[method] = jest.fn(() => query);
+    // Knex's own subquery convention (a `this`-bound function, called with
+    // NO positional argument) — the exact shape the real query builder AND
+    // this mock both support; an arrow function relying on a parameter
+    // would silently receive undefined here.
+    query.where = jest.fn((...args) => {
+      whereCalls.push(args);
+      if (typeof args[0] === 'function') args[0].call(query);
+      return query;
+    });
+    query.orWhere = jest.fn((...args) => { orWhereCalls.push(args); return query; });
+    const mockDb = jest.fn(() => query);
+    jest.doMock('../models/db', () => mockDb);
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const fresh = require('../services/sms-auto-send');
+    fresh.gratitudeCandidatePage({ activatedAt: new Date(0), now: new Date(), cursor: null, pageSize: 100 });
+
+    const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
+    expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
+    expect(orWhereCalls).toEqual([
+      ['md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION],
+      ['md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`],
+    ]);
+  });
+});

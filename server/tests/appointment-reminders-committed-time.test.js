@@ -163,3 +163,56 @@ describe('admin-schedule registers spawned and created visits from the committed
     expect(at).toBeGreaterThan(0);
   });
 });
+
+describe('registerAppointment re-arms a confirmation the self-heal sweep claimed first', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    db.raw = jest.fn().mockResolvedValue();
+    db.transaction = jest.fn(async (cb) => cb(db));
+  });
+
+  const selfHealRow = { id: 'rem-sh', scheduled_service_id: 904, source: 'cron_selfheal', confirmation_sent: true, service_type: 'Quarterly Pest Control' };
+  const wire = () => {
+    const b = rowReader(selfHealRow);
+    b.update = jest.fn().mockReturnThis();
+    b.returning = jest.fn(async () => [{ ...selfHealRow, confirmation_sent: false, confirmation_sent_at: null, source: 'admin_ib' }]);
+    return b;
+  };
+
+  test('a booking that asks for its confirmation gets the sweep row re-armed, then left for its deferred send', async () => {
+    const b = wire();
+    const record = await AppointmentReminders.registerAppointment(
+      904, 5, '2099-09-15T09:00', 'Quarterly Pest Control', 'admin_ib',
+      { sendConfirmation: true, deferConfirmation: true },
+    );
+    // One-time: the row takes the booking's source, so no later
+    // registration can re-arm a confirmation that has since gone out.
+    expect(b.update).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null, source: 'admin_ib' });
+    expect(b.where).toHaveBeenCalledWith({
+      id: 'rem-sh', source: 'cron_selfheal', confirmation_sent: true,
+      suppressed_by_sibling: false, windows_preclosed: false, cancelled: false,
+    });
+    expect(record).toMatchObject({ id: 'rem-sh', confirmation_sent: false });
+  });
+
+  test('a sibling-suppressed sweep row is never re-armed — the slot\'s primary row owns that confirmation', async () => {
+    const b = rowReader({ ...selfHealRow, suppressed_by_sibling: true });
+    b.update = jest.fn().mockReturnThis();
+    const record = await AppointmentReminders.registerAppointment(
+      904, 5, '2099-09-15T09:00', 'Quarterly Pest Control', 'admin_ib',
+      { sendConfirmation: true, deferConfirmation: true },
+    );
+    expect(b.update).not.toHaveBeenCalled();
+    expect(record).toMatchObject({ id: 'rem-sh', confirmation_sent: true });
+  });
+
+  test('a registration that does not ask for a confirmation leaves the sweep row alone', async () => {
+    const b = wire();
+    const record = await AppointmentReminders.registerAppointment(
+      904, 5, '2099-09-15T09:00', 'Quarterly Pest Control', 'recurring_auto_extend', { sendConfirmation: false },
+    );
+    expect(b.update).not.toHaveBeenCalled();
+    expect(record).toMatchObject({ id: 'rem-sh', confirmation_sent: true });
+  });
+});

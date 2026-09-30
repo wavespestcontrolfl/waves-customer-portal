@@ -10,6 +10,9 @@ const { reconcileLawnReport, applyLawnReportReconciliation } = require('../servi
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { buildServiceReportV1SmsVars } = require('../services/service-report/delivery');
 const { frozenSmsSummary } = require('../services/service-report/lawn-report-write-gate');
+const {
+  hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, resolveLawnAftercare,
+} = require('../services/service-report/lawn-aftercare');
 
 const APPLICATIONS = [
   { product: { name: 'SedgeHammer Plus', active_ingredient: 'halosulfuron-methyl', category: 'herbicide', reentry_summary: 'Follow the product label before re-entering treated areas.' }, targets: ['weeds'] },
@@ -64,6 +67,361 @@ const CASES = {
     recommendations: {},
   }),
 };
+
+describe('unconfirmed product directions take precedence throughout the report', () => {
+  test.each([
+    ['healthy', null, 'balanced'],
+    ['deficit', null, 'deficit'],
+    ['deficit', { title: 'Run two cycles this week', action: 'run' }, 'deficit'],
+    ['overWatered', { title: 'Skip watering this week', action: 'hold' }, 'surplus'],
+    ['balancedDryCoverage', null, 'balanced'],
+    ['balancedDryCoverage', null, 'unknown'],
+  ])('%s with plan %j and %s water retains one confirmation task', (scenario, weekPlan, waterStatus) => {
+    const assessment = CASES[scenario];
+    const waterContext = { ...assessment.waterContext, weekPlan };
+    waterContext.irrigationAdvice = { ...waterContext.irrigationAdvice, status: waterStatus };
+    const report = buildLawnReportV2({
+      lawnAssessment: { ...assessment, waterContext },
+      applications: [{ product: { irrigation_required: true } }],
+    });
+    expect(report.aftercare.needsReview).toBe(true);
+    expect(report.snapshot.customerAction).toMatch(/Confirm the product watering directions/);
+    expect(report.snapshot.customerAction.match(/Confirm the product watering directions/g)).toHaveLength(1);
+    if (scenario === 'balancedDryCoverage') expect(report.snapshot.customerAction).toContain('Check sprinkler coverage');
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.snapshot.rootCause).toBeNull();
+    expect(report.water.explanation).toMatch(/Confirm the product watering directions/);
+    expect(report.snapshot.customerAction).not.toMatch(/follow it as written|a bit more even watering|Add a little irrigation time/);
+    const reconciled = reconcileLawnReport({
+      data: { lawnAssessment: { ...assessment, recommendations: { nextVisitFocus: 'Recheck the recorded lawn areas next visit.' } } },
+      reportV2: report,
+    });
+    expect(reconciled.followUp.customerAction).toMatch(/Confirm the product watering directions/);
+    expect(reconciled.followUp.customerAction).not.toMatch(/No action is needed/);
+  });
+});
+
+// PR #5033: each review finding, one row. Every surface reads the verdict
+// lawn-aftercare.js resolves, so a row failing names the surface that drifted.
+describe('aftercare verdict fixture table (PR #5033 findings)', () => {
+  const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
+  const { buildAftercare } = require('../services/service-report/lawn-report-v2');
+  const { applyLawnReportNarrative } = require('../services/service-report/lawn-report-narrative');
+  const CONFIRM = /Confirm the product watering directions/;
+  const PLAN_CONDITION = /before applying the plan below/;
+  const RUN_PLAN = { title: 'This week: run once', detail: 'One turf cycle before Friday.', action: 'run' };
+  const reviewAftercare = () => buildAftercare([{ product: { irrigation_required: true } }]);
+  const render = (scenario, weekPlan = null) => buildLawnReportV2({
+    lawnAssessment: { ...CASES[scenario], waterContext: { ...CASES[scenario].waterContext, weekPlan } },
+    applications: [{ product: { irrigation_required: true } }],
+  });
+  const ask = (question, water = { weekPlan: null }) => answerServiceReportQuestion({
+    question,
+    data: {
+      pressureIndex: null,
+      dynamicContext: {},
+      findings: [{ title: 'Mushrooms observed', detail: 'Near the sprinkler heads.' }],
+      reportV2: { aftercare: reviewAftercare(), water },
+    },
+  });
+
+  const creditedAftercare = () => ({
+    watering: 'Water in with 0.25 inches today.', waterInRequired: true, neutral: false,
+    creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
+  });
+  const CREDIT_PLAN = {
+    ...RUN_PLAN, visitInPlanWeek: true, prescribesRun: true,
+    afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' },
+  };
+  // A report built as the product-note classifier will build it: the visit's
+  // aftercare resolves to a verified, credited water-in.
+  const renderWithCredit = (scenario, weekPlan = null) => {
+    let report;
+    jest.isolateModules(() => {
+      const real = jest.requireActual('../services/service-report/lawn-aftercare');
+      jest.doMock('../services/service-report/lawn-aftercare', () => ({
+        ...real,
+        normalizeLawnAftercare: (a, opts) => (a && a.waterInRequired === true && !a.evidenceSource ? creditedAftercare() : real.normalizeLawnAftercare(a, opts)),
+      }));
+      report = require('../services/service-report/lawn-report-v2').buildLawnReportV2({
+        lawnAssessment: { ...CASES[scenario], waterContext: { ...CASES[scenario].waterContext, weekPlan } },
+        applications: [{ product: { irrigation_required: true } }],
+      });
+    });
+    return report;
+  };
+  const neutralAftercare = () => ({ watering: 'No special watering is needed because of today’s treatment.', neutral: true });
+  // Drought-signal report (the only one the overlay rewrites) whose model
+  // output swaps every customer action for generic drought advice.
+  const GENERIC_DROUGHT = 'Add extra irrigation every day this week to beat the drought.';
+  const rewrite = async (aftercare, observations) => {
+    const report = buildLawnReportV2({ lawnAssessment: CASES.deficit });
+    report.aftercare = aftercare;
+    const before = JSON.parse(JSON.stringify(report));
+    const callModel = jest.fn(async () => ({ ok: true, json: {
+      customerAction: GENERIC_DROUGHT,
+      insights: report.insights.map(() => ({ customerAction: GENERIC_DROUGHT })),
+    } }));
+    return { before, callModel, out: await applyLawnReportNarrative(report, { observations }, { callModel }) };
+  };
+  const keepsCreditedActions = ({ before, callModel, out }) => {
+    expect(before.water.droughtSignal).toBe(true);
+    expect(callModel).toHaveBeenCalledTimes(1);
+    expect(out.aftercare).toEqual(creditedAftercare());
+    expect(out.snapshot.customerAction).toBeTruthy();
+    expect(out.snapshot.customerAction).toBe(before.snapshot.customerAction);
+    expect(out.insights.map((i) => i.customerAction)).toEqual(before.insights.map((i) => i.customerAction));
+    expect(JSON.stringify(out)).not.toContain(GENERIC_DROUGHT);
+  };
+
+  test.each([
+    ['P1 hero watering advice waits on aftercare review', () => render('deficit', RUN_PLAN), (report) => {
+      expect(report.snapshot.rootCause).toBeNull();
+      expect(report.water.explanation).toMatch(CONFIRM);
+    }],
+    ['P1 no-action claim is suppressed while water-in needs review', () => render('healthy'), (report) => {
+      expect(report.snapshot.noActionNeeded).toBe(false);
+      expect(report.snapshot.customerAction).toMatch(CONFIRM);
+    }],
+    ['P1 generic next-step answer includes the confirmation', () => ask('What should I do next?'), (answer) => {
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+    }],
+    ['P2 observation-qualified action request routes to next steps', () => ask('What are the next steps for the mushrooms you found?'), (answer) => {
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+      expect(answer).not.toMatch(/Mushrooms observed/);
+    }],
+    ['P2 need-to-water question outranks findings wording', () => ask('I observed dry spots; do I need to water?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } }), (answer) => {
+      expect(answer).toMatch(PLAN_CONDITION);
+      expect(answer).toContain(RUN_PLAN.title);
+      expect(answer).not.toMatch(/Mushrooms observed/);
+    }],
+    ['P2 past-visit aftercare does not gate the current plan', () => ask('Should I water this week?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: false } }), (answer) => {
+      expect(answer).toContain(RUN_PLAN.title);
+      expect(answer).not.toMatch(PLAN_CONDITION);
+    }],
+    ['P2 a recorded amount or timing is never denied', () => buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Apply 0.25 inches within 24 hours.' } }]), (aftercare) => {
+      expect(aftercare.watering).toContain('Apply 0.25 inches within 24 hours.');
+      expect(aftercare.watering).not.toMatch(/not recorded/);
+      expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
+    }],
+    ['P1 narrative rewrite keeps credited aftercare customer actions', () => rewrite(creditedAftercare(), 'Credited aftercare rewrite.'), keepsCreditedActions],
+    ['P1 narrative cache never serves another aftercare verdict', async () => {
+      await rewrite(neutralAftercare(), 'Shared narrative facts.');
+      return rewrite(creditedAftercare(), 'Shared narrative facts.');
+    }, keepsCreditedActions],
+    ['P2 passive watering question outranks findings wording', () => ['I found mushrooms; should the lawn be watered?', 'I found mushrooms; may I water?', 'You found dry spots; does it need water?']
+      .map((question) => ask(question, { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } })), (answers) => {
+      for (const answer of answers) {
+        expect(answer).toMatch(PLAN_CONDITION);
+        expect(answer).toContain(RUN_PLAN.title);
+        expect(answer).not.toMatch(/Mushrooms observed/);
+      }
+    }],
+    // Round 4 (PR #5033 findings on fb3f59b606).
+    ['P1 no recorded instruction never earns water-in credit', () => resolveLawnAftercare({ ...creditedAftercare(), watering: '  ' }), (state) => {
+      expect(state).toEqual({ verdict: 'review', customerTask: expect.stringMatching(CONFIRM), restricts: true, credited: false });
+      expect(renderedWeekPlan({ ...creditedAftercare(), watering: '' }, CREDIT_PLAN)).toBe(CREDIT_PLAN);
+    }],
+    ['P1 a credited water-in stays the customer task on hero, follow-up and next steps', () => {
+      const report = renderWithCredit('healthy');
+      const followUp = reconcileLawnReport({
+        data: { lawnAssessment: { ...CASES.healthy, recommendations: { nextVisitFocus: 'Recheck the lawn next visit.' } } },
+        reportV2: report,
+      }).followUp;
+      const nextSteps = answerServiceReportQuestion({ question: 'What should I do next?', data: { pressureIndex: null, dynamicContext: {}, reportV2: { aftercare: creditedAftercare() } } });
+      return { report, followUp, nextSteps };
+    }, ({ report, followUp, nextSteps }) => {
+      expect(report.aftercare.creditableWaterIn).toBe(true);
+      expect(report.snapshot.customerAction).toContain(creditedAftercare().watering);
+      expect(report.snapshot.noActionNeeded).toBe(false);
+      expect(followUp.customerAction).toBe(creditedAftercare().watering);
+      expect(nextSteps).toMatch(/^Water in with 0\.25 inches today\./);
+    }],
+    ['P1 an unsupported evidence source fails closed into review', () => normalizeLawnAftercare({ watering: 'Water in today.', evidenceSource: 'irrigation_requirement', creditableWaterIn: true, needsReview: false }), (aftercare) => {
+      expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false, evidenceSource: 'legacy_unverified_instruction' });
+      expect(aftercare.watering).toContain('Water in today.');
+      expect(resolveLawnAftercare(aftercare)).toMatchObject({ verdict: 'review', restricts: true });
+    }],
+    ['P1 sprinkler activation requests are watering requests', () => ['Can I turn my sprinklers back on?', 'Should I switch irrigation back on?', 'May I start the sprinkler system?', 'Can I start watering?']
+      .map((question) => ask(question, { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } })), (answers) => {
+      for (const answer of answers) {
+        expect(answer).toMatch(PLAN_CONDITION);
+        expect(answer).toContain(RUN_PLAN.title);
+      }
+    }],
+    ['P1 narrative water copy is grounded in the rendered reduced plan', async () => {
+      const report = buildLawnReportV2({ lawnAssessment: { ...CASES.deficit, waterContext: { ...CASES.deficit.waterContext, weekPlan: CREDIT_PLAN } } });
+      report.aftercare = creditedAftercare();
+      const before = JSON.parse(JSON.stringify(report));
+      const callModel = jest.fn(async () => ({ ok: true, json: { water: 'Rain this week was low, so water once on Wednesday for the week.' } }));
+      return { before, callModel, out: await applyLawnReportNarrative(report, { observations: 'Reduced plan grounding.' }, { callModel }) };
+    }, ({ before, callModel, out }) => {
+      const facts = callModel.mock.calls[0][0].text;
+      expect(facts).toContain(CREDIT_PLAN.afterTreatment.title);
+      expect(facts).not.toContain(CREDIT_PLAN.detail);
+      expect(out.water.explanation).toBe(before.water.explanation);
+    }],
+    ['P2 credited water explanation is never rewritten against the product note', async () => {
+      const report = buildLawnReportV2({ lawnAssessment: CASES.deficit });
+      report.aftercare = creditedAftercare();
+      const before = JSON.parse(JSON.stringify(report));
+      const callModel = jest.fn(async () => ({ ok: true, json: { water: 'Rain this week was low, so skip the product watering-in and delay irrigation until next week.' } }));
+      return { before, out: await applyLawnReportNarrative(report, { observations: 'Credited no-plan water copy.' }, { callModel }) };
+    }, ({ before, out }) => {
+      expect(out.water.explanation).toBe(before.water.explanation);
+      expect(out.water.explanation).not.toMatch(/skip the product watering-in/);
+    }],
+    // Round 10 (PR #5033, codex P2 on lawn-report-v2.js:653): a reopened/
+    // history-carried report's own attached weekPlan can mark
+    // visitInPlanWeek: false — that visit's aftercare (review confirmation
+    // or a credited instruction) must stay a historical Aftercare-section
+    // note, never this week's hero action, noActionNeeded flip, or SMS line.
+    ['P2 a past-visit review confirmation does not become this visit’s current action', () => render('healthy', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      expect(report.aftercare.needsReview).toBe(true);
+      expect(String(report.snapshot.customerAction || '')).not.toMatch(CONFIRM);
+      expect(String(report.smsSummary || '')).not.toMatch(CONFIRM);
+    }],
+    ['P2 a past-visit credited water-in does not become this visit’s current action', () => renderWithCredit('healthy', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      expect(report.aftercare.creditableWaterIn).toBe(true);
+      expect(String(report.snapshot.customerAction || '')).not.toContain(creditedAftercare().watering);
+      expect(String(report.smsSummary || '')).not.toContain(creditedAftercare().watering);
+    }],
+    // Round 7 (PR #5033 findings on ca8bbecf87): the hero-action fix above
+    // (round 10) only guarded the direct-task promotion. Three more surfaces
+    // still read the unscoped verdict: the water card's own action, the
+    // follow-up card, and the assistant's generic "what's next" answer.
+    ['P2 a past-visit review confirmation is stripped from the water card action', () => render('deficit', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      const waterCard = report.insights.find((c) => c.category === 'water');
+      expect(waterCard).toBeDefined();
+      expect(waterCard.customerAction).not.toMatch(CONFIRM);
+      expect(report.water.explanation).not.toMatch(CONFIRM);
+    }],
+    ['P2 a past-visit review confirmation is stripped from the follow-up card', () => {
+      const report = render('deficit', { ...RUN_PLAN, visitInPlanWeek: false });
+      return reconcileLawnReport({
+        data: { lawnAssessment: { ...CASES.deficit, recommendations: { nextVisitFocus: 'Recheck the recorded lawn areas next visit.' } } },
+        reportV2: report,
+      }).followUp;
+    }, (followUp) => {
+      expect(followUp).toBeTruthy();
+      expect(followUp.customerAction).not.toMatch(CONFIRM);
+      expect(followUp.customerAction).toMatch(/No action is needed/);
+    }],
+    ['P2 a past-visit review confirmation is stripped from assistant next steps', () => ask('What should I do next?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: false } }), (answer) => {
+      expect(answer).not.toMatch(CONFIRM);
+    }],
+    // Round 8 (PR #5033 on lawn-report-v2.js:654): a credited watering-in
+    // instruction can itself read like drought advice ("Water in
+    // drought-stressed areas…"); promoting it into snapshot.customerAction
+    // must not expose it to the SAME rain-vs-drought rewrite that reconciles
+    // the surrounding prose, or the hero disagrees with the Aftercare
+    // section's own (untouched) instruction.
+    ['P1 drought reconciliation preserves a credited instruction word for word', () => {
+      const report = renderWithCredit('deficit');
+      report.aftercare = { ...creditedAftercare(), watering: 'Water in drought-stressed areas with 0.25 inches today.' };
+      report.water = { ...report.water, droughtSignal: true, rainInches: 3, targetInches: 1.25 };
+      report.snapshot = {
+        ...report.snapshot,
+        customerAction: `${report.aftercare.watering} Damage could be drought-related in the other zones.`,
+      };
+      const fix = reconcileLawnReport({ data: { lawnAssessment: CASES.deficit }, reportV2: report });
+      return { report, fix };
+    }, ({ report, fix }) => {
+      expect(fix).toBeTruthy();
+      // The credited instruction survives verbatim…
+      expect(fix.snapshot.customerAction).toContain(report.aftercare.watering);
+      // …while the surrounding drought hypothesis is still reconciled.
+      expect(fix.snapshot.customerAction).toMatch(/sprinkler-coverage-related/);
+    }],
+    // Round 8 (PR #5033 on lawn-report-v2.js:657): a credited water-in on a
+    // surplus/damp water card phrases the SAME task generically ("Water in
+    // today's application as directed…") rather than quoting the recorded
+    // instruction — the literal `includes` check missed that semantic
+    // duplicate and the hero repeated the watering command twice.
+    ['P2 a credited water-in is not repeated when the water card already states it', () => renderWithCredit('overWatered'), (report) => {
+      const waterCard = report.insights.find((c) => c.category === 'water');
+      expect(waterCard).toBeDefined();
+      expect(waterCard.customerAction).toMatch(/^Water in today’s application as directed/);
+      // The hero shows the card's own wording once — not the card's generic
+      // phrasing AND the recorded instruction concatenated.
+      expect(report.snapshot.customerAction).toBe(waterCard.customerAction);
+      expect(report.snapshot.customerAction).not.toContain(creditedAftercare().watering);
+    }],
+    // PR #5033 round 5 routing findings, moved to this follow-up.
+    ['P1 an activation request outranks observation wording', () => ['I found dry spots; can I turn my sprinklers back on?', 'You spotted fungus; should I switch irrigation back on?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) {
+        expect(answer).toMatch(CONFIRM);
+        expect(answer).not.toMatch(/Mushrooms observed/);
+      }
+    }],
+    ['P1 watering-adjustment requests carry the aftercare task', () => ['Should I adjust my irrigation?', 'Can I reduce irrigation?', 'Can I increase watering?', 'Should I turn off the sprinklers?', 'Should I cut back on watering?', 'Can I water less this week?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) expect(answer).toMatch(CONFIRM);
+    }],
+    // PR #5258 round 1.
+    ['P1 system-subject activation requests carry the aftercare task', () => ['Can the sprinklers be turned back on?', 'Should the irrigation stay off?', 'When can watering be resumed?', 'Can my sprinklers run tonight?', 'Can the irrigation be reduced?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) expect(answer).toMatch(CONFIRM);
+    }],
+    // PR #5258 round 2: any question naming watering is a watering question
+    // unless the word is incidental.
+    ['P1 keep / leave watering requests carry the aftercare task', () => ['Can I leave the sprinklers off?', 'Is it okay to leave irrigation off?', 'Am I supposed to keep the sprinklers off?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) expect(answer).toMatch(CONFIRM);
+    }],
+  ])('%s', async (_finding, run, check) => check(await run()));
+});
+
+// The aftercare state table (lawn-aftercare.js). Every combination of the
+// inputs resolves by the documented first-match rules, the outputs follow
+// from the verdict, and normalization never changes the verdict.
+describe('aftercare state table covers every input combination', () => {
+  const INSTRUCTION = 'Water in with 0.25 inches today.';
+  const combos = [];
+  for (const neutral of [false, true]) {
+    for (const watering of [INSTRUCTION, '', undefined]) {
+      for (const evidenceSource of ['product_instruction', 'legacy_unverified_instruction', 'irrigation_requirement', undefined]) {
+        for (const needsReview of [false, true]) {
+          for (const wateringHold of [false, true]) {
+            for (const creditableWaterIn of [false, true]) {
+              combos.push({ neutral, watering, evidenceSource, needsReview, wateringHold, creditableWaterIn });
+            }
+          }
+        }
+      }
+    }
+  }
+  // The documented table, first match wins.
+  const expected = (a) => {
+    const claimed = a.needsReview || a.wateringHold || a.creditableWaterIn || Boolean(a.evidenceSource);
+    if (a.neutral && !claimed) return 'none';
+    if (!a.watering) return claimed ? 'review' : 'none';
+    if (a.evidenceSource !== 'product_instruction' || a.needsReview) return 'review';
+    if (a.wateringHold) return 'hold';
+    if (a.creditableWaterIn) return 'credit';
+    return 'none';
+  };
+
+  test(`${combos.length} combinations resolve by the table`, () => {
+    expect(combos).toHaveLength(192);
+    for (const input of combos) {
+      const verdict = expected(input);
+      const state = resolveLawnAftercare(input);
+      expect({ input, verdict: state.verdict }).toEqual({ input, verdict });
+      expect(state.credited).toBe(verdict === 'credit');
+      expect(state.restricts).toBe(verdict === 'review' || verdict === 'hold');
+      expect(Boolean(state.customerTask)).toBe(verdict !== 'none');
+      if (verdict === 'credit') expect(state.customerTask).toBe(INSTRUCTION);
+      // Credit requires a recorded, verified, unrestricted instruction.
+      if (state.credited) expect(input).toMatchObject({ watering: INSTRUCTION, evidenceSource: 'product_instruction', needsReview: false, wateringHold: false });
+      const normalized = normalizeLawnAftercare(input);
+      expect({ input, verdict: resolveLawnAftercare(normalized).verdict }).toEqual({ input, verdict });
+      expect(resolveLawnAftercare(normalizeLawnAftercare(normalized)).verdict).toBe(verdict);
+      expect(hasCreditableWaterIn(normalized)).toBe(verdict === 'credit');
+    }
+  });
+});
 
 describe('structured moisture evidence owns sprinkler advice', () => {
   const render = (overrides = {}) => buildLawnReportV2({

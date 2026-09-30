@@ -1,4 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+jest.mock('../models/db', () => jest.fn(() => {
+  throw new Error('Warranty projection tests must not access a database');
+}));
 
 // One-time service copy pack (owner directive 2026-09-03): every one-time
 // row reads like a recurring plan card — outcome line, "what the visit
@@ -14,10 +17,13 @@ const {
   oneTimeOnlyIntelligenceCopy,
   ONE_TIME_SERVICE_COPY,
 } = require('../services/estimate-one-time-copy');
+const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   attachPublicPricingContract,
+  buildPricingBundle,
   buildWaveGuardIntelligencePayload,
+  estimateMakesNoGuaranteeClaim,
   renderPage,
 } = require('../routes/estimate-public');
 
@@ -234,9 +240,15 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(pyrethroid.outcome).toBe('A continuous liquid barrier around your foundation — a treated zone termites will not cross.');
     // Unknown chemistry fails closed to the barrier wording.
     expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).outcome).toBe(pyrethroid.outcome);
-    // The warranty-period inspection bullet rides a sold warranty tier only.
-    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent', warrantyTier: 'one_year_retreat' }).includes).toContain('Annual inspection during the warranty period');
-    expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching', chemistryType: 'repellent_pyrethroid', warrantyTier: 'none' }).includes).not.toContain('Annual inspection during the warranty period');
+    // The warranty-period inspection bullet rides canonical sold-scope
+    // metadata only: normalized tier plus the pricer's warranty slice.
+    const purchased = { service: 'trenching', label: 'Termite Trenching', chemistryType: 'non_repellent', warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    expect(hasPurchasedTrenchingWarranty(purchased)).toBe(true);
+    expect(resolveOneTimeServiceCopy(purchased).includes).toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy(purchased, { noGuaranteeClaims: true }).includes).toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ ...purchased, warrantyAdder: null }).includes).not.toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ ...purchased, warrantyTier: 'none' }).includes).not.toContain('Annual inspection during the warranty period');
+    expect(resolveOneTimeServiceCopy({ service: 'one_time_pest', label: 'Annual inspection during the warranty period', warrantyTier: 'one_year_retreat', warrantyAdder: 100 }, { noGuaranteeClaims: true }).includes).not.toContain('Annual inspection during the warranty period');
     expect(resolveOneTimeServiceCopy({ service: 'trenching', label: 'Termite Trenching' }).includes).not.toContain('Annual inspection during the warranty period');
   });
 
@@ -279,6 +291,62 @@ describe('resolveOneTimeServiceCopy', () => {
     ];
     const copies = resolveOneTimeRowCopies(rows);
     expect(copies.map((c) => (c ? c.key : null))).toEqual(['rodent_exclusion', null, null, 'wasp', 'one_time_lawn', 'one_time_lawn']);
+  });
+
+  test('one saved row never lends its sold scope to a sibling job (Codex #4982)', () => {
+    // Front and rear wasp jobs; only the front one bought nest removal, and
+    // the saved result holds just that row. It enriches its own job only.
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 300, items: [
+        { service: 'wasp', label: 'Front wasp nest treatment', amount: 150 },
+        { service: 'wasp', label: 'Rear wasp nest treatment', amount: 150 },
+      ] } },
+      {},
+      { result: { oneTime: { specItems: [
+        { service: 'wasp', name: 'Front wasp nest treatment', price: 150, pricingBreakdown: { subtotal: 150, removal: 75 } },
+      ] } } },
+    );
+    const [front, rear] = contract.oneTimeBreakdown.items;
+    expect(front.copy.includes).toContain(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
+    expect(rear.copy.includes).toContain(ONE_TIME_SERVICE_COPY.wasp.noRemovalBullet);
+    expect(rear.copy.includes).not.toContain(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
+  });
+
+  // Owner ruling 2026-09-27: each service carries its own terms. The page
+  // data stamps every row with termsScope, and its copy follows it.
+  test('a residential bed bug job keeps its own guarantee beside a rodent job', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 1550, items: [
+        { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true },
+        { service: 'rodent_exclusion', label: 'Full Rodent Exclusion', amount: 900 },
+      ] } },
+      {},
+      { result: { oneTime: { items: [
+        { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true },
+        { service: 'rodent_exclusion', name: 'Full Rodent Exclusion', price: 900 },
+      ] } } },
+    );
+    const [bedBug, rodent] = contract.oneTimeBreakdown.items;
+    expect(bedBug.termsScope).toBe('all');
+    expect(bedBug.copy.assurance).toBe('Written 30-day guarantee on the treated areas');
+    expect(rodent.termsScope).toBe('satisfaction');
+    expect(rodent.copy.terms).toBe('Pay on service day.');
+  });
+
+  test('every one-time row of an estimate with commercial work keeps only its satisfaction clause', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 650, items: [
+        { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true },
+      ] } },
+      {},
+      { result: { oneTime: { items: [
+        { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true, isCommercial: true },
+      ] } } },
+    );
+    const [bedBug] = contract.oneTimeBreakdown.items;
+    expect(bedBug.termsScope).toBe('satisfaction');
+    expect(bedBug.copy.assurance).toBeNull();
+    expect(`${bedBug.copy.includes.join(' ')} ${bedBug.copy.terms}`).not.toMatch(/guarantee|contract/i);
   });
 
   test('one-time lawn copy is neutral across turf basis and treatment type (fertilization is not described as a corrective treatment)', () => {
@@ -521,6 +589,482 @@ describe('Waves AI intelligence payload', () => {
 });
 
 describe('server-rendered page', () => {
+  const noGuaranteeRows = [
+    roach2,
+    { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 350 },
+    { service: 'wasp', label: 'Wasp Nest Treatment', amount: 350 },
+  ];
+  const authoredTermiteData = (row) => ({
+    result: { recurring: { services: [] }, oneTime: { items: [{ ...row, price: row.amount, name: row.label }] } },
+    proposal: {
+      enabled: true,
+      buildings: [{ name: 'Building A', lineItems: [{ description: 'Termite Trenching', frequency: 'one_time', unitPrice: 180 }] }],
+    },
+  });
+
+  test.each(noGuaranteeRows)('authored termite work neutralizes the legacy hero and expanded $service row copy', (row) => {
+    const estData = authoredTermiteData(row);
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(estData);
+    expect(noGuaranteeClaims).toBe(true);
+    const html = renderPage('mixed-termite-token', {
+      id: 'estimate-termite-stale-copy', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: 350, quoteRequired: false, noGuaranteeClaims,
+    }, estData);
+    expect(html).toContain('Review the itemized service scope and terms below. Licensed &amp; insured.');
+    expect(html).toContain('class="onetime-includes-wrap"');
+    expect(html).toContain('Pay on service day.');
+    expect(html).not.toMatch(/100% guaranteed|30-day callback|retreat guaranteed|backed by the Waves Guarantee|no contract/i);
+    if (row.service === 'german_roach') {
+      expect(html).toContain('Two targeted visits that treat the roaches');
+      expect(html).toContain('Visit 2 about 10–14 days later');
+    }
+  });
+
+  test.each(noGuaranteeRows)('the public contract neutralizes $service copy from the same authored-termite decision', (row) => {
+    const estData = authoredTermiteData(row);
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: row.amount, items: [row] } },
+      { status: 'sent' }, estData,
+    );
+    const copy = contract.oneTimeBreakdown.items[0].copy;
+    expect(copy.assurance).toBeNull();
+    expect(copy.includes.length).toBeGreaterThan(0);
+    expect(copy.terms).toContain('Pay on service day.');
+    expect(JSON.stringify(copy)).not.toMatch(/guarantee|callback|re[- ]?treat|risk[- ]?free|no contract/i);
+    expect(contract.oneTimeServiceCopy.hero.sub).toBe('Review the itemized service scope and terms below. Licensed & insured.');
+    // Resolving an estimate-wide exception must not mutate the shared pack.
+    expect(resolveOneTimeServiceCopy(row).assurance).toMatch(/guarantee|callback/i);
+  });
+
+  test('a priced trenching warranty survives the termite policy on the public payload and legacy page', () => {
+    const row = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      chemistryType: 'non_repellent', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117,
+      detail: 'Lifetime guarantee with free retreatments',
+    };
+    const estData = authoredTermiteData(row);
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(true);
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: row.amount, items: [row] } },
+      { status: 'sent' }, estData,
+    );
+    const contractRow = contract.oneTimeBreakdown.items[0];
+    expect(contractRow).toMatchObject({
+      service: 'trenching', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117, detail: null,
+    });
+    expect(contractRow.copy.includes).toContain('Annual inspection during the warranty period');
+    expect(JSON.stringify(contractRow.copy)).not.toMatch(/lifetime guarantee|callbacks?|free retreat|risk[- ]?free/i);
+
+    const html = renderPage('purchased-warranty-token', {
+      id: 'estimate-purchased-warranty', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: row.amount, quoteRequired: false, noGuaranteeClaims: true,
+    }, estData);
+    expect(html).toContain('Annual inspection during the warranty period');
+    expect(html).not.toMatch(/Lifetime guarantee|free retreatments/i);
+  });
+
+  test.each([
+    ['included tier', { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, {}, true],
+    ['paid tier', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, {}, true],
+    ['saved paid tier over a different frozen purchase',
+      { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, true],
+    ['explicit pricing removal over saved purchase', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, false],
+    ['missing purchase evidence', { warrantyTier: 'three_year_repair_retreat' }, {}, false],
+  ])('aligned trenching rows retain the same verified warranty evidence as their resolved copy: %s', (_label, rawScope, projectedScope, purchased) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, ...rawScope };
+    const projected = { service: row.service, label: row.label, amount: row.amount, detail: 'Measured treatment path', ...projectedScope };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true }, authoredTermiteData(row),
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(returned.amount).toBe(900);
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(purchased);
+    expect(returned.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+    if (purchased) expect(returned).toMatchObject(rawScope);
+  });
+
+  test('projected rows union raw warranty proof from the saved engine container', () => {
+    const projected = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat',
+    };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [projected] } },
+      engineResult: { oneTime: { items: [{ ...projected, price: 900, warrantyAdder: 0 }] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(returned).toMatchObject({ warrantyTier: 'one_year_retreat', warrantyAdder: 0 });
+    expect(returned.copy.includes).toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['none', 'three_year_repair_retreat', false],
+    ['one_year_retreat', 'none', true],
+  ])('fresh engine warranty %s survives public projection and assistant fallback over saved %s', async (
+    warrantyTier, savedTier, purchased,
+  ) => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const { buildEstimateAssistantContext, answerEstimateQuestionFallback } = require('../services/estimate-assistant');
+    const engineInputs = { services: { trenching: {
+      measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier,
+    } } };
+    const generated = generateEstimate(engineInputs);
+    const generatedRow = generated.lineItems.find((row) => row.service === 'trenching');
+    expect(generatedRow.warrantyTier).toBe(warrantyTier);
+    const estData = { engineInputs, result: { oneTime: { items: [{
+      service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: savedTier, warrantyAdder: savedTier === 'none' ? 0 : 117,
+    }] } } };
+    const estimate = { id: `live-trenching-warranty-${warrantyTier}`, status: 'draft', show_one_time_option: true,
+      onetime_total: generatedRow.price, estimate_data: estData };
+    for (const cached of [false, true]) {
+      const bundle = await buildPricingBundle(estimate, { monthlyBilled: true });
+      expect(bundle.source).toBe('engine_invocation');
+      if (cached) expect(bundle.cacheHit).toBe(true);
+      const item = bundle.oneTimeBreakdown.items.find((row) => row.service === 'trenching');
+      expect(item.warrantyTier).toBe(warrantyTier);
+      expect(hasPurchasedTrenchingWarranty(item)).toBe(purchased);
+      expect(item.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+      const context = buildEstimateAssistantContext({ estimate, estData, pricingBundle: bundle,
+        noGuaranteeClaims: true, serviceMode: 'one_time' });
+      expect(context.oneTime.items[0].purchasedTerms)
+        .toEqual(purchased ? ['Annual inspection during the warranty period'] : []);
+      expect(answerEstimateQuestionFallback('What warranty did I buy?', context)
+        .includes('Annual inspection during the warranty period')).toBe(purchased);
+    }
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['null', { warrantyTier: null, warrantyAdder: null }],
+  ])('an explicit live %s warranty decision suppresses raw engine purchase proof', (_name, liveDecision) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900 };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [{ ...row, ...liveDecision }] } },
+      engineResult: { oneTime: { items: [{ ...row, price: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [{ ...row, ...liveDecision }] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['key alias removal', { key: 'trenching', label: 'Termite Trenching', price: 900,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+    ['tier conflict', { service: 'trenching', label: 'Termite Trenching', price: 900,
+      warrantyTier: 'three_year_repair_retreat' }],
+    ['renamed removal', { service: 'trenching', label: 'Updated Trenching Scope', price: 900,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+    ['zero-price removal', { service: 'trenching', label: 'Updated Trenching Scope', price: 0,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+  ])('fully populated frozen projection honors current %s over older raw warranty proof', (_name, current) => {
+    const projected = { service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const raw = { service: 'trenching', label: 'Termite Trenching', price: 900,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {
+        result: { recurring: { services: [] }, oneTime: { items: [current] } },
+        engineResult: { oneTime: { items: [raw] } },
+      },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['oneTime with empty root', (row) => ({ specItems: [], oneTime: { specItems: [row] } })],
+    ['oneTime with unrelated root', (row) => ({ specItems: [{ service: 'one_time_pest', price: 250 }], oneTime: { specItems: [row] } })],
+    ['nested oneTime with empty root', (row) => ({ specItems: [], results: { oneTime: { specItems: [row] } } })],
+  ])('projected copy retains current nested warranty removal with %s specItems', (_name, currentShape) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, price: 900 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [row] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {
+        result: currentShape({ ...row, warrantyTier: 'none', warrantyAdder: 0 }),
+        engineResult: { oneTime: { items: [{ ...row, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+      },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test('ambiguous duplicate raw rows cannot lend projected warranty proof', () => {
+    const projected = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat',
+    };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [projected] } },
+      engineResult: { oneTime: { items: [
+        { ...projected, price: 900, warrantyAdder: 0 },
+        { ...projected, price: 900, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      ] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['top-level specItems', (rows) => ({ specItems: rows })],
+    ['oneTime specItems', (rows) => ({ oneTime: { specItems: rows } })],
+    ['nested oneTime specItems', (rows) => ({ results: { oneTime: { specItems: rows } } })],
+    ['lineItems', (rows) => ({ lineItems: rows })],
+  ])('conflicting duplicate warranty rows in %s fail closed before normalization', (_name, engineShape) => {
+    const projected = { service: 'trenching', label: 'Termite Trenching', amount: 900 };
+    const conflicts = [
+      { ...projected, price: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { ...projected, price: 900, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+    ];
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {
+        result: { recurring: { services: [] }, oneTime: { items: [projected] } },
+        engineResult: engineShape(conflicts),
+      },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test('a projected row with no saved counterpart stays warranty-neutral', () => {
+    const projected = { service: 'trenching', label: 'Unmatched Trenching', amount: 900 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: [
+        { service: 'one_time_pest', label: 'General Pest Treatment', amount: 250 },
+      ] } } },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['unmatched label', 'Front foundation', 'Rear foundation', 900, false],
+    ['same label and price', 'Other foundation', 'Other foundation', 900, false],
+    ['same label with distinct prices', 'Other foundation', 'Other foundation', 600, true],
+  ])('a projected row borrows warranty scope only from an unambiguous raw row: %s', (_case, firstLabel, secondLabel, secondAmount, purchased) => {
+    const rows = [
+      { service: 'trenching', label: firstLabel, amount: 900, detail: 'Front treatment area', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      { service: 'trenching', label: secondLabel, amount: secondAmount, detail: 'Rear treatment area', warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [{ service: 'trenching', label: 'Other foundation', amount: 900 }] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: rows } } },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(purchased);
+    expect(returned.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+  });
+
+  test.each([
+    ['same-price singleton purchase',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front Trenching', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+      ['Front Trenching']],
+    ['renamed distinct-price jobs',
+      [
+        { service: 'trenching', label: 'Current north scope', amount: 900 },
+        { service: 'trenching', label: 'Current south scope', amount: 700 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy front scope', amount: 900,
+          warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 700,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current north scope']],
+    ['same-price paid and unpaid jobs',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Front Trenching']],
+    ['changed-price label reservation',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 700 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front Trenching', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+      ['Front Trenching']],
+    ['equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
+    ['reversed equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
+  ])('public projection assigns warranty evidence to one distinct trenching job: %s', (
+    _name, projectedRows, savedRows, purchasedLabels,
+  ) => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: projectedRows.reduce((sum, row) => sum + row.amount, 0), items: projectedRows } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: savedRows } } },
+    );
+    expect(contract.oneTimeBreakdown.items
+      .filter((row) => row.copy.includes.includes('Annual inspection during the warranty period'))
+      .map((row) => row.label)).toEqual(purchasedLabels);
+  });
+
+  test('live engine rows keep their own warranty decision when display identities are identical', () => {
+    const rows = [
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    const contract = attachPublicPricingContract(
+      { source: 'engine_invocation', snapshotHit: false, frequencies: [],
+        oneTimeBreakdown: { total: 1800, items: rows } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      {},
+    );
+    expect(contract.oneTimeBreakdown.items.map((row) => (
+      row.copy.includes.includes('Annual inspection during the warranty period')
+    ))).toEqual([true, false]);
+  });
+
+  test.each([
+    ['purchased', { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, true],
+    ['removed', { warrantyTier: 'none', warrantyAdder: 0 }, false],
+    ['unknown', { warrantyTier: 'one_year_retreat' }, false],
+  ])('engine-only SSR trenching keeps exact warranty evidence: %s', (_name, warranty, purchased) => {
+    const html = renderPage('engine-only-warranty-token', {
+      id: 'estimate-engine-only-warranty', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: 900, quoteRequired: false, noGuaranteeClaims: true,
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'trenching', label: 'Termite Trenching', price: 900, ...warranty }],
+        oneTime: { total: 900 },
+      },
+    });
+    expect(html.includes('Annual inspection during the warranty period')).toBe(purchased);
+  });
+
+  test.each([
+    ['Rain re-spray guarantee', false],
+    ['Rain re-spray within 48 hours', false],
+    ['Free re-service between visits', false],
+    ['One-year warranty', false],
+    ['Exterior landscaping treatment', true],
+  ])('the public contract and legacy renderer apply the estimate policy to raw detail: %s', (detail, retained) => {
+    const row = { service: 'one_time_mosquito', label: 'One-Time Mosquito Treatment', amount: 275, detail };
+    for (const noGuaranteeClaims of [true, false]) {
+      const estData = authoredTermiteData(row);
+      estData.proposal.enabled = noGuaranteeClaims;
+      const estimate = {
+        id: 'estimate-raw-detail', status: 'sent', customerName: 'Test Customer',
+        address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+        onetimeTotal: 275, quoteRequired: false, noGuaranteeClaims,
+      };
+      const contract = attachPublicPricingContract(
+        { frequencies: [], oneTimeBreakdown: { total: 275, items: [row] } },
+        estimate, estData,
+      );
+      const html = renderPage('raw-detail-token', estimate, estData);
+      const shouldRetain = !noGuaranteeClaims || retained;
+      expect(contract.oneTimeBreakdown.items[0].detail).toBe(shouldRetain ? detail : null);
+      expect(html.includes(`<div class="sub">${detail}</div>`)).toBe(shouldRetain);
+      expect(html).toContain('$275');
+      expect(row.detail).toBe(detail);
+    }
+  });
+
+  test.each([true, false])('the legacy one-time toggle honors the estimate guarantee decision (%s)', (noGuaranteeClaims) => {
+    const html = renderPage('termite-toggle-token', {
+      status: 'sent', customerName: 'Test Customer', address: '1 Main St, Bradenton, FL 34203',
+      monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze',
+      showOneTimeOption: true, oneTimeChoicePrice: 350, noGuaranteeClaims,
+    }, { result: {
+      recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50 }] },
+      oneTime: { items: [], specItems: [] }, results: { pest: { apps: 4 } },
+    } });
+    expect(html).toContain('data-mode-only="one_time"');
+    const callback = 'Includes a 30-day callback period if pests return after this visit.';
+    if (noGuaranteeClaims) expect(html).not.toContain(callback);
+    else expect(html).toContain(callback);
+  });
+
+  test.each([
+    ['pest_control', 'Pest Control', 'Re-service between visits at no charge'],
+    ['lawn_care', 'Lawn Care', 'Between-visit service calls at no charge'],
+  ])('legacy %s perks keep ordinary benefits without a free-service promise on mixed termite work', (service, name, freeServiceClaim) => {
+    for (const noGuaranteeClaims of [true, false]) {
+      const html = renderPage('mixed-termite-perks', {
+        status: 'sent', customerName: 'Test Customer', address: '1 Main St, Bradenton, FL 34203',
+        monthlyTotal: 50, annualTotal: 600, onetimeTotal: 0, tier: 'Bronze', noGuaranteeClaims,
+      }, { result: {
+        recurring: { services: [{ service, name, mo: 50 }] },
+        oneTime: { items: [], specItems: [] }, results: { pest: { apps: 4 } },
+      } });
+      const perks = html.match(/<ul class="perks-list">([\s\S]*?)<\/ul>/)[1];
+      expect(perks.includes(freeServiceClaim)).toBe(!noGuaranteeClaims);
+      expect(perks).toContain('Locked-in pricing for 12 months');
+      if (noGuaranteeClaims) expect(html).not.toContain('protection between treatments');
+    }
+  });
+
   test('one-time-only roach estimate renders the outcome, the visit bullets, the terms, and the roach chips', () => {
     const est = {
       id: 'estimate-roach-ssr',

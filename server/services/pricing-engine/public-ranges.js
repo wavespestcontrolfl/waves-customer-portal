@@ -75,6 +75,18 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
   };
 }
 
+// Rows the feed publishes only while a purchase gate is on, keyed to that
+// gate. The ONE list: the sweep below reads it, the cache signature reads
+// it, and consumers that freeze keys into content (the blog price card)
+// exclude these rows, since a frozen key outlives a gate flip.
+const PURCHASE_GATED_ROWS = Object.freeze({
+  termite_station_rental: 'GATE_TERMITE_STATION_RENTAL',
+  termite_bond: 'GATE_TERMITE_BOND_OPTION',
+});
+function purchaseGateOn(key) {
+  return ['1', 'true', 'on'].includes(String(process.env[PURCHASE_GATED_ROWS[key]] || '').toLowerCase());
+}
+
 function buildRows() {
   const rows = [];
   const errors = [];
@@ -354,8 +366,7 @@ function buildRows() {
   // estimate flow's GATE_TERMITE_STATION_RENTAL is the choke point
   // (predicate mirrors estimate-engine.js). Rental rides the install price,
   // so the sweep derives per-application rental from the bait installs.
-  const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
-  if (rentalGateOn) {
+  if (purchaseGateOn('termite_station_rental')) {
     add('termite_station_rental', () => rangeRow({
       key: 'termite_station_rental',
       name: 'Termite Bait Station Rental',
@@ -372,8 +383,7 @@ function buildRows() {
   // flow's GATE_TERMITE_BOND_OPTION is the single choke point (predicate
   // mirrors estimate-engine.js), and advertising an option the exact-quote
   // flow refuses to offer would mislead agents.
-  const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
-  if (bondGateOn) {
+  if (purchaseGateOn('termite_bond')) {
     add('termite_bond', () => rangeRow({
       key: 'termite_bond',
       name: 'Termite Bond',
@@ -705,7 +715,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return `${getLastSyncAt()}|${process.env.GATE_TERMITE_BOND_OPTION || ''}|${process.env.GATE_TERMITE_STATION_RENTAL || ''}`;
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || '')].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {
@@ -752,4 +762,4 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   return cached;
 }
 
-module.exports = { computePublicPricingRanges, lastComputeUnstable, _internals: { buildRows } };
+module.exports = { computePublicPricingRanges, lastComputeUnstable, PURCHASE_GATED_ROWS, _internals: { buildRows } };

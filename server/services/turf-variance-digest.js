@@ -160,7 +160,21 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
     `<p><a href="${esc(adminPortalUrl())}/admin/estimates">Open the estimates ledger</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, avgDeltaPct: Math.round(avg * 100) / 100, samples: samples.length, direction };
+  const avgDeltaPct = Math.round(avg * 100) / 100;
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`. Magnitude only (no +/- sign —
+  // `direction` above already says which way it's off).
+  const headline = `Estimates — turf estimates running ${direction}`;
+  const summary = `Avg ${Math.abs(avgDeltaPct)}% off across ${samples.length} services.`;
+  // Item identity: EVERY sample in the window (the email shows only the
+  // top outliers, but the average moves with the whole set).
+  // Plus the drift direction: nightly rescans can flip the verdict (low <->
+  // high) on the same samples, which reverses the action — that must ring.
+  const itemKeys = [
+    `direction:${direction}`,
+    ...samples.map((row) => row.service_record_id).filter((id) => id != null).map(String),
+  ];
+  return { subject, text, html, avgDeltaPct, samples: samples.length, direction, headline, summary, itemKeys };
 }
 
 async function runTurfVarianceDigest(opts = {}) {
@@ -208,6 +222,10 @@ async function runTurfVarianceDigest(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
+      count: composed.samples,
+      itemKeys: composed.itemKeys,
       link: '/admin/estimates',
       sendEmail: () => mailer.sendOne({
         to,

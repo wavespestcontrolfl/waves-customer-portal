@@ -128,13 +128,86 @@ jest.setTimeout(30000);
   });
 
   describe('not_a_prospect', () => {
-    test.each(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner', 'job_applicant'])(
+    test.each(['spam_solicitation', 'robocall', 'wrong_number', 'job_applicant'])(
       'a call with this number the V2 extraction called %s',
       async (nature) => {
         await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: nature }) });
         expect(await hold()).toBe('not_a_prospect');
       },
     );
+
+    describe('vendor_or_partner (owner ruling 2026-09-28: holds only alongside a spam flag)', () => {
+      test('never: a vendor/partner call V2 cleared of spam — a genuine property manager or referral partner', async () => {
+        await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }) });
+        expect(await hold()).toBeNull();
+      });
+
+      test('a vendor/partner call ALSO flagged spam (compat is_spam true) still holds', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('a vendor/partner call ALSO flagged spam (legacy call_type spam) still holds', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }),
+          ai_extraction: '{"call_type": "spam"}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('never: V2 explicitly cleared it (spam_verdict) even though a shadow-era legacy label still says spam', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false } }),
+          ai_extraction: '{"is_spam": true, "call_type": "spam"}',
+        });
+        expect(await hold()).toBeNull();
+      });
+
+      test('a V2 spam verdict that did NOT clear it leaves the legacy spam flag holding', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: true } }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('V2 judged the vendor/partner call spam: holds even with the legacy flag false (shadow-mode row)', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: true } }),
+          ai_extraction: '{"is_spam": false}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('the V2 clear only exempts vendor/partner: a cleared customer-nature call with a legacy spam flag still holds', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'new_customer_inquiry', spam_verdict: { is_spam_content: false } }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('the call setting the text off is read by id here too', async () => {
+        const id = randomUUID();
+        await priorCall({
+          id, from_phone: '+19415550188',
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBeNull(); // by number alone it is invisible
+        expect(await hold({ originCallId: id })).toBe('not_a_prospect');
+      });
+    });
 
     test('never: a schema-failed V2 extraction\'s nature (it can persist a wrong call_nature)', async () => {
       await priorCall({ v2_extraction_status: 'schema_failed', ai_extraction_enriched: JSON.stringify({ call_nature: 'wrong_number' }) });

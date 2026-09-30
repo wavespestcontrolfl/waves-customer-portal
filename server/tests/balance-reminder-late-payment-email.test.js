@@ -912,6 +912,46 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(2);
   });
 
+  test.each([false, true])('legacy prior Email keeps its ledger time with %s fresh Text', async (freshText) => {
+    const emailAt = new Date('2026-05-18T12:00:00Z');
+    const textAt = new Date('2026-05-19T12:00:00Z');
+    const { interactions } = armHappyPath();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    if (!freshText) sendCustomerMessage.mockResolvedValueOnce({ sent: true, deduped: true,
+      deliveryOutcome: 'accepted', sentAt: textAt });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { provider_message_id: 'sg-old', sent_at: emailAt } });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }), { occurredAt: emailAt });
+    if (freshText) {
+      expect(interactions.some((q) => q.insert.mock.calls.length)).toBe(true);
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('sent 1 reminders'));
+    } else {
+      expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'led-sms' }), { occurredAt: textAt });
+      expect(interactions.every((q) => q.insert.mock.calls.length === 0)).toBe(true);
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('sent 0 reminders'));
+    }
+  });
+
+  test.each([false, true])('explicit Email-only %s settlement counts only a fresh reminder', async (fresh) => {
+    const emailAt = new Date('2026-05-18T12:00:00Z');
+    const { interactions } = armHappyPath({ billing_channels: ['email'] });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: !fresh,
+      message: { provider_message_id: 'sg-1', sent_at: emailAt } });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(ContactLedger.markDelivered).toHaveBeenCalled();
+    expect(interactions.some((q) => q.insert.mock.calls.length)).toBe(fresh);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining(`sent ${fresh ? 1 : 0} reminders`));
+  });
+
   test('a blocked SMS stamps its ledger row send_failed and skips the email sidecar', async () => {
     armHappyPath();
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'quiet_hours' });

@@ -438,7 +438,7 @@ const STORED_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhi
 function storedTurnStats(stats = []) {
   const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
     'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount', 'segmentGeneration'];
-  const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut'];
+  const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut', 'modelSwitched'];
   return stats.map((turn) => ({
     ...Object.fromEntries(numeric.map((key) => [key, Number.isFinite(turn[key]) ? turn[key] : null])),
     ...Object.fromEntries(flags.map((key) => [key, turn[key] === true])),

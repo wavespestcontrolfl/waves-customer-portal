@@ -11,7 +11,7 @@ const displayArea = value => Number(value).toLocaleString('en-US');
 /** Shared property editor. The parent owns this visit's coverage and product
  * actuals; only an explicit reviewed-area save writes the property. */
 export default function PropertyServiceAreas({ serviceId, serviceLine, customerId, propertyId,
-  visitArea, onVisitAreaChange, onMeasurements, refreshToken, disabled = false }) {
+  visitArea, onVisitAreaChange, onMeasurements, onUnavailable, refreshToken, disabled = false }) {
   const endpoint = serviceId ? `/admin/schedule/${serviceId}/property-areas`
     : customerId && propertyId ? `/admin/customers/${customerId}/properties/${propertyId}/areas` : null;
   const activeKey = SERVICE_AREAS[serviceLine];
@@ -23,8 +23,8 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
   const [message, setMessage] = useState('');
   const [stale, setStale] = useState(false);
   const epoch = useRef(0);
-  const current = useRef({ endpoint, onMeasurements });
-  current.current = { endpoint, onMeasurements };
+  const current = useRef({ endpoint, onMeasurements, onUnavailable });
+  current.current = { endpoint, onMeasurements, onUnavailable };
 
   useEffect(() => {
     const generation = ++epoch.current;
@@ -33,10 +33,13 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     current.current.onMeasurements?.(null);
     if (!endpoint || (serviceId && !activeKey)) return undefined;
     adminFetch(endpoint).then(result => {
-      if (!alive || generation !== epoch.current || !result?.enabled) return;
+      if (!alive || generation !== epoch.current) return;
+      if (!result?.enabled) { current.current.onUnavailable?.(); return; }
       setData(result); current.current.onMeasurements?.(result);
     }).catch(err => {
-      if (alive && err.status !== 404) setError('Property areas are unavailable. Enter the area treated for this visit.');
+      if (!alive || generation !== epoch.current) return;
+      current.current.onUnavailable?.();
+      if (err.status !== 404) setError('Property areas are unavailable. Enter the area treated for this visit.');
     });
     return () => { alive = false; };
   }, [endpoint, serviceId, activeKey, refreshToken]);

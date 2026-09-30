@@ -59,7 +59,7 @@ const literal = (name) => {
 
 describe('frozen enum literals == services/seo/link-registry.js', () => {
   test.each([
-    ['LINK_SOURCES'], ['AGENT_STATES'], ['DISCOVERY_PRIORITIES'], ['ACQUISITION_TYPES'], ['EXPECTED_REL'], ['EXPECTED_INDEXABILITY'],
+    ['AGENT_STATES'], ['DISCOVERY_PRIORITIES'], ['ACQUISITION_TYPES'], ['EXPECTED_REL'], ['EXPECTED_INDEXABILITY'],
     ['EXPECTED_PERSISTENCE'], ['RENEWAL_PERIODS'], ['PATH_LINK_TYPES'], ['ATTEMPT_PROVIDERS'], ['ATTEMPT_ACTIONS'], ['ATTEMPT_OUTCOMES'],
     ['AUTHORITY_DIMENSIONS'],
   ])('%s', (name) => {
@@ -69,6 +69,11 @@ describe('frozen enum literals == services/seo/link-registry.js', () => {
     const step1 = literal('AUTHORITY_LEVELS');
     expect([...R.AUTHORITY_LEVELS].slice(0, step1.length)).toEqual(step1);
     // the latest CHECK owner pins the FULL enum: backlink-authority-policy-step4a-migration.test.js
+  });
+  test('LINK_SOURCES: the step-1 literal is a prefix of the service enum (20260928050000 appended ai_citation and swapped the CHECK)', () => {
+    const step1 = literal('LINK_SOURCES');
+    expect([...R.LINK_SOURCES].slice(0, step1.length)).toEqual(step1);
+    // the latest CHECK owner pins the FULL enum: link-source-ai-citation-migration.test.js
   });
   test('the migration requires no service enum (literals are frozen at migration time)', () => {
     expect(src).not.toMatch(/require\(['"][^'"]*link-registry['"]\)/);

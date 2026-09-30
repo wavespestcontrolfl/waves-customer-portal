@@ -11,6 +11,10 @@ const {
   missingAssessmentFallbacks,
   curationEnabled,
   buildCurationCandidateQuery,
+  CURATION_FRESHNESS_EXCLUSIONS,
+  CURATION_RUN_BUDGET_MS,
+  curationDeadline,
+  batchFitsDeadline,
 } = require('../services/event-curation');
 const { FACTOR_MAXES, REJECTION_CODES } = require('../services/event-scoring');
 
@@ -116,6 +120,24 @@ describe('event-curation buildCurationPrompt', () => {
     expect(long).toContain('line1 line2');
     expect(long).not.toContain('x'.repeat(301));
   });
+
+  // 2026-09-27 calibration (owner ruling): the model was underscoring
+  // source_confidence/accessibility/audience_fit for exactly the events the
+  // rubric wants approved — an official venue publishing its own event, a
+  // major touring headliner or pro sports match, an event that just doesn't
+  // state a price or age range. Anchors added to stop that without touching
+  // the hard-policy rejection codes or penalty flags.
+  test('calibrates source_confidence, accessibility, audience_fit and specialness so the model stops underscoring official/major events', () => {
+    expect(prompt).toMatch(/source_confidence.*9.?[-–]10|9-10.*source_confidence/is);
+    expect(prompt).toContain('official venue');
+    expect(prompt).toMatch(/museum|performing-arts|tourism board|municipal calendar/);
+    expect(prompt).toMatch(/do NOT zero or heavily penalize/i);
+    expect(prompt).toMatch(/touring headliner|pro sports/i);
+    expect(prompt).toMatch(/do not dock audience_fit/i);
+    // The hard-policy codes and penalty flags are untouched by the calibration pass.
+    for (const code of REJECTION_CODES) expect(prompt).toContain(code);
+    expect(prompt).toContain('generic_class');
+  });
 });
 
 describe('event-curation parseCurationResponse', () => {
@@ -177,6 +199,14 @@ describe('event-curation candidate query recurrence gate', () => {
     expect(sql).toContain('is_free');
     expect(sql).toContain('family_friendly');
   });
+
+  // Codex P1, 2026-09-27: "Revalidate content before initial auto-approval"
+  // — applyDecision pins its write to this exact updated_at, so the
+  // candidate fetch must select it.
+  test('selects updated_at for applyDecision\'s version-pinned approval/assessment write', () => {
+    const { sql } = buildCurationCandidateQuery(25).toSQL();
+    expect(sql).toMatch(/"e"\."updated_at"/);
+  });
 });
 
 describe('event-curation kill switch', () => {
@@ -193,5 +223,35 @@ describe('event-curation kill switch', () => {
     expect(curationEnabled()).toBe(false);
     process.env.EVENT_AUTO_CURATION = 'true';
     expect(curationEnabled()).toBe(true);
+  });
+});
+
+describe('event-curation hard freshness exclusions', () => {
+  test('hard-excludes only expired and needs_review; stale_recurring is left to the first-of-year gate', () => {
+    expect(CURATION_FRESHNESS_EXCLUSIONS).toEqual(['expired', 'needs_review']);
+  });
+});
+
+describe('event-curation deadline (finishes before the 7 AM autopilot)', () => {
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const et = (clock) => parseETDateTime(`2026-10-06T${clock}`);
+
+  test('an on-time 6:15 run is capped at 6:55 ET', () => {
+    expect(curationDeadline(et('06:15:00'))).toBe(et('06:55:00').getTime());
+  });
+
+  test('a run the cron lock delayed to 6:25 still ends by 6:55 ET, not 7:05', () => {
+    expect(curationDeadline(et('06:25:00'))).toBe(et('06:55:00').getTime());
+  });
+
+  test('a run starting after the autopilot gets the plain 40-minute budget', () => {
+    expect(curationDeadline(et('09:00:00'))).toBe(et('09:00:00').getTime() + CURATION_RUN_BUDGET_MS);
+  });
+
+  test('a batch starts only when its full 10-minute allowance ends by the deadline', () => {
+    const deadline = et('06:55:00').getTime();
+    expect(batchFitsDeadline(et('06:45:00').getTime(), deadline)).toBe(true);
+    expect(batchFitsDeadline(et('06:45:00').getTime() + 1, deadline)).toBe(false);
+    expect(batchFitsDeadline(et('06:15:00').getTime(), deadline)).toBe(true);
   });
 });

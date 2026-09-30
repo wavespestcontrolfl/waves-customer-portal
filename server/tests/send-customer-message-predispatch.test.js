@@ -90,6 +90,17 @@ beforeEach(() => {
   persistAudit.mockResolvedValue({ id: 'audit-1' });
 });
 
+test('an accepted provider dedupe carries its original time through the canonical sender', async () => {
+  const acceptedAt = new Date('2026-05-20T14:00:00Z');
+  sendViaTwilio.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+    sentAt: acceptedAt, providerMessageId: 'SM-prior' });
+
+  await expect(sendCustomerMessage(BASE_INPUT)).resolves.toMatchObject({
+    sent: true, deliveryOutcome: 'accepted', deduped: true,
+    sentAt: acceptedAt, providerMessageId: 'SM-prior',
+  });
+});
+
 test('a failing check blocks the send after all validators — no provider call, audited', async () => {
   const result = await sendCustomerMessage({
     ...BASE_INPUT,
@@ -196,6 +207,39 @@ test('the trusted gratitude executor may combine its claim handoff with the fina
   })).resolves.toMatchObject({ sent: true });
 
   expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ providerPreSendCheck, withSmsHandoff: expect.any(Function) });
+});
+
+// codex #5018 r15 P2: the manual Leads-page compose (admin-leads.js POST
+// /:id/send-sms) serializes behind the SAME phone lock call-booking-link-
+// text.js's own worker uses, so its concurrent delivered-link check and a
+// manual send can't interleave. No providerPreSendCheck requirement here —
+// manual semantics stay unconditional either way.
+test('the manual Leads-page compose may supply a locked SMS handoff alone, no providerPreSendCheck required', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, entryPoint: 'admin_leads_send_sms', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: true });
+
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ withSmsHandoff: expect.any(Function) });
+});
+
+test('the SAME manual-compose handoff also works for the customer audience (a linked customer owns this phone)', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, audience: 'customer', customerId: 'cust-1', entryPoint: 'admin_leads_send_sms', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: true });
+
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ withSmsHandoff: expect.any(Function) });
+});
+
+test('a DIFFERENT entryPoint may not reuse the manual-compose handoff allowance', async () => {
+  const withSmsHandoff = jest.fn();
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT, entryPoint: 'some_other_route', withSmsHandoff,
+  })).resolves.toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
 test('previsit billing Text fences Twilio while automatic App routing ignores the SMS-only handoff', async () => {
@@ -617,6 +661,29 @@ test('lead handoff closure reaches only the provider hook, never message or audi
   expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
   expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
   expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withSmsHandoff');
+});
+
+// codex #5196 r4 P2: onDispatchRejected threads through unchanged, the same
+// as onDispatchStart/onDispatchAbort, and never leaks into the serialized
+// provider input or the audit record.
+test('onDispatchRejected reaches the provider hook unchanged, never message or audit state', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+  const onDispatchStart = jest.fn(async () => {});
+  const onDispatchAbort = jest.fn(async () => {});
+  const onDispatchRejected = jest.fn(async () => {});
+  expect((await sendCustomerMessage({
+    ...BASE_INPUT, entryPoint: 'lead_response_auto_reply',
+    withSmsHandoff, onDispatchStart, onDispatchAbort, onDispatchRejected,
+  })).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].onDispatchRejected).toBe(onDispatchRejected);
+  expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('onDispatchRejected');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('onDispatchRejected');
+  expect(onDispatchRejected).not.toHaveBeenCalled();
+});
+
+test('a caller with no onDispatchRejected forwards it as undefined, byte-identical to before', async () => {
+  expect((await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', withSmsHandoff: jest.fn(async (d) => d()) })).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].onDispatchRejected).toBeUndefined();
 });
 
 test('promised reschedule link can use the locked SMS handoff only with its delivery identity', async () => {

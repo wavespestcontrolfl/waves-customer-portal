@@ -3,6 +3,41 @@ const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 
+// Counters that mean the termite renewal sweep did something worth a log
+// line: EVERY action counter runTermiteAnnualRenewalSweep returns (Codex
+// #4971 r8 P2 — a night whose only work was recovery, a withdrawal, a
+// resolved charge outcome or a late-paid alert, logs too). The *Scanned
+// counters are not activity: a quiet night stays silent. A test pins this
+// list against the sweep's own counts object, so a new action counter can't
+// be missed. The leg lives outside checkAndSend so that function's
+// complexity stays at its baseline.
+const TERMITE_RENEWAL_ACTIVITY_KEYS = [
+  'noWitnessBelled', 'unanchoredBelled', 'staleOverdueBelled',
+  'minted', 'charged', 'failed', 'skipped',
+  'graceLapsed', 'graceReconciliationDeferred', 'graceRetiredSettled',
+  'lapseEffectsReconciled', 'reconcileSkipped', 'reconcileNeverReachedStripeBelled',
+  'reconcilePendingOutcomeResolved', 'latePaidBelled', 'withdrawn', 'parentRenewedStamped',
+];
+
+// Every numeric counter the sweep returned, scanned and action alike.
+function termiteRenewalSummary(counts) {
+  return Object.entries(counts)
+    .filter(([, value]) => typeof value === 'number')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
+}
+
+async function runTermiteRenewalChargeLeg() {
+  try {
+    const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
+    const renewalCharge = await runTermiteAnnualRenewalSweep();
+    if (!TERMITE_RENEWAL_ACTIVITY_KEYS.some((key) => renewalCharge[key])) return;
+    logger.info(`Termite annual renewal charge: ${termiteRenewalSummary(renewalCharge)}`);
+  } catch (err) {
+    logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
+  }
+}
+
 class RenewalReminder {
   /**
    * Check all customers for upcoming renewal dates and send reminders
@@ -21,19 +56,6 @@ class RenewalReminder {
       logger.error(`Annual prepay renewal reminder failed: ${err.message}`);
     }
 
-    // Pre-visit payment reminders for UNPAID accept-time prepay terms
-    // (3d / 1d before term_start). Independent of the renewal notices —
-    // a failure in one must not silence the other.
-    try {
-      const prepay = annualPrepay || require('../annual-prepay-renewals');
-      if (prepay.checkAndSendPaymentReminders) {
-        const result = await prepay.checkAndSendPaymentReminders();
-        annualPrepaySent += Number(result?.sent || 0);
-      }
-    } catch (err) {
-      logger.error(`Annual prepay payment reminder failed: ${err.message}`);
-    }
-
     // Daily catch-all reconcile for live covered terms: recovers
     // pending-window settle/credit/reversal work whose one-shot
     // payment/refund hook was lost to a transient error (idempotent — see
@@ -47,6 +69,15 @@ class RenewalReminder {
     } catch (err) {
       logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
     }
+
+    // Termite annual plan: the automatic renewal charge (slice 6b, dark
+    // behind GATE_TERMITE_ANNUAL_PLAN — no-ops end to end while the gate is
+    // off). Mints a renewal successor for every due, witnessed, undecided
+    // termite term, charges the saved consented method at most once, and
+    // voids/retires any successor whose grace period lapsed unpaid.
+    // Independent try/catch (inside the helper), same as every other leg
+    // in this workflow.
+    await runTermiteRenewalChargeLeg();
 
     // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
     // bonds — the one service with a real fixed term. WaveGuard and mosquito
@@ -153,3 +184,4 @@ class RenewalReminder {
 }
 
 module.exports = new RenewalReminder();
+module.exports._private = { TERMITE_RENEWAL_ACTIVITY_KEYS, runTermiteRenewalChargeLeg };

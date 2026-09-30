@@ -32,7 +32,13 @@ const SCHEMA_VERSION = 2;
 // 2026-08-02). A v2 snapshot can never carry that label, so the version is
 // what tells fixtures and audits which generator produced a given row
 // (codex P2 on #3159).
-const COPY_MAP_VERSION = 3;
+// Copy map v4: tree & shrub / palm 'Yes' labels (palm_trunk_concern,
+// pruning_issue_observed, irrigation_issue_observed, mulch_depth_concern) no
+// longer end in "— see recommendations" — the Next steps chips were retired
+// in #5116 so a visit may carry no advice. A v3 snapshot still renders its
+// persisted pointer text; the version is what tells fixtures and audits which
+// copy produced a row (codex r7 P2 on #5116).
+const COPY_MAP_VERSION = 4;
 // Summary template v5: every gauge lane accepts the tech-reviewed AI report
 // copy as the body (bodySource 'technician_report'), not just rodent
 // trapping — cockroach, bed bug, the termite family, bait stations, and
@@ -47,7 +53,9 @@ const COPY_MAP_VERSION = 3;
 // lines append, and the contradiction rules choose between AI and
 // deterministic copy — snapshots frozen by this generator must be
 // distinguishable from v5's (codex r79).
-const SUMMARY_TEMPLATE_VERSION = 6;
+// v7: the Next steps chips were retired (owner ruling 2026-09-27) — new
+// snapshots carry no chip-derived next-step sentence (Codex r1 #5116).
+const SUMMARY_TEMPLATE_VERSION = 7;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -559,8 +567,10 @@ const CUSTOMER_VALUE_LABELS = {
     Yes: 'Nutrient stress signs present — addressed in today’s treatment plan',
     No: 'No nutrient stress signs observed today',
   },
+  // Self-contained: no "see recommendations" pointer — since the Next steps
+  // chips were retired a visit may carry no advice (Codex r6 #5116).
   palm_trunk_concern: {
-    Yes: 'A trunk concern was noted — see recommendations',
+    Yes: 'A trunk concern was noted',
     No: 'No trunk concerns observed today',
   },
   ganoderma_conk_observed: {
@@ -576,11 +586,11 @@ const CUSTOMER_VALUE_LABELS = {
     No: 'No new growth observed yet',
   },
   pruning_issue_observed: {
-    Yes: 'A pruning issue was observed — see recommendations',
+    Yes: 'A pruning issue was observed',
     No: 'No pruning issues observed today',
   },
   irrigation_issue_observed: {
-    Yes: 'An irrigation issue was observed — see recommendations',
+    Yes: 'An irrigation issue was observed',
     No: 'No irrigation issues observed today',
   },
   pre_emergent_applied: {
@@ -588,7 +598,7 @@ const CUSTOMER_VALUE_LABELS = {
     No: 'No pre-emergent applied this visit',
   },
   mulch_depth_concern: {
-    Yes: 'Mulch depth needs attention — see recommendations',
+    Yes: 'Mulch depth needs attention',
     No: 'Mulch depth looks good',
   },
   // Rodent family Yes/No selects render as findings sentences, never raw
@@ -769,214 +779,10 @@ const REQUIRED_FINDINGS_FIELDS = {
   palmetto_roach_knockdown: ['activity_level', 'treatment_completed', 'followup_needed'],
 };
 
-// Next-step chips per type (contract §7). Each chip maps to the
-// deterministic next-step sentence used in Today's Result.
-const NEXT_STEP_CHIPS = {
-  'No action needed': 'No further action is needed right now.',
-  'Monitor activity': 'Monitor for activity and contact us if anything returns.',
-  'Sanitation recommended': 'Improving sanitation in the noted areas will help keep activity down.',
-  'Reduce moisture': 'Reducing moisture in the noted areas will help keep activity down.',
-  'Seal entry gaps': 'Sealing the noted entry gaps will help prevent re-entry.',
-  'Remove cardboard/clutter': 'Removing cardboard and clutter will remove harborage for pests.',
-  'Keep treated areas undisturbed': 'Please keep treated areas undisturbed so the treatment can work.',
-  'Follow-up recommended': 'A follow-up visit is recommended — we will help you get it scheduled.',
-  'Vacuum daily for 2 weeks': 'Vacuum daily for the next two weeks to remove emerging fleas.',
-  'Wash pet bedding': 'Wash pet bedding on high heat.',
-  'Coordinate vet flea control': 'Coordinate flea prevention for pets with your veterinarian.',
-  'Stay off treated areas until dry': 'Stay off treated areas until they are fully dry.',
-  'Trap check scheduled': 'We will return for the scheduled trap check.',
-  'Seal entry points': 'Sealing the identified entry points is the key next step.',
-  'Monitor for new activity': 'Monitor for new activity and let us know if anything changes.',
-  'Exclusion work scheduled': 'The entry-point sealing work is scheduled.',
-  'Continue trapping': 'Trapping will continue until activity is reduced.',
-  'Await exclusion approval': 'Entry-point sealing will be scheduled once the exclusion quote is approved.',
-  'Monitor after no activity': 'With no recent activity, we will continue monitoring before removing traps.',
-  'Remove traps after inactivity': 'Traps will be removed once the inactivity period is confirmed.',
-  'Continue mosquito program': 'We will continue your regular mosquito service.',
-  'Recheck breeding areas next visit': 'We will recheck the noted breeding areas on the next visit.',
-  'Monitor after rainfall': 'Monitor mosquito activity after rainfall and let us know what you see.',
-  'Customer action — remove standing water': 'Removing the noted standing water will make a big difference before the next visit.',
-  'Callback if activity persists': 'If activity stays high after the treatment window, contact us for a callback visit.',
-  'Continue palm program': 'We will continue your palm care program.',
-  'Continue Tree & Shrub program': 'We will continue your Tree & Shrub care program.',
-  'Monitor plant response': 'We will monitor plant response over the next visits.',
-  'Monitor canopy response': 'We will monitor canopy response over the next visits.',
-  'Injection recommended': 'A palm injection is recommended to address the noted deficiency.',
-  'Arborist review recommended': 'An arborist evaluation is recommended for the noted concern.',
-  'Removal evaluation recommended': 'A removal evaluation is recommended for the declining palm.',
-  'Continue lawn program': 'We will continue your lawn care program.',
-  'Recheck next visit': 'We will recheck the noted areas on the next visit.',
-  'Add-on treatment recommended': 'An add-on treatment is recommended — we will help you get it scheduled.',
-  'Irrigation correction needed': 'Correcting the noted irrigation issue will help the lawn recover.',
-  'Callback if no improvement': 'If you do not see improvement, contact us for a callback visit.',
-  'Treatment recommended': 'A treatment program is recommended — we will help you get it scheduled.',
-  'Estimate to follow': 'We will follow up with an estimate for the recommended work.',
-  'Exclusion recommended': 'Sealing work is recommended to reduce pest access.',
-  'Follow-up in 10–14 days': 'A follow-up visit in 10–14 days is recommended to stay ahead of newly hatching activity.',
-  'No store-bought sprays': 'Please avoid store-bought sprays — they interfere with the bait placements.',
-  'Install one-way device': 'A one-way exit device will be installed so the animal can leave but not return.',
-  'Exclusion after activity stops': 'Entry points will be sealed once activity has stopped.',
-  'Attic sanitation recommended': 'Attic sanitation is recommended after removal is complete.',
-  'Daily trap checks underway': 'Daily trap checks are underway as required.',
-  'Avoid trap area': 'Please avoid the trap area so the trap can do its job.',
-  'Secure trash/food sources': 'Securing trash and outdoor food sources will reduce wildlife pressure.',
-  'Follow prep sheet': 'Please follow the prep sheet before the next visit.',
-  'Wash/dry bedding on high heat': 'Wash and dry bedding on high heat.',
-  '14-day follow-up scheduled': 'Your 14-day follow-up visit will confirm the treatment is working.',
-  'Continue monitoring': 'Continue monitoring and contact us if activity returns.',
-  'Dump standing water weekly': 'Dump standing water around the property weekly.',
-  'Avoid treated foliage until dry': 'Avoid treated foliage until it is fully dry.',
-  'Follow watering guidance': 'Follow the watering guidance in this report.',
-  'Mow guidance provided': 'Follow the mowing guidance in this report.',
-  'Re-check scheduled': 'We will re-check the treated areas on the scheduled visit.',
-  'Retreatment scheduled': 'Retreatment is scheduled to keep protection current.',
-  'Monitor fronds for change': 'Monitor the fronds for change and let us know what you see.',
-  'Continue scheduled monitoring': 'We will continue your scheduled bait station monitoring.',
-  'Recheck active station sooner': 'We will recheck the active station ahead of the normal monitoring interval.',
-  'Replace damaged station': 'The damaged station will be replaced.',
-  'Return when access available': 'We will check the inaccessible station once access is available.',
-  'Moisture correction recommended': 'Correcting the noted moisture condition will reduce termite-conducive conditions near the structure.',
-  'Continue bait station service': 'We will continue your scheduled bait station service.',
-  'Recheck high-consumption station': 'We will recheck bait levels at the high-activity station on the next visit.',
-  'Add station': 'An additional bait station is recommended for better coverage.',
-  'Rodent inspection recommended': 'A full rodent inspection is recommended based on the activity observed.',
-  'Customer action needed': 'Your help with the recommendations above will reduce activity before our next visit.',
-  'Return for additional exclusion': 'We will return to complete additional exclusion work.',
-  'Customer repair needed': 'A repair by your contractor is needed to fully close the noted access point.',
-  'No follow-up needed': 'No follow-up visit is needed right now.',
-  'Complete exclusion': 'Completing the exclusion repairs is the key next step.',
-  'Replace contaminated insulation': 'Replacing the contaminated insulation is recommended.',
-  'Reduce clutter': 'Reducing clutter in the noted areas will help.',
-  'Store food / pet food sealed': 'Store food and pet food in sealed containers.',
-  'Monitor odor': 'Monitor the noted odor and let us know if it persists.',
-  'Additional sanitation recommended': 'An additional sanitation visit is recommended.',
-};
-
-const MAX_NEXT_STEP_CHIPS = 4;
-
-// Types whose completion must select at least one next-step chip (owner
-// spec: every report ends with a clear next action). Enforced in the typed
-// /complete path; served to clients in the schema slice so the panel can
-// mark the section required.
-const REQUIRED_NEXT_STEP_TYPES = new Set([
-  'rodent_trapping', 'mosquito_event', 'palm_injection', 'one_time_lawn_treatment',
-  'pest_inspection', 'cockroach', 'wildlife_trapping', 'bed_bug',
-  'termite_bait_station', 'rodent_bait_station', 'tree_shrub',
-  'rodent_exclusion', 'rodent_sanitation', 'rodent_inspection', 'flea',
-  'german_roach_knockdown', 'palmetto_roach_knockdown',
-]);
-
-function nextStepRequiredForType(projectType) {
-  return REQUIRED_NEXT_STEP_TYPES.has(projectType);
-}
-
-// Per-type chip allowlists (contract §7) — the global map alone would let a
-// cockroach completion persist lawn/mosquito guidance into the immutable
-// snapshot. Schema serving and validation both use the type's list.
-const PEST_FAMILY_CHIPS = [
-  'No action needed', 'Monitor activity', 'Sanitation recommended',
-  'Reduce moisture', 'Seal entry gaps', 'Remove cardboard/clutter',
-  'Keep treated areas undisturbed', 'Follow-up recommended',
-];
-const RODENT_FAMILY_CHIPS = [
-  'No action needed', 'Trap check scheduled', 'Seal entry points',
-  'Sanitation recommended', 'Monitor for new activity', 'Exclusion work scheduled',
-  'Follow-up recommended',
-];
-// Trapping-specific next steps (owner spec, 2026-06-12): every trapping
-// report ends with a clear next action — see REQUIRED_NEXT_STEP_TYPES.
-const RODENT_TRAPPING_CHIPS = [
-  'Continue trapping', 'Trap check scheduled', 'Await exclusion approval',
-  'Exclusion work scheduled', 'Monitor after no activity',
-  'Remove traps after inactivity', 'Seal entry points', 'Sanitation recommended',
-];
-const TYPE_NEXT_STEP_CHIPS = {
-  pest_inspection: [
-    'No action needed', 'Treatment recommended', 'Follow-up recommended',
-    'Estimate to follow', 'Exclusion recommended', 'Monitor activity', 'Seal entry gaps',
-  ],
-  one_time_pest_treatment: PEST_FAMILY_CHIPS,
-  cockroach: [...PEST_FAMILY_CHIPS, 'Follow-up in 10–14 days', 'No store-bought sprays'],
-  flea: [
-    'No action needed', 'Vacuum daily for 2 weeks', 'Wash pet bedding',
-    'Coordinate vet flea control', 'Stay off treated areas until dry',
-    'Follow-up recommended', 'Monitor activity',
-  ],
-  rodent_trapping: RODENT_TRAPPING_CHIPS,
-  // Owner spec §1 follow-up list — exclusion reports end with the repair
-  // story's next action, not generic trapping steps.
-  rodent_exclusion: [
-    'Continue trapping', 'Monitor for new activity', 'Return for additional exclusion',
-    'Sanitation recommended', 'Customer repair needed', 'No follow-up needed',
-  ],
-  // Owner spec §2 recommendation list.
-  rodent_sanitation: [
-    'Continue trapping', 'Complete exclusion', 'Replace contaminated insulation',
-    'Reduce clutter', 'Store food / pet food sealed', 'Monitor odor',
-    'Additional sanitation recommended', 'No follow-up needed',
-  ],
-  // Owner spec §4 — diagnostic and sales-supportive.
-  rodent_inspection: [
-    'Treatment recommended', 'Estimate to follow', 'Follow-up recommended',
-    'Monitor activity', 'Exclusion recommended', 'Sanitation recommended', 'No action needed',
-  ],
-  wildlife_trapping: [
-    'Continue trapping', 'Daily trap checks underway', 'Install one-way device',
-    'Exclusion after activity stops', 'Remove traps after inactivity',
-    'Attic sanitation recommended', 'Avoid trap area', 'Secure trash/food sources',
-    'Monitor for new activity', 'No action needed',
-  ],
-  bed_bug: [
-    'Follow prep sheet', 'Wash/dry bedding on high heat',
-    '14-day follow-up scheduled', 'Follow-up in 10–14 days', 'Continue monitoring',
-  ],
-  mosquito_event: [
-    'Continue mosquito program', 'Recheck breeding areas next visit', 'Monitor after rainfall',
-    'Customer action — remove standing water', 'Callback if activity persists',
-    'Dump standing water weekly', 'Avoid treated foliage until dry', 'No action needed',
-  ],
-  one_time_lawn_treatment: [
-    'Continue lawn program', 'Recheck next visit', 'Add-on treatment recommended',
-    'Irrigation correction needed', 'Callback if no improvement',
-    'Follow watering guidance', 'Mow guidance provided', 'No action needed',
-  ],
-  palm_injection: [
-    'Continue palm program', 'Monitor canopy response', 'Injection recommended',
-    'Arborist review recommended', 'Removal evaluation recommended',
-    'Retreatment scheduled', 'Monitor fronds for change', 'No action needed',
-  ],
-  termite_inspection: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
-  termite_treatment: ['No action needed', 'Monitor activity', 'Follow-up recommended'],
-  termite_bait_station: [
-    'Continue scheduled monitoring', 'Recheck active station sooner', 'Replace damaged station',
-    'Return when access available', 'Moisture correction recommended',
-    'Follow-up recommended', 'No action needed',
-  ],
-  rodent_bait_station: [
-    'Continue bait station service', 'Recheck high-consumption station', 'Add station',
-    'Replace damaged station', 'Rodent inspection recommended', 'Exclusion recommended',
-    'Customer action needed', 'Monitor activity',
-  ],
-  // Owner template §6: "continue program / monitor / injection recommended /
-  // follow-up needed".
-  tree_shrub: [
-    'Continue Tree & Shrub program', 'Monitor plant response', 'Recheck next visit',
-    'Injection recommended', 'Arborist review recommended', 'Follow-up recommended',
-    'Customer action needed', 'No action needed',
-  ],
-  german_roach_knockdown: [
-    'Follow-up in 10–14 days', 'No store-bought sprays', 'Keep treated areas undisturbed',
-    'Sanitation recommended', 'Reduce moisture', 'Monitor activity', 'Follow-up recommended',
-  ],
-  palmetto_roach_knockdown: [
-    'Monitor activity', 'Seal entry gaps', 'Reduce moisture', 'Sanitation recommended',
-    'Exclusion recommended', 'Follow-up recommended', 'No action needed',
-  ],
-};
-
-function chipsForType(projectType) {
-  return TYPE_NEXT_STEP_CHIPS[projectType] || [];
-}
+// The "Next steps" chip picker (per-type chip map, required-type set,
+// chip-to-sentence dictionary) was retired (owner ruling 2026-09-27) —
+// Recommendations is now the single tech-advice field for every typed
+// service type, and a new completion carries no next-step sentence.
 
 function getActivityIndicator(projectType) {
   return ACTIVITY_INDICATORS[projectType] || null;
@@ -1675,92 +1481,6 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   return { ok: errors.length === 0 && missing.length === 0, errors, missing };
 }
 
-function validateNextStepChips(chips, projectType = null, values = null, context = {}) {
-  if (chips == null) return { ok: true, chips: [] };
-  if (!Array.isArray(chips)) return { ok: false, error: 'nextStepChips must be an array' };
-  if (chips.length > MAX_NEXT_STEP_CHIPS) {
-    return { ok: false, error: `At most ${MAX_NEXT_STEP_CHIPS} next-step chips allowed` };
-  }
-  const allowed = projectType ? chipsForType(projectType) : Object.keys(NEXT_STEP_CHIPS);
-  const normalized = [];
-  for (const chip of chips) {
-    const key = String(chip || '').trim();
-    if (!key) continue;
-    if (!allowed.includes(key)) {
-      return { ok: false, error: `Next-step chip not available for this service: ${key}` };
-    }
-    if (!normalized.includes(key)) normalized.push(key);
-  }
-  // Two-treatment package, first visit (context set by the completion
-  // route): the included follow-up is owed regardless of findings, so "No
-  // further action is needed right now." can never land in the immutable
-  // report beside a completion response demanding the second visit (Codex
-  // r3 on the 20260712300000 cutover). The chip stays available on the
-  // included follow-up visit itself.
-  if (context.packageFollowupPending && normalized.includes('No action needed')) {
-    return { ok: false, error: 'Next-step chip "No action needed" contradicts this service\'s included follow-up visit — select a follow-up next step instead' };
-  }
-  // "No action needed" beside confirmed/suspected flea activity contradicts
-  // the report's mandatory aftercare story — the chip sentence ("No further
-  // action is needed right now.") would land verbatim next to body copy
-  // saying home-care steps make the biggest difference (Codex P2). The chip
-  // stays available for truthful 'None observed' cleared visits.
-  if (values && projectType === 'flea'
-    && normalized.includes('No action needed')
-    && String(values.evidence_level || '').trim()
-    && String(values.evidence_level) !== 'None observed') {
-    return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded flea evidence level (${String(values.evidence_level)}) — remove the chip or update the evidence level` };
-  }
-  // Knockdown follow-up chips must agree with the structured follow-up
-  // answer — the chip text lands verbatim in Today's Result, so a chip
-  // recommending a follow-up beside findings that say "No" (or a chip
-  // naming a window the tech didn't select) contradicts the report body
-  // and the suppressed/redated CTA (Codex P2 round 5).
-  if (values && projectType === 'german_roach_knockdown') {
-    const followupRequired = String(values.followup_required || '');
-    const window = String(values.followup_window || '');
-    for (const chip of normalized) {
-      const recommendsFollowup = chip === 'Follow-up recommended' || chip === 'Follow-up in 10–14 days';
-      if (followupRequired === 'No' && recommendsFollowup) {
-        return { ok: false, error: `Next-step chip "${chip}" contradicts "Follow-up required: No" — update the follow-up answer or remove the chip` };
-      }
-      if (chip === 'Follow-up in 10–14 days' && window && window !== '10–14 days') {
-        return { ok: false, error: `Next-step chip "Follow-up in 10–14 days" contradicts the selected follow-up window (${window}) — match the window or use "Follow-up recommended"` };
-      }
-    }
-  }
-  if (values && projectType === 'palmetto_roach_knockdown') {
-    if (String(values.followup_needed || '') === 'No'
-      && normalized.includes('Follow-up recommended')) {
-      return { ok: false, error: 'Next-step chip "Follow-up recommended" contradicts "Follow-up needed: No" — update the follow-up answer or remove the chip' };
-    }
-    // "No action needed" stays available for cleared/no-follow-up visits but
-    // contradicts recorded activity or a requested follow-up (Codex P2
-    // round 6) — the chip sentence would deny the action the findings/CTA
-    // call for.
-    if (normalized.includes('No action needed')) {
-      const level = String(values.activity_level || '').trim();
-      if (level && level !== 'None observed') {
-        return { ok: false, error: `Next-step chip "No action needed" contradicts the recorded activity level (${level}) — remove the chip or update the activity level` };
-      }
-      if (String(values.followup_needed || '') === 'Yes') {
-        return { ok: false, error: 'Next-step chip "No action needed" contradicts "Follow-up needed: Yes" — remove the chip or update the follow-up answer' };
-      }
-    }
-  }
-  // The T&S simplification (owner directive 2026-07-21) made
-  // customer_recommendations optional, but the 'Customer action needed'
-  // sentence reads "Your help with the recommendations above" — beside an
-  // empty recommendations field that copy dangles in the immutable report
-  // (Codex P2 round 6). The chip requires a recorded recommendation.
-  if (values && projectType === 'tree_shrub'
-    && normalized.includes('Customer action needed')
-    && !String(values.customer_recommendations || '').trim()) {
-    return { ok: false, error: 'Next-step chip "Customer action needed" requires a recorded customer recommendation — add one or remove the chip' };
-  }
-  return { ok: true, chips: normalized };
-}
-
 // Final-score vs findings consistency at the CLEARED boundary (Codex P2).
 // Within the active range a technician override is legal and the headline
 // follows the final score; crossing the 0 boundary is different — a pinned
@@ -1808,14 +1528,6 @@ function firstSentenceFrom(value, fallback) {
   if (!text) return fallback;
   const period = text.endsWith('.') ? '' : '.';
   return `${text.charAt(0).toUpperCase()}${text.slice(1)}${period}`;
-}
-
-function nextStepSentence(chips = []) {
-  const sentences = chips
-    .map((chip) => NEXT_STEP_CHIPS[chip])
-    .filter(Boolean);
-  if (!sentences.length) return 'Contact us if you have any questions.';
-  return sentences.join(' ');
 }
 
 function joinPhrases(parts) {
@@ -3454,7 +3166,6 @@ function buildTodaysResult({
   projectType,
   reportTypeLabel,
   values = {},
-  chips = [],
   activity = null,
   visitSequence = 1,
   // Tech-reviewed AI report copy (the completion form's "Generate AI report"
@@ -3502,7 +3213,10 @@ function buildTodaysResult({
       values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
       'We completed the scheduled service.'
     );
-  const nextStep = nextStepSentence(chips);
+  // No chip-derived next-step sentence on a new completion (Next steps chips
+  // retired 2026-09-27; Recommendations replaces them). Frozen snapshots keep
+  // whatever todaysResult.nextStep they already stored.
+  const nextStep = null;
 
   // Bait station zero states use the owner's required scoped wording —
   // accessible-stations-only for termite, consumption+evidence for rodent —
@@ -3531,7 +3245,7 @@ function buildTodaysResult({
         headline: contradictsZero
           ? 'Termite activity signs were observed in the bait stations today — see the details below.'
           : 'No termite activity was observed in the accessible bait stations today.',
-        body: `${whatWeDid} ${nextStep}`,
+        body: whatWeDid,
         nextStep,
       };
     }
@@ -3543,7 +3257,7 @@ function buildTodaysResult({
       headline: rodentEvidence
         ? 'No bait consumption was observed today, but rodent evidence was noted nearby.'
         : 'No bait consumption or visible rodent evidence was observed today.',
-      body: `${whatWeDid} ${nextStep}`,
+      body: whatWeDid,
       nextStep,
     };
   }
@@ -3561,8 +3275,11 @@ function buildTodaysResult({
       Excellent: 'Overall landscape condition is excellent.',
       Good: 'Overall landscape condition is good.',
       Fair: 'Overall landscape condition is fair.',
-      Poor: 'Overall landscape condition is poor — see the recommendations below.',
-      Declining: 'Overall landscape condition is declining — see the recommendations below.',
+      // No "see the recommendations below": since the Next steps chips were
+      // retired the visit may carry no advice at all, and this builder can't
+      // see the Recommendations field (Codex r5 #5116).
+      Poor: 'Overall landscape condition is poor.',
+      Declining: 'Overall landscape condition is declining.',
       Recovering: 'Overall landscape condition is recovering.',
     };
     const headline = conditionHeadlines[condition];
@@ -3677,7 +3394,7 @@ function buildTodaysResult({
         : null;
       return {
         headline,
-        body: `${tsReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        body: `${tsReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote}`.replace(/\s+/g, ' ').trim(),
         nextStep,
         ...(tsReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -3970,7 +3687,7 @@ function buildTodaysResult({
       : null;
     return {
       headline,
-      body: `${knockdownReportBody || `${intro} ${whatWeDid}`}${disclosure}${followup} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+      body: `${knockdownReportBody || `${intro} ${whatWeDid}`}${disclosure}${followup}`.replace(/\s+/g, ' ').trim(),
       nextStep,
       ...(knockdownReportBody ? { bodySource: 'technician_report' } : {}),
     };
@@ -4001,7 +3718,7 @@ function buildTodaysResult({
         : null;
       return {
         headline: `Mosquito activity was ${level.toLowerCase()} today.`,
-        body: `${mosquitoReportBody || whatWeDid} ${nextStep}`,
+        body: mosquitoReportBody || whatWeDid,
         nextStep,
         ...(mosquitoReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -4136,7 +3853,7 @@ function buildTodaysResult({
         // visitSequence > 1 with a resolved trendWord — and that is the
         // main case the selector exists for. Omitting the guidance here
         // dropped it from exactly the reports that needed it most.
-        body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
+        body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine}`,
         nextStep,
         ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -4151,7 +3868,7 @@ function buildTodaysResult({
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
+      body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine}`,
       nextStep,
       ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
     };
@@ -4184,7 +3901,7 @@ function buildTodaysResult({
     // "Palm Injection Treatment completed today."
     // No trailing period — it's a headline, not a sentence (owner 2026-07-21).
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today`,
-    body: `${technicianReportBody || whatWeDid} ${nextStep}`,
+    body: technicianReportBody || whatWeDid,
     nextStep,
     ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
   };
@@ -4263,7 +3980,6 @@ function typedStoryAcceptsBody(serviceData = {}) {
 function buildTypedReportSnapshot({
   projectType,
   values = {},
-  nextStepChips = [],
   serviceKey = null,
   serviceLabel = null,
   visitSequence = 1,
@@ -4325,7 +4041,6 @@ function buildTypedReportSnapshot({
     projectType,
     reportTypeLabel: resolvedReportTypeLabel,
     values,
-    chips: nextStepChips,
     activity,
     visitSequence,
     technicianReportBody,
@@ -4349,7 +4064,6 @@ function buildTypedReportSnapshot({
     reportTypeLabel: resolvedReportTypeLabel,
     visitSequence,
     values,
-    nextStepChips,
     todaysResult,
     // Customer-facing photo summary (AI-drafted, tech-reviewed, banned-copy
     // validated in the complete path) — renders atop the report's Field
@@ -4440,8 +4154,6 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
       })),
     photoCategories: config.photoCategories || [],
     requiredFields: requiredFindingsFieldsFor(projectType, { companion }),
-    nextStepChips: chipsForType(projectType),
-    nextStepRequired: nextStepRequiredForType(projectType),
     activity: indicator
       ? {
         indicatorKey: indicator.indicatorKey,
@@ -4555,9 +4267,8 @@ module.exports = {
   SUMMARY_TEMPLATE_VERSION,
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
-  NEXT_STEP_CHIPS,
-  TYPE_NEXT_STEP_CHIPS,
-  chipsForType,
+  COMPANION_REQUIRED_FINDINGS_FIELDS,
+  requiredFindingsFieldsFor,
   SCORE_LEVEL_WORDS,
   TECH_SCORE_LABELS,
   getActivityIndicator,
@@ -4567,9 +4278,7 @@ module.exports = {
   customerLabelForField,
   customerLabelForValue,
   validateTypedFindings,
-  validateNextStepChips,
   validateActivityScoreConsistency,
-  nextStepRequiredForType,
   trendWordForScores,
   trendDirection,
   buildTodaysResult,

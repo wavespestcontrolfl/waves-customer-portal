@@ -1,6 +1,7 @@
 {
   "german_roach": {
     "outcome": "Your home back — every room, not just the kitchen. {Visits} targeted visits that clear the roaches and the eggs they left behind, 100% guaranteed.",
+    "outcomeNoGuarantee": "Your home back — every room, not just the kitchen. {Visits} targeted visits that treat the roaches and the eggs they left behind.",
     "includes": [
       "Gel bait placed where German roaches actually live — kitchens, baths, hinges, appliances, plumbing voids, and anywhere else we find activity",
       "ULV fogging with a non-repellent plus an insect growth regulator (IGR), so the population collapses — not just the visible bugs",

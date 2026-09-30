@@ -133,4 +133,15 @@ describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
     await findByTestId('project-poison-control');
     expect(container.querySelector('[data-testid="project-applicator-id"]')).toBeNull();
   });
+
+  // Owner ask 2026-09-28: every report links to the public Products & Safety
+  // page from its closing strip, treatment evidence or not.
+  it.each([true, false])('links to the public Products & Safety page (poisonControl %s)', async (poisonControl) => {
+    const { findByRole } = renderProjectReport(payload('flea', { poisonControl }));
+    const link = await findByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link.closest('footer')).not.toBeNull();
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
 });

@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
@@ -51,6 +51,11 @@ function isMissingQueueError(err) {
 // gives the hourly geocode backstop ample room, while bounding the records it
 // can never repair.
 const PENDING_DEFER_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+// Uncached reasons that are TRANSIENT (a retry can succeed any minute) and so
+// take the normal failure retry ladder rather than a wait for ET midnight:
+// the lawn freeze's 'unfrozen' and the pest week's provider/freeze failures
+// (codex P2 2026-09-28 round 5). Every other reason is time-dependent.
+const TRANSIENT_UNCACHED_REASONS = new Set(['unfrozen', 'pest_week_weather_unavailable']);
 
 function nextPdfRenderAttemptAt(now = new Date(), attempts = 0) {
   const index = Math.min(Math.max(Number(attempts || 0), 0), RETRY_DELAYS_MINUTES.length - 1);
@@ -62,12 +67,17 @@ async function ensureReportToken(serviceRecordId, knex = db) {
   if (!service) return null;
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write: two concurrent mints (completion + an IB closeout
+  // repair) must converge on ONE token — an overwrite would strand a link
+  // already queued in an email. The loser re-reads the winner's token.
   const token = crypto.randomBytes(16).toString('hex');
-  await knex('service_records').where({ id: serviceRecordId }).update({
+  const updated = await knex('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: knex.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await knex('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 // Cached probe for the rollout window where 20260830000050 has not run yet
@@ -228,10 +238,26 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // recovery can attach rows mid-render (Codex #4091 P1, photo-set-signature.js).
   // The parked-summary marker comes from the snapshot this render uses
   // (`service`, loaded above), never a fresh read — see the module doc.
-  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data });
+  // lawnFields: this `service` row is already service_records.* (see
+  // loadServiceRecordForPdf above) — passing it through the lawn-photo
+  // identity lookup skips a second service_records read here. lawnHistory:
+  // canonical.lawnHistory (never the possibly-DELIVERY-pinned local
+  // `lawnHistory` above) — this signature always describes the unpinned
+  // CANONICAL render, matching lawnAssessmentPdfSignature's own posture, so
+  // reuse the canonical resolver's own history instead of re-deriving it a
+  // second time (Sonnet fallback-audit P1s, 2026-09-28: avoid the extra
+  // read/query when the caller already has the row, and thread the same
+  // propertyHistoryEnabled/lawnHistory the render itself resolved from,
+  // rather than each side re-deriving its own default).
+  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, {
+    serviceData: service.service_data,
+    lawnFields: service,
+    propertyHistoryEnabled,
+    lawnHistory: canonical.lawnHistory,
+  });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -240,6 +266,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).
     stripLiveOnlyScheduleFields(data);
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF cache key does not vary on this gate, so a
+    // rolling deploy could otherwise cache copy under the worker's OWN gate
+    // state rather than what the browser rendered. This path bypasses the
+    // route helper's strip the same way stripLiveOnlyScheduleFields does.
+    stripLiveOnlyReportProductCopy(data);
     data.dynamicContext = await buildServiceReportDynamicContext({
       recordId,
       mode: 'static',
@@ -258,6 +290,13 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (codex P1 #3600 r11).
     attachTermiteReportV2(data, service);
     attachCockroachReportV2(data, service);
+    // This path never composes pestReportV2 itself (the actual bytes come
+    // from the browser's own /data fetch below) — but `data` already
+    // carries `pestWeekWeatherUncacheable` straight from buildReportV1Data
+    // above (codex P1 2026-09-29 round 3: report-data.js's
+    // resolvePestWeekWeather / resolvePestWeekWeatherForBuild is the ONE
+    // canonical fetch+freeze every caller of buildReportV1Data shares — no
+    // separate preflight fetch left here to disagree with the render).
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -352,6 +391,28 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: reason,
       };
     }
+    // Mirrors the lawn guard above for the pest-line rain block (codex P0
+    // 2026-09-28): a still-OPEN 7-day window is not yet reproducible, so
+    // storing it under the stable '-pex1' key would serve the "no rain
+    // block" bytes forever even after the window settles and a later render
+    // would include it. Wait for the window to close; no amount of retrying
+    // resolves it any sooner.
+    if (renderedData?.pestWeekWeatherUncacheable) {
+      // The reason decides the retry shape (codex P2 2026-09-28 round 5):
+      // an OPEN window or missing coordinates are time-dependent (wait for
+      // ET midnight, like the lawn pending reasons); a provider outage or a
+      // failed freeze is transient and takes the normal failure retry
+      // ladder instead of deferring for up to three days.
+      const pending = renderedData.pestWeekWeatherPendingReason || 'open_window';
+      const uncachedReason = pending === 'open_window' ? 'pest_week_weather_unsettled'
+        : pending === 'no_coordinates' ? 'pest_week_weather_no_coordinates'
+          : 'pest_week_weather_unavailable';
+      logger.warn(`[service-report-pdf] pest week weather not cacheable for ${recordId} (${pending}) — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason,
+      };
+    }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
@@ -392,7 +453,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: 'callback_set_changed',
       };
     }
-    const photoSetAfter = await reportPhotoSetPdfSignature(recordId, knex);
+    // Same canonical (never delivery-pinned) propertyHistoryEnabled/lawnHistory
+    // as the BEFORE capture above, so a real content change is the only thing
+    // that can move this value between the two reads.
+    const photoSetAfter = await reportPhotoSetPdfSignature(recordId, knex, { propertyHistoryEnabled, lawnHistory: canonical.lawnHistory });
     if (photoSetAfter !== photoSetBefore) {
       logger.warn(`[service-report-pdf] photo set changed during PDF render for ${recordId} — serving without storing`);
       return {
@@ -552,7 +616,13 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      // reportPhotoSetPdfSignature reuses this already-loaded `service` row
+      // (serviceData + lawnFields, per this function's own comment above on
+      // why customer_id/service_id/service_data ride along) instead of a
+      // second service_records read, and threads the same
+      // propertyHistoryEnabled lawnAssessmentPdfSignature is already given
+      // just below (Sonnet fallback-audit P1s, 2026-09-28).
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
@@ -827,7 +897,7 @@ async function processPdfRenderJob(job, knex = db) {
       // nightly and never surfacing. After the grace window it takes the normal
       // failure path, so it retires loudly with the reason in last_error.
       const queuedSinceMs = job.created_at ? Date.now() - new Date(job.created_at).getTime() : 0;
-      if (result.uncachedReason && result.uncachedReason !== 'unfrozen' && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
+      if (result.uncachedReason && !TRANSIENT_UNCACHED_REASONS.has(result.uncachedReason) && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
         const until = nextEtMidnight();
         await deferPdfRenderJob(job, until, `weather not freezable yet (${result.uncachedReason}) — deferred`, knex);
         return { status: 'deferred', nextAttemptAt: until.toISOString() };

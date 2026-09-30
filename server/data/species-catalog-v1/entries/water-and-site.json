@@ -1,0 +1,1118 @@
+[
+  {
+    "slug": "drought-irrigation-stress",
+    "kind": "disorder",
+    "common_name": "Drought / Irrigation Stress",
+    "aka": [
+      "dry spot",
+      "irrigation stress"
+    ],
+    "aliases": [
+      "drought stress",
+      "irrigation stress",
+      "dry spot"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Blades fold or roll lengthwise and turn a dull blue-gray-green before browning",
+      "Footprints or mower tracks stay visible in the turf longer than usual",
+      "Damage often starts on high spots, slopes or near sidewalks and driveways"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "peak_months": [
+      4,
+      5
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Folded, blue-gray blades and lingering footprints suggest wilt in this spot, most often from too little water, but a photo cannot tell drought apart from other causes of wilt. Watering the spot for a few days and watching for green-up, or a technician checking the irrigation coverage, confirms it.",
+      "fact": "Turf under drought stress conserves water by rolling its blades inward, which changes how light reflects off the leaf."
+    },
+    "tech_notes": "Check irrigation zone coverage and run time before assuming a disease; footprint test helps separate this from disease-related thinning.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/lawns/maintenance-and-care/lawn-management-during-drought/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b3eb428b63d49908ec727f9203f0605b748788b4c306111af95189afd48763b9"
+    },
+    "condition": {
+      "hosts": [
+        "turf",
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Blades fold or roll lengthwise and turn a dull blue-gray-green before browning",
+        "Footprints or mower tracks stay visible in the turf longer than usual"
+      ],
+      "required_signature": {
+        "text": "A water response check settles this: water the spot for two to three days and watch for green-up. Lingering footprints point to wilt of any cause, not drought specifically.",
+        "elements": [
+          "Blades fold or roll lengthwise and turn a dull blue-gray-green before browning",
+          "Footprints or mower tracks stay visible in the turf longer than usual"
+        ],
+        "confirmable_by": "field_test"
+      },
+      "field_tests": [
+        {
+          "name": "Water response check",
+          "who": "customer",
+          "how": "Water the affected spot well for two to three days and watch for green-up.",
+          "reads_as": "Green-up within a few days points to drought stress; no response points elsewhere."
+        },
+        {
+          "name": "Footprint test",
+          "who": "customer",
+          "how": "Walk across the lawn and look back after a few minutes.",
+          "reads_as": "Lingering footprints point to wilt, usually from water; a green-up after watering settles it. Grass that springs back quickly points elsewhere."
+        }
+      ],
+      "differentials": [
+        {
+          "slug": "large-patch",
+          "difference": "Drought stress is uniform and blue-gray, greening up within days of water; large patch keeps a rotted ring at the base even after watering.",
+          "next_observation": "Water the dry-looking edge for a few days and recheck, or a technician checks the leaf bases.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "take-all-root-rot",
+          "difference": "Drought stress greens up within days of watering; take-all root rot roots stay short, black and rotted regardless of water.",
+          "next_observation": "Water the area for a few days and recheck, or pull a plug to check the roots.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "mower-scalping",
+          "difference": "Drought stress shows blue-gray, folded blades across dry zones; mower scalping is a uniform tan, stubbly cut appearing right after a mow.",
+          "next_observation": "Check whether the discoloration followed a recent mow or a dry, sunny spell.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage is confined to hot, sunny areas near pavement with insects present; drought stress responds to watering within days.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "infrequent_irrigation",
+        "full_sun",
+        "sandy_high_ph"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Color and green-up often follow within 2-3 weeks once watering is corrected."
+    }
+  },
+  {
+    "slug": "overwatering",
+    "kind": "disorder",
+    "common_name": "Overwatering",
+    "aka": [],
+    "aliases": [
+      "overwatering",
+      "overwatered lawn"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Turf stays a dull, light green, thin and shallow-rooted despite frequent watering",
+      "Soil feels spongy and wet, sometimes with algae or moss on the surface",
+      "Turf is more prone to disease and weeds that favor wet soil"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Dull, thin, shallow-rooted turf with spongy, wet soil suggests overwatering. It does not rule out a drainage problem; an irrigation can test measures how much water the zone is actually getting.",
+      "fact": "Grass roots need oxygen in the soil just as much as water, so soil that stays saturated can actually starve the roots even though the plant looks well watered."
+    },
+    "tech_notes": "Check run times and frequency against the season; reduce frequency and water deeper, less often to encourage deeper roots.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/LH050"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "481d9fc15494291721c98f1c1a2885639550e0fdbfdd4047b9778418bff611a7"
+    },
+    "condition": {
+      "hosts": [
+        "turf",
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Turf stays a dull, light green, thin and shallow-rooted despite frequent watering",
+        "Soil feels spongy and wet, sometimes with algae or moss on the surface"
+      ],
+      "required_signature": {
+        "text": "An irrigation can test settles this: water measuring more than about half to three-quarters of an inch per run, or standing afterwards, confirms overwatering.",
+        "elements": [
+          "Turf stays a dull, light green, thin and shallow-rooted despite frequent watering"
+        ],
+        "confirmable_by": "field_test"
+      },
+      "field_tests": [
+        {
+          "name": "Irrigation can test",
+          "who": "customer",
+          "how": "Place a few shallow cans across the zone while it runs, then measure the water depth in each.",
+          "reads_as": "Water measuring more than about half to three-quarters of an inch per run, or standing afterwards, points to overwatering."
+        }
+      ],
+      "differentials": [
+        {
+          "slug": "fairy-ring",
+          "difference": "Overwatering causes a dull, thin, waterlogged lawn overall without mushrooms in a ring; fairy ring shows mushrooms or a dark green band in a circle or arc.",
+          "next_observation": "A photo of the ring pattern, or an irrigation can test checking how much water the zone gets.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "pythium-root-rot",
+          "difference": "Overwatering alone recovers once watering is corrected; pythium root rot needs a technician to check the roots even after watering is fixed.",
+          "next_observation": "An irrigation can test to check watering, alongside a root check by a technician.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "dog-urine-spots",
+          "difference": "Overwatering causes general thin, waterlogged turf without distinct spots; dog urine spots are small, sharply defined dead circles with a dark green rim.",
+          "next_observation": "A wider photo checking whether the damage is general or in small, distinct spots.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "frequent_irrigation",
+        "poor_drainage"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Density and root depth often improve over 60-90 days once watering frequency is reduced."
+    }
+  },
+  {
+    "slug": "shade-thinning",
+    "kind": "disorder",
+    "common_name": "Shade Thinning",
+    "aka": [],
+    "aliases": [
+      "shade thinning",
+      "thin lawn in shade"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Blades grow longer and thinner reaching for light, weakening the turf over time",
+      "Bare or thin spots develop under tree canopy or building shadow, inviting weeds",
+      "Turf in the same spot is more easily hurt by foot traffic and slow to recover"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Stretched, thin blades and bare spots lining up with tree canopy or building shade suggest shade thinning. Turfgrass generally needs more sun than a heavily shaded spot provides; a ground cover or mulch bed is often a better long-term fit than more lawn care.",
+      "fact": "Grass grown in shade stretches its blades longer trying to catch more light, which actually drains the plant's energy reserves faster than staying short."
+    },
+    "tech_notes": "In heavily shaded areas, growing turfgrass is often not realistic long-term regardless of species or care. Blades also grow longer and thinner reaching for light, which weakens the turf over time.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP072"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6d51e383d5261319e55c7ba23e9db9c1d9e13240accb969b00e1644f09ca5be1"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Blades grow longer and thinner reaching for light",
+        "Bare or thin spots develop under tree canopy or building shadow, inviting weeds"
+      ],
+      "required_signature": {
+        "text": "A wide photo of the thin or bare area showing it lines up with tree canopy or building shade.",
+        "elements": [
+          "Bare or thin spots develop under tree canopy or building shadow, inviting weeds"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "compaction-traffic-wear",
+          "difference": "Shade thinning follows the shadow of a tree or structure with stretched, thin blades; compaction wear follows a foot-traffic path or gate regardless of light.",
+          "next_observation": "A wider photo checking whether the thin area matches a shade pattern or a traffic path.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "turf-rust",
+          "difference": "Shade thinning shows stretched, thin blades and bare spots under canopy with no pustules; rust shows orange, powdery pustules on the blade.",
+          "next_observation": "A close-up of the blade surface checking for pustules.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "shade"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Density rarely improves without more light; fill-in elsewhere can take 60-90 days once shade is reduced."
+    }
+  },
+  {
+    "slug": "compaction-traffic-wear",
+    "kind": "disorder",
+    "common_name": "Compaction / Traffic Wear",
+    "aka": [],
+    "aliases": [
+      "compaction",
+      "traffic wear",
+      "soil compaction"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Thin, worn or bare turf along a consistent foot path, gate or parking pattern",
+      "Water tends to pool or run off rather than soak in on the worn area",
+      "Soil here is noticeably harder to probe than the surrounding lawn"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A worn strip of thin turf that follows a foot path, gate or parking pattern suggests compaction from repeated traffic. Aeration and rerouting traffic where possible are the realistic fixes; a technician can advise if the worn area keeps expanding.",
+      "fact": "Compacted soil holds less oxygen for roots, which is why worn paths often stay thin even after traffic stops for a while."
+    },
+    "tech_notes": "A soil probe or shovel test (hard to push in past a few inches) confirms compaction; plug aeration is the usual remedy in an existing lawn. Water also tends to pool or run off rather than soak in on the worn area, another clue.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/SS529"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "9cbff5d06650030e0d5344e36a207e5f1f6c70dd115512d8d181bfb4b9cb2752"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Thin, worn or bare turf along a consistent foot path, gate or parking pattern"
+      ],
+      "required_signature": {
+        "text": "A wide photo of the worn strip showing it follows a foot path, gate or parking pattern.",
+        "elements": [
+          "Thin, worn or bare turf along a consistent foot path, gate or parking pattern"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "shade-thinning",
+          "difference": "Compaction wear follows a repeated traffic path regardless of light; shade thinning follows the shadow of a tree or structure with stretched, thin blades.",
+          "next_observation": "A wider photo checking whether the thin area matches a traffic path or a shade pattern.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "mower-scalping",
+          "difference": "Compaction wear follows a repeated traffic path regardless of mowing; mower scalping is a uniform tan cut appearing right after a single low mow.",
+          "next_observation": "Check whether the thin area is a walking path or matches a recent mow.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "compaction",
+        "dog_traffic"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Density can improve over 60-90 days once aeration and traffic patterns are addressed."
+    }
+  },
+  {
+    "slug": "salt-injury",
+    "kind": "disorder",
+    "common_name": "Salt Injury",
+    "aka": [],
+    "aliases": [
+      "salt injury",
+      "salt burn",
+      "salt spray damage"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaf tips and margins burn brown or tan, often worse on the side facing onshore wind or salt spray",
+      "Leaves may look scorched, dry and unusually brittle for the season",
+      "Damage is often one-sided, matching the direction the salt exposure comes from"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Brown, scorched tips and margins worse on one side can suggest salt injury, often onshore wind, brackish irrigation, storm surge or heavy fertilizer, but a photo cannot rule out other causes. A technician checks the likely source; rinsing foliage and choosing salt-tolerant plants are the realistic fixes.",
+      "fact": "Salt injury often shows up worse on the side of a plant facing the wind or the water, since that side takes the brunt of the wind-blown salt spray."
+    },
+    "tech_notes": "Consider the irrigation water source (well or reclaimed water salinity) and onshore wind carrying Gulf spray, as well as storm surge or a recent heavy fertilizer application; road de-icing salt is not a factor in Southwest Florida.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/design/landscaping-for-specific-sites/salt-tolerant-plants/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c916526b2688f42f016837f44871cd22ad6d70a41e9ba574ea84ec1e07c4331f"
+    },
+    "condition": {
+      "hosts": [
+        "turf",
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Leaf tips and margins burn brown or tan, often worse on the side facing onshore wind or salt spray",
+        "Leaves may look scorched, dry and unusually brittle for the season"
+      ],
+      "required_signature": {
+        "text": "A photo cannot rule out other causes on its own; a technician checks the one-sided pattern against the likely salt source.",
+        "elements": [
+          "Leaf tips and margins burn brown or tan, often worse on the side facing onshore wind or salt spray",
+          "Leaves may look scorched, dry and unusually brittle for the season"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "anthracnose",
+          "difference": "Salt injury browns tips and margins, worse facing onshore wind or spray; anthracnose causes scattered lesions with a yellow halo and can cause dieback.",
+          "next_observation": "A wider photo of the whole plant checking whether the burn follows the side facing onshore wind or salt spray.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "leaf-spot-fungi",
+          "difference": "Salt injury browns tips and margins, worse facing onshore wind or spray; leaf spot fungi cause scattered round spots across the leaf, not just the margin.",
+          "next_observation": "A wider photo of the whole plant checking whether the burn follows the side facing onshore wind or salt spray.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "oleander-leaf-scorch",
+          "difference": "Both can look one-sided in a photo; leaf scorch spreads from one branch over months to years, while salt injury tracks wind or spray exposure.",
+          "next_observation": "A technician tracks whether the browning spreads from one branch over time, or tests for the bacterium.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "salt_exposure"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "New growth is often unaffected; existing scorched leaves do not recover but usually shed over a few weeks."
+    }
+  },
+  {
+    "slug": "cold-damage",
+    "kind": "disorder",
+    "common_name": "Cold Damage",
+    "aka": [
+      "freeze damage",
+      "chilling injury"
+    ],
+    "aliases": [
+      "cold damage",
+      "freeze damage",
+      "chilling injury"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+      "Some leaves look water-soaked and others brown or black on the exposed parts of the plant",
+      "Damage is worse on plants in open, unprotected spots than those under canopy or near a building"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      12,
+      1,
+      2
+    ],
+    "peak_months": [
+      1
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Leaves that look water-soaked, then brown or black, within days of a cold snap suggest cold damage, worse on exposed growth. On a palm, a spear leaf that pulls free after a freeze needs a technician right away. Leave damaged leaves in place until the cold season passes; removing them too soon can do more harm.",
+      "fact": "Even fully dead, brown palm fronds still insulate the bud from further cold, which is one reason it pays to wait before cutting them off."
+    },
+    "tech_notes": "Do not remove damaged palm fronds until the danger of further cold has passed and 2-3 new leaves have emerged; check water needs after a freeze since roots may be too cold to function normally. On a palm, cold can also kill the spear leaf itself, not just the older fronds.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/MG318"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3864a4b257d7280760ad5c26fe7c08745ea691018e519465d740ee312ec51e4b"
+    },
+    "condition": {
+      "hosts": [
+        "palms",
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+        "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
+      ],
+      "required_signature": {
+        "text": "A wide photo showing water-soaked and browned or blackened leaves, worst on the most exposed growth.",
+        "elements": [
+          "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+          "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "palm-bud-rot",
+          "difference": "Cold damage can also kill the spear leaf after a hard freeze, so a pulled-free spear does not by itself separate it from bud rot; both need a technician.",
+          "next_observation": "A technician checks the bud and whether other fronds also show cold injury, since a pulled-free spear can mean either.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "potassium-deficiency-palm",
+          "difference": "Cold damage appears within days of a cold snap and can affect many fronds at once; potassium deficiency develops gradually and stays on the oldest fronds only.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "cold_event"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "New growth over the following months shows whether the plant has recovered; damaged leaves do not green back up."
+    }
+  },
+  {
+    "slug": "transplant-shock",
+    "kind": "disorder",
+    "common_name": "Transplant Shock",
+    "aka": [],
+    "aliases": [
+      "transplant shock",
+      "planting shock"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)",
+      "Premature fall color or early leaf drop out of season on a new planting",
+      "Growth stalls or slows noticeably compared to before the plant was moved"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Scorch, wilting or stalled growth on a recently planted tree or shrub suggests transplant shock while the root system reestablishes. Light, frequent watering is often the fix, but if the soil is already wet a technician checks drainage and planting depth first; symptoms usually ease as the plant settles in.",
+      "fact": "A transplanted tree or shrub loses much of its fine root system in the move, which is why light, frequent watering matters more in the first few months than afterward."
+    },
+    "tech_notes": "Roughly 2-3 irrigations per week for the first few months after planting is typical guidance if the soil is not already wet; confirm the plant is not also deep-planted, root-bound or sitting in poor drainage. Premature fall color or early leaf drop out of season can be another clue.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/planting/planting-and-establishing-trees/"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "3cb385242a6413701a584ce1edd601dd53d02ae7a537746a61c9f23ed316c299"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
+      ],
+      "required_signature": {
+        "text": "A wide photo of the struggling plant showing signs of a new installation (stakes, a fresh mulch ring or the root ball edge) and whether the soil looks wet or dry.",
+        "elements": [
+          "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "phytophthora-root-rot",
+          "difference": "Transplant shock affects a recently moved plant and often improves within months; root rot can affect an established plant and worsens with wet soil.",
+          "next_observation": "A technician checks the roots and confirms how recently the plant was planted.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "deep-planting-mulch-volcano",
+          "difference": "Transplant shock eases within months on its own; a mulch volcano keeps stressing the plant until the excess mulch or soil is pulled back.",
+          "next_observation": "A photo of the trunk base checking whether the root flare is visible or buried.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "wounding",
+        "infrequent_irrigation"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Most new plantings recover over a few months as roots reestablish, once watering is consistent."
+    }
+  },
+  {
+    "slug": "deep-planting-mulch-volcano",
+    "kind": "disorder",
+    "common_name": "Deep Planting / Mulch Volcano",
+    "aka": [
+      "mulch volcano"
+    ],
+    "aliases": [
+      "mulch volcano",
+      "deep planting",
+      "volcano mulching"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "water-and-site",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Mulch or soil piled against the trunk, burying the root flare where the trunk widens at the base",
+      "Slow, stunted growth with the tree or shrub failing to establish for no obvious reason",
+      "Bark at the buried trunk base may stay damp, soft or discolored"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mulch or soil piled against the trunk, burying the root flare, suggests a mulch volcano or a plant set too deep at installation. Pulling mulch and excess soil back from the trunk so the root flare shows is the realistic fix.",
+      "fact": "A buried trunk stays damp and low on oxygen, conditions that favor rot and can also invite insects that would not otherwise reach the trunk."
+    },
+    "tech_notes": "Keep mulch 2-3 inches deep with a gap of roughly a foot around the trunk of an established tree; check for the root flare when in doubt. Slow, stunted growth with the plant failing to establish for no obvious reason is another clue.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP625"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "73bf182a73b5bf8664629ce727c99e22e827f1e9d94eee41452c3e8515f0de41"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees"
+      ],
+      "signs": [
+        "Mulch or soil piled against the trunk, burying the root flare where the trunk widens at the base"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A photo of the trunk base showing mulch or soil piled against the trunk with the root flare buried.",
+        "elements": [
+          "Mulch or soil piled against the trunk, burying the root flare where the trunk widens at the base"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "phytophthora-root-rot",
+          "difference": "A buried root flare confirms deep planting, but does not rule out root rot at the same time; a technician checks the roots regardless.",
+          "next_observation": "A technician digs at the roots to check for rot even when the flare is visibly buried.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "transplant-shock",
+          "difference": "A mulch volcano keeps stressing a plant of any age until corrected; transplant shock affects a newly moved plant and eases within months on its own.",
+          "next_observation": "A photo of the trunk base checking whether the root flare is visible or buried.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "trimmer-bark-damage",
+          "difference": "A mulch volcano buries the trunk base under soil or mulch with no visible wound; trimmer bark damage shows a scraped or gouged wound with bark missing.",
+          "next_observation": "A close-up of the trunk base checking for a bare wound versus buried mulch.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "deep_planting"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Growth often improves within a few months once the root flare is uncovered and mulch depth is corrected."
+    }
+  }
+]

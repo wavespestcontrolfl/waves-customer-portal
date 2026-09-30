@@ -9,8 +9,18 @@
  * instead); brand reads "Waves" only (never "Waves Pest Control"); NO
  * "Reply STOP to opt out." line ("they called us" —
  * docs/sms-stop-line-policy.md's deliberate-exceptions section); no
- * sign-off/signature; after-hours calls get the text at the next 8 AM ET,
- * only if nobody has called or texted them by then.
+ * sign-off/signature.
+ *
+ * Owner ruling 2026-09-28: a caller reaching out to us is a customer action
+ * (same idea as the 2026-08-29 ruling that put form replies in
+ * CUSTOMER_ACTION_ENTRY_POINTS), so this text goes out at ANY hour — no
+ * holding to 8 AM. This module carries NO window check of its own any more;
+ * `missed_call_text_back` is a CUSTOMER_ACTION_ENTRY_POINTS entry
+ * (messaging/validators/send-window.js), so the general 8am-8pm ET
+ * moratorium (server/services/messaging/send-window.js) never applies to
+ * this entry point in the first place. A night miss still waits out its own
+ * voicemail-landing grace (a voicemail can land seconds after the terminal
+ * status), then sends inside its normal 30-minute slot like any other call.
  *
  * Eligibility reuses server/services/missed-call-bell.js's
  * `missedCallShapeEligible` (outcome-unanswered, the 25s unknown-caller
@@ -50,13 +60,12 @@
  * failure, a terminal rejection of our own sender or account).
  *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
- * moment it may be texted — after the voicemail-landing grace, or at the
- * next 8 AM ET when the window is closed by then. Outside 8am-8pm ET
- * nothing is sent; the call stays UNSETTLED and the durable sweep
- * (scheduler.js, every 2 minutes) sends it once the window reopens,
- * re-checking "still uncontacted" right before it does. Past the slot the
- * call is skipped for good, so a gate flipped on mid-morning, a crashed pod
- * or a hung hook never produces an hours-late "sorry we missed your call".
+ * moment it may be texted — right after the voicemail-landing grace, any
+ * hour of the day. Past the slot the call is skipped for good, so a crashed
+ * pod or a hung hook never produces an hours-late "sorry we missed your
+ * call"; the durable sweep (scheduler.js, every 2 minutes) is what actually
+ * catches a call the post-call hook missed, re-checking "still uncontacted"
+ * right before it sends.
  */
 
 const db = require('../models/db');
@@ -67,7 +76,6 @@ const {
   missedCallShapeEligible, UNKNOWN_CALLER_MIN_SECONDS,
   UNANSWERED, UNANSWERED_STATUSES, TERMINAL_STATUSES, VOICEMAIL_GRACE_MS,
 } = require('./missed-call-bell');
-const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send-window');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
@@ -94,7 +102,6 @@ const CLAIM = {
 const BOUNDARY = {
   NOT_MISSED: 'MISSED_CALL_NO_LONGER_MISSED',
   CONTACTED: 'MISSED_CALL_ALREADY_CONTACTED',
-  WINDOW: 'MISSED_CALL_WINDOW_CLOSED',
   TOO_OLD: 'MISSED_CALL_TOO_OLD',
   CLAIMED: 'MISSED_CALL_PHONE_CLAIMED',
   CLAIM_BUSY: 'MISSED_CALL_CLAIM_IN_FLIGHT',
@@ -115,14 +122,15 @@ const LEASE_MS = 10 * 60 * 1000;
 // send slot either way, so only a repeat call within the day is affected.
 const STALE_CLAIM_MS = 24 * 60 * 60 * 1000;
 // The one send slot per call (see header): 30 minutes from the first moment
-// the call may be texted. An in-hours miss goes out within minutes; an
-// after-hours miss goes out between 8:00 and 8:30 AM ET.
+// the call may be texted — any hour of the day, since owner ruling
+// 2026-09-28 dropped the after-hours defer. A miss goes out within minutes
+// of clearing its voicemail-landing grace, whatever the clock says.
 const SEND_SLOT_MS = 30 * 60 * 1000;
 // Belt on top of the slot (sendSlotDeadline is the real bound): no call
 // older than this is ever texted, and the sweep reads no further back. The
-// longest legitimate wait — a call ending just before 8 PM ET whose slot
-// moves to 8:00–8:30 the next morning — is about 13 hours, and 14 on the
-// night the clocks fall back (a repeated hour); 16 leaves headroom.
+// legitimate wait is now only the voicemail grace plus the send slot (under
+// an hour); this cap is pure backstop headroom for a stalled sweep or a
+// backlog, not a scheduled wait.
 const MAX_CALL_AGE_MS = 16 * 60 * 60 * 1000;
 
 // Later-call outcomes that mean someone already spoke with the caller.
@@ -213,17 +221,14 @@ function callEndedAt(row) {
 /**
  * When the call's one send slot closes (ms epoch), or null when its
  * timestamps are unreadable. The slot opens when the call clears the
- * voicemail-landing grace (measured from when it ended). If the window is
- * closed then, or closes before the slot would run out, the slot moves to
- * the next 8 AM ET instead — the owner's after-hours rule.
+ * voicemail-landing grace (measured from when it ended) and runs
+ * SEND_SLOT_MS from there — any hour of the day (owner ruling 2026-09-28:
+ * no after-hours defer to the next morning any more).
  */
 function sendSlotDeadline(row) {
   const terminalAt = callEndedAt(row);
   if (!Number.isFinite(terminalAt)) return null;
-  const readyAt = terminalAt + VOICEMAIL_GRACE_MS;
-  const inHoursEnd = readyAt + SEND_SLOT_MS;
-  if (isWithinSendWindowET(new Date(readyAt)) && isWithinSendWindowET(new Date(inHoursEnd))) return inHoursEnd;
-  return nextSendWindowOpenET(new Date(readyAt)).getTime() + SEND_SLOT_MS;
+  return terminalAt + VOICEMAIL_GRACE_MS + SEND_SLOT_MS;
 }
 
 /** Bounded catch-up, exported for tests: past the send slot, or past the overall age belt. */
@@ -416,9 +421,7 @@ async function reconcileOrphanedClaims({ limit = 20 } = {}) {
 
 // Deterministic gates decidable before any lease is taken — every check
 // here computes the same answer no matter which process runs it, so a
-// terminal outcome is safe to settle immediately without a fence. Pure
-// checks and the window come first, so an after-hours call waiting for
-// 8 AM costs the 2-minute sweep no queries.
+// terminal outcome is safe to settle immediately without a fence.
 async function precheckRow(row, now) {
   if (tooOldToText(row, now)) return { ok: false, outcome: 'skipped:too_old', reason: 'too_old' };
 
@@ -431,14 +434,9 @@ async function precheckRow(row, now) {
   // (same exclusion as outbound-voicemail-sms.js).
   if (TWILIO_NUMBERS.isInternalNumber(phone)) return { ok: false, outcome: 'skipped:internal_number', reason: 'internal_number' };
 
-  if (!isWithinSendWindowET(new Date(now))) {
-    // Never sent in the moment outside 8am-8pm ET. Stays unsettled — the
-    // sweep re-evaluates every 2 minutes and sends inside the call's slot.
-    return { ok: false, deferred: true, nextAttemptAt: nextSendWindowOpenET(new Date(now)) };
-  }
-
-  // In-hours voicemail-landing grace, from when the call ended — same
-  // window the bell's own sweep uses (a voicemail can still be
+  // Voicemail-landing grace, from when the call ended, any hour of the day
+  // (owner ruling 2026-09-28: no 8am-8pm window check here any more) — same
+  // grace the bell's own sweep uses (a voicemail can still be
   // recording/uploading right after the terminal status lands).
   const terminalAt = callEndedAt(row);
   if (Number.isFinite(terminalAt) && now - terminalAt < VOICEMAIL_GRACE_MS) {
@@ -554,8 +552,9 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
  * voicemail lane's), still uncontacted, none of the owner's holds, then the
  * one-shot claim (taken here and nowhere earlier), then the voicemail lane's
  * claim, then, as the last step after the last await, a fresh clock against
- * the 8am-8pm window and the call's send slot. A refusal after the claim
- * leaves it to classifySendOutcome to release.
+ * the call's send slot (any hour — owner ruling 2026-09-28 dropped the
+ * 8am-8pm check here). A refusal after the claim leaves it to
+ * classifySendOutcome to release.
  */
 function providerBoundaryCheck(row, phone, attempt) {
   return async ({ dbi = db } = {}) => {
@@ -607,9 +606,6 @@ function providerBoundaryCheck(row, phone, attempt) {
           : { ok: false, code: BOUNDARY.VOICEMAIL_TEXTED, reason: 'the voicemail lane texted this number' };
       }
       const now = Date.now();
-      if (!isWithinSendWindowET(new Date(now))) {
-        return { ok: false, code: BOUNDARY.WINDOW, reason: 'outside 8am-8pm ET', retryable: true };
-      }
       if (tooOldToText(row, now)) return { ok: false, code: BOUNDARY.TOO_OLD, reason: 'the send slot closed' };
       return { ok: true };
     } catch (err) {
@@ -642,6 +638,7 @@ async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
         call_sid: row.twilio_call_sid,
         call_log_id: row.id,
         fromNumber,
+        templateKey: MESSAGE_TYPE,
       },
     });
     return { value };
@@ -709,8 +706,8 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   }
   // Nothing left the system and the failure can clear: an upstream
   // suppression sentinel (sent:true with no real send — a gate or template
-  // raced off), a hold the pipeline says to retry (the window boundary, a
-  // callback-number hold, this lane's own window/recheck refusals) or a
+  // raced off), a hold the pipeline says to retry (a claim in flight, a
+  // callback-number hold, this lane's own recheck refusals) or a
   // non-terminal provider failure. Release both so a later sweep pass
   // retries inside the send slot.
   if (attempt.claimed) await releaseClaim(phone);
@@ -719,9 +716,9 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
 }
 
 /**
- * Attempt (or defer, or skip) a text-back for one call_log row. Shared core
- * for both the post-call hook and the durable sweep so the two paths can
- * never diverge. Returns { outcome: 'sent' | 'deferred' | 'pending' | 'skipped' | 'error', reason? }.
+ * Attempt (or skip) a text-back for one call_log row. Shared core for both
+ * the post-call hook and the durable sweep so the two paths can never
+ * diverge. Returns { outcome: 'sent' | 'pending' | 'skipped' | 'error', reason? }.
  */
 async function attemptForRow(row, now = Date.now()) {
   if (!row || !row.twilio_call_sid) return { outcome: 'skipped', reason: 'no_sid' };
@@ -742,7 +739,6 @@ async function attemptForRow(row, now = Date.now()) {
   const pre = await precheckRow(row, now);
   if (!pre.ok) {
     if (pre.error) return { outcome: 'error' };
-    if (pre.deferred) return { outcome: 'deferred', nextAttemptAt: pre.nextAttemptAt };
     if (pre.pending) return { outcome: 'pending', reason: pre.reason };
     await settle(pre.outcome);
     return { outcome: 'skipped', reason: pre.reason };
@@ -797,9 +793,9 @@ async function textBackIfMissed(callSid) {
 
 /**
  * Durable retry (scheduler.js, every 2 minutes): re-offers unsettled,
- * eligible unknown-caller misses — in-hours calls the post-call hook hasn't
- * reached yet, and after-hours calls waiting for the next 8 AM ET.
- * Idempotent — attemptForRow's own lease + claim make a re-offer a no-op.
+ * eligible unknown-caller misses the post-call hook hasn't reached yet, any
+ * hour of the day (owner ruling 2026-09-28: no after-hours defer). Idempotent
+ * — attemptForRow's own lease + claim make a re-offer a no-op.
  */
 async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
   await reconcileOrphanedClaims().catch((err) => logger.warn(`[missed-call-text-back] orphan reconcile pass failed: ${err?.code || err?.name || 'error'}`));
@@ -844,7 +840,7 @@ async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
       offered += 1;
       try {
         // A fresh clock per row: a long pass must not judge a later row's
-        // window or send slot by the time the pass started.
+        // send slot by the time the pass started.
         const result = await attemptForRow(r, Date.now());
         if (result.outcome === 'sent') sent += 1;
       } catch (err) {

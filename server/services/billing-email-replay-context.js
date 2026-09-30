@@ -14,6 +14,7 @@ const SOURCES = new Set([
   'invoice_followup_sequence',
   'balance_reminder_late_payment_check',
   'late_payment_checker',
+  'previsit_balance_reminder',
 ]);
 const CATEGORIES = new Set(['invoice', 'payment_issue', 'billing', 'payment_receipt']);
 const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day', '60_day']);
@@ -79,16 +80,60 @@ function complete(context) {
     return has('invoice_id', 'appointment_id', 'appointment_date',
       'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id');
   }
+  if (context.source_entry_point === 'previsit_balance_reminder') {
+    return has('appointment_id', 'appointment_date', 'appointment_service_type',
+      'appointment_rendered_on', 'collections_ledger_id', 'rendered_amount', 'invoice_ids', 'invoice_quotes', 'dues_cents', 'selected_channels')
+      && Number(context.rendered_amount) > 0
+      && context.notificationEventKey === `previsit-balance:${context.appointment_id}`;
+  }
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
   return has('invoice_id', 'collections_ledger_id');
 }
 
+function copyInvoiceQuotes(context, out) {
+  if (context.invoice_ids != null) {
+    if (!Array.isArray(context.invoice_ids) || context.invoice_ids.length > 200) return false;
+    out.invoice_ids = context.invoice_ids.map((id) => boundedString(id, STRING_FIELDS.invoice_id));
+    if (out.invoice_ids.some((id) => !id) || new Set(out.invoice_ids).size !== out.invoice_ids.length) return false;
+  }
+  if (context.invoice_quotes != null) {
+    if (!Array.isArray(context.invoice_quotes) || context.invoice_quotes.length > 200) return false;
+    out.invoice_quotes = context.invoice_quotes.map((quote) => ({
+      id: boundedString(quote?.id, STRING_FIELDS.invoice_id), dueCents: quote?.dueCents,
+    }));
+    if (out.invoice_quotes.some((quote) => !quote.id || !Number.isSafeInteger(quote.dueCents) || quote.dueCents <= 0)
+      || !out.invoice_ids || out.invoice_quotes.length !== out.invoice_ids.length
+      || new Set(out.invoice_quotes.map((quote) => quote.id)).size !== out.invoice_ids.length
+      || out.invoice_quotes.some((quote) => !out.invoice_ids.includes(quote.id))) return false;
+  }
+  return true;
+}
+
+function copyPrevisitQuote(context, out) {
+  if (!copyInvoiceQuotes(context, out)) return false;
+  if (context.selected_channels != null) {
+    if (!Array.isArray(context.selected_channels) || !context.selected_channels.length
+      || context.selected_channels.some((channel) => !['email', 'sms', 'push'].includes(channel))
+      || new Set(context.selected_channels).size !== context.selected_channels.length) return false;
+    out.selected_channels = [...context.selected_channels];
+  }
+  if (context.dues_cents != null) {
+    if (!Number.isSafeInteger(context.dues_cents) || context.dues_cents < 0) return false;
+    out.dues_cents = context.dues_cents;
+  }
+  if (out.source_entry_point === 'previsit_balance_reminder'
+    && Math.round(Number(out.rendered_amount) * 100)
+      !== (out.invoice_quotes || []).reduce((sum, quote) => sum + quote.dueCents, out.dues_cents || 0)) return false;
+  return true;
+}
+
 function sanitizeBillingReplayContext(context) {
   if (!context || typeof context !== 'object' || Array.isArray(context) || context.schema_version !== 1) return null;
   const out = { schema_version: 1 };
-  if (!copyStrings(context, out) || !copyDates(context, out) || !copyExpiry(context, out)) return null;
+  if (!copyStrings(context, out) || !copyDates(context, out) || !copyExpiry(context, out)
+    || !copyPrevisitQuote(context, out)) return null;
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
@@ -127,7 +172,15 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     appointment_rendered_on: meta.appointment_rendered_on,
     followup_sequence_id: meta.followup_sequence_id,
     rendered_amount: meta.rendered_amount,
+    invoice_ids: meta.invoice_ids,
+    selected_channels: meta.selected_channels,
+    invoice_quotes: meta.invoice_quotes,
+    dues_cents: meta.dues_cents,
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES };
+function isBillingReplaySource(input) {
+  return SOURCES.has(boundedString(replaySourceEntryPoint(input), STRING_FIELDS.source_entry_point));
+}
+
+module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, isBillingReplaySource, INVOICE_SEND_SOURCES };

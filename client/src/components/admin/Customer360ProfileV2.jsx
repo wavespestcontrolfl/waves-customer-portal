@@ -78,6 +78,7 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
@@ -136,7 +137,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
-import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
@@ -149,6 +150,7 @@ import {
 } from "../../lib/paymentMethodConsentText";
 import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
+import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -6614,6 +6616,691 @@ function CustomerProfileServices({
   );
 }
 
+// ─── Access & Preferences (property_preferences) — view + admin edit ─────
+// Field list mirrors server/services/property-preferences-schema.js
+// (PREFS_FIELD_SCHEMAS / ALLOWED_FIELDS) plus the two staff-only fields
+// (chemicalSensitivities/chemicalSensitivityDetails) that route also
+// accepts. Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
+const ACCESS_PREFS_PREFERRED_DAY_OPTIONS = [
+  ["no_preference", "No preference"],
+  ["monday", "Monday"],
+  ["tuesday", "Tuesday"],
+  ["wednesday", "Wednesday"],
+  ["thursday", "Thursday"],
+  ["friday", "Friday"],
+];
+const ACCESS_PREFS_PREFERRED_TIME_OPTIONS = [
+  ["no_preference", "No preference"],
+  ["early_morning", "Early morning"],
+  ["morning", "Morning"],
+  ["midday", "Midday"],
+  ["afternoon", "Afternoon"],
+];
+const ACCESS_PREFS_CONTACT_OPTIONS = [
+  ["", "Not set"],
+  ["text", "Text"],
+  ["call", "Call"],
+  ["email", "Email"],
+];
+const ACCESS_PREFS_MOWING_TIME_OPTIONS = [
+  ["", "Not set"],
+  ["morning", "Morning"],
+  ["midday", "Midday"],
+  ["afternoon", "Afternoon"],
+  ["varies", "Varies"],
+];
+const ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS = [
+  ["spray", "Spray"],
+  ["drip", "Drip"],
+  ["rotor", "Rotor"],
+];
+const ACCESS_PREFS_HOA_ROWS = [
+  ["HOA Name", "hoa_name"],
+  ["HOA Company", "hoa_company"],
+  ["HOA Phone", "hoa_phone"],
+  ["HOA Email", "hoa_email"],
+  ["Lawn Height Rule", "hoa_lawn_height"],
+  ["Inspection Period", "hoa_inspection_period"],
+  ["Restrictions", "hoa_restrictions"],
+  ["Signage Rules", "hoa_signage_rules"],
+  ["Timing Restrictions", "hoa_timing_restrictions"],
+];
+
+// Legacy rows can hold full day names ("Monday") or retired sprinkler types
+// ("bubbler") the server now rejects and no pill can show or remove. Restate
+// them the way the customer portal does — the runtime's exact day alias map
+// and the head types it knows — so a stale value never blocks a correction.
+function accessPrefsNormalizeDays(value) {
+  const seen = new Set(
+    [].concat(value ?? []).map((d) => DAY_ALIASES[String(d).trim().toLowerCase()]),
+  );
+  return DAY_KEYS.filter((d) => seen.has(d));
+}
+function accessPrefsNormalizeHeadTypes(value) {
+  return [].concat(value ?? [])
+    .map((t) => String(t).toLowerCase())
+    .filter((t) => Object.prototype.hasOwnProperty.call(HEAD_LABELS, t));
+}
+
+// How each field moves stored row → form draft → PUT body. One table drives
+// both directions so draft creation and serialization can't drift apart.
+const ACCESS_PREFS_KINDS = {
+  text: { fromRow: (v) => v || "", toPayload: (v) => v },
+  // null, never '' — enum and date columns reject an empty string.
+  optional: { fromRow: (v) => v || "", toPayload: (v) => v || null },
+  anyPreference: { fromRow: (v) => v || "no_preference", toPayload: (v) => v },
+  number: {
+    fromRow: (v) => (v === null || v === undefined ? "" : String(v)),
+    toPayload: (v) => (v === "" || v === null || v === undefined ? null : Number(v)),
+  },
+  count: { fromRow: (v) => v ?? 0, toPayload: (v) => Number(v) || 0 },
+  bool: { fromRow: (v) => !!v, toPayload: (v) => !!v },
+  date: { fromRow: (v) => dateInputValue(v), toPayload: (v) => v || null },
+  days: { fromRow: accessPrefsNormalizeDays, toPayload: (v) => v },
+  headTypes: { fromRow: accessPrefsNormalizeHeadTypes, toPayload: (v) => v },
+};
+const ACCESS_PREFS_FIELDS = {
+  neighborhoodGateCode: "text",
+  propertyGateCode: "text",
+  garageCode: "text",
+  lockboxCode: "text",
+  sideGateAccess: "text",
+  parkingNotes: "text",
+  accessNotes: "text",
+  petCount: "count",
+  petDetails: "text",
+  petsSecuredPlan: "text",
+  preferredDay: "anyPreference",
+  preferredTime: "anyPreference",
+  contactPreference: "optional",
+  blackoutStart: "date",
+  blackoutEnd: "date",
+  irrigationControllerLocation: "text",
+  irrigationZones: "number",
+  irrigationInchesPerWeek: "number",
+  irrigationRunMinutes: "number",
+  irrigationScheduleNotes: "text",
+  wateringDays: "days",
+  irrigationSystemType: "headTypes",
+  rainSensor: "bool",
+  irrigationIssues: "text",
+  mowingDays: "days",
+  mowingTimeOfDay: "text",
+  mowingNotes: "text",
+  hoaName: "text",
+  hoaCompany: "text",
+  hoaPhone: "text",
+  hoaEmail: "text",
+  hoaRestrictions: "text",
+  hoaLawnHeight: "text",
+  hoaSignageRules: "text",
+  hoaTimingRestrictions: "text",
+  hoaInspectionPeriod: "text",
+  chemicalSensitivities: "bool",
+  chemicalSensitivityDetails: "text",
+  specialInstructions: "text",
+};
+const accessPrefsColumn = (key) =>
+  key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+function accessPrefsDraftFromRow(prefs) {
+  const row = prefs || {};
+  return Object.fromEntries(
+    Object.entries(ACCESS_PREFS_FIELDS).map(([key, kind]) => [
+      key,
+      ACCESS_PREFS_KINDS[kind].fromRow(row[accessPrefsColumn(key)]),
+    ]),
+  );
+}
+
+function accessPrefsSavePayload(draft, keys) {
+  return Object.fromEntries(
+    keys.map((key) => [
+      key,
+      ACCESS_PREFS_KINDS[ACCESS_PREFS_FIELDS[key]].toPayload(draft[key]),
+    ]),
+  );
+}
+
+// Access codes and the free-text access fields (which often hold codes —
+// data hygiene classes access/parking notes as sensitive) show to office
+// admins only. The portal tells customers codes go to the assigned
+// technician on service day, and a technician's Customer 360 scope isn't
+// limited to that day — the tech app shows them on the visit itself.
+const ACCESS_PREFS_SENSITIVE_ROWS = [
+  ["Property/Yard Gate", "property_gate_code"],
+  ["Neighborhood Gate", "neighborhood_gate_code"],
+  ["Garage Code", "garage_code"],
+  ["Lockbox Code", "lockbox_code"],
+  ["Side Gate", "side_gate_access"],
+  ["Parking Notes", "parking_notes"],
+  ["Access Notes", "access_notes"],
+];
+
+function accessPrefsOptionLabel(options, value) {
+  const hit = options.find(([key]) => key === String(value ?? ""));
+  return hit ? hit[1] : null;
+}
+
+// Read-only summary lines for pets_structured — job-card.js prioritizes
+// this array over the free-text pet fields for the technician's pet line.
+// Not editable here (a nested repeating-group editor is separate work).
+function accessPrefsFormatPetsStructured(petsStructured) {
+  const pets = Array.isArray(petsStructured) ? petsStructured : [];
+  return pets.map((pet) => {
+    // The customer portal stores type/indoor/temperament; older onboarding
+    // rows use species/friendly/secured — read both shapes.
+    const nameSpecies = [pet?.name, pet?.type || pet?.species, pet?.breed]
+      .filter(Boolean)
+      .join(" — ");
+    const traits = [
+      pet?.indoor || null,
+      pet?.temperament || null,
+      pet?.friendly === true ? "friendly" : pet?.friendly === false ? "not friendly" : null,
+      pet?.secured === true ? "secured" : pet?.secured === false ? "not secured" : null,
+    ].filter(Boolean);
+    const parts = [nameSpecies || "Pet", traits.join(", "), pet?.notes]
+      .filter(Boolean);
+    return parts.join(" · ");
+  });
+}
+
+// Renders one key/value row; empty/missing important values read as a
+// muted "Not set" instead of the row disappearing, so staff can see what's
+// missing at a glance rather than assume it was never asked.
+function AccessPrefRow({ label, value }) {
+  const isEmpty =
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    (Array.isArray(value) && value.length === 0);
+  return (
+    <div className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2">
+      {" "}
+      <span className="text-ink-secondary flex-shrink-0">{label}</span>{" "}
+      <span
+        className={cn(
+          "text-right max-w-[220px] break-words",
+          isEmpty ? "text-ink-tertiary italic" : "text-zinc-900",
+        )}
+      >
+        {isEmpty ? "Not set" : Array.isArray(value) ? value.join(", ") : value}
+      </span>{" "}
+    </div>
+  );
+}
+
+function AccessPrefsSubheading({ children }) {
+  return (
+    <div className="text-ui-caption font-medium text-ink-secondary mt-3 mb-1 first:mt-0">
+      {children}
+    </div>
+  );
+}
+
+// Multi-select pill toggle for day lists (watering/mowing) and the
+// irrigation system-type vocabulary — stores/reads the exact canonical keys
+// the server schema validates (Mon..Sun / spray|drip|rotor), matching the
+// customer portal's own pill picker.
+function AccessPrefsPillToggle({ options, value, onChange, disabled }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const key = Array.isArray(opt) ? opt[0] : opt;
+        const label = Array.isArray(opt) ? opt[1] : opt;
+        const active = value.includes(key);
+        return (
+          <button
+            key={key}
+            type="button"
+            disabled={disabled}
+            aria-pressed={active}
+            onClick={() =>
+              onChange(
+                active ? value.filter((v) => v !== key) : [...value, key],
+              )
+            }
+            className={cn(
+              "px-2.5 py-1 rounded-sm text-ui-label border-hairline u-focus-ring",
+              active
+                ? "bg-zinc-900 text-white border-zinc-900"
+                : "bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50",
+            )}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// A single control sits inside a <label>. A pill group uses fieldset/legend
+// instead: a label wrapping several buttons forwards a click on its text to
+// the first button, which would toggle Monday from the "Watering Days" title.
+function AccessPrefsField({ label, error, group, children }) {
+  const Wrapper = group ? "fieldset" : "label";
+  const Title = group ? "legend" : "div";
+  return (
+    <Wrapper className="block">
+      <Title className="ui-label text-ink-secondary mb-1">{label}</Title>
+      {children}
+      {error && (
+        <div className="mt-1 text-ui-caption text-alert-fg">{error}</div>
+      )}
+    </Wrapper>
+  );
+}
+
+const ACCESS_PREFS_INPUT_CLASS =
+  "w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
+const ACCESS_PREFS_TEXTAREA_CLASS =
+  "w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
+
+function accessPrefsValuesEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const aa = Array.isArray(a) ? [...a].sort() : [];
+    const bb = Array.isArray(b) ? [...b].sort() : [];
+    return JSON.stringify(aa) === JSON.stringify(bb);
+  }
+  return a === b;
+}
+
+// Fields that must travel together. The server checks the blackout pair as
+// one rule, and it infers the sensitivity flag from details sent without it
+// — so details always carry the switch as shown, and a flag turned back off
+// can't be re-enabled by that inference.
+const ACCESS_PREFS_COUPLED = {
+  blackoutStart: ["blackoutEnd"],
+  blackoutEnd: ["blackoutStart"],
+  chemicalSensitivityDetails: ["chemicalSensitivities"],
+};
+
+// Which draft keys actually changed since the form opened (codex P2): a
+// full-snapshot resubmit could clobber a newer customer portal autosave on
+// a field nobody touched in this form.
+function accessPrefsDirtyKeys(initial, current) {
+  const changed = Object.keys(current).filter(
+    (k) => !accessPrefsValuesEqual(initial?.[k], current[k]),
+  );
+  const coupled = changed.flatMap((k) => ACCESS_PREFS_COUPLED[k] || []);
+  return [...new Set([...changed, ...coupled])];
+}
+
+// Client-side mirror of the server's blackout-pair rule (codex P2): both
+// set or both cleared, and start on or before end. "YYYY-MM-DD" strings
+// sort the same lexicographically as chronologically.
+function accessPrefsBlackoutError(draft) {
+  if (!draft.blackoutStart !== !draft.blackoutEnd) {
+    return "Blackout start and end dates must be set or cleared together.";
+  }
+  if (draft.blackoutStart > draft.blackoutEnd) {
+    return "Blackout end date must be on or after the start date.";
+  }
+  return null;
+}
+
+function accessPrefsRejectedMap(rejected) {
+  return Object.fromEntries(
+    (Array.isArray(rejected) ? rejected : []).map((r) => [r.field, r.message]),
+  );
+}
+
+// Move the dirty baseline forward for every field that saved, so a later
+// edit back to the original value is still sent. Rejected fields — and
+// anything coupled to them — keep their old baseline.
+function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
+  const failedKeys = accessPrefsDirtyKeys({}, failed);
+  const saved = dirtyKeys.filter((k) => !failedKeys.includes(k));
+  return {
+    ...baseline,
+    ...Object.fromEntries(saved.map((k) => [k, draft[k]])),
+  };
+}
+
+function AccessPrefsReadView({ p, isAdmin, onEdit }) {
+  const code = (value) =>
+    isAdmin || !value ? value : "Shown in the tech app on service day";
+  const hasHoa = ACCESS_PREFS_HOA_ROWS.some(([, key]) => p[key]);
+  return (
+    <div>
+      {" "}
+      <div className="flex items-center justify-between mb-2">
+        <SectionTitle className="mb-0">Access &amp; Preferences</SectionTitle>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label="Edit Access &amp; Preferences"
+            className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+      <AccessPrefsSubheading>Access</AccessPrefsSubheading>
+      {ACCESS_PREFS_SENSITIVE_ROWS.map(([label, key]) => (
+        <AccessPrefRow key={key} label={label} value={code(p[key])} />
+      ))}
+
+      <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
+      <AccessPrefRow label="Pet Count" value={p.pet_count ?? null} />
+      <AccessPrefRow label="Pet Details" value={p.pet_details} />
+      <AccessPrefRow label="Pets Secured Plan" value={p.pets_secured_plan} />
+      {accessPrefsFormatPetsStructured(p.pets_structured).map((line, i) => (
+        <AccessPrefRow
+          key={`pet-${i}`}
+          label={i === 0 ? "Pets on File" : ""}
+          value={line}
+        />
+      ))}
+
+      <AccessPrefsSubheading>Scheduling</AccessPrefsSubheading>
+      <AccessPrefRow
+        label="Preferred Day"
+        value={accessPrefsOptionLabel(ACCESS_PREFS_PREFERRED_DAY_OPTIONS, p.preferred_day)}
+      />
+      <AccessPrefRow
+        label="Preferred Time"
+        value={accessPrefsOptionLabel(ACCESS_PREFS_PREFERRED_TIME_OPTIONS, p.preferred_time)}
+      />
+      <AccessPrefRow
+        label="Contact Preference"
+        value={accessPrefsOptionLabel(ACCESS_PREFS_CONTACT_OPTIONS, p.contact_preference)}
+      />
+      {(p.blackout_start || p.blackout_end) && (
+        <AccessPrefRow
+          label="Blackout Dates"
+          value={`${dateInputValue(p.blackout_start) || "?"} – ${dateInputValue(p.blackout_end) || "?"}`}
+        />
+      )}
+
+      <AccessPrefsSubheading>Lawn &amp; Irrigation</AccessPrefsSubheading>
+      <AccessPrefRow
+        label="Irrigation System Type"
+        value={[].concat(p.irrigation_system_type ?? [])}
+      />
+      <AccessPrefRow label="Inches / Week" value={p.irrigation_inches_per_week} />
+      <AccessPrefRow label="Run Minutes / Zone" value={p.irrigation_run_minutes} />
+      <AccessPrefRow label="Watering Days" value={p.watering_days} />
+      <AccessPrefRow label="Controller Location" value={p.irrigation_controller_location} />
+      <AccessPrefRow label="Zones" value={p.irrigation_zones} />
+      <AccessPrefRow label="Rain Sensor" value={p.rain_sensor ? "Yes" : "No"} />
+      <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
+      <AccessPrefRow label="Irrigation Issues" value={p.irrigation_issues} />
+      <AccessPrefRow label="Mowing Days" value={p.mowing_days} />
+      <AccessPrefRow
+        label="Mowing Time"
+        value={accessPrefsOptionLabel(ACCESS_PREFS_MOWING_TIME_OPTIONS, p.mowing_time_of_day)}
+      />
+      <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
+
+      {hasHoa && (
+        <>
+          <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
+          {ACCESS_PREFS_HOA_ROWS.map(([label, key]) => (
+            <AccessPrefRow key={key} label={label} value={p[key]} />
+          ))}
+        </>
+      )}
+
+      <AccessPrefsSubheading>Health &amp; Safety</AccessPrefsSubheading>
+      <AccessPrefRow
+        label="Chemical Sensitivities"
+        value={p.chemical_sensitivities ? "Yes" : "No"}
+      />
+      {p.chemical_sensitivities && (
+        <AccessPrefRow label="Sensitivity Details" value={p.chemical_sensitivity_details} />
+      )}
+      <AccessPrefRow label="Special Instructions" value={p.special_instructions} />
+    </div>
+  );
+}
+
+function AccessPrefsTextInput({ label, field, d, set, fieldErrors, multiline, ...inputProps }) {
+  const Control = multiline ? Textarea : Input;
+  return (
+    <AccessPrefsField label={label} error={fieldErrors[field]}>
+      <Control
+        {...(multiline ? { rows: 2 } : {})}
+        {...inputProps}
+        className={multiline ? ACCESS_PREFS_TEXTAREA_CLASS : ACCESS_PREFS_INPUT_CLASS}
+        value={d[field]}
+        onChange={(e) => set(field)(e.target.value)}
+      />
+    </AccessPrefsField>
+  );
+}
+
+function AccessPrefsSelect({ label, field, options, d, set, fieldErrors }) {
+  return (
+    <AccessPrefsField label={label} error={fieldErrors[field]}>
+      <Select className={ACCESS_PREFS_INPUT_CLASS} value={d[field]} onChange={(e) => set(field)(e.target.value)}>
+        {options.map(([key, optLabel]) => (
+          <option key={key} value={key}>{optLabel}</option>
+        ))}
+      </Select>
+    </AccessPrefsField>
+  );
+}
+
+function AccessPrefsPills({ label, field, options, d, set, fieldErrors }) {
+  return (
+    <AccessPrefsField group label={label} error={fieldErrors[field]}>
+      <AccessPrefsPillToggle options={options} value={d[field]} onChange={set(field)} />
+    </AccessPrefsField>
+  );
+}
+
+function AccessPrefsSwitchRow({ label, checked, onChange }) {
+  return (
+    <div className="flex items-center justify-between py-1">
+      <span className="ui-label text-ink-secondary">{label}</span>
+      <Switch aria-label={label} checked={!!checked} onChange={onChange} />
+    </div>
+  );
+}
+
+function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets }) {
+  const f = { d, set, fieldErrors };
+  // Entering sensitivity details turns the flag on — techs only see the
+  // warning when the flag is set.
+  const setSensitivityDetails = (next) =>
+    setDraft((prev) => ({
+      ...prev,
+      chemicalSensitivityDetails: next,
+      ...(next.trim() ? { chemicalSensitivities: true } : {}),
+    }));
+  return (
+    <div className="space-y-3">
+      <AccessPrefsSubheading>Access</AccessPrefsSubheading>
+      <AccessPrefsTextInput {...f} label="Property/Yard Gate" field="propertyGateCode" maxLength={100} />
+      <AccessPrefsTextInput {...f} label="Neighborhood Gate" field="neighborhoodGateCode" maxLength={100} />
+      <AccessPrefsTextInput {...f} label="Garage Code" field="garageCode" maxLength={100} />
+      <AccessPrefsTextInput {...f} label="Lockbox Code" field="lockboxCode" maxLength={100} />
+      <AccessPrefsTextInput {...f} label="Side Gate" field="sideGateAccess" maxLength={200} />
+      <AccessPrefsTextInput {...f} multiline label="Parking Notes" field="parkingNotes" />
+      <AccessPrefsTextInput {...f} multiline label="Access Notes" field="accessNotes" />
+
+      <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
+      {/* The tech job card prefers the structured pet list over count and
+          details, so while one exists those two stay read-only here —
+          an edit would never reach the technician. */}
+      {hasStructuredPets && (
+        <div className="text-ui-caption text-ink-secondary">
+          This customer's pet list comes from their portal and is what the technician sees; pet count and details are locked while it exists.
+        </div>
+      )}
+      <AccessPrefsTextInput {...f} label="Pet Count" field="petCount" type="number" min="0" max="20" disabled={hasStructuredPets} />
+      <AccessPrefsTextInput {...f} multiline label="Pet Details" field="petDetails" disabled={hasStructuredPets} />
+      <AccessPrefsTextInput {...f} multiline label="Pets Secured Plan" field="petsSecuredPlan" />
+
+      <AccessPrefsSubheading>Scheduling</AccessPrefsSubheading>
+      <AccessPrefsSelect {...f} label="Preferred Day" field="preferredDay" options={ACCESS_PREFS_PREFERRED_DAY_OPTIONS} />
+      <AccessPrefsSelect {...f} label="Preferred Time" field="preferredTime" options={ACCESS_PREFS_PREFERRED_TIME_OPTIONS} />
+      <AccessPrefsSelect {...f} label="Contact Preference" field="contactPreference" options={ACCESS_PREFS_CONTACT_OPTIONS} />
+      <div className="grid grid-cols-2 gap-2">
+        <AccessPrefsTextInput {...f} label="Blackout Start" field="blackoutStart" type="date" />
+        <AccessPrefsTextInput {...f} label="Blackout End" field="blackoutEnd" type="date" />
+      </div>
+
+      <AccessPrefsSubheading>Lawn &amp; Irrigation</AccessPrefsSubheading>
+      <AccessPrefsPills {...f} label="Irrigation System Type" field="irrigationSystemType" options={ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS} />
+      <div className="grid grid-cols-2 gap-2">
+        <AccessPrefsTextInput {...f} label="Inches / Week" field="irrigationInchesPerWeek" type="number" min="0" max="5" step="0.1" />
+        <AccessPrefsTextInput {...f} label="Run Minutes / Zone" field="irrigationRunMinutes" type="number" min="1" max="240" />
+      </div>
+      <AccessPrefsPills {...f} label="Watering Days" field="wateringDays" options={DAY_KEYS} />
+      <AccessPrefsTextInput {...f} label="Controller Location" field="irrigationControllerLocation" maxLength={200} />
+      <AccessPrefsTextInput {...f} label="Zones" field="irrigationZones" type="number" min="0" max="100" />
+      <AccessPrefsSwitchRow label="Rain Sensor" checked={d.rainSensor} onChange={set("rainSensor")} />
+      <AccessPrefsTextInput {...f} multiline label="Irrigation Notes" field="irrigationScheduleNotes" />
+      <AccessPrefsTextInput {...f} multiline label="Irrigation Issues" field="irrigationIssues" />
+      <AccessPrefsPills {...f} label="Mowing Days" field="mowingDays" options={DAY_KEYS} />
+      <AccessPrefsSelect {...f} label="Mowing Time" field="mowingTimeOfDay" options={ACCESS_PREFS_MOWING_TIME_OPTIONS} />
+      <AccessPrefsTextInput {...f} multiline label="Mowing Notes" field="mowingNotes" />
+
+      <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
+      <div className="grid grid-cols-2 gap-2">
+        <AccessPrefsTextInput {...f} label="HOA Name" field="hoaName" maxLength={150} />
+        <AccessPrefsTextInput {...f} label="HOA Company" field="hoaCompany" maxLength={200} />
+        <AccessPrefsTextInput {...f} label="HOA Phone" field="hoaPhone" maxLength={30} />
+        <AccessPrefsTextInput {...f} label="HOA Email" field="hoaEmail" type="email" maxLength={100} />
+        <AccessPrefsTextInput {...f} label="Lawn Height Rule" field="hoaLawnHeight" maxLength={100} />
+        <AccessPrefsTextInput {...f} label="Inspection Period" field="hoaInspectionPeriod" maxLength={100} />
+      </div>
+      <AccessPrefsTextInput {...f} multiline label="Restrictions" field="hoaRestrictions" />
+      <AccessPrefsTextInput {...f} multiline label="Signage Rules" field="hoaSignageRules" />
+      <AccessPrefsTextInput {...f} multiline label="Timing Restrictions" field="hoaTimingRestrictions" />
+
+      <AccessPrefsSubheading>Health &amp; Safety</AccessPrefsSubheading>
+      <AccessPrefsSwitchRow label="Chemical Sensitivities" checked={d.chemicalSensitivities} onChange={set("chemicalSensitivities")} />
+      <AccessPrefsField label="Sensitivity Details" error={fieldErrors.chemicalSensitivityDetails}>
+        <Textarea
+          rows={2}
+          className={ACCESS_PREFS_TEXTAREA_CLASS}
+          value={d.chemicalSensitivityDetails}
+          onChange={(e) => setSensitivityDetails(e.target.value)}
+        />
+      </AccessPrefsField>
+      <AccessPrefsTextInput {...f} multiline label="Special Instructions" field="specialInstructions" />
+    </div>
+  );
+}
+
+function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
+  const [draft, setDraft] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
+  // The snapshot the form opened with — diffed against on Save so only
+  // fields actually touched in THIS edit go in the PUT body.
+  const initialDraftRef = useRef(null);
+
+  const set = (key) => (value) =>
+    setDraft((prev) => ({ ...prev, [key]: value }));
+
+  const openEdit = () => {
+    const snapshot = accessPrefsDraftFromRow(prefs);
+    initialDraftRef.current = snapshot;
+    setDraft(snapshot);
+    setFieldErrors({});
+    setErr("");
+  };
+  const closeEditor = () => {
+    setDraft(null);
+    initialDraftRef.current = null;
+    setFieldErrors({});
+    setErr("");
+  };
+
+  // Resolves to the per-field rejections, or throws when the request failed.
+  const submit = async (dirtyKeys) => {
+    const response = await adminFetch(
+      `/admin/customers/${customerId}/property-preferences`,
+      { method: "PUT", body: JSON.stringify(accessPrefsSavePayload(draft, dirtyKeys)) },
+    );
+    return accessPrefsRejectedMap(response?.rejected);
+  };
+
+  const handleSave = async () => {
+    const blackoutError = accessPrefsBlackoutError(draft);
+    if (blackoutError) {
+      setFieldErrors({ blackoutEnd: blackoutError });
+      setErr(blackoutError);
+      return;
+    }
+    const dirtyKeys = accessPrefsDirtyKeys(initialDraftRef.current, draft);
+    if (!dirtyKeys.length) return closeEditor();
+
+    setSaving(true);
+    setErr("");
+    let failed;
+    try {
+      failed = await submit(dirtyKeys);
+    } catch (e) {
+      setSaving(false);
+      setFieldErrors(accessPrefsRejectedMap(e?.body?.rejected));
+      setErr(e.message || "Failed to save property preferences");
+      return;
+    }
+    initialDraftRef.current = accessPrefsAdvanceBaseline(
+      initialDraftRef.current, draft, dirtyKeys, failed,
+    );
+    setFieldErrors(failed);
+    const failedCount = Object.keys(failed).length;
+    // Refresh before closing: if the reload fails the editor stays open
+    // with the error rather than dropping staff onto a stale read view.
+    try {
+      await onSaved?.();
+    } catch (reloadErr) {
+      setErr(`Saved, but the profile couldn't refresh — reload the page to see it. (${reloadErr?.message || "refresh failed"})`);
+      return;
+    } finally {
+      setSaving(false);
+    }
+    if (!failedCount) return closeEditor();
+    setErr(`${failedCount} field${failedCount > 1 ? "s" : ""} could not be saved — fix and try again. Everything else was saved.`);
+  };
+
+  if (!draft) {
+    return <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />;
+  }
+
+  return (
+    <div>
+      {" "}
+      <div className="flex items-center justify-between mb-2">
+        <SectionTitle className="mb-0">Access &amp; Preferences</SectionTitle>
+      </div>
+      {err && (
+        <div className="mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
+          {err}
+        </div>
+      )}
+      {/* Locked while a save is in flight: edits typed then would miss the
+          submitted snapshot and be dropped when the editor closes. */}
+      <fieldset disabled={saving} className="contents">
+        <AccessPrefsEditForm
+          d={draft}
+          set={set}
+          setDraft={setDraft}
+          fieldErrors={fieldErrors}
+          hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
+        />
+      </fieldset>
+      <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">
+        <Button variant="secondary" size="sm" onClick={closeEditor} disabled={saving}>
+          Cancel
+        </Button>
+        <Button size="sm" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving..." : "Save"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function CustomerProfileProperty({
   embedded,
   recipientDetails,
@@ -6718,34 +7405,12 @@ function CustomerProfileProperty({
         </div>{" "}
         <div>
           {" "}
-          <SectionTitle>Access &amp; Preferences</SectionTitle>
-          {[
-            ["Property Gate Code", prefs.property_gate_code],
-            ["Neighborhood Gate", prefs.neighborhood_gate_code],
-            ["Parking Instructions", prefs.parking_instructions],
-            ["Interior Access", prefs.interior_access_instructions],
-            ["Pet Details", prefs.pet_details],
-            ["Chemical Sensitivities", prefs.chemical_sensitivities],
-            ["Preferred Time", prefs.preferred_service_time],
-            ["Preferred Tech", prefs.preferred_technician],
-            ["Special Instructions", prefs.special_instructions],
-          ].map(
-            ([label, val]) =>
-              val && (
-                <div
-                  key={label}
-                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2"
-                >
-                  {" "}
-                  <span className="text-ink-secondary flex-shrink-0">
-                    {label}
-                  </span>{" "}
-                  <span className="text-zinc-900 text-right max-w-[200px] break-words">
-                    {val}
-                  </span>{" "}
-                </div>
-              ),
-          )}
+          <AccessPreferencesSection
+            customerId={customerId}
+            isAdmin={isAdmin}
+            prefs={prefs}
+            onSaved={handlePropertyChanged}
+          />
         </div>{" "}
       </div>{" "}
     </div>
@@ -8490,6 +9155,7 @@ function CustomerWorkspacePresentation({
             <>
               {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
               <OwedCommitmentsSummary customerId={customerId} source="sms" />
+              {sections.engagement}
               {isAdmin && sections.activity}
               {sections.services}
             </>
@@ -8545,6 +9211,7 @@ function CustomerOverlayPresentation({
           {activeTab === "overview" && sections.overview}
           {activeTab === "billing" && sections.billing}
           {activeTab === "comms" && sections.conversation}
+          {activeTab === "comms" && sections.engagement}
           {activeTab === "services" && sections.services}
           {activeTab === "property" && sections.property}
           {activeTab === "compliance" && sections.compliance}
@@ -9234,10 +9901,12 @@ function useCustomerProfileNavigation({
   isAdmin,
   editOpen,
   onClose,
+  onSelectCustomer,
   loading,
   data,
   reloadCustomer,
   customerId,
+  onDraftActiveChange,
 }) {
   const [requestedTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
@@ -9262,6 +9931,36 @@ function useCustomerProfileNavigation({
     embedded && !isAdmin && requestedTab === "billing"
       ? "overview"
       : requestedTab;
+  // Single "draft active" choke point for every control that can unmount
+  // the address-review panel (it lives only in the overview tab): tab
+  // switches, the header/menu quick actions that jump tabs, Escape, and
+  // (via the onDraftActiveChange callback below) an owning Workspace's own
+  // "All customers" button and this profile's customer-switch links.
+  // A ref, not state — read synchronously from event handlers with no
+  // re-render dependency, same pattern as the panel's own activeIdRef.
+  const draftActiveRef = useRef(false);
+  const handleDraftActiveChange = useCallback((active) => {
+    draftActiveRef.current = active;
+    onDraftActiveChange?.(active);
+  }, [onDraftActiveChange]);
+  const guardNavigateAway = useCallback(
+    () => !draftActiveRef.current || confirmDiscardDraft(),
+    [],
+  );
+  // The two controls that unmount this profile from OUTSIDE its own tab
+  // navigation: closing it, and switching to a different customer via the
+  // account-properties / "others at this address" links. Built here, next
+  // to guardNavigateAway, rather than in the (already complexity-capped)
+  // outer component body.
+  const guardedClose = () => { if (guardNavigateAway()) onClose?.(); };
+  const guardedSelectCustomer = onSelectCustomer
+    ? (id) => { if (guardNavigateAway()) onSelectCustomer(id); }
+    : undefined;
+  const requestTabChange = (next) => {
+    if (next !== activeTab && !guardNavigateAway()) return false;
+    setActiveTab(next);
+    return true;
+  };
   useEffect(() => {
     if (!loading)
       activeTabButtonRef.current?.scrollIntoView?.({
@@ -9284,11 +9983,12 @@ function useCustomerProfileNavigation({
     if (embedded) return undefined;
     const handler = (e) => {
       if (e.key !== "Escape" || subModalOpen) return;
+      if (!guardNavigateAway()) return;
       onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen]);
+  }, [onClose, embedded, subModalOpen, guardNavigateAway]);
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e) => {
@@ -9303,7 +10003,7 @@ function useCustomerProfileNavigation({
     };
   }, [menuOpen]);
   const changeWorkspaceTab = (next) => {
-    setActiveTab(next);
+    if (!requestTabChange(next)) return;
     requestAnimationFrame(() => {
       if (panelRef.current && tabsAnchorRef.current) {
         panelRef.current.scrollTo({
@@ -9326,7 +10026,7 @@ function useCustomerProfileNavigation({
     return () => observer.disconnect();
   }, [embedded, loading, data?.customer?.id]);
   const viewServiceRecords = () => {
-    setActiveTab("comms");
+    if (!requestTabChange("comms")) return;
     requestAnimationFrame(() => {
       const records = panelRef.current?.querySelector(".c360-service-records");
       if (records) {
@@ -9339,7 +10039,7 @@ function useCustomerProfileNavigation({
     await reloadCustomer();
     setAnnualPrepayOpen(false);
     setAnnualPrepayInvoiceOpen(false);
-    setActiveTab("billing");
+    requestTabChange("billing");
   };
   useEffect(() => {
     setMenuOpen(false);
@@ -9368,7 +10068,10 @@ function useCustomerProfileNavigation({
     menuOpen,
     setMenuOpen,
     menuRef,
-    setActiveTab,
+    // Every external consumer of this (the overlay tab bar, the mobile
+    // action menu's tab jumps) gets the same draft guard as changeWorkspaceTab
+    // for free — this is no longer the raw useState setter.
+    setActiveTab: requestTabChange,
     tabsAnchorRef,
     profileContentId,
     menuButtonRef,
@@ -9378,6 +10081,9 @@ function useCustomerProfileNavigation({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardedClose,
+    guardedSelectCustomer,
   };
 }
 
@@ -9614,6 +10320,10 @@ export default function Customer360ProfileV2({
   initialTab = "overview",
   initialScheduledServiceId = null,
   embedded = false,
+  // Lets an owning Workspace guard its own controls (e.g. "All customers")
+  // against unmounting this profile while its address-review draft is open —
+  // see the draftActiveRef/guardNavigateAway note in useCustomerProfileNavigation.
+  onDraftActiveChange,
 }) {
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
@@ -9633,6 +10343,13 @@ export default function Customer360ProfileV2({
     profileVersion,
     profileActionErr,
   } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
+  const resolveAddressReview = async () => {
+    try {
+      await reloadCustomer();
+    } finally {
+      onCustomerMutation?.({ customerId, action: "update" });
+    }
+  };
   const {
     resumeBilling,
     resumingBilling,
@@ -9707,6 +10424,9 @@ export default function Customer360ProfileV2({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardedClose,
+    guardedSelectCustomer,
   } = useCustomerProfileNavigation({
     profileReloadKey,
     initialTab,
@@ -9714,10 +10434,12 @@ export default function Customer360ProfileV2({
     isAdmin,
     editOpen,
     onClose,
+    onSelectCustomer,
     loading,
     data,
     reloadCustomer,
     customerId,
+    onDraftActiveChange,
   });
   const [historySearch, setHistorySearch] = useState("");
   useEffect(() => {
@@ -9935,7 +10657,7 @@ export default function Customer360ProfileV2({
         referral={referral}
         customerId={customerId}
         accountProperties={accountProperties}
-        onSelectCustomer={onSelectCustomer}
+        onSelectCustomer={guardedSelectCustomer}
         addressNeighbors={addressNeighbors}
         setData={setData}
         setProfileActionErr={setProfileActionErr}
@@ -9945,6 +10667,8 @@ export default function Customer360ProfileV2({
             key={customerId}
             customerId={customerId}
             refreshToken={profileVersion}
+            onResolved={resolveAddressReview}
+            onDraftActiveChange={handleDraftActiveChange}
           />
         ) : null}
       />
@@ -10025,6 +10749,9 @@ export default function Customer360ProfileV2({
         onLoadOlder={history.loadOlder}
       />
     ),
+    // Read-only sent/engagement feed; the server answers { enabled: false }
+    // while GATE_CUSTOMER_ACTIVITY_TIMELINE is dark and it renders nothing.
+    engagement: <CustomerEngagementTimeline customerId={customerId} adminOnly={isAdmin} />,
     timeline: (
       <CustomerProfileTimeline
         isAdmin={isAdmin}
@@ -10061,7 +10788,7 @@ export default function Customer360ProfileV2({
         setMenuOpen,
         menuRef,
         score,
-        onClose,
+        onClose: guardedClose,
         customerId,
         setAnnualPrepayInvoiceOpen,
         setActiveTab,
@@ -10080,7 +10807,7 @@ export default function Customer360ProfileV2({
       profileActionErr={profileActionErr}
       actions={
         <CustomerProfileMobileActions
-          onClose={onClose}
+          onClose={guardedClose}
           c={c}
           isAdmin={isAdmin}
           openIntelligenceBar={openIntelligenceBar}

@@ -48,6 +48,10 @@ const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
 const OpenBalance = require('../services/open-balance');
 const router = require('../routes/admin-invoices');
+// The apply handler lazy-requires the reconciler on its first call. Loading its
+// module graph cold (~1 s idle, several under a parallel run) inside the first
+// apply test blew the 5 s test timeout in CI — load it here, outside any test.
+require('../services/zelle-notice-reconciler');
 
 let tables;
 function builder(table) {

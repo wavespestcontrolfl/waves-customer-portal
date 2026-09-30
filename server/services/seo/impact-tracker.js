@@ -78,7 +78,8 @@ const REGRESSION_PAUSE_THRESHOLD = 3;
 const LAUNCH_MIN_IMPRESSIONS = 30;  // same "did it register at all" floor
 const LAUNCH_RANKED_POSITION = 20;  // ranking somewhere a human might see it
 
-// AEO visibility feedback loop (aeo_gap rows only).
+// AEO visibility feedback loop (aeo_gap and aeo_question_gap rows).
+const AEO_BUCKETS = ['aeo_gap', 'aeo_question_gap'];
 const AEO_REPROBE_DAYS = 21;        // wait this many days post-deploy before judging
 const AEO_MIN_OBSERVATIONS = 5;     // distinct post-deploy probe-days needed for a verdict
 
@@ -391,10 +392,14 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
 
   const ctx = runId ? await aeoContextForRun(database, runId) : { bucket: null, city: null, service: null };
   const bucket = ctx.bucket;
-  // For aeo_gap rows, capture which managed mention queries to watch after the
+  // For AEO rows, capture which managed mention queries to watch after the
   // deploy so the daily feedback check can tell if Waves started getting cited.
-  const aeoQueryIds = bucket === 'aeo_gap'
-    ? await aeoQueryIdsForCityService(database, ctx.city, ctx.service).catch(() => [])
+  // A lookup failure THROWS: the impact row is insert-once, so an empty
+  // cohort frozen by a transient error would leave the experiment
+  // insufficient_data forever. sweepNewlyLive catches per run and retries
+  // on its next pass (no impact row was written).
+  const aeoQueryIds = AEO_BUCKETS.includes(bucket)
+    ? await aeoQueryIdsForRun(database, ctx)
     : null;
 
   const [row] = await database('content_optimization_impact')
@@ -427,14 +432,25 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
   return row;
 }
 
+// A lookup failure THROWS, like the query-id lookup: swallowing it would
+// persist the insert-once impact row with bucket NULL and no AEO cohort,
+// leaving the run out of the AEO recheck forever. sweepNewlyLive retries.
 async function aeoContextForRun(database, runId) {
-  try {
-    const row = await database('autonomous_runs as r')
-      .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
-      .where('r.id', runId)
-      .first('q.bucket as bucket', 'q.city as city', 'q.service as service');
-    return { bucket: row?.bucket || null, city: row?.city || null, service: row?.service || null };
-  } catch { return { bucket: null, city: null, service: null }; }
+  const row = await database('autonomous_runs as r')
+    .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
+    .where('r.id', runId)
+    .first('q.bucket as bucket', 'q.city as city', 'q.service as service', 'q.query as query');
+  return { bucket: row?.bucket || null, city: row?.city || null, service: row?.service || null, query: row?.query || null };
+}
+
+// Managed mention-query ids an AEO row watches: aeo_gap watches its
+// city×service; aeo_question_gap watches its one benchmark question (the row's
+// query IS the frozen benchmark prompt).
+async function aeoQueryIdsForRun(database, ctx) {
+  if (ctx.bucket !== 'aeo_question_gap') return aeoQueryIdsForCityService(database, ctx.city, ctx.service);
+  if (!ctx.query) return [];
+  const rows = await database('seo_llm_mention_queries').where({ active: true, query: ctx.query }).select('id');
+  return rows.map((r) => r.id);
 }
 
 // Managed mention-query ids for an opportunity's city×service. The miner stores
@@ -703,8 +719,24 @@ async function pausedBuckets({ db: database = db, strict = false } = {}) {
   }
 }
 
+// The engines (llm_platform values) an aeo_question_gap run set out to win:
+// the qualifying cohort persisted on its opportunity row. Empty when the
+// cohort is unavailable, which leaves the verdict insufficient_data (the
+// recheck retries such rows); a lookup failure throws and the row retries.
+async function questionGapMissingPlatforms(database, runId) {
+  if (!runId) return [];
+  const row = await database('autonomous_runs as r')
+    .join('opportunity_queue as q', 'r.opportunity_id', 'q.id')
+    .where('r.id', runId)
+    .first('q.signal_metadata as signal_metadata');
+  let meta = row?.signal_metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  const engines = Array.isArray(meta?.engines_missing) ? meta.engines_missing : [];
+  return [...new Set(engines.map((e) => e?.platform).filter(Boolean))];
+}
+
 /**
- * AEO visibility feedback loop. For aeo_gap rows that deployed ≥ AEO_REPROBE_DAYS
+ * AEO visibility feedback loop. For AEO rows (AEO_BUCKETS) that deployed ≥ AEO_REPROBE_DAYS
  * ago and haven't been checked, look at the answer-engine observations the daily
  * prober has recorded for the watched queries SINCE the deploy, and record
  * whether Waves started getting cited. Reuses existing seo_llm_mentions data —
@@ -715,10 +747,10 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
   let pending = [];
   try {
     pending = await database('content_optimization_impact')
-      .where('bucket', 'aeo_gap')
+      .whereIn('bucket', AEO_BUCKETS)
       .where(b => b.whereNull('aeo_measurement_version').orWhere('aeo_verdict', 'insufficient_data'))
       .where('deployed_at', '<=', addETDays(now, -AEO_REPROBE_DAYS))
-      .select('id', 'page_url', 'aeo_query_ids', 'deployed_at');
+      .select('id', 'bucket', 'run_id', 'page_url', 'aeo_query_ids', 'deployed_at');
   } catch (err) {
     logger.warn(`[impact-tracker] checkAeoVisibility query failed: ${err.message}`);
     return { checked: 0 };
@@ -729,12 +761,22 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
       let ids = [];
       try { ids = Array.isArray(row.aeo_query_ids) ? row.aeo_query_ids : JSON.parse(row.aeo_query_ids || '[]'); } catch { ids = []; }
 
+      // aeo_question_gap measures ONLY the engines that were missing the
+      // target when the question qualified (its frozen queue row's
+      // signal_metadata.engines_missing): an engine that already cited the
+      // target proves nothing about the treatment. aeo_gap is unchanged.
+      const platforms = row.bucket === 'aeo_question_gap'
+        ? await questionGapMissingPlatforms(database, row.run_id)
+        : null;
+
       let observedDays = 0;
       let wavesHitDays = 0;
-      if (ids.length) {
-        const obs = await database('seo_llm_mentions')
+      if (ids.length && (!platforms || platforms.length)) {
+        let obsQ = database('seo_llm_mentions')
           .whereIn('query_id', ids)
-          .where('check_date', '>=', etDateString(row.deployed_at))
+          .where('check_date', '>=', etDateString(row.deployed_at));
+        if (platforms) obsQ = obsQ.whereIn('llm_platform', platforms);
+        const obs = await obsQ
           .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls');
         const days = new Map(); // date → any waves hit that day
         for (const o of obs.filter(isMeasuredAnswer)) {
@@ -755,7 +797,7 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
       logger.warn(`[impact-tracker] checkAeoVisibility row ${row.id} failed: ${err.message}`);
     }
   }
-  if (checked) logger.info(`[impact-tracker] AEO visibility: checked ${checked} aeo_gap row(s)`);
+  if (checked) logger.info(`[impact-tracker] AEO visibility: checked ${checked} AEO row(s)`);
   return { checked };
 }
 
@@ -771,7 +813,7 @@ module.exports = {
   selectControlPages,
   launchVerdict,
   isEmptyBaseline,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl, aeoQueryIdsForRun, questionGapMissingPlatforms },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

@@ -576,6 +576,10 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
 }
 
 module.exports = {
+  // The per-visit ordering chain, shared with visit-prep-tech-alert.js so a
+  // photo alert and a move/cancel notice for the same visit deliver in
+  // commit order (one queue, not two).
+  enqueueForVisit,
   recordTrackingNotice,
   pushTrackingNotice: pushCard,
   // Reused by no-show-detector.js so a tracking notice reads the same "who

@@ -116,8 +116,8 @@ router.post('/:id/flag', async (req, res, next) => {
 // ═══════════════════════════════════════════
 router.post('/audit/run', async (req, res, next) => {
   try {
-    const { maxEntries, forceAll } = req.body;
-    const result = await KBService.runAIAudit({ maxEntries: maxEntries || 10, forceAll: !!forceAll });
+    const { maxEntries, forceAll, flaggedOnly } = req.body;
+    const result = await KBService.runAIAudit({ maxEntries: maxEntries || 10, forceAll: !!forceAll, flaggedOnly: !!flaggedOnly });
     res.json(result);
   } catch (err) { next(err); }
 });

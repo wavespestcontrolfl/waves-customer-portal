@@ -57,6 +57,11 @@ function priorPayableStatus(stmt) {
  */
 async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
   const run = async (trx) => {
+    // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate
+    // first — a statement refund / chargeback reverses the cascade (child
+    // invoices paid -> draft), and a child can be a termite parent's prepay
+    // invoice. No-op without a termite term on the statement's children.
+    await require('./annual-prepay-renewals').acquireTermiteGateForStatement(trx, statementId);
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
     return fn(trx);
   };

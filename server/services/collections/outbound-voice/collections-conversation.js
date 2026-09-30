@@ -65,7 +65,29 @@ function linkAnchorOf(invoices = []) {
   return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
 }
 
-const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// VOICE_RELAY_MODEL / MODEL_VOICE are shared with relay-conversation.js's
+// inbound lane (see its file header) — relay-conversation.js validates the
+// resolved value against ALLOWED_OVERRIDE_MODEL_IDS before ever running on
+// it; this module previously read the env with no check at all. This lane
+// always sends `thinking: { type: 'disabled' }` below, which a
+// thinking-always-on id (Opus 5.5+) rejects, so it needs the same guard —
+// reusing relay-conversation's own allowlist (Anthropic text models,
+// thinking-always-on ids excluded) rather than a second hand-typed list.
+// Lazy require: this file loads at server boot too, and the two modules
+// have no other reason to depend on each other.
+// Each link is validated in order (VOICE_RELAY_MODEL, then MODEL_VOICE), the
+// same walk relay-conversation.js's shared chain takes, so a rejected
+// VOICE_RELAY_MODEL still lands on a valid configured VOICE tier.
+const MODEL = (() => {
+  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../../voice-agent/relay-conversation');
+  for (const [source, value] of [['VOICE_RELAY_MODEL', process.env.VOICE_RELAY_MODEL], ['MODEL_VOICE', MODELS.VOICE]]) {
+    if (!value) continue;
+    if (ALLOWED_OVERRIDE_MODEL_IDS.has(value)) return value;
+    logger.warn(`[collections-voice] ${source}=${value} is not on the Anthropic voice allowlist — skipping it`);
+  }
+  logger.warn(`[collections-voice] no allowlisted voice model configured — using ${MODELS.DEFAULTS.VOICE}`);
+  return MODELS.DEFAULTS.VOICE;
+})();
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
 const MAX_TOOL_ROUNDS = 4;
 const MAX_CALL_TURNS = 30;
@@ -1051,8 +1073,15 @@ class CollectionsConversation {
       const saysUnknownHere = /\b(wrong number|never heard of|no (?:one|body) (?:named|called|by that name|here)|no \w+ (?:at|on) this (?:number|phone)|don'?t know (?:a |any )?(?:him|her|them|that (?:person|name)|who that is)|no such person|doesn'?t live here|not (?:his|her|their) (?:number|phone)|(?:just )?(?:got|took over) this (?:number|phone))\b/i
         .test(this._lastCallerText());
       if (input.number_unknown === true && saysUnknownHere) {
+        // Suppress the number this call was DIALED to (it reached the
+        // stranger), falling back to the customer's phone only when the
+        // call row carried none — the canonical messaging_suppression row
+        // stops every other SMS rail, not just the collections lane (B14).
         const wn = await flags.flagWrongNumber(this._ctx.customer.id, {
           detail: 'answerer said the customer is not known at this number',
+          phone: this._ctx.dialedPhone || this._ctx.customer.phone || null,
+          callLogId: this._ctx.callLogId,
+          capturedBody: this._lastCallerText(),
         }).catch(() => ({ ok: false }));
         if (!wn || wn.ok === false) {
           // The wrong-number report must survive (gh prb-r6): the durable
@@ -1562,6 +1591,7 @@ class CollectionsConversation {
       // The ACTIVE call's own ledger row must not veto this in-call write
       // (gh prb-r2: the any-channel 24h window always found it).
       excludeCollectionCaseId: this._ctx.caseId,
+      source: 'collections_voice_paylink',
       logTag: 'collections-voice-paylink',
     });
     if (!permitted) return 'A text cannot be sent to this customer. Offer the office number for payment instead.';

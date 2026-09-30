@@ -165,7 +165,7 @@ function followUpDateFromPreset(preset, explicitDate) {
 
 function leadDraftMessage(lead, taskType) {
   const name = firstName(lead);
-  const greeting = `Hi${name ? ` ${name}` : ''}, this is Waves Pest Control.`;
+  const greeting = `Hi${name ? ` ${name}` : ''}, it's Waves.`;
   const service = compact(lead.service_interest || '', 42);
   const servicePhrase = service ? ` with ${service}` : '';
 
@@ -1036,9 +1036,14 @@ function uuidOrNull(value) {
 
 // Activity feed (GATE_AGENT_ACTIVITY). ?hours=24|168 window; gate off →
 // { available: false }. Read-only; see server/services/agent-activity.js.
+// ?focus=<notification id> (the bell's deep link, admin-alerts-brevity
+// scope): loads that ONE ops_digest row regardless of its read state or
+// age, so an older read ACT/REVIEW row (already dropped from the pinned
+// set, its full report now living only in `detail`) is still reachable —
+// an invalid/non-UUID value is silently ignored rather than erroring.
 router.get('/activity', async (req, res, next) => {
   try {
-    const feed = await agentActivity.getActivity({ windowHours: req.query.hours });
+    const feed = await agentActivity.getActivity({ windowHours: req.query.hours, focus: uuidOrNull(req.query.focus) });
     res.json(feed);
   } catch (err) {
     next(err);

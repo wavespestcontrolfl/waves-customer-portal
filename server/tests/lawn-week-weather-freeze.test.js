@@ -218,6 +218,8 @@ describe('freeze contract in the render path', () => {
     expect(LAWN_RENDER_STRATEGY).not.toBe('p3');
     // p5: Front-only before/after pairing (close-up / trouble never pair).
     expect(LAWN_RENDER_STRATEGY).not.toBe('p4');
+    // p6: product-instruction provenance governs watering-plan credits.
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p5');
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -237,7 +239,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap5')).toBe(true);
+    expect(signature.startsWith('-lap6-aftercare-guards-20260927')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });
@@ -285,7 +287,9 @@ describe('freeze contract in the render path', () => {
     expect(pdfQueue).toMatch(/uncachedReason: reason,/);
     expect(pdfQueue).toMatch(/weekWeatherPendingReason \|\| 'unfrozen'/);
     // Deferred, not failed — and the branch precedes the failure path.
-    const deferAt = pdfQueue.indexOf("result.uncachedReason && result.uncachedReason !== 'unfrozen'");
+    // 'unfrozen' (and the pest week's transient reasons) take the failure
+    // ladder; every other reason defers — the set is TRANSIENT_UNCACHED_REASONS.
+    const deferAt = pdfQueue.indexOf("result.uncachedReason && !TRANSIENT_UNCACHED_REASONS.has(result.uncachedReason)");
     const failAt = pdfQueue.indexOf('pdf_render_uncacheable');
     expect(deferAt).toBeGreaterThan(-1);
     expect(deferAt).toBeLessThan(failAt);
@@ -404,7 +408,9 @@ describe('freeze contract in the render path', () => {
   // Every pending reason waits; only a real failure spends the ladder.
   test('the queue defers on ANY pending reason, not just an open window', () => {
     const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
-    expect(pdfQueue).toMatch(/result\.uncachedReason && result\.uncachedReason !== 'unfrozen'/);
+    expect(pdfQueue).toMatch(/result\.uncachedReason && !TRANSIENT_UNCACHED_REASONS\.has\(result\.uncachedReason\)/);
+    // Only explicitly TRANSIENT reasons spend the ladder; 'unfrozen' is one.
+    expect(pdfQueue).toMatch(/const TRANSIENT_UNCACHED_REASONS = new Set\(\['unfrozen'/);
     // A new pending reason must not need a matching queue change to be honoured.
     expect(pdfQueue).not.toMatch(/uncachedReason === 'open_window'/);
   });

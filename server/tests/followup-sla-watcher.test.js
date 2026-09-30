@@ -13,15 +13,24 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: j
 jest.mock('../services/voice-agent/relay-protocol', () => ({ whereNotSandboxCall: jest.fn((qb) => qb.whereRaw('not_sandbox')) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
-  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
+  return {
+    ...actual,
+    listOpenCommitments: jest.fn(),
+    refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+    stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)),
+    // Defaults to the real implementation; individual tests override with
+    // mockRejectedValueOnce to prove a failure propagates rather than
+    // silently reading as "no renewal".
+    obligationRenewedAt: jest.fn(actual.obligationRenewedAt),
+  };
 });
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt } = require('../services/call-commitments');
 const {
-  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, ROLLING_KEY,
+  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, ROLLING_KEY,
 } = require('../services/followup-sla-watcher');
 
 // ET is UTC-4 in late September.
@@ -83,6 +92,12 @@ describe('selectMissed', () => {
 // { table, calls: [[method, ...args]] } so a test can assert what was asked,
 // and `first`/`select`/`update` answer from the scenario given to mockDb.
 let log = [];
+// A person's call that reached the customer, and a person's delivered text,
+// as staff-contact.js reads them (personCallBack / operatorReply + smsDelivered).
+const STAFF_CONTACT = {
+  call_log: { source: 'admin-click', v2_extraction_status: 'valid', is_voicemail: 'false' },
+  sms_log: { status: 'delivered', message_type: 'manual', operator_sent: true },
+};
 function mockDb({ activity = {}, call = null, standingRow = null, settled = [], lockedStamp = {}, hints = {} } = {}) {
   log = [];
   const updates = [];
@@ -114,12 +129,15 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
       if (['scheduled_services', 'call_log', 'sms_log'].includes(table)) {
         const on = typeof activity[table] === 'function' ? activity[table]() : activity[table];
         if (!on) return [];
-        // One far-future record per contact the query asked about.
+        // One far-future record per contact the query asked about: by default
+        // a person's call that reached the customer, or a person's delivered
+        // text (the fields staff-contact.js reads); an object overrides them.
+        const fields = { ...STAFF_CONTACT[table], ...(typeof on === 'object' ? on : {}) };
         const ins = entry.calls.filter(([m]) => m === 'whereIn');
         const custs = ins.filter(([, col]) => col === 'customer_id').flatMap(([, , v]) => v);
         const phones = entry.calls.filter(([m, sql]) => (m === 'whereRaw' || m === 'orWhereRaw') && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
-        return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z' })),
-          ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z' }))];
+        return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z', ...fields })),
+          ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z', ...fields }))];
       }
       if (table === 'call_commitments' && cols.includes('fulfillment')) {
         const ids = entry.calls.filter(([m]) => m === 'whereIn').flatMap(([, , v]) => v);
@@ -310,19 +328,37 @@ test('a lead who became a customer through the follow-up still matches by number
   expect(argsOf('scheduled_services', 'whereIn')).toContainEqual(['customer_id', ['new-cust']]);
 });
 
-test('only a text that actually went out counts — scheduled, reserved and failed rows are excluded', async () => {
+test('only a text that reached the customer counts: queued, sent-but-undelivered, reserved and failed rows are excluded (the proof\'s smsDelivered)', async () => {
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['status', ['queued', 'sent', 'delivered']]);
+  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['status', ['sent', 'delivered']]);
+  // A text accepted but never delivered keeps the promise on the list.
+  mockDb({ activity: { sms_log: { status: 'sent' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
-test('a text counts only when a person wrote it — manual, or an AI draft staff approved/revised — AND a staff sender', async () => {
+test('a text counts only when a person sent it: the composer\'s stamp or the sending admin, or an AI draft staff approved/revised (the proof\'s operatorReply) — never a bare manual type', async () => {
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['message_type', ['manual', 'ai_approved', 'ai_revised']]);
-  expect(argsOf('sms_log', 'whereNotNull')).toEqual([['admin_user_id']]);
+  expect(argsOf('sms_log', 'whereRaw').map(([sql]) => sql).join(' ')).toMatch(/human_authored.*admin_user_id IS NOT NULL/);
+  expect(argsOf('sms_log', 'orWhereIn')).toContainEqual(['message_type', ['ai_approved', 'ai_revised']]);
+  mockDb({ activity: { sms_log: { operator_sent: false } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  mockDb({ activity: { sms_log: { operator_sent: false, message_type: 'ai_approved' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+});
+
+test('only a call a person placed counts: an automated outbound call (collections), or a staff call that reached voicemail, keeps the promise on the list', async () => {
+  mockDb({ activity: { call_log: true } });
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
+  expect(argsOf('call_log', 'whereIn')).toContainEqual(['source', ['admin-click', 'admin-callback', 'tech-click']]);
+  mockDb({ activity: { call_log: { source: 'collections_voice' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  mockDb({ activity: { call_log: { is_voicemail: 'true' } } });
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
 test.each(['send_estimate', 'schedule_visit'])('a connected call counts on a %s promise too — completed 60 s+ customer leg, affirmatively not voicemail', async (kind) => {
@@ -423,6 +459,39 @@ test('the tick reads the office closure calendar for the scan window', async () 
   await runFollowUpSlaWatcher({ now: NOW });
   const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
   expect(getBlackoutLayers).toHaveBeenCalled();
+});
+
+describe('followedUpIds — renewal-boundary propagation', () => {
+  test('a failed obligationRenewedAt lookup propagates rather than reading as "no renewal"', async () => {
+    obligationRenewedAt.mockRejectedValueOnce(new Error('synthetic audit_log lookup failure'));
+    const reopenedRow = {
+      id: 'fixture-reopened-1', kind: 'callback', party: 'waves', human_state: 'confirmed',
+      customer_id: 'fixture-customer-1', created_at: NOW, call_started_at: NOW, source: 'ai',
+    };
+    // Old evidence from BEFORE the reopen must never silently count as
+    // fulfillment when the renewal boundary itself couldn't be verified —
+    // every existing caller (the pager's own runInner, promise-chaser-bell)
+    // already treats a thrown followedUpIds as "unverified, hold for retry".
+    await expect(followedUpIds(db, [reopenedRow])).rejects.toThrow('synthetic audit_log lookup failure');
+  });
+
+  test('a row the pager itself would ever pass (no human_state) touches no renewal-boundary query at all', async () => {
+    // renewedFloors no longer short-circuits on kind/human_state itself
+    // (Codex #5019 r12 P1: obligationRenewedAt is the single source of
+    // truth for which rows it renews, so this file never duplicates —
+    // or drifts from — that decision), so it IS called for every row now.
+    // The real guarantee this test pins is unchanged: obligationRenewedAt's
+    // OWN human_state guard returns before ever touching audit_log, so a
+    // row the pager's own candidates always look like (no human_state)
+    // still causes zero DB work — `db` (the bare mock) is never invoked.
+    const untouchedRow = {
+      id: 'fixture-untouched-1', kind: 'callback', party: 'waves', human_state: null,
+      customer_id: null, created_at: NOW, call_started_at: NOW, source: 'ai', from_phone: null, to_phone: null, direction: 'inbound',
+    };
+    await followedUpIds(db, [untouchedRow]).catch(() => {}); // db is a bare mock; only proving the call pattern here
+    expect(obligationRenewedAt).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled();
+  });
 });
 
 describe('pagerHealthy — judged against the pager schedule', () => {

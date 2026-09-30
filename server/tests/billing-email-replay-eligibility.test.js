@@ -257,3 +257,15 @@ test('an unreadable eligibility dependency fails closed for retry', async () => 
   databaseWith({ customers: new Error('database unavailable') })))
     .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
 });
+
+test.each(['previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed', null])(
+  'previsit replay preserves only a declared supersession signal (%s)', async (supersessionReason) => {
+    const reason = 'collections policy denied selected channel before dispatch';
+    const guard = jest.spyOn(require('../services/previsit-balance-reminder'), 'previsitReplayQuoteEligible')
+      .mockResolvedValue({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, supersessionReason, retryable: true });
+    try {
+      await expect(billingEmailReplayEligible({ source_entry_point: 'previsit_balance_reminder' }, databaseWith()))
+        .resolves.toEqual({ eligible: false, reason: supersessionReason || reason, retryable: true });
+    } finally { guard.mockRestore(); }
+  },
+);

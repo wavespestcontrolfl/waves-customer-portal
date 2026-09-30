@@ -32,8 +32,11 @@
  */
 
 const logger = require('../logger');
+const { recordGap } = require('../agent-gap-reports');
 
 const TRANSFER_TOOL_NAME = 'transfer_to_office';
+// The intent relay-conversation.js passes on its provider-failure recovery transfer.
+const RECOVERY_INTENT = 'system trouble';
 const WHISPER_MAX_WORDS = 20;
 const SUMMARY_MAX_WORDS = 20;
 const NAME_MAX_CHARS = 60;
@@ -72,6 +75,8 @@ const TRANSFER_TOOLS = [
         summary: { type: 'string', description: 'At most twenty words: what was discussed and what they need' },
         caller_name: { type: 'string', description: 'The caller\'s name as they gave it, if any' },
         unresolved_question: { type: 'string', description: 'The one thing you could not resolve, if any' },
+        // Gap reports only — never read by the transfer itself.
+        not_supported: { type: 'boolean', description: 'true ONLY when the caller wanted something you have no way to do on this call. Leave it out for cancellations, complaints, billing or refunds, legal, exposure or damage topics, a request for a person, or a failed tool.' },
       },
       required: ['intent', 'summary'],
     },
@@ -306,6 +311,18 @@ async function transferToOfficeText(input = {}, ctx = {}) {
       + 'and say a Waves team member will call them back.';
   }
   if (noContext) ringNoContextBell(ctx, facts);
+  // Gap reports (server/services/agent-gap-reports.js): only a handoff Sandy
+  // marks `not_supported` — most transfers are staff workflows by design
+  // (cancel, billing, "wants a person"). Never on the sandbox (a dry run) or
+  // when anything broke on the call (the provider-failure recovery transfer,
+  // or any failed tool): an outage is Tool Health's, not a missing feature.
+  // Fire-and-forget — never on the hot path that just spoke and ended the
+  // relay leg.
+  const somethingBroke = input.intent === RECOVERY_INTENT || packet.tools.some((tool) => !tool.ok);
+  if (input.not_supported === true && ctx.sandbox !== true && !somethingBroke) {
+    recordGap({ source: 'phone-agent', summary: packet.summary || packet.intent || 'Caller requested a transfer',
+      attempted: 'Handed to the office' }).catch(() => {});
+  }
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
 
@@ -477,6 +494,7 @@ function composeRelaySegment(call) {
 module.exports = {
   composeRelaySegment,
   TRANSFER_TOOL_NAME,
+  RECOVERY_INTENT,
   TRANSFER_TOOLS,
   WHISPER_MAX_WORDS,
   NO_CONTEXT_BELL,

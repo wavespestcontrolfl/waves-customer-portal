@@ -57,9 +57,29 @@ describe('Appointment texts per saved property', () => {
   it('a toggle saves to the PROFILE with the saved property named', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
     await screen.findByText('Appointment notifications');
-    const row = screen.getByText('Tech en route').closest('div');
-    fireEvent.click(row.querySelector('[role="switch"]'));
+    fireEvent.click(screen.getByRole('switch', { name: /^Tech en route for/ }));
     await waitFor(() => expect(api.updatePropertyNotificationPrefs).toHaveBeenCalledWith('c1', { techEnRoute: true, propertyId: 'pr' }));
+  });
+  it('reveals help for every property notification without changing preferences', async () => {
+    render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
+    await screen.findByText('Appointment notifications');
+    const explanations = [
+      ['New appointment', 'Heads-up when a visit is booked'],
+      ['72-hour reminder', '3 days before a visit'],
+      ['24-hour reminder', 'The day before a visit'],
+      ['Tech en route', 'Live GPS, about an hour out'],
+      ['Tech arrived', 'The moment we reach the property'],
+      ['Send me appointment alerts', "Receive this property's appointment and technician alerts in addition to any on-location contacts."],
+    ];
+    for (const [label, description] of explanations) {
+      const summary = screen.getByText(label, { selector: 'summary span' }).closest('summary');
+      const details = summary.closest('details');
+      expect(details).not.toHaveAttribute('open');
+      fireEvent.click(summary);
+      expect(details).toHaveAttribute('open');
+      expect(screen.getByText(description)).toBeVisible();
+    }
+    expect(api.updatePropertyNotificationPrefs).not.toHaveBeenCalled();
   });
   it('the PRIMARY house reads the profile row copy', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);

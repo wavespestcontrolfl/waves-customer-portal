@@ -396,6 +396,224 @@ describe('POST / — admin create', () => {
     sendConfirmationSms: false,
   };
 
+  // Phone-agent double-booking guard preflight (findExistingCallBookings,
+  // routes/admin-schedule.js) reads scheduled_services through `db`, same as
+  // this describe's other preflight reads — the outer beforeEach's default
+  // scheduled_services row (a full SVC fixture) would otherwise look like a
+  // phone-agent-booked match on every create here and 409 this whole
+  // describe. Shadow it back to "no match" by default; the guard's own
+  // tests below override db.mockImplementation per case.
+  beforeEach(() => {
+    db.mockImplementation((table) => chain(table === 'customers'
+      ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null }
+      : undefined));
+  });
+
+  const CUSTOMER_ROW = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null };
+
+  describe('phone-agent double-booking guard', () => {
+    const logger = require('../services/logger');
+    // The guard reads call-booked visits through this alias.
+    const GUARD_TABLE = 'scheduled_services as ss';
+    const callBookedVisit = {
+      id: 'call-visit-1', status: 'confirmed', service_type: 'General Pest Control',
+      scheduled_date_label: '2099-07-03', window_start_label: '09:00',
+    };
+
+    test('a live phone-agent-booked visit refuses the create with the conflict payload', async () => {
+      db.mockImplementation((table) => chain(
+        table === 'customers' ? CUSTOMER_ROW : (table === GUARD_TABLE ? callBookedVisit : undefined),
+      ));
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({
+        code: 'duplicate_call_booking',
+        existingVisits: [{
+          id: 'call-visit-1', serviceType: 'General Pest Control',
+          scheduledDate: '2099-07-03', windowStart: '09:00', status: 'confirmed',
+        }],
+      });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('allowCallBookingDuplicate for the reviewed visits proceeds and logs the override', async () => {
+      db.mockImplementation((table) => chain(
+        table === 'customers' ? CUSTOMER_ROW : (table === GUARD_TABLE ? callBookedVisit : undefined),
+      ));
+
+      const result = await post({ ...createBody, allowCallBookingDuplicate: true, callBookingReviewedIds: ['call-visit-1'] });
+
+      expect(result.status).toBe(201);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('allowCallBookingDuplicate override'));
+    });
+
+    test('the override covers only the visits it reviewed: a phone booking that arrived after the box was shown is a new conflict (codex #5183 r2 P2)', async () => {
+      db.mockImplementation((table) => chain(
+        table === 'customers' ? CUSTOMER_ROW : (table === GUARD_TABLE ? callBookedVisit : undefined),
+      ));
+
+      const stale = await post({ ...createBody, allowCallBookingDuplicate: true, callBookingReviewedIds: ['some-older-visit'] });
+      const bare = await post({ ...createBody, allowCallBookingDuplicate: true });
+
+      for (const r of [stale, bare]) {
+        expect(r.status).toBe(409);
+        expect(r.body).toMatchObject({ code: 'duplicate_call_booking', existingVisits: [{ id: 'call-visit-1' }] });
+      }
+    });
+
+    test('no matching phone-agent visit proceeds without a conflict', async () => {
+      const result = await post(createBody);
+      expect(result.status).toBe(201);
+    });
+
+    test('a guard query error fails open and still books', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'customers') return chain(CUSTOMER_ROW);
+        if (table === GUARD_TABLE) {
+          const c = chain(undefined);
+          // A real thenable's `.then` must invoke the passed reject callback
+          // itself — returning a rejected promise from `.then()` is not the
+          // same thing and leaves `await`ers hanging forever.
+          c.then = (resolve, reject) => reject(new Error('guard query failed'));
+          return c;
+        }
+        return chain(undefined);
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(201);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('call-booking duplicate guard failed'));
+    });
+    // Runs the guard's grouped predicates on the mock so the service-line
+    // and property clauses it builds can be asserted.
+    const recordGuardQuery = (seen, extra = {}) => (table) => {
+      if (extra[table]) return chain(extra[table]);
+      const c = chain(table === 'customers' ? CUSTOMER_ROW : undefined);
+      if (table === GUARD_TABLE) {
+        const run = (...args) => { if (typeof args[0] === 'function') args[0](c); else seen.where.push(args); return c; };
+        c.where = jest.fn(run);
+        c.orWhereExists = jest.fn(() => c);
+        c.orWhereNotNull = jest.fn(() => c);
+        c.orWhereNull = jest.fn(() => c);
+        c.orWhereRaw = jest.fn((sql, bindings) => { seen.orWhereRaw.push([String(sql), bindings[0]]); return c; });
+      }
+      return c;
+    };
+
+    test('every requested service line is matched — by catalog id first, by name where a side has no id, the add-ons too (codex #5183 r1 + r2 P1)', async () => {
+      const seen = { where: [], orWhereRaw: [] };
+      db.mockImplementation(recordGuardQuery(seen));
+
+      await post({
+        ...createBody, serviceType: 'General Pest Control', serviceId: 'svc-gpc',
+        serviceAddons: [{ name: '  Mosquito Control ', serviceId: 'svc-mosq' }, { serviceName: 'Lawn Care' }],
+      });
+
+      expect(seen.orWhereRaw).toEqual(expect.arrayContaining([
+        ['ss.service_id::text = ANY(?)', ['svc-gpc', 'svc-mosq']],
+        ['ss.service_id IS NULL AND LOWER(TRIM(ss.service_type)) = ANY(?)', ['general pest control', 'mosquito control', 'lawn care']],
+        ['LOWER(TRIM(ss.service_type)) = ANY(?)', ['lawn care']],
+      ]));
+    });
+
+    test('a booking from a linked estimate is scoped to the estimate\'s property (codex #5183 r2 P2)', async () => {
+      const seen = { where: [], orWhereRaw: [] };
+      db.mockImplementation(recordGuardQuery(seen, { estimates: { id: 'est-1', property_id: 'prop-9', customer_id: 'cust-1' } }));
+
+      await post({ ...createBody, sourceEstimateId: 'est-1' });
+
+      expect(seen.where).toEqual(expect.arrayContaining([['ss.property_id', 'prop-9']]));
+    });
+
+    test('the locked re-check covers every date a series books — each generated occurrence and booster, not just the anchor (codex #5183 r3 P1)', async () => {
+      const lockedDays = [];
+      trx.mockImplementation((table) => {
+        const c = chain(table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined));
+        if (table === GUARD_TABLE) {
+          c.whereRaw = jest.fn((sql, bindings) => { if (String(sql).includes('unnest')) lockedDays.push(...bindings[0]); return c; });
+        }
+        return c;
+      });
+
+      await post({
+        ...createBody, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, boosterMonths: [11],
+        estimatedPrice: 89, createInvoice: true,
+      });
+
+      // Anchor, two generated monthly occurrences (moved onto working days)
+      // and the November booster: every date the series will insert.
+      expect(lockedDays[0]).toBe('2099-07-03');
+      expect(lockedDays.map((d) => d.slice(0, 7))).toEqual(['2099-07', '2099-08', '2099-09', '2099-11']);
+    });
+
+    test('the promised follow-up visit a call booked (a phone_call child) is a candidate too (codex #5183 r3 P1)', async () => {
+      const seen = { where: [], orWhereRaw: [] };
+      const orWhere = [];
+      db.mockImplementation((table) => {
+        const c = recordGuardQuery(seen)(table);
+        if (table === GUARD_TABLE) c.orWhere = jest.fn((...args) => { orWhere.push(args); return c; });
+        return c;
+      });
+
+      await post(createBody);
+
+      expect(orWhere).toEqual(expect.arrayContaining([['ss.booking_source', 'phone_call']]));
+    });
+
+    test('a visit that matched only through an add-on reports that add-on as the matched line (codex #5183 r3 P2)', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'customers') return chain(CUSTOMER_ROW);
+        if (table === GUARD_TABLE) return chain({ ...callBookedVisit, service_type: 'General Pest Control', service_id: 'svc-gpc' });
+        if (table === 'scheduled_service_addons') return chain({ scheduled_service_id: 'call-visit-1', service_id: 'svc-mosq', service_name: 'Mosquito Control' });
+        return chain(undefined);
+      });
+
+      const result = await post({ ...createBody, serviceType: 'Mosquito Control', serviceId: 'svc-mosq' });
+
+      expect(result.status).toBe(409);
+      expect(result.body.existingVisits[0]).toMatchObject({ serviceType: 'General Pest Control', matchedService: 'Mosquito Control' });
+    });
+
+    test('a phone-agent booking committed after the preflight is caught by the locked re-check inside the booking transaction (codex #5183 r1 P1)', async () => {
+      const insertSpy = jest.fn();
+      trx.mockImplementation((table) => {
+        const c = chain(table === GUARD_TABLE ? callBookedVisit : (table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined)));
+        if (table === 'scheduled_services') c.insert = insertSpy;
+        return c;
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({ code: 'duplicate_call_booking', existingVisits: [{ id: 'call-visit-1' }] });
+      expect(insertSpy).not.toHaveBeenCalled();
+      // Checked under the customer lock, after it is taken.
+      expect(callOrder).toContain('comms');
+    });
+
+    test('the locked re-check does not fail open: an error there aborts the create', async () => {
+      const insertSpy = jest.fn();
+      trx.mockImplementation((table) => {
+        if (table === GUARD_TABLE) {
+          const c = chain(undefined);
+          c.then = (resolve, reject) => reject(new Error('locked guard query failed'));
+          return c;
+        }
+        const c = chain(table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined));
+        if (table === 'scheduled_services') c.insert = insertSpy;
+        return c;
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBeGreaterThanOrEqual(500);
+      expect(insertSpy).not.toHaveBeenCalled();
+    });
+  });
+
   test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
 

@@ -20,6 +20,9 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
+const {
+  pestReportExpectationsGateOn, buildWhatToExpect, toExpectationProduct,
+} = require('./pest-report-expectations');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -406,7 +409,7 @@ async function loadProductSafety(products, knex) {
       })
       .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
         'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_required',
-        'approved_for_service_report');
+        'approved_for_service_report', 'moa_group');
     const approvedRows = rows.filter(catalogApprovedForReport);
     const safetyFacts = approvedRows.map((r) => ({
       name: cleanText(r.name),
@@ -419,6 +422,11 @@ async function loadProductSafety(products, knex) {
       // Tri-state: true = label requires watering-in, false = label says no
       // irrigation needed, null = unknown (omitted from the prompt).
       irrigationRequired: r.irrigation_required == null ? null : Boolean(r.irrigation_required),
+      // Pest Report V2 "expectations" classification (GATE_PEST_REPORT_EXPECTATIONS)
+      // — feeds the EXPECTATIONS grounding section below, same classifier the
+      // customer-facing report uses (pest-report-expectations.js).
+      category: cleanText(r.category) || null,
+      moaGroup: cleanText(r.moa_group) || null,
     }));
     const rowsById = new Map(approvedRows.map((row) => [String(row.id), row]));
     const rowsByName = new Map(approvedRows.map((row) => [cleanText(row.name).toLowerCase(), row]));
@@ -686,6 +694,35 @@ async function buildReportCopyContext({
       weekWeather?.rainInches != null ? `Rainfall in the 7 days ending on the service date: ${weekWeather.rainInches}".` : null,
     ].filter(Boolean).join(' ');
     if (wx) sections.push(`WEATHER: ${wx}`);
+  }
+
+  // Same facts, SAME classifier, SAME normalized product shape as the
+  // customer-facing Pest Report V2 "expectations" blocks
+  // (pest-report-expectations.js's toExpectationProduct — owner-flagged P1
+  // 2026-09-28: this used to build its own ad-hoc product list without
+  // `name`, so a name-dependent classification, e.g. roach gel bait, could
+  // come out different here than on the render path) — dark behind the
+  // same gate, so generated copy never diverges from what the dashboard
+  // itself says once both are live. Live-forecast heavy-rain phrasing is
+  // deliberately NOT re-derived here (a second live NWS fetch just for
+  // grounding); the product-class what-to-expect facts still
+  // ground the model honestly (rain never does — see below).
+  //
+  // NO rain or ants-after-rain lines here (codex P1 2026-09-28 round 4):
+  // this grounding runs at completion, the same day as the visit, when the
+  // trailing 7-day rain window is by definition still accumulating — any
+  // total would be a partial reading baked permanently into the saved
+  // summary while the customer-facing PDF deliberately withholds the same
+  // number until `windowClosed`. Only the product-class what-to-expect
+  // lines (deterministic, not time-dependent) ground the writer; the rain
+  // card stays a render-time, deterministic surface.
+  if (line === 'pest' && pestReportExpectationsGateOn()) {
+    const expectationProducts = productSafety.map(toExpectationProduct);
+    const whatToExpect = buildWhatToExpect({ products: expectationProducts });
+    const expectationLines = whatToExpect?.lines || [];
+    if (expectationLines.length) {
+      sections.push(`EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee):\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
+    }
   }
 
   if (productSafety.length) {

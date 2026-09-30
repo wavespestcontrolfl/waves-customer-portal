@@ -4555,7 +4555,7 @@ function AccountsReceivableTab() {
           method: "POST",
           body: JSON.stringify({
             to: inv.phone,
-            message: `Hi ${inv.customerName}, this is Waves Pest Control. You have an outstanding balance of ${fmtM(inv.amount)} (Invoice #${inv.invoiceNumber}). Please call or reply to arrange payment. Thank you!`,
+            message: `Hi ${inv.customerName}, it's Waves. You have an outstanding balance of ${fmtM(inv.amount)} (Invoice #${inv.invoiceNumber}). Please call or reply to arrange payment. Thank you!`,
           }),
         });
         alert("Reminder sent!");
@@ -4806,6 +4806,529 @@ const BANK_STATUS_LABELS = {
   refund_applied: "refund",
   ignored: "ignored",
 };
+// ── Live bank feeds (GATE_PLAID_SYNC) ──────────────────────────────
+// Plaid Link runs from Plaid's own script; the bank login happens inside
+// Plaid's window and never touches this page. The server keeps the access
+// token; this panel only ever sees a one-time public token.
+
+const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+let plaidScriptPromise = null;
+function loadPlaidLink() {
+  if (window.Plaid) return Promise.resolve(window.Plaid);
+  if (!plaidScriptPromise) {
+    plaidScriptPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = PLAID_LINK_SRC;
+      s.async = true;
+      s.onload = () =>
+        window.Plaid
+          ? resolve(window.Plaid)
+          : reject(new Error("Plaid Link did not load"));
+      s.onerror = () => {
+        plaidScriptPromise = null;
+        reject(new Error("Could not load Plaid Link"));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return plaidScriptPromise;
+}
+
+// OAuth banks on a phone send the whole page to the bank and back to
+// PLAID_REDIRECT_URI (this page + ?oauth_state_id=…). Link then has to be
+// re-created with the SAME link token and that callback URL, so the token
+// (short-lived; it only opens Link, never reaches an account) is kept here
+// until Link finishes. Unreadable storage = no resume, never a crash.
+const PLAID_LINK_RESUME_KEY = "waves_plaid_link_resume";
+function saveLinkResume(value) {
+  try {
+    if (value) localStorage.setItem(PLAID_LINK_RESUME_KEY, JSON.stringify(value));
+    else localStorage.removeItem(PLAID_LINK_RESUME_KEY);
+  } catch {
+    /* storage blocked — the redirect flow just can't resume */
+  }
+}
+function readLinkResume() {
+  try {
+    return JSON.parse(localStorage.getItem(PLAID_LINK_RESUME_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+const PLAID_ITEM_STATUS = {
+  setup: "Needs setup",
+  active: "Syncing",
+  login_required: "Bank login needed",
+  error: "Last sync failed",
+};
+
+function nextDay(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// the bank change exactly as displayed — the server applies/dismisses only
+// if the row still carries this version
+function shownBankChange(r) {
+  return {
+    plaidModified: r.suggestion?.plaidModified || null,
+    plaidRemoved: r.suggestion?.plaidRemoved || null,
+  };
+}
+
+// a row the bank changed after review still holds the OLD values — the
+// server refuses every claim on it until the change is applied or
+// dismissed, so its match / create / link / refund actions stay hidden
+function bankRowClaimable(r) {
+  return (
+    r.status === "unmatched" &&
+    !r.suggestion?.plaidModified &&
+    !r.suggestion?.plaidRemoved
+  );
+}
+
+function syncSummary(sync) {
+  if (!sync) return "";
+  if (sync.error) return `Sync failed: ${sync.error}`;
+  // a string = the whole run was skipped; per-transaction reasons
+  // (pending, before start date…) ride separately in sync.skips
+  if (typeof sync.skipped === "string")
+    return `Sync skipped (${sync.skipped})`;
+  const parts = [`${sync.inserted || 0} new`];
+  if (sync.updated) parts.push(`${sync.updated} updated`);
+  if (sync.deleted) parts.push(`${sync.deleted} withdrawn by the bank`);
+  if (sync.flagged) parts.push(`${sync.flagged} reviewed rows flagged`);
+  let text = `Synced: ${parts.join(", ")}`;
+  if (sync.matching)
+    text += ` — ${sync.matching.payoutsLinked} payouts + ${sync.matching.expensesLinked} expenses matched`;
+  if (sync.matchingError) text += ` — ${sync.matchingError}`;
+  return text;
+}
+
+function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
+  const [draft, setDraft] = useState(() =>
+    item.accounts.map((a) => ({ ...a })),
+  );
+  const listId = `plaid-labels-${item.id}`;
+  const tomorrow = nextDay(etDateString(new Date()));
+  const a0SyncFrom = (id) => draft.find((r) => r.id === id)?.syncFrom;
+  const patch = (id, change) =>
+    setDraft((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const onLabel = (id, value) => {
+    const known = existingLabels.find(
+      (l) => l.label.trim().toUpperCase() === value.trim().toUpperCase(),
+    );
+    // continuing an existing statement series: keep its type and start
+    // the feed the day after its last imported row (no overlap)
+    patch(
+      id,
+      known
+        ? {
+            accountLabel: value,
+            accountType: known.accountType,
+            // may be tomorrow when the CSV already covers today
+            syncFrom: known.lastDate ? nextDay(known.lastDate) : a0SyncFrom(id),
+          }
+        : { accountLabel: value },
+    );
+  };
+  return (
+    <div className="mt-3">
+      <datalist id={listId}>
+        {existingLabels.map((l) => (
+          <option key={l.label} value={l.label} />
+        ))}
+      </datalist>
+      <Table>
+        <THead>
+          <TR>
+            <TH>Import</TH>
+            <TH>Account</TH>
+            <TH>Label</TH>
+            <TH>Type</TH>
+            <TH>Start date</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {draft.map((a) => {
+            const known = existingLabels.find(
+              (l) =>
+                l.label.trim().toUpperCase() ===
+                a.accountLabel.trim().toUpperCase(),
+            );
+            return (
+              <TR key={a.id}>
+                <TD>
+                  <Checkbox
+                    checked={a.enabled}
+                    onChange={(e) => patch(a.id, { enabled: e.target.checked })}
+                    disabled={busy}
+                    aria-label={`Import ${a.name}`}
+                  />
+                </TD>
+                <TD style={{ minWidth: 180 }}>
+                  {a.name}
+                  {a.mask ? ` ••${a.mask}` : ""}
+                  <div className="text-14 text-ink-secondary">
+                    {a.plaidSubtype || a.plaidType}
+                  </div>
+                </TD>
+                <TD>
+                  <Input
+                    list={listId}
+                    value={a.accountLabel}
+                    onChange={(e) => onLabel(a.id, e.target.value)}
+                    disabled={busy || !a.enabled}
+                    style={{ width: 240 }}
+                  />
+                  {known && (
+                    <div className="text-14 text-ink-secondary">
+                      {known.rows} rows already imported
+                      {known.lastDate ? `, last ${known.lastDate}` : ""}
+                    </div>
+                  )}
+                </TD>
+                <TD>
+                  <Select
+                    value={a.accountType}
+                    onChange={(e) =>
+                      patch(a.id, { accountType: e.target.value })
+                    }
+                    disabled={busy || !a.enabled}
+                  >
+                    <option value="bank">Bank account</option>
+                    <option value="card">Credit card</option>
+                  </Select>
+                </TD>
+                <TD>
+                  <Input
+                    type="date"
+                    value={a.syncFrom}
+                    max={tomorrow}
+                    onChange={(e) => patch(a.id, { syncFrom: e.target.value })}
+                    disabled={busy || !a.enabled}
+                    title="Transactions before this date are not imported — set it after the last statement you uploaded by CSV"
+                  />
+                </TD>
+              </TR>
+            );
+          })}
+        </TBody>
+      </Table>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button type="button" disabled={busy} onClick={() => onSave(draft)}>
+          {busy ? "Saving…" : "Save and sync"}
+        </Button>
+        {onCancel && (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// feedOn = GATE_PLAID_SYNC. Off, the panel only lists connections still in
+// place (each still counts as coverage for statement uploads on its label)
+// with Disconnect — no connect, sync, re-login or account edits.
+function PlaidFeedsPanel({ feedOn, onSynced }) {
+  const [status, setStatus] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const busyRef = useRef(false);
+
+  const load = useCallback(() => {
+    adminFetch("/admin/tax/bank-import/plaid/status")
+      .then((s) => {
+        setStatus(s);
+        setLoadError("");
+      })
+      .catch((e) => setLoadError(e.message));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const run = (label, fn) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(label);
+    setNotice(null);
+    Promise.resolve()
+      .then(fn)
+      .catch((e) => setNotice({ error: true, text: e.message }))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy("");
+        load();
+      });
+  };
+  const post = (path, body) =>
+    adminFetch(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const reportSync = (r) => {
+    if (r?.sync) {
+      setNotice({ error: !!r.sync.error, text: syncSummary(r.sync) });
+      onSynced();
+    }
+  };
+
+  // itemId present = re-login for an existing connection (update mode).
+  // `resume` = returning from a bank's OAuth redirect: the stored token and
+  // the URL the bank sent us back to.
+  const openLink = (itemId, resume = null) =>
+    run(itemId ? `reconnect-${itemId}` : "connect", async () => {
+      const [Plaid, tok] = await Promise.all([
+        loadPlaidLink(),
+        resume ||
+          post("/admin/tax/bank-import/plaid/link-token", itemId ? { itemId } : {}),
+      ]);
+      saveLinkResume({ linkToken: tok.linkToken, itemId: itemId || null });
+      const outcome = await new Promise((resolve, reject) => {
+        const handler = Plaid.create({
+          token: tok.linkToken,
+          ...(resume ? { receivedRedirectUri: resume.receivedRedirectUri } : {}),
+          onSuccess: (publicToken, metadata) => {
+            handler.destroy();
+            resolve({ publicToken, metadata });
+          },
+          onExit: (err) => {
+            handler.destroy();
+            if (err)
+              reject(
+                new Error(err.display_message || err.error_message || "Bank connection was not completed"),
+              );
+            else resolve(null);
+          },
+        });
+        handler.open();
+      }).finally(() => saveLinkResume(null));
+      if (!outcome) return;
+      if (itemId) {
+        reportSync(await post(`/admin/tax/bank-import/plaid/items/${itemId}/reconnected`));
+      } else {
+        const r = await post("/admin/tax/bank-import/plaid/connect", {
+          publicToken: outcome.publicToken,
+          institutionName: outcome.metadata?.institution?.name || null,
+        });
+        setEditing(r.itemId);
+        setNotice({
+          text: "Connected. Confirm each account below, then save to start syncing.",
+        });
+      }
+    });
+
+  // back from a bank's OAuth page: finish the Link session it interrupted
+  useEffect(() => {
+    if (!feedOn || !new URLSearchParams(window.location.search).has("oauth_state_id")) return;
+    const receivedRedirectUri = window.location.href;
+    window.history.replaceState(null, "", window.location.pathname);
+    const resume = readLinkResume();
+    if (resume?.linkToken)
+      openLink(resume.itemId, { linkToken: resume.linkToken, receivedRedirectUri });
+    else
+      setNotice({
+        error: true,
+        text: "The bank sent you back, but this browser no longer has the connection in progress — connect again.",
+      });
+    // once, on the redirect landing (the query is stripped on that run)
+  }, [feedOn]);
+
+  if (loadError)
+    return (
+      <ActionFeedback error className="mb-3" onRetry={load}>
+        Could not load bank feeds: {loadError}
+      </ActionFeedback>
+    );
+  if (!status || (!feedOn && status.items.length === 0)) return null;
+
+  return (
+    <Card style={{ padding: 16, marginBottom: 16 }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-14 font-medium">Live bank feeds</div>
+          <div className="text-14 text-ink-secondary">
+            {feedOn
+              ? "Read-only via Plaid. New transactions land here every hour for review, the same as an uploaded statement."
+              : "Live bank feeds are switched off — nothing syncs. A connection still in place keeps covering its label's days for statement uploads; disconnect it to import those days from a statement instead."}
+            {status.env === "sandbox" ? " (Plaid sandbox — test data)" : ""}
+          </div>
+        </div>
+        {feedOn && (
+          <Button
+            type="button"
+            disabled={!!busy || !status.configured || !status.tokenKey}
+            onClick={() => openLink(null)}
+          >
+            {busy === "connect" ? "Connecting…" : "Connect a bank"}
+          </Button>
+        )}
+      </div>
+      {feedOn && !status.configured && (
+        <ActionFeedback className="mt-3">
+          Plaid keys are not set on the server (PLAID_CLIENT_ID,
+          PLAID_SECRET, PLAID_ENV).
+        </ActionFeedback>
+      )}
+      {status.configured && !status.tokenKey && (
+        <ActionFeedback error className="mt-3">
+          No encryption key is set (PLAID_TOKEN_KEY), so bank connections
+          cannot be stored.
+        </ActionFeedback>
+      )}
+      {notice && (
+        <ActionFeedback error={notice.error} className="mt-3">
+          {notice.text}
+        </ActionFeedback>
+      )}
+      {status.items.map((item) => (
+        <div key={item.id} className="mt-4 border-t border-zinc-200 pt-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-14 font-medium">
+              {item.institutionName || "Bank connection"}
+            </span>
+            <Badge tone="neutral">
+              {PLAID_ITEM_STATUS[item.status] || item.status}
+            </Badge>
+            {item.lastSyncedAt && (
+              <span className="text-14 text-ink-secondary">
+                Last synced{" "}
+                {new Date(item.lastSyncedAt).toLocaleString("en-US", {
+                  timeZone: "America/New_York",
+                })}
+              </span>
+            )}
+            <span className="ml-auto flex flex-wrap gap-2">
+              {feedOn && item.status === "login_required" && (
+                <Button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => openLink(item.id)}
+                >
+                  {busy === `reconnect-${item.id}` ? "Opening…" : "Log in again"}
+                </Button>
+              )}
+              {feedOn && item.status !== "setup" && (
+                <>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!!busy}
+                    onClick={() =>
+                      run(`sync-${item.id}`, async () =>
+                        reportSync(
+                          await post(`/admin/tax/bank-import/plaid/items/${item.id}/sync`),
+                        ),
+                      )
+                    }
+                  >
+                    {busy === `sync-${item.id}` ? "Syncing…" : "Sync now"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!!busy}
+                    onClick={() =>
+                      setEditing(editing === item.id ? null : item.id)
+                    }
+                  >
+                    Edit accounts
+                  </Button>
+                </>
+              )}
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!!busy}
+                onClick={() => {
+                  // unreadable token: this app can't revoke it at Plaid, so
+                  // the operator must confirm they removed it there
+                  const blind = item.tokenReadable === false;
+                  if (
+                    !window.confirm(
+                      blind
+                        ? `The stored token for ${item.institutionName || "this bank"} can't be read, so it can't be revoked from here. Only continue if you have already removed this connection in Plaid. Disconnect anyway?`
+                        : `Disconnect ${item.institutionName || "this bank"}? Transactions already imported stay; new ones stop.`,
+                    )
+                  )
+                    return;
+                  run(`disconnect-${item.id}`, () =>
+                    post(
+                      `/admin/tax/bank-import/plaid/items/${item.id}/disconnect`,
+                      blind ? { confirmedRemovedAtPlaid: true } : {},
+                    ),
+                  );
+                }}
+              >
+                Disconnect
+              </Button>
+            </span>
+          </div>
+          {item.tokenReadable === false && (
+            <div className="mt-1 text-14 text-ink-primary">
+              The stored bank token can't be read — check PLAID_TOKEN_KEY on
+              the server. Syncing and revoking are unavailable until it is.
+            </div>
+          )}
+          {item.lastError && item.status !== "active" && (
+            <div className="mt-1 text-14 text-ink-secondary">
+              {item.lastError}
+            </div>
+          )}
+          {feedOn && (item.status === "setup" || editing === item.id) ? (
+            <PlaidAccountsForm
+              key={`${item.id}-${item.accounts.map((a) => a.accountLabel).join("|")}`}
+              item={item}
+              existingLabels={status.existingLabels}
+              busy={busy === `setup-${item.id}`}
+              onCancel={item.status === "setup" ? null : () => setEditing(null)}
+              onSave={(draft) =>
+                run(`setup-${item.id}`, async () => {
+                  const r = await post(
+                    `/admin/tax/bank-import/plaid/items/${item.id}/setup`,
+                    {
+                      accounts: draft.map((a) => ({
+                        id: a.id,
+                        accountLabel: a.accountLabel,
+                        accountType: a.accountType,
+                        syncFrom: a.syncFrom,
+                        enabled: a.enabled,
+                      })),
+                    },
+                  );
+                  setEditing(null);
+                  reportSync(r);
+                })
+              }
+            />
+          ) : (
+            <ul className="mt-2 list-none space-y-1 p-0 text-14">
+              {item.accounts.map((a) => (
+                <li key={a.id}>
+                  {a.name}
+                  {a.mask ? ` ••${a.mask}` : ""} —{" "}
+                  {a.enabled
+                    ? `${a.accountLabel} (${a.accountType === "card" ? "card" : "bank"}) from ${a.syncFrom}`
+                    : "not imported"}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
 function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
@@ -4819,6 +5342,9 @@ function BankImportTab() {
   const [countsReady, setCountsReady] = useState(false);
   const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [counts, setCounts] = useState({});
+  const [plaidEnabled, setPlaidEnabled] = useState(false);
+  const [importEnabled, setImportEnabled] = useState(false);
+  const [bankChanges, setBankChanges] = useState(0);
   const [rows, setRows] = useState([]);
   const [coverage, setCoverage] = useState([]);
   const [filter, setFilter] = useState("");
@@ -4906,6 +5432,9 @@ function BankImportTab() {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => {
         setCounts(s?.counts || {});
+        setPlaidEnabled(!!s?.plaidEnabled);
+        setImportEnabled(!!s?.enabled);
+        setBankChanges(s?.bankChanges || 0);
         setCountsReady(true);
         setReadErrors((prev) => ({
           ...prev,
@@ -5025,6 +5554,9 @@ function BankImportTab() {
         setNotice({
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skippedTotal ?? r.skipped.length} skipped)` +
+            (r.feedCovered
+              ? ` — ${r.feedCovered} row${r.feedCovered === 1 ? "" : "s"} not imported: a bank feed already covers ${r.feedCovered === 1 ? "that day" : "those days"}${r.feedLiveFrom ? ` (live from ${r.feedLiveFrom})` : ""}`
+              : "") +
             // skipped rows never reach staging or coverage — name each line
             // and reason so the operator can fix the statement and re-import
             // (the server returns a bounded sample plus the honest total)
@@ -5153,7 +5685,18 @@ function BankImportTab() {
           label="Ignored"
           value={countsReady ? counts.ignored || 0 : "\u2014"}
         />
+        {bankChanges > 0 && (
+          <StatCard
+            label="Changed by bank"
+            value={bankChanges}
+            onClick={() => setFilter("bank_change")}
+          />
+        )}
       </div>
+
+      {importEnabled && (
+        <PlaidFeedsPanel feedOn={plaidEnabled} onSynced={load} />
+      )}
 
       <Card
         style={{
@@ -5273,6 +5816,9 @@ function BankImportTab() {
             <option value="created_expense">Created expense</option>
             <option value="refund_applied">Refund applied</option>
             <option value="ignored">Ignored</option>
+            {(plaidEnabled || bankChanges > 0) && (
+              <option value="bank_change">Changed by bank</option>
+            )}
           </Select>
         </Field>
         <Field label="Coverage year" className="min-w-0">
@@ -5544,6 +6090,53 @@ function BankImportTab() {
                     whiteSpace: "nowrap",
                   }}
                 >
+                  {(r.suggestion?.plaidModified ||
+                    r.suggestion?.plaidRemoved) && (
+                    <div
+                      className="mb-1 text-14 text-ink-primary"
+                      style={{ whiteSpace: "normal" }}
+                    >
+                      {r.suggestion.plaidRemoved
+                        ? "The bank withdrew this transaction."
+                        : `The bank changed this to $${Number(r.suggestion.plaidModified.amount).toFixed(2)} ${r.suggestion.plaidModified.direction} on ${r.suggestion.plaidModified.txn_date}${r.status === "unmatched" ? "." : r.status === "created_expense" ? " — edit the expense created from this row to match, then dismiss." : " — unlink to apply it."}`}
+                      {/* resolvable with the feed switched off too — the row
+                          stays blocked from every claim until then */}
+                      <span className="ml-2 inline-flex gap-2">
+                        {r.suggestion.plaidModified &&
+                          !r.suggestion.plaidRemoved &&
+                          r.status === "unmatched" && (
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              disabled={!!busy}
+                              onClick={() =>
+                                act(
+                                  "bank-change",
+                                  `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                                  { action: "apply", expected: shownBankChange(r) },
+                                )
+                              }
+                            >
+                              Apply bank's change
+                            </Button>
+                          )}
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={!!busy}
+                          onClick={() =>
+                            act(
+                              "bank-change",
+                              `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                              { action: "dismiss", expected: shownBankChange(r) },
+                            )
+                          }
+                        >
+                          Dismiss
+                        </Button>
+                      </span>
+                    </div>
+                  )}
                   {/* a transfer-flagged CREDIT with candidates falls through
                       to the select — a vendor refund whose descriptor says
                       "transfer" still needs its Apply refund action (the
@@ -5556,7 +6149,7 @@ function BankImportTab() {
                   ) &&
                   !r.suggestion?.candidates?.length ? (
                     "internal transfer?"
-                  ) : r.status === "unmatched" &&
+                  ) : bankRowClaimable(r) &&
                     (r.suggestion?.candidates?.length ||
                       /* after the SOLE candidate is unlinked, the parked list is
               empty but the on-demand endpoint is rejection-agnostic —
@@ -5644,7 +6237,7 @@ function BankImportTab() {
                         )}
                       </Select>
                     </Field>
-                  ) : r.status === "unmatched" &&
+                  ) : bankRowClaimable(r) &&
                     r.direction === "credit" &&
                     (r.suggestion?.refundCandidates?.length ||
                       r.suggestion?.payoutCandidates?.length ||
@@ -5805,7 +6398,7 @@ function BankImportTab() {
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "debit" &&
                     linkPick[r.id] && (
                       <Button
@@ -5838,7 +6431,7 @@ function BankImportTab() {
                         Link
                       </Button>
                     )}
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "credit" &&
                     linkPick[r.id] && (
                       <Button
@@ -5891,7 +6484,7 @@ function BankImportTab() {
                       The category selector lives HERE so it stays reachable
                       in every review state (transfer warning, parked
                       candidates). Refund credits go through Apply refund. */}
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "debit" &&
                     !linkPick[r.id] && (
                       <>
@@ -6082,7 +6675,13 @@ function BankImportTab() {
 }
 export default function TaxPage() {
   const isMobile = useIsMobile(640);
-  const [activeTab, setActiveTab] = useState("overview");
+  // a bank's OAuth redirect lands here (PLAID_REDIRECT_URI) — open Bank
+  // Import so its feeds panel can finish the Plaid Link session
+  const [activeTab, setActiveTab] = useState(() =>
+    new URLSearchParams(window.location.search).has("oauth_state_id")
+      ? "bankimport"
+      : "overview",
+  );
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).
   const [bankImportOn, setBankImportOn] = useState(false);

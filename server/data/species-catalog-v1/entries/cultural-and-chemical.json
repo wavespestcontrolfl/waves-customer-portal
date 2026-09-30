@@ -1,0 +1,864 @@
+[
+  {
+    "slug": "mower-scalping",
+    "kind": "disorder",
+    "common_name": "Mower Scalping",
+    "aka": [
+      "scalping"
+    ],
+    "aliases": [
+      "mower scalping",
+      "scalping",
+      "scalped lawn"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Uniform tan, stubbly turf cut down to the stems, often on high spots or uneven ground",
+      "Scalped areas are slow to green back up and are more open to weeds and sun stress",
+      "Cut appears clean and even, unlike a disease patch or insect damage"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Uniform tan, stubbly turf right after a mow, especially on high spots, suggests scalping from cutting too short. Raising the mowing height and following the one-third rule are the realistic fixes; a technician can advise on the right height for your grass.",
+      "fact": "Removing more than about a third of the blade in one mow stresses the plant enough that it can take weeks to fully recover, even though the cut itself only takes seconds."
+    },
+    "tech_notes": "Recommend raising deck height and mowing more frequently rather than cutting back hard in one pass; uneven ground often scalps even at a correct average height. Scalped areas are slow to green back up and more open to weeds and sun stress in the meantime.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh028"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "698e08cd9ddb7dfd9873b968a10f92f2f655410337075158c1bdc9408c13cf26"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Uniform tan, stubbly turf cut down to the stems, often on high spots or uneven ground"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A wide photo of the scalped area showing tan stubble cut down to the stems, lined up with high spots or uneven ground.",
+        "elements": [
+          "Uniform tan, stubbly turf cut down to the stems, often on high spots or uneven ground"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "drought-irrigation-stress",
+          "difference": "Mower scalping is a uniform tan, stubbly cut appearing right after a mow; drought stress shows blue-gray, folded blades across dry zones.",
+          "next_observation": "Check whether the discoloration followed a recent mow or a dry, sunny spell.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "dull-blade-shredding",
+          "difference": "Mower scalping cuts turf too short evenly, exposing stems; dull-blade shredding leaves ragged, torn, whitish-brown blade tips at a normal mowing height.",
+          "next_observation": "A close-up of the blade tips checking for a clean short cut versus ragged tearing.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "chinch-bug",
+          "difference": "Mower scalping is a uniform tan cut right after mowing; chinch bug damage expands in hot, sunny spots without a recent low mow.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "compaction-traffic-wear",
+          "difference": "Mower scalping is a uniform tan cut appearing right after a mow, anywhere in the yard; compaction wear follows a repeated foot-traffic path.",
+          "next_observation": "Check whether the thin area is a walking path or matches a recent mow.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "low_mowing"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Color often returns within 2-3 weeks; density can take 60-90 days at a corrected mowing height."
+    }
+  },
+  {
+    "slug": "dull-blade-shredding",
+    "kind": "disorder",
+    "common_name": "Dull Mower Blade Shredding",
+    "aka": [],
+    "aliases": [
+      "dull blade shredding",
+      "shredded grass tips",
+      "torn grass blades"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Blade tips look ragged, frayed and torn instead of cleanly cut",
+      "Cut tips look whitish-brown or tan across the lawn",
+      "The whole lawn looks dull and grayish-brown from a distance after mowing"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Ragged, torn blade tips that turn whitish-brown soon after cutting suggest a dull mower blade tearing the grass instead of cutting it. Sharpening the mower blade is the realistic fix; a technician can point it out on the next visit if you would like a second look.",
+      "fact": "A torn blade tip dries out and browns faster than a clean cut, and the larger wound is also an easier entry point for leaf-spot fungi."
+    },
+    "tech_notes": "Recommend sharpening the mower blade frequently enough to prevent tearing of leaf blades; torn tips increase susceptibility to leaf-spot disease.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/lh028"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "ac7c66e2fe2894d1e92126e24fe7a82c49097a461d9d0a71862927fab31506b9"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Blade tips look ragged, frayed and torn instead of cleanly cut",
+        "Cut tips look whitish-brown or tan across the lawn"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up of the blade tips showing the ragged, torn cut instead of a clean edge.",
+        "elements": [
+          "Blade tips look ragged, frayed and torn instead of cleanly cut",
+          "Cut tips look whitish-brown or tan across the lawn"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "gray-leaf-spot",
+          "difference": "Dull-blade shredding leaves ragged, frayed, whitish-brown tips with no lesions; gray leaf spot shows dark-bordered lesions on the blade.",
+          "next_observation": "A close-up of the blade tips versus the lesion pattern.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "leaf-spot-melting-out",
+          "difference": "Dull-blade shredding leaves ragged, torn, whitish-brown tips with no lesions; melting-out shows distinct brown to purple lesions on the blade.",
+          "next_observation": "A close-up of the blade tips versus the lesion pattern.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "mower-scalping",
+          "difference": "Dull-blade shredding leaves ragged, torn tips at a normal mowing height; mower scalping cuts turf too short evenly, exposing stems.",
+          "next_observation": "A close-up of the blade tips checking for ragged tearing versus a clean short cut.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [],
+      "outcome": "cultural_fix",
+      "recovery_note": "The lawn's color and texture often improve within a couple of mowings once the blade is sharpened."
+    }
+  },
+  {
+    "slug": "herbicide-injury",
+    "kind": "disorder",
+    "common_name": "Herbicide Injury",
+    "aka": [],
+    "aliases": [
+      "herbicide injury",
+      "herbicide damage",
+      "weed killer damage"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Leaf curling, twisting or cupping appearing days to a few weeks after any nearby application",
+      "Chlorotic or scorched foliage limited mostly to one area or one side of a plant",
+      "Stem die-back or delayed new leaf appearance on a nearby tree or shrub"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage",
+      "yellowing"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Curling, twisting or scorched foliage appearing days to a few weeks after any nearby application can suggest herbicide injury. A recent application by anyone, including a lawn service, can cause this pattern; a technician checks what was applied and when before recommending a next step.",
+      "fact": "Some herbicides can be taken up by tree and shrub roots that extend into a treated lawn, so injury can show up on a plant that was never sprayed directly."
+    },
+    "tech_notes": "Check timing against any recent lawn or landscape application (by any company); root uptake by nearby trees/shrubs can cause injury without direct spray contact.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/fr400"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2360527f5db4ad37d6d2f5ad11803ef05b3cb00c8bb02064c767b3d34da0c4eb"
+    },
+    "condition": {
+      "hosts": [
+        "turf",
+        "shrubs",
+        "trees"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Leaf curling, twisting or cupping appearing days to a few weeks after any nearby application",
+        "Chlorotic or scorched foliage limited mostly to one area or one side of a plant"
+      ],
+      "required_signature": {
+        "text": "A photo of curling or scorched foliage can raise concern, but a technician checks what was applied nearby and when, since a photo alone cannot confirm the cause.",
+        "elements": [
+          "Leaf curling, twisting or cupping appearing days to a few weeks after any nearby application"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "iron-deficiency-turf",
+          "difference": "Herbicide injury matches where and when something was applied, spot or lawn-wide; iron deficiency stripes the newest blades regardless of any application.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "magnesium-deficiency-turf",
+          "difference": "Herbicide injury matches where and when something was applied, spot or lawn-wide; magnesium deficiency shows blotchy, interveinal yellowing regardless.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "fertilizer-burn",
+          "difference": "Herbicide injury often shows curling, twisting or cupping leaves; fertilizer burn shows crisp, brown or yellow turf following a spreader path.",
+          "next_observation": "A technician checks what was applied nearby and when, alongside the pattern on the ground.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "recent_herbicide"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Recovery depends on the product and dose; new growth can look normal within weeks to months once the cause is identified."
+    }
+  },
+  {
+    "slug": "fertilizer-burn",
+    "kind": "disorder",
+    "common_name": "Fertilizer Burn",
+    "aka": [],
+    "aliases": [
+      "fertilizer burn",
+      "fertilizer streaking"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Yellow to brown, crisp turf following a straight line or striped pattern matching a spreader path",
+      "Damage often appears within a few days of an application, worse at turns, overlaps or spill points",
+      "Edges of the damaged stripe are sharper and straighter than a disease patch"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      10,
+      11
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Crisp, yellow to brown turf following a straight or striped pattern can suggest fertilizer burn. A recent application by anyone, including a lawn service, can cause this pattern; a technician checks what was applied and when before recommending a next step.",
+      "fact": "The stripe or overlap pattern is often the biggest clue, since it traces the exact path a spreader took across the lawn."
+    },
+    "tech_notes": "Check timing and pattern against any recent application (by any company, including overlaps and spill points); watering in unwashed granules promptly reduces further damage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep236"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "ce7eba7a74ab7f47dc5b7e2bf95c6b53367974ce064187fe9de3e7d7db81310d"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Yellow to brown, crisp turf following a straight line or striped pattern matching a spreader path"
+      ],
+      "symptoms": [
+        "Damage often appears within a few days of an application, worse at turns, overlaps or spill points"
+      ],
+      "required_signature": {
+        "text": "A photo of the striped, crisp pattern can raise concern, but a technician checks what was applied and when to confirm the cause.",
+        "elements": [
+          "Yellow to brown, crisp turf following a straight line or striped pattern matching a spreader path"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "dollar-spot",
+          "difference": "Fertilizer burn follows a straight or striped spreader path; dollar spot forms small, round, scattered patches with hourglass-shaped blade lesions.",
+          "next_observation": "A wider photo showing whether the pattern is a straight stripe or scattered circles.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "dog-urine-spots",
+          "difference": "Fertilizer burn follows a straight or striped spreader path; dog urine spots are round, isolated dead circles with a dark green rim, not a line.",
+          "next_observation": "A wider photo checking whether the pattern is a straight stripe or a round, isolated spot.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "herbicide-injury",
+          "difference": "Fertilizer burn shows crisp, brown or yellow turf following a spreader path; herbicide injury often shows curling, twisting or cupping leaves.",
+          "next_observation": "A technician checks what was applied nearby and when, alongside the pattern on the ground.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "recent_fertilizer"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Color and density often improve over a few weeks once the excess is watered through and new blades grow in."
+    }
+  },
+  {
+    "slug": "dog-urine-spots",
+    "kind": "disorder",
+    "common_name": "Dog Urine Spots",
+    "aka": [],
+    "aliases": [
+      "dog urine spots",
+      "dog spots",
+      "pet urine damage"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, roughly circular dead or straw-colored spot, 3-6 inches across, with a dark green rim around it",
+      "Spots cluster in one favorite corner of the yard rather than scattering evenly",
+      "The dark green rim fades gradually into normal-colored turf just beyond it"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, roughly circular dead spot with a dark green rim, especially clustered in one favorite corner, suggests dog urine. Watering the spot well right after your dog goes is the main way to reduce damage; training toward a mulched area helps too.",
+      "fact": "The dark green ring around a dog urine spot forms because diluted nitrogen reaches the edge of the spot at a level that feeds the grass instead of burning it."
+    },
+    "tech_notes": "Bermudagrass and zoysiagrass tolerate this better than other warm-season species and often fill spots back in on their own. Female dogs and puppies tend to cause more concentrated spots than males, since males often mark upright over a wider area.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://content.ces.ncsu.edu/publication/dogs-and-turfgrass-interactions"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "08d479e300aaa137968ce4470e26bda0348b612da911f4853f308a38bc7ae904"
+    },
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [
+        "Small, roughly circular dead or straw-colored spot, 3-6 inches across, with a dark green rim around it"
+      ],
+      "symptoms": [
+        "Spots cluster in one favorite corner of the yard rather than scattering evenly"
+      ],
+      "required_signature": {
+        "text": "A close-up of the spot showing the dead or straw-colored center with a dark green rim around it.",
+        "elements": [
+          "Small, roughly circular dead or straw-colored spot, 3-6 inches across, with a dark green rim around it"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "fairy-ring",
+          "difference": "Dog urine spots are small, roughly circular dead patches with a dark green rim and no mushrooms; fairy ring often shows mushrooms and can span several feet.",
+          "next_observation": "A wider photo showing the full ring size and whether mushrooms are present.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "dollar-spot",
+          "difference": "Dog urine spots are dead circles with a dark green rim clustered near a favorite spot; dollar spot scatters many small patches across the lawn.",
+          "next_observation": "A wider photo showing whether the spots are scattered or clustered near a dog's favorite spot.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "fertilizer-burn",
+          "difference": "Dog urine spots are round, isolated dead circles with a dark green rim; fertilizer burn follows a straight or striped spreader path, not a round spot.",
+          "next_observation": "A wider photo checking whether the pattern is a round, isolated spot or a straight stripe.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "overwatering",
+          "difference": "Dog urine spots are small, sharply defined dead circles with a dark green rim; overwatering causes general thin, waterlogged turf without distinct spots.",
+          "next_observation": "A wider photo checking whether the damage is in small, distinct spots or general across the area.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "dog_traffic"
+      ],
+      "outcome": "cultural_fix",
+      "recovery_note": "Small spots often fill back in within a few weeks once watered promptly after each visit."
+    }
+  },
+  {
+    "slug": "trimmer-bark-damage",
+    "kind": "disorder",
+    "common_name": "String Trimmer Bark Damage",
+    "aka": [
+      "mower blight"
+    ],
+    "aliases": [
+      "trimmer damage",
+      "string trimmer damage",
+      "bark wound",
+      "mower blight"
+    ],
+    "scientific_name": null,
+    "rank": "condition",
+    "group": "cultural-and-chemical",
+    "subgroup": null,
+    "site_category": "Lawn & plant problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A scraped, gouged or stripped patch of bark at the trunk base, often ringing part or all of the trunk",
+      "Dieback or a thin canopy above a wound that girdles much of the trunk",
+      "Damage sits right at grass level where a trimmer or mower deck would reach"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "role": "plant_disorder",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A scraped or gouged bark wound at the trunk base, sometimes wrapping part of the trunk, suggests string trimmer or mower damage. A wound wrapping most of the trunk can cut off water and nutrients above it. On a palm this kind of wound never closes; a technician judges the damage.",
+      "fact": "A wound that rings most of the way around a trunk can girdle it, cutting off the flow of water and nutrients even though the roots below stay healthy."
+    },
+    "tech_notes": "Estimate the percentage of trunk circumference affected; a mulch ring or trunk guard around the base prevents repeat damage. Palms have no cambium layer, so a trunk wound never seals; treat any trimmer or mower wound on a palm as a possible entry point for disease and have a technician look.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP625"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "9411e6a7e50f8756155a12b5bcce41160b908ae721aad6002f69b737b14b0350"
+    },
+    "condition": {
+      "hosts": [
+        "shrubs",
+        "trees",
+        "palms"
+      ],
+      "signs": [
+        "A scraped, gouged or stripped patch of bark at the trunk base, often ringing part or all of the trunk"
+      ],
+      "symptoms": [
+        "Dieback or a thin canopy above a wound that girdles much of the trunk"
+      ],
+      "required_signature": {
+        "text": "A close-up of the trunk base showing the scraped or gouged bark wound.",
+        "elements": [
+          "A scraped, gouged or stripped patch of bark at the trunk base, often ringing part or all of the trunk"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "deep-planting-mulch-volcano",
+          "difference": "Trimmer bark damage shows a scraped or gouged wound with bark missing; a mulch volcano buries the trunk base under soil or mulch with no visible wound.",
+          "next_observation": "A close-up of the trunk base checking for a bare wound versus buried mulch.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "A minor wound on a shrub or tree often seals over within a season; a palm wound never closes and needs a technician's assessment."
+    }
+  }
+]

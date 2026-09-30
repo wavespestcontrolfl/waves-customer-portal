@@ -292,7 +292,45 @@ describe('final_score equals sum of breakdown entries', () => {
 
 // ── page-anchored buckets (answer_gap) ───────────────────────────────
 
+describe('page-anchored bucket pinning (aeo_question_gap)', () => {
+  test.each([
+    ['refresh_existing_page', '/pest-control/get-rid-of-german-cockroaches/', 'new_supporting_blog', 'refresh'],
+    ['refresh_existing_page', '/termite/termite-bond/', 'create_or_refresh_city_service_page', 'refresh'],
+  ])('keeps %s when the profiler recommends another asset', (action, pageUrl, recommended, pageType) => {
+    const r = route(
+      opp({ bucket: 'aeo_question_gap', action_type: action, page_url: pageUrl, query: 'What affects termite treatment cost in Bradenton?' }),
+      { serp_profile: serp({ dominant_intent: 'informational', dominant_page_type: 'blog', recommended_asset_type: recommended }) }
+    );
+    expect(r.action_type).toBe(action);
+    expect(r.page_type).toBe(pageType);
+    expect(r.router_notes).toMatch(/page-anchored bucket aeo_question_gap/);
+  });
+});
+
 describe('page-anchored bucket pinning (answer_gap)', () => {
+  test('citability_backfill stays on its seeded refresh action when the profiler recommends a blog', () => {
+    const r = route(
+      {
+        bucket: 'citability_backfill',
+        action_type: 'refresh_existing_page',
+        page_url: '/blog/ghost-ant-guide/',
+        score: 80,
+      },
+      {
+        serp_profile: {
+          dominant_intent: 'informational',
+          dominant_page_type: 'blog',
+          recommended_asset_type: 'new_supporting_blog',
+          directory_saturation: 0,
+        },
+      },
+    );
+
+    expect(r.action_type).toBe('refresh_existing_page');
+    expect(r.page_type).toBe('refresh');
+    expect(r.router_notes).toMatch(/page-anchored bucket citability_backfill/);
+  });
+
   test('answer_gap keeps refresh_existing_page when the profiler recommends a blog', () => {
     const r = route(
       opp({

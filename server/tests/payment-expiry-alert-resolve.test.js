@@ -154,4 +154,46 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
       interaction_type: `${channel}_outbound`, channel,
     }));
   });
+
+  test.each([
+    ['old Email', { ok: true, deduped: true }, 0, false],
+    ['failed Email', { ok: false, deliveryOutcome: 'not_sent' }, 0, false],
+    ['fresh Email', { ok: true, deliveryOutcome: 'accepted' }, 1, false],
+    ['a fresh App bell with failed native transport', { ok: true, deduped: true }, 1, true],
+  ])('%s creates %i fresh daily notices', async (_label, emailOutcome, freshCount, freshApp) => {
+    const alertInsert = jest.fn(async () => [1]);
+    const interactionInsert = jest.fn(async () => [1]);
+    paymentExpiry.resolveAlertsForExemptCustomers = jest.fn(async () => {});
+    require('../services/messaging/send-customer-message').sendCustomerMessage.mockResolvedValueOnce(freshApp
+      ? { sent: true, channel: 'push', deliveryOutcome: 'accepted', bellPersisted: true,
+        pushAcceptedAt: null, deliveredNow: [] }
+      : { sent: true, deduped: true, channel: 'push', deliveryOutcome: 'accepted',
+        channelResults: { push: { sent: false, deduped: true, deliveryOutcome: 'not_sent',
+          reason: 'app_event_already_visible', eventVisibleAt: new Date('2026-09-23T15:00:00Z') } } });
+    require('../services/sms-template-renderer').renderSmsTemplate.mockResolvedValueOnce('expiry body');
+    require('../services/payment-lifecycle-email').sendPaymentMethodExpiring.mockResolvedValueOnce(emailOutcome);
+    db.mockImplementation((table) => {
+      if (table === 'payment_methods as pm') return query([{
+        id: 'pm-1', customer_id: 'cust-1', last_four: '4242', exp_month: '9', exp_year: '2026', card_brand: 'Visa',
+      }]);
+      if (table === 'customers') return query([], { first: {
+        id: 'cust-1', first_name: 'Pat', last_name: 'Customer', phone: '+19415550100', billing_mode: null,
+      } });
+      if (table === 'sms_log') return query([], { first: null });
+      if (table === 'inventory_alerts') return query([], { insert: alertInsert });
+      if (table === 'customer_interactions') return query([], { insert: interactionInsert });
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await expect(paymentExpiry.checkExpiringCards()).resolves.toMatchObject({ notified: freshCount });
+    expect(require('../services/messaging/send-customer-message').sendCustomerMessage)
+      .toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({
+        notificationEventKey: 'payment-expiry:pm-1:9:2026:7_day',
+      }) }));
+    expect(alertInsert).toHaveBeenCalledTimes(freshCount);
+    expect(interactionInsert).toHaveBeenCalledTimes(freshCount);
+    if (freshCount) expect(interactionInsert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: freshApp ? 'push_outbound' : 'email_outbound', channel: freshApp ? 'push' : 'email',
+    }));
+  });
 });

@@ -35,6 +35,15 @@ const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
+// The processing_status values that mean THIS call's own pipeline pass has
+// genuinely finished — the retry states (extraction_failed, no_transcription)
+// are deliberately excluded: they are unfinished work a later pass may still
+// complete (see the SLA-clamp comment at its own use below), so a caller
+// asking "has processing settled" must not treat them as done either.
+// Exported so other callers (promise-chaser-bell.js, Codex #5019 r11 P2)
+// reuse the SAME set rather than re-deriving their own notion of "terminal".
+const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+
 /**
  * PR 2A: the RECORDED part of a stored transcript. A composite a prior pass
  * wrote is "[AI segment]\n…\n\n[Staff|Voicemail segment]\n<recorded>"; a
@@ -102,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1850,13 +1859,19 @@ function safeParseJsonPayload(payload) {
 // Two payloads with the same signature describe the identical question —
 // same candidates, same disagreement flag, same release target; anything
 // else means the office needs to see fresh evidence.
-function emailCardSignature(reasonCode, payload) {
+function emailCardSignature(reasonCode, payload, { wording = false } = {}) {
   const candidates = Array.isArray(payload?.email_candidates)
     ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
     : [];
   const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
   const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
-  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+  const key = [reasonCode || null, !!payload?.email_disagreement, candidates, target];
+  // gmail_same_inbox (2026-09-29) is card WORDING, not evidence: it counts
+  // only when comparing against a still-open card, so a card minted before
+  // the same-inbox wording refreshes on reprocess (codex #5323 r5) — never
+  // against a card a human already confirmed, which must stay satisfied.
+  if (wording) key.push(payload?.gmail_same_inbox || null);
+  return JSON.stringify(key);
 }
 
 // The single address (or blank) a card's evidence supports holding a
@@ -2009,8 +2024,8 @@ async function mintEmailReviewCardsFenced({
       for (const live of liveCards) {
         const desired = cards.find((c) => c.reason_code === live.reason_code);
         const same = !!desired
-          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
-            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload), { wording: true })
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload), { wording: true });
         if (same) {
           satisfiedReasonCodes.add(desired.reason_code);
           continue; // identical evidence — no-op, card untouched
@@ -7123,7 +7138,7 @@ Do not inflate quality: a caller who is still comparing companies or said they'd
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
-- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — an explicit AM/PM stated on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon") — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range with NO explicit AM/PM, no "noon"/"midnight", and no day-part word — "Tuesday, 2 to 4", "between 2 and 4" — leaves the START's period unstated, so it does NOT count as confirmed (you would otherwise have to invent AM or PM). An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
+- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed (appointment_confirmed true, preferred_date_time set from that reading) from that reading. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so appointment_confirmed stays false. An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
@@ -7839,6 +7854,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 }
 
 const CallRecordingProcessor = {
+  // Re-used by promise-chaser-bell.js (Codex #5019 r11 P2) to gate its own
+  // "has this call's pipeline pass genuinely finished" check.
+  COMPLETED_STATUSES,
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
   // full pipeline incl. the letter-fidelity contact-dictation second pass,
   // plus the same hallucination guard the live pipeline applies.
@@ -7874,7 +7892,7 @@ const CallRecordingProcessor = {
     // re-run and newly read as a lead must not inject its original call
     // time into the SLA analytics. The retry states (extraction_failed,
     // no_transcription) are unfinished work and keep the real wait.
-    const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+    // (COMPLETED_STATUSES is now the module-scope export above.)
     // …or the ROW says so: an operator adoption swaps the recording and puts
     // processing_status back to NULL (so the sweep owns the row) and stamps
     // the pre-swap state on metadata.adopted_recording — read here by EVERY
@@ -9612,6 +9630,15 @@ const CallRecordingProcessor = {
     // union of read-back reminders the office clears, never edited across
     // calls (no per-reason provenance). Schema-valid V2 only.
     const wdoArrangerAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction);
+    // Same idea, owner ruling 2026-09-28: a family_member caller (schema
+    // 1.18.0) with a confirmed time on the call is authorized for ANY
+    // service type (isAuthorizedFamilyMemberBooking). Live miss (call
+    // f5a54dbd, 2026-09-28): a paper-wasp knockdown at "my grandfather's
+    // house" blocked on caller_not_authorized because pre-1.18.0 schema
+    // forced the caller onto "other". A force-reprocess of that call under
+    // the new schema/relationship value must retire the stale card the same
+    // way the WDO-arranger reprocess does below.
+    const familyMemberAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedFamilyMemberBooking(v2Result.extraction);
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -19618,12 +19645,19 @@ const CallRecordingProcessor = {
         }
       }
       // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor/home
-      // buyer ordering a confirmed WDO inspection is an authorized caller. A
-      // force-reprocess of a call an earlier pass carded caller_not_authorized
-      // must retire that card here — the finalizer only ever OPENS review
-      // state — or the visit books while the office still sees a "confirm the
-      // account holder" task. Same transaction and fence as the repairs above.
-      if (written > 0 && finalStatus === 'processed' && wdoArrangerAuthorizedThisPass) {
+      // buyer ordering a confirmed WDO inspection is an authorized caller.
+      // Owner ruling 2026-09-28: a family member of the homeowner/resident
+      // (grandchild, child, parent, sibling, in-law, etc.) booking at THAT
+      // RELATIVE'S home with a confirmed time is authorized too, for any
+      // service type. Either way, a force-reprocess of a call an earlier
+      // pass carded caller_not_authorized must retire that card here — the
+      // finalizer only ever OPENS review state — or the visit books while
+      // the office still sees a "confirm the account holder" task. Same
+      // transaction and fence as the repairs above.
+      if (written > 0 && finalStatus === 'processed' && (wdoArrangerAuthorizedThisPass || familyMemberAuthorizedThisPass)) {
+        const retirementNote = familyMemberAuthorizedThisPass
+          ? 'Superseded — a family member booking service at their relative’s home with a confirmed time is an authorized caller (owner ruling 2026-09-28).'
+          : 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).';
         const retired = await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
           .whereIn('status', ['open', 'in_progress'])
@@ -19631,7 +19665,7 @@ const CallRecordingProcessor = {
             status: 'resolved',
             resolved_at: new Date(),
             resolution_source: 'system',
-            resolution_note: 'Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+            resolution_note: retirementNote,
           });
         if (retired > 0) {
           await trx('call_log')
@@ -20936,6 +20970,27 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // not from_phone). It lived only under `_test` — every real caller outside
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
+
+// Production contract for call-booking-link-text.js's own outbound-return
+// prior-contact check (codex r7 P1, pre-push): that lane's own
+// customerPredatesThisCall only excludes a customer THIS call's own legacy
+// path created — it has no comparison against the customer ROW'S OWN
+// created_at, missing the exact TCPA-implied-consent timing gap this
+// helper's own predatesCall() already closed for every caller inside this
+// file. It lived only under `_test` too, same reason as
+// resolveCallContactPhone above — promoted here rather than reimplemented
+// a second time (CLAUDE.md rule 15).
+CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCustomerId;
+
+// Production contract for call-booking-link-text.js's own staging check
+// (codex #5018 r11 P2): duration_seconds/conversationSeconds prove only that
+// the clock ran, never that the caller and Waves actually spoke — a call
+// that connected and dropped in the first few seconds can still carry
+// enough ring/hold time to clear call_too_short. hasRealTwoWayConversation
+// (PR #5012) already exists for exactly this and lived only under `_test`,
+// same reason as the two promotions above — promoted rather than
+// reimplemented (CLAUDE.md rule 15).
+CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
 
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

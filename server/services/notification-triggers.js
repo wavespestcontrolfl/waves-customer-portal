@@ -425,6 +425,28 @@ const TRIGGER_REGISTRY = {
       link: '/admin/communications#tab=calls',
     }),
   },
+  // A lead calls back while a Waves promise from an earlier unbooked call
+  // (a callback, a quote, a time to come out) is still open — gated by
+  // GATE_PROMISE_CHASER_BELL. See services/promise-chaser-bell.js.
+  promise_chaser: {
+    label: 'Lead calling back — promise still owed',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    allowContactDetails: true,
+    build: (p) => {
+      const who = p.name || p.phone || 'A lead';
+      // Dispatched only by the durable sweep now (no more live /voice call
+      // site) — the call has always already ended by the time this fires,
+      // so the copy always states when they called, never "is calling in
+      // now".
+      return {
+        title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
+        body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
+        link: '/admin/communications#tab=calls',
+      };
+    },
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -795,7 +817,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof sent — reply APPROVED to send',
       body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   newsletter_proof_approved: {
@@ -809,6 +833,20 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=history',
     }),
   },
+  newsletter_send_not_dispatched: {
+    label: 'Newsletter send cancelled: the draft changed after Send was clicked',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter not sent',
+      body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
+      // Deep-link THE affected draft: the bare compose tab opens the latest
+      // autopilot draft, not the campaign whose send was cancelled (codex
+      // round 14 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
+    }),
+  },
   newsletter_proof_blocked: {
     label: 'Newsletter proof/approval blocked by validation',
     category: 'newsletter',
@@ -817,7 +855,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter proof blocked',
       body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE draft the notice is about — the bare compose tab opens
+      // the latest autopilot draft, not this one (codex round 16 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   event_sources_unhealthy: {
@@ -846,7 +886,9 @@ const TRIGGER_REGISTRY = {
       const visible = entries.slice(0, 4).map((entry) => {
         const title = entry.title || 'Untitled entry';
         const summary = entry.summary || 'Needs review';
-        return `${title}: ${String(summary).slice(0, 180)}`;
+        // Generated entries are fixed at their source; say where.
+        const where = entry.fixLabel ? ` (fix in ${entry.fixLabel})` : '';
+        return `${title}${where}: ${String(summary).slice(0, 180)}`;
       });
       if (count > visible.length) visible.push(`${count - visible.length} more flagged entr${count - visible.length === 1 ? 'y' : 'ies'}`);
       return {
@@ -880,6 +922,13 @@ function pushTagFor(triggerKey, payload = {}) {
     // The persisted delivery identity survives a newer call reclaiming a
     // push-only attempt. Different caller windows still have distinct tags.
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
+  }
+  if (triggerKey === 'promise_chaser') {
+    // Fallback only — the real dispatch path below tags with the bell's own
+    // per-day dedupeKey instead, so a same-day repeat callback collapses
+    // into one banner even under a push-only preference. Per-promise here
+    // too: two different open promises calling back must not collapse.
+    return `waves-promise_chaser-${payload.commitmentId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
     // Per-attempt tag: the service worker replaces same-tag pushes with
@@ -1003,7 +1052,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
     let bellWritten = false;
-    let replayedSmsBell = false;
+    // A dedupe HIT on a trigger whose identity is the dedupeKey itself (not
+    // the bell row) means this event already delivered — the push must not
+    // repeat either. sms_reply: a concurrent lease winner reaching this
+    // dispatcher after the canonical send already delivered. promise_chaser:
+    // its sweep is stateless and never retries a push, so a dedupe hit can
+    // only be a concurrent dispatch of the same (promise, ET day) that
+    // already pushed.
+    let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -1047,7 +1103,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
-          if (created?.deduped && triggerKey === 'sms_reply' && dedupeKey) replayedSmsBell = true;
+          if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1060,9 +1116,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     };
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
-    // A concurrent SMS lease winner can reach this dispatcher before the first
-    // bell commits. Its canonical dedupe result also prevents a second push.
-    if (replayedSmsBell) return { ...stats, deduped: true };
+    if (dedupedNoPush) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so
@@ -1165,8 +1219,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               title: built.title,
               body: built.body,
               url: built.link || '/admin',
+              // promise_chaser: the push tag IS the bell's own dedupeKey
+              // (already 'waves-promise_chaser-<commitment>-<ET day>') so a
+              // same-day repeat callback on the same open promise collapses
+              // into the same banner even on a push-only preference, where
+              // notifyAdmin's own dedupe lock is never reached below.
               tag: triggerKey === 'sms_reply' && dedupeKey
-                ? `waves-sms_reply-${payload.twilioSid}` : pushTagFor(triggerKey, payload),
+                ? `waves-sms_reply-${payload.twilioSid}`
+                : (triggerKey === 'promise_chaser' && dedupeKey ? dedupeKey : pushTagFor(triggerKey, payload)),
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,

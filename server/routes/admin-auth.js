@@ -26,6 +26,7 @@ const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail } = require('../utils/staff-identity');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
+const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -426,6 +427,13 @@ async function register(req, res, next) {
     const normalizedName = name.trim();
     const normalizedEmail = normalizeStaffEmail(email);
     if (!normalizedEmail) return res.status(400).json({ error: 'A valid staff email is required' });
+    // Owner-only access model (owner ruling 2026-09-28): this is the other
+    // way (besides admin-timetracking.js) a new technicians row's email is
+    // set, and ibFullAccess() keys authorization on that column — a
+    // brand-new row has nothing to strip (fromEmail: null), only a possible
+    // assignment of the owner's email to a fresh admin account.
+    const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: null, toEmail: normalizedEmail });
+    if (fullAccessEmailGuard) return res.status(403).json(fullAccessEmailGuard);
     const staffRole = role || 'technician';
     if (!['admin', 'technician'].includes(staffRole)) {
       return res.status(400).json({ error: 'Role must be admin or technician' });

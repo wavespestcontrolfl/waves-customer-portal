@@ -7,14 +7,10 @@
 const {
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
-  TYPE_NEXT_STEP_CHIPS,
-  NEXT_STEP_CHIPS,
   customerLabelForValue,
   deriveActivityScore,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
   validateTypedFindings,
-  validateNextStepChips,
   validateActivityScoreConsistency,
   findingsSchemaForType,
   buildTodaysResult,
@@ -68,15 +64,15 @@ describe('knockdown schemas', () => {
     expect(PROJECT_TYPES.palmetto_roach_knockdown.requiresFollowup).toBe(false);
   });
 
-  test('owner-required cores enforced; both types require a next step', () => {
+  // Next-step chip picker/requirement retired (owner ruling 2026-09-27) —
+  // Recommendations is the single tech-advice field now.
+  test('owner-required cores enforced; neither type serves the retired next-step picker fields', () => {
     expect(REQUIRED_FINDINGS_FIELDS.german_roach_knockdown).toEqual(['activity_level', 'treatment_completed', 'followup_required']);
     expect(REQUIRED_FINDINGS_FIELDS.palmetto_roach_knockdown).toEqual(['activity_level', 'treatment_completed', 'followup_needed']);
-    expect(nextStepRequiredForType('german_roach_knockdown')).toBe(true);
-    expect(nextStepRequiredForType('palmetto_roach_knockdown')).toBe(true);
     for (const type of ['german_roach_knockdown', 'palmetto_roach_knockdown']) {
-      for (const chip of TYPE_NEXT_STEP_CHIPS[type]) {
-        expect({ type, chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ type, chip, hasSentence: true });
-      }
+      const schema = findingsSchemaForType(type);
+      expect(schema.nextStepRequired).toBeUndefined();
+      expect(schema.nextStepChips).toBeUndefined();
     }
   });
 
@@ -381,21 +377,6 @@ describe('cross-field contradictions (Codex P2 round 6)', () => {
     });
     expect({ ok: agreeing.ok, errors: agreeing.errors }).toEqual({ ok: true, errors: [] });
   });
-
-  test('palmetto "No action needed" chip requires a truly settled visit', () => {
-    const activeVisit = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown', PALMETTO_VALUES);
-    expect(activeVisit.ok).toBe(false);
-    expect(activeVisit.error).toMatch(/activity level/);
-
-    const wantsFollowup = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown',
-      { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No', activity_locations: '', followup_needed: 'Yes' });
-    expect(wantsFollowup.ok).toBe(false);
-    expect(wantsFollowup.error).toMatch(/Follow-up needed: Yes/);
-
-    const settled = validateNextStepChips(['No action needed'], 'palmetto_roach_knockdown',
-      { ...PALMETTO_VALUES, activity_level: 'None observed', interior_activity: 'No', activity_locations: '' });
-    expect(settled).toEqual({ ok: true, chips: ['No action needed'] });
-  });
 });
 
 describe('final score vs cleared boundary (flea precedent)', () => {
@@ -415,41 +396,6 @@ describe('final score vs cleared boundary (flea precedent)', () => {
   });
 });
 
-describe('next-step chips vs structured follow-up answers (Codex P2 round 5)', () => {
-  test('German follow-up chips must agree with followup_required and the selected window', () => {
-    for (const chip of ['Follow-up recommended', 'Follow-up in 10–14 days']) {
-      const result = validateNextStepChips([chip], 'german_roach_knockdown',
-        { ...GERMAN_VALUES, followup_required: 'No', followup_window: '' });
-      expect(result.ok).toBe(false);
-      expect(result.error).toMatch(/Follow-up required: No/);
-    }
-    for (const window of ['2–3 weeks', 'As needed']) {
-      const result = validateNextStepChips(['Follow-up in 10–14 days'], 'german_roach_knockdown',
-        { ...GERMAN_VALUES, followup_window: window });
-      expect(result.ok).toBe(false);
-      expect(result.error).toMatch(/follow-up window/);
-    }
-    // The generic chip is window-agnostic; the dated chip matches its window.
-    expect(validateNextStepChips(['Follow-up recommended'], 'german_roach_knockdown',
-      { ...GERMAN_VALUES, followup_window: '2–3 weeks' }).ok).toBe(true);
-    expect(validateNextStepChips(['Follow-up in 10–14 days'], 'german_roach_knockdown', GERMAN_VALUES).ok).toBe(true);
-  });
-
-  test('palmetto "Follow-up recommended" chip requires followup_needed Yes', () => {
-    const rejected = validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown', PALMETTO_VALUES);
-    expect(rejected.ok).toBe(false);
-    expect(rejected.error).toMatch(/Follow-up needed: No/);
-    expect(validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown',
-      { ...PALMETTO_VALUES, followup_needed: 'Yes' }).ok).toBe(true);
-    // Non-follow-up chips are unaffected by the answer.
-    expect(validateNextStepChips(['Monitor activity'], 'palmetto_roach_knockdown', PALMETTO_VALUES).ok).toBe(true);
-  });
-
-  test('without values (legacy callers) chip validation is unchanged', () => {
-    expect(validateNextStepChips(['Follow-up recommended'], 'palmetto_roach_knockdown').ok).toBe(true);
-  });
-});
-
 describe('snapshot', () => {
   test('Yes/No selects render as findings sentences; whole snapshot is copy-safe', () => {
     expect(customerLabelForValue('live_roaches_observed', 'No')).toBe('No live roaches observed today');
@@ -463,7 +409,6 @@ describe('snapshot', () => {
       const snapshot = buildTypedReportSnapshot({
         projectType: type,
         values,
-        nextStepChips: ['Monitor activity'],
         serviceKey: key,
         serviceLabel: PROJECT_TYPES[type].label,
         visitSequence: 1,

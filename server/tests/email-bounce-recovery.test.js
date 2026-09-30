@@ -12,6 +12,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/billing-email-provider-replay', () => ({
+  isBillingEmailTemplateRetry: jest.fn(() => false),
   isBillingEmailProviderReplay: jest.fn(() => false),
   runBillingEmailProviderReplayHandoff: jest.fn(),
 }));
@@ -29,6 +30,7 @@ const billingReplay = require('../services/billing-email-provider-replay');
 const recovery = require('../services/email-bounce-recovery');
 
 beforeEach(() => {
+  billingReplay.isBillingEmailTemplateRetry.mockReturnValue(false);
   billingReplay.isBillingEmailProviderReplay.mockReturnValue(false);
   billingReplay.runBillingEmailProviderReplayHandoff.mockReset();
 });
@@ -109,6 +111,10 @@ describe('decideRecoveryAction', () => {
   test('skips when the bounced address is no longer on file', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
       .toEqual({ action: 'skip', status: 'address_no_longer_on_file' });
+  });
+  test('skips a never-replay billing email (owner ruling 2026-09-27)', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, senderRendered: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'sender_rendered_not_replayed' });
   });
   test('medium threshold accepts medium candidates', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'medium' }, suppressed: false, min: 'medium' }))
@@ -283,6 +289,71 @@ describe('attemptRecovery codex-fix behaviors', () => {
       expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'blocked')).toBe(true);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     }
+  });
+
+  test.each(['billing_late_payment_30_day', 'invoice.followup_14_day', 'payment.microdeposit_verification', 'billing.previsit_balance'])(
+    'a bounced %s email is not re-sent; staff get the suggested address', async (templateKey) => {
+      const mockDb = orderedDb({
+        first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+        returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+      });
+      db.mockImplementation(mockDb);
+      const res = await recovery.attemptRecovery(
+        { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] },
+        { event: 'bounce', type: 'bounce' },
+      );
+      expect(res).toEqual({ skipped: 'sender_rendered_not_replayed' });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data)).toBe(false);
+      expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data)
+        .toMatchObject({ status: 'sender_rendered_not_replayed', corrected_email: 'jane@gmail.com' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('Suggested correction: jane@gmail.com'),
+        expect.objectContaining({ metadata: expect.objectContaining({ status: 'sender_rendered_not_replayed' }) }));
+    });
+
+  test.each([
+    ['billing_late_payment_90_day', undefined, true, null],
+    ['invoice.followup_90_day', 'true', true, null],
+    ['billing.previsit_balance', undefined, true, null],
+    ['invoice.followup_30_day', undefined, true, null],
+    ['invoice.followup_30_day', 'true', false, null],
+    ['billing_late_payment_60_day', undefined, false, null],
+    ['payment.microdeposit_verification', undefined, true, '90d'],
+    ['payment.microdeposit_verification', 'true', true, 'd90_final_notice'],
+    ['payment.microdeposit_verification', undefined, true, 'd30_final'],
+    ['payment.microdeposit_verification', 'true', false, 'd30_final'],
+    ['payment.microdeposit_verification', undefined, false, '60d'],
+  ])('a bounced %s (ladder gate %s) alert says final=%s', async (templateKey, ladder, final, touch) => {
+    if (ladder) process.env.GATE_DUNNING_LADDER_90 = ladder; else delete process.env.GATE_DUNNING_LADDER_90;
+    db.mockImplementation(orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    }));
+    await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'],
+        trigger_event_id: touch ? `microdeposit_verification_email:inv1:${touch}` : null },
+      { event: 'bounce', type: 'bounce' },
+    );
+    const finalAlerts = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finalAlerts).toHaveLength(final ? 1 : 0);
+    if (final) {
+      expect(finalAlerts[0][2]).toContain('Contact the customer directly');
+      expect(finalAlerts[0][3]).toMatchObject({ dedupeKey: 'billing-final-notice-missed:orig1', metadata: { cause: 'bounced' } });
+    }
+  });
+
+  test('a final notice is flagged even when another skip applies or recovery is off', async () => {
+    // The address was already changed on file: address_no_longer_on_file.
+    db.mockImplementation(orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'new@example.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    }));
+    const bounced = { id: 'orig9', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing_late_payment_90_day', suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] };
+    await recovery.attemptRecovery(bounced, { event: 'bounce', type: 'bounce' });
+    process.env.EMAIL_BOUNCE_RECOVERY = 'off';
+    await recovery.attemptRecovery({ ...bounced, id: 'orig10' }, { event: 'bounce', type: 'bounce' });
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals.map((c) => c[3].metadata.original_message_id)).toEqual(['orig9', 'orig10']);
   });
 
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
@@ -930,6 +1001,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-billing-recovery' });
+    billingReplay.isBillingEmailTemplateRetry.mockReturnValue(true);
     billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
     const heldDatabase = jest.fn();
     const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
@@ -960,10 +1032,39 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     }));
   });
 
+  // #4843 gate checklist: a billing row whose producer stored no replay
+  // contract re-authorizes through the same handoff before a corrected
+  // resend, instead of being resent unchecked.
+  test('a billing row with no stored contract also re-authorizes before the corrected resend', async () => {
+    const messageRow = { id: 'msg-billing-unregistered', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Payment received', send_attempt_token: 'recovery-attempt' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailTemplateRetry.mockReturnValue(true);
+    billingReplay.runBillingEmailProviderReplayHandoff.mockResolvedValueOnce({
+      handled: true, allowed: false, reason: 'Email is not selected for this billing category', retryable: false,
+    });
+    await expect(recovery.attemptRecovery({
+      id: 'orig-billing-unregistered', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.receipt_notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing', 'payment_receipt'],
+      trigger_event_id: 'billing:c1:monthly_billing_success:abc',
+      idempotency_key: 'billing_channel_email:billing:c1:monthly_billing_success:abc:email',
+      payload_snapshot: { notification_body: 'Payment received' },
+      html_snapshot: '<p>Payment received</p>', text_snapshot: 'Payment received',
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual({ skipped: 'Email is not selected for this billing category' });
+    expect(billingReplay.runBillingEmailProviderReplayHandoff).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'billing_replay_reauthorization_required' }) }),
+    );
+  });
+
   test.each([false, true])('a refused billing replay never sends and always alerts operations (%s)', async (retryable) => {
     const messageRow = { id: 'msg-billing-invalid', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailTemplateRetry.mockReturnValue(true);
     billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
     const reason = retryable ? 'Billing email authority could not be verified'
       : 'Stored billing replay context does not match the email message';
@@ -995,6 +1096,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     const messageRow = { id: 'msg-billing-ownership', status: 'queued', subject_snapshot: 'Billing update' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailTemplateRetry.mockReturnValue(true);
     billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
     const reason = busy ? 'Email ownership assignment in progress' : 'Email ownership check temporarily unavailable';
     billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, _dispatch, options) => {
@@ -1024,6 +1126,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     logger.warn.mockClear();
     const body = 'rejected private-provider-recipient@example.invalid';
     sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 400: ${body}`), { status: 400, body }));
+    billingReplay.isBillingEmailTemplateRetry.mockReturnValue(true);
     billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
     billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, dispatch) => {
       await dispatch(jest.fn(), jest.fn());

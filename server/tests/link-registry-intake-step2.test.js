@@ -104,6 +104,34 @@ describe('parseOpportunities (step 2 shape)', () => {
 });
 
 describe('intake — persists every reference as an intake item', () => {
+  // Codex P1 2026-09-28 (round 11): an intake-created ai_citation domain
+  // carries the durable prefix on its first-touch detail, its parked items
+  // and (via the item's detail) every resolver touch — so a rollback relabel
+  // plus an enrich overwrite still leaves it discovery-only, and the 110000
+  // restore migration's pattern finds it.
+  test('source ai_citation: every detail starts with `ai_citation:intake`, and the guard survives rollback + re-enrich', async () => {
+    const P = require('../services/seo/link-authority-policy');
+    const fs = require('fs');
+    const restoreSrc = fs.readFileSync(path.join(__dirname, '..', 'models/migrations/20260928110000_link_source_ai_citation_restore.js'), 'utf8');
+    const restoreDetailRe = new RegExp(restoreSrc.match(/^const DETAIL_PREFIX_RE = '([^']*)';/m)[1]);
+    for (const [given, expected] of [[null, 'ai_citation:intake'], ['batch-7', 'ai_citation:intake batch-7'], ['ai_citation:listing already', 'ai_citation:listing already']]) {
+      registry.ensureDomain.mockClear();
+      const inserted = [];
+      const db = makeDb({
+        'seo_link_intake_items.returning': (chain) => { inserted.push(chain.ops.find((o) => o[0] === 'insert')[1][0]); return [{ id: `item-${inserted.length}` }]; },
+      });
+      await intake(db, { text: 'academia.edu bit.ly/abc', source: 'ai_citation', sourceDetail: given });
+      const firstTouch = registry.ensureDomain.mock.calls[0][1];
+      expect(firstTouch).toMatchObject({ domain: 'academia.edu', source: 'ai_citation' });
+      expect(firstTouch.sourceDetail.startsWith(expected)).toBe(true);
+      for (const item of inserted) expect(item.source_detail.startsWith(expected)).toBe(true); // the resolver builds its touches from this
+      // rollback (060000 relabels source) + an enrich run that replaced `enrichment` wholesale
+      const domainRow = { domain: 'academia.edu', source: 'legacy_unknown', source_detail: firstTouch.sourceDetail, enrichment: { domain_rating: 30 } };
+      expect(P.isDiscoveryOnlyDomain(domainRow)).toBe(true);
+      expect(restoreDetailRe.test(domainRow.source_detail)).toBe(true);
+    }
+  });
+
   test('candidates → resolved items bound to the domain; references → pending; drops → dropped with reason', async () => {
     const inserted = [];
     const db = makeDb({

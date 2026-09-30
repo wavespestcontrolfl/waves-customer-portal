@@ -1,6 +1,7 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
@@ -228,7 +229,14 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
     // for 10am Monday, blocked with routing.reason "triage_flags" even
     // though the deterministic pass never raised it — the MODEL's own
     // triage_flags entry survived the merge unfiltered).
-    if (isAuthorizedWdoArrangerBooking(extraction)) return flags.filter((f) => f !== 'caller_not_authorized');
+    // A family_member caller with a confirmed time on the call is authorized
+    // too (owner ruling 2026-09-28, isAuthorizedFamilyMemberBooking) — ANY
+    // service type, not just WDO — and needs the same demotion of the
+    // model's own copy of the flag, or the merge would reintroduce the block
+    // from the model side alone exactly as the WDO-arranger live miss did.
+    if (isAuthorizedWdoArrangerBooking(extraction) || isAuthorizedFamilyMemberBooking(extraction)) {
+      return flags.filter((f) => f !== 'caller_not_authorized');
+    }
     return flags;
   }
   return flags.filter((f) => f !== 'caller_not_authorized');
@@ -316,6 +324,50 @@ function isAuthorizedWdoArrangerBooking(extraction) {
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;
   if (!isWdoInspectionRequest(extraction?.service_request || {})) return false;
+  const scheduling = extraction?.scheduling || {};
+  return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
+}
+
+// Owner ruling 2026-09-28: a family member of the homeowner or resident
+// (grandchild, child, parent, sibling, in-law, etc.) booking service AT THAT
+// RELATIVE'S HOME, with a time CONFIRMED on the call, is an authorized
+// caller — the office does not need the account holder on the line to trust
+// a grandchild arranging pest control for their grandfather's house. Live
+// miss (call f5a54dbd, 2026-09-28, inbound): the caller booked a paper-wasp
+// nest knockdown at "my grandfather's house", confirmed Sun Oct 4 11am, and
+// the booking blocked with routing.reason "triage_flags" /
+// appointment_blocking_flags ["caller_not_authorized"] because schema
+// pre-1.18.0 forced the caller onto relationship_to_property "other", which
+// also covers strangers arranging service at a property they have no tie to.
+// Schema 1.18.0 gives family callers their own value, family_member.
+//
+// Deliberately independent of isAuthorizedWdoArrangerBooking: it is not
+// scoped to WDO inspections or to lenders/realtors/buyers — ANY service
+// type qualifies, because the authorization here rests on the FAMILY
+// relationship to the resident, not on a recognized professional role
+// arranging a specific transaction. A spouse/partner is not a "family
+// member" for this purpose — they ARE the household (OWNER_EQUIVALENT_
+// RELATIONSHIPS already covers spouse_partner and never reaches this
+// predicate at all).
+//
+// Pure (no clock), same discipline as isAuthorizedWdoArrangerBooking: the
+// route decision must stay a function of the call so a force-reprocess
+// under the same decision version reproduces it. The on-the-hour guard
+// (confirmedStartOnTheHour) and the elapsed-slot guard
+// (slotElapsedAtBookingTime, call-recording-processor.js) are NOT
+// duplicated here — they are enforced centrally, after routing, for every
+// allowed booking regardless of which authorization path cleared it (see
+// the central on-the-hour gate and slotElapsedAtBookingTime call sites), so
+// an unconfirmed-time or already-elapsed family booking still cannot
+// auto-create a visit.
+//
+// An UNCONFIRMED family_member call (no scheduling.status === 'confirmed'
+// and a real confirmed_start_at) keeps today's behavior: it still hard-
+// blocks on caller_not_authorized like any other explicit third party,
+// until staff (or a later call) actually agrees a time.
+function isAuthorizedFamilyMemberBooking(extraction) {
+  const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  if (relationship !== 'family_member') return false;
   const scheduling = extraction?.scheduling || {};
   return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
 }
@@ -473,7 +525,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   }
 
   if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)
-      && !isAuthorizedWdoArrangerBooking(extraction)) {
+      && !isAuthorizedWdoArrangerBooking(extraction) && !isAuthorizedFamilyMemberBooking(extraction)) {
     flags.push('caller_not_authorized');
   }
 
@@ -2231,12 +2283,14 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // Same owner-ruling exception the enforce gate applies (2026-09-26): a
   // real_estate_agent/lender/home_buyer ordering a confirmed WDO inspection
   // is authorized, so this shadow-mode review card must not re-raise it
-  // either.
+  // either. Same for a family_member with a confirmed time (owner ruling
+  // 2026-09-28, isAuthorizedFamilyMemberBooking) — any service type.
   // v2Extraction is optional (older callers keep today's behavior) — the one
   // live call site (call-recording-processor.js) passes the full V2
   // extraction so the predicate can see service_request/scheduling.
   if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)
-      && !isAuthorizedWdoArrangerBooking(v2Extraction)) needsConfirmation.push('caller_not_authorized');
+      && !isAuthorizedWdoArrangerBooking(v2Extraction)
+      && !isAuthorizedFamilyMemberBooking(v2Extraction)) needsConfirmation.push('caller_not_authorized');
   // Finding #4 (round 4 P1, PR #4807): callback_number_needed reaches this
   // function inside bridgeTriageFlags (the processor already merges
   // computeDeterministicTriageFlags's output in before calling this), but
@@ -2372,7 +2426,21 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
   }
   payload.email_candidates = existing;
   if (!payload.email_as_heard) payload.email_as_heard = v1Email;
-  if (!payload.confirmation_question) {
+  // Gmail ignores dots in the mailbox name, so a pair that differs only by
+  // those dots is one inbox (owner ruling 2026-09-29): the card still asks
+  // for a human confirm — no address is saved automatically, since every
+  // send path matches suppressions by exact spelling — but it says so, and
+  // either spelling is right to confirm.
+  // Only when EVERY candidate on the card is that one inbox — a decoder
+  // candidate that genuinely differs keeps its own question (codex #5323 r4)
+  // — and no decoder/arbiter question is already there: that one carries
+  // the evidence-specific warning (a risk flag, a contradiction) and must
+  // not be traded for the generic wording (codex #5323 r6).
+  const oneInbox = !payload.confirmation_question && sameGmailInbox(existing.map((c) => c?.value));
+  if (oneInbox) {
+    payload.confirmation_question = `Both spellings are the same Gmail inbox (Gmail ignores dots) — confirm either one: "${v1Email}" or "${v2Email}".`;
+    payload.gmail_same_inbox = oneInbox;
+  } else if (!payload.confirmation_question) {
     payload.confirmation_question = `The call's two extraction passes heard different emails — read it back and confirm which is right: "${v1Email}" or "${v2Email}"?`;
   }
   payload.email_disagreement = { v1: v1Email, v2: v2Email };
@@ -2719,6 +2787,7 @@ module.exports = {
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
   isAuthorizedWdoArrangerBooking,
+  isAuthorizedFamilyMemberBooking,
   isWdoInspectionRequest,
   suppressUnsupportedModelFlags,
   computeDeterministicTriageFlags,
@@ -2745,6 +2814,8 @@ module.exports = {
   CANONICAL_WRITE_BLOCKING_FLAGS,
   confirmedStartOnTheHour,
   quoteBindsConfirmedSlot,
+  turnHasNegationOrHedge,
+  turnHasUnresolvedConditional,
   normalizeCommitmentText,
   hasAgentCommittedEvidence,
   etWallClockOfConfirmedStart,

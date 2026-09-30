@@ -6,6 +6,9 @@ const {
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   classifyAcceptedEstimateInvoiceCoverage,
+  isPricedCoveredMemberVisit,
+  refuseCoveredMemberMintInTrx,
+  pricedCoveredMemberOwnRefundHold,
 } = require('../services/estimate-first-application-invoice');
 
 function makeItemizeKnex(first, members) {
@@ -245,10 +248,25 @@ function makeKnex(rows = []) {
       calls.push(['orderBy', ...args]);
       return chain;
     }),
-    select: jest.fn(async (...args) => {
+    // Real knex's query builder stays chainable (and only thenable) after
+    // `.select(...)` — `.forUpdate()`/`.noWait()` can still follow it, and
+    // nothing actually runs until the whole thing is awaited. Mirror that
+    // here (record the call, stay on `chain`) rather than resolving `rows`
+    // immediately, which would break the lockRows path chaining
+    // `.forUpdate('i')` (and `.noWait()`) onto whatever `.select()` returned.
+    select: jest.fn((...args) => {
       calls.push(['select', ...args]);
-      return rows;
+      return chain;
     }),
+    forUpdate: jest.fn((...args) => {
+      calls.push(['forUpdate', ...args]);
+      return chain;
+    }),
+    noWait: jest.fn((...args) => {
+      calls.push(['noWait', ...args]);
+      return chain;
+    }),
+    then: (resolve) => resolve(rows),
   };
   const knex = jest.fn((table) => {
     calls.push(['table', table]);
@@ -326,6 +344,31 @@ describe('estimate first-application invoice lookup', () => {
     expect(knex.calls.some((c) => c[0] === 'whereNotIn')).toBe(false);
   });
 
+  test('lockRows: true takes FOR UPDATE OF i without NOWAIT by default', async () => {
+    const knex = makeKnex([]);
+    await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex, { lockRows: true },
+    );
+    expect(knex.calls).toContainEqual(['forUpdate', 'i']);
+    expect(knex.calls.some((c) => c[0] === 'noWait')).toBe(false);
+  });
+
+  // Codex round-6 P1 (pre-push): a caller that already holds the
+  // estimate.deposit.ledger advisory lock (the schedule mint's own sibling
+  // recheck) passes noWait so a busy row fails fast instead of blocking
+  // into a deadlock against withInvoiceDepositSettlement's invoice-row-
+  // then-ledger-lock order (estimate-deposits.js).
+  test('lockRows + noWait takes FOR UPDATE OF i NOWAIT', async () => {
+    const knex = makeKnex([]);
+    await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex, { lockRows: true, noWait: true },
+    );
+    expect(knex.calls).toContainEqual(['forUpdate', 'i']);
+    expect(knex.calls).toContainEqual(['noWait']);
+  });
+
   test('does not query when the service is not linked to an estimate date', async () => {
     const knex = makeKnex();
 
@@ -335,5 +378,383 @@ describe('estimate first-application invoice lookup', () => {
     }, knex)).resolves.toEqual({ invoice: null, liveBeside: null });
 
     expect(knex).not.toHaveBeenCalled();
+  });
+});
+
+// Codex round 14 P1 (PR #5021): the lookup honours the accept-time STAMP
+// (scheduled_services.first_application_invoice_id), not only a shared
+// scheduled_date. A fake knex that records every builder call — including the
+// ones made inside where(fn)/orWhereIn(col, fn) callbacks — and answers the
+// fallback stamp read and the invoice query with fixed rows. The SQL itself
+// is exercised against real Postgres in
+// first-application-sibling-split.postgres.test.js.
+function makeStampAwareKnex({ invoiceRows = [], stampRow } = {}) {
+  const calls = [];
+  const recorder = (label) => {
+    const builder = {};
+    for (const method of ['join', 'where', 'orWhere', 'whereNot', 'whereIn', 'orWhereIn', 'orderBy', 'select', 'from', 'forUpdate', 'noWait']) {
+      builder[method] = jest.fn((...args) => {
+        calls.push([label, method, ...args.map((a) => (typeof a === 'function' ? '[fn]' : a))]);
+        for (const arg of args) {
+          if (typeof arg === 'function') arg.call(recorder(`${label}>${method}`), recorder(`${label}>${method}`));
+        }
+        return builder;
+      });
+    }
+    return builder;
+  };
+  const knex = jest.fn((table) => {
+    calls.push(['table', table]);
+    if (table === 'scheduled_services') {
+      const chain = {
+        where: jest.fn((...args) => { calls.push(['stamp', 'where', ...args]); return chain; }),
+        first: jest.fn(async (...args) => { calls.push(['stamp', 'first', ...args]); return stampRow; }),
+      };
+      return chain;
+    }
+    const chain = recorder('q');
+    chain.then = (resolve, reject) => Promise.resolve(invoiceRows).then(resolve, reject);
+    return chain;
+  });
+  knex.calls = calls;
+  return knex;
+}
+
+describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (Codex round 14 P1)', () => {
+  const RECOGNIZED = {
+    title: 'First Service Application',
+    notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+  };
+  const movedSibling = {
+    id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1',
+    scheduled_date: '2026-10-20', // moved off the anchor's 2026-10-01
+    first_application_invoice_id: 'combined-inv',
+  };
+
+  test('a stamped sibling moved to another day → the stamped combined invoice is returned, even with edited title/notes', async () => {
+    const combined = {
+      id: 'combined-inv', status: 'paid', scheduled_service_id: 'anchor-visit',
+      title: 'Edited by the office', notes: 'Nothing recognizable here.',
+    };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined] });
+    const found = await findFirstApplicationInvoiceForEstimateService(movedSibling, knex);
+    expect(found).toEqual({ invoice: combined, liveBeside: null });
+    // The svc carried the column — no fallback read.
+    expect(knex.calls.some((c) => c[0] === 'stamp')).toBe(false);
+    // The stamped query: ONLY the stamped row OR any invoice on the stamped
+    // anchor — never the date branch (Codex r17 P1: another group's same-day
+    // invoice must never compete with the stamp).
+    expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+    expect(knex.calls.some((c) => c[2] === 'first_visit.source_estimate_id')).toBe(false);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
+    expect(knex.calls).toContainEqual(['q>where', 'orWhereIn', 'i.scheduled_service_id', '[fn]']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'select', 'scheduled_service_id']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'from', 'invoices']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'where', 'id', 'combined-inv']);
+    expect(knex.calls).toContainEqual(['q', 'where', 'i.customer_id', 'customer-1']);
+    expect(knex.calls).toContainEqual(['q', 'whereNot', 'i.status', 'void']);
+  });
+
+  test('stamped invoice voided + a live replacement on the anchor → the replacement is returned as live', async () => {
+    // The void stamped row is excluded in SQL (whereNot void); the anchor
+    // branch returns the replacement minted on the same anchor visit.
+    const replacement = { id: 'replacement-inv', status: 'sent', scheduled_service_id: 'anchor-visit', ...RECOGNIZED };
+    const knex = makeStampAwareKnex({ invoiceRows: [replacement] });
+    const found = await findFirstApplicationInvoiceForEstimateService(movedSibling, knex);
+    expect(found).toEqual({ invoice: replacement, liveBeside: null });
+  });
+
+  test('status ordering is unchanged on the widened rows: a refunded stamped invoice wins, the live replacement rides as liveBeside', async () => {
+    const replacement = { id: 'replacement-inv', status: 'sent', ...RECOGNIZED };
+    const refundedStamped = { id: 'combined-inv', status: 'refunded', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [replacement, refundedStamped] });
+    expect(await findFirstApplicationInvoiceForEstimateService(movedSibling, knex))
+      .toEqual({ invoice: refundedStamped, liveBeside: replacement });
+  });
+
+  test('only the STAMPED row skips the text recognizer — an unrecognized other invoice on the anchor is still ignored', async () => {
+    const unrelated = { id: 'repair-inv', status: 'sent', title: 'Repair', notes: 'Sprinkler head.' };
+    const knex = makeStampAwareKnex({ invoiceRows: [unrelated] });
+    expect(await findFirstApplicationInvoiceForEstimateService(movedSibling, knex))
+      .toEqual({ invoice: null, liveBeside: null });
+  });
+
+  test('lockRows/noWait apply to the widened query exactly as before', async () => {
+    const knex = makeStampAwareKnex({ invoiceRows: [] });
+    await findFirstApplicationInvoiceForEstimateService(movedSibling, knex, { lockRows: true, noWait: true });
+    expect(knex.calls).toContainEqual(['q', 'forUpdate', 'i']);
+    expect(knex.calls).toContainEqual(['q', 'noWait']);
+  });
+
+  // Codex r3 P1 on #5237: a NULL on the caller's row can be stale, so it is
+  // re-read by id; still NULL in the database → the date-based query as-is.
+  test('an unstamped visit (column present, NULL) → the stamp is re-read, then identical to the date-based query', async () => {
+    const unstamped = { ...movedSibling, first_application_invoice_id: null };
+    const legacy = { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20' };
+    const rows = [{ id: 'first-app', status: 'sent', ...RECOGNIZED }];
+    const knexA = makeStampAwareKnex({ invoiceRows: rows, stampRow: { first_application_invoice_id: null } });
+    const knexB = makeStampAwareKnex({ invoiceRows: rows });
+    const a = await findFirstApplicationInvoiceForEstimateService(unstamped, knexA);
+    const b = await findFirstApplicationInvoiceForEstimateService(legacy, knexB);
+    expect(a).toEqual(b);
+    expect(knexA.calls.slice(0, 3)).toEqual([
+      ['table', 'scheduled_services'],
+      ['stamp', 'where', { id: unstamped.id }],
+      ['stamp', 'first', 'first_application_invoice_id'],
+    ]);
+    expect(knexA.calls.slice(3)).toEqual(knexB.calls);
+    expect(knexB.calls).toEqual([
+      ['table', 'invoices as i'],
+      ['q', 'join', 'scheduled_services as first_visit', 'i.scheduled_service_id', 'first_visit.id'],
+      ['q', 'where', 'i.customer_id', 'customer-1'],
+      ['q', 'where', 'first_visit.source_estimate_id', 'est-1'],
+      ['q', 'where', 'first_visit.scheduled_date', '2026-10-20'],
+      ['q', 'whereNot', 'i.status', 'void'],
+      ['q', 'orderBy', 'i.created_at', 'desc'],
+      ['q', 'select', 'i.*'],
+    ]);
+  });
+
+  test('a svc WITHOUT the column (narrow select) → the stamp is read by id before deciding', async () => {
+    const narrow = {
+      id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20',
+    };
+    const combined = { id: 'combined-inv', status: 'sent', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined], stampRow: { first_application_invoice_id: 'combined-inv' } });
+    expect(await findFirstApplicationInvoiceForEstimateService(narrow, knex))
+      .toEqual({ invoice: combined, liveBeside: null });
+    expect(knex.calls.slice(0, 3)).toEqual([
+      ['table', 'scheduled_services'],
+      ['stamp', 'where', { id: 'sibling-visit' }],
+      ['stamp', 'first', 'first_application_invoice_id'],
+    ]);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
+  });
+
+  test('a svc WITHOUT the column whose row is unstamped → the fallback read happens, then the plain date query', async () => {
+    const narrow = {
+      id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20',
+    };
+    const knex = makeStampAwareKnex({ invoiceRows: [], stampRow: { first_application_invoice_id: null } });
+    await findFirstApplicationInvoiceForEstimateService(narrow, knex);
+    expect(knex.calls).toContainEqual(['stamp', 'first', 'first_application_invoice_id']);
+    expect(knex.calls.some((c) => c[1] === 'orWhere' || c[1] === 'orWhereIn')).toBe(false);
+  });
+
+  test('a stamped svc with no scheduled_date still finds the stamped invoice (the date branch is simply omitted)', async () => {
+    const combined = { id: 'combined-inv', status: 'sent', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined] });
+    const found = await findFirstApplicationInvoiceForEstimateService({ ...movedSibling, scheduled_date: null }, knex);
+    expect(found).toEqual({ invoice: combined, liveBeside: null });
+    expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+  });
+});
+
+// Minimal fake conn for isPricedCoveredMemberVisit: only 'invoices' (the
+// anchor-identity read) and 'scheduled_services' (readFirstApplicationStamp's
+// narrow-select fallback) ever get touched by this predicate.
+// `splitOffRows` (default `[]`, i.e. no member has split itself off with
+// its own live base-application invoice) backs
+// isPricedCoveredMemberVisit's OWN "split off by hand" check
+// (liveBaseApplicationInvoiceVisitIdsOn): that query starts with
+// `.whereIn(...)`, never a plain `.where({id})` first, and ends in
+// `.select(...)`, never `.first(...)` — told apart from the anchor-
+// identity read below by both.
+// `ownTerminalInvoice` (default none) backs pricedCoveredMemberOwnRefundHold
+// (completionTerminalInvoiceLookup): the only invoices read that opens with a
+// callback `.where(qb => ...)`.
+function fakeAnchorLookupConn({ invoiceById = {}, stampRow, splitOffRows = [], ownTerminalInvoice = null } = {}) {
+  return (table) => {
+    if (table === 'invoices') {
+      const q = {};
+      const terminal = {};
+      terminal.whereIn = () => terminal;
+      terminal.orderBy = () => terminal;
+      terminal.first = async () => ownTerminalInvoice;
+      q.where = (cond) => (typeof cond === 'function'
+        ? terminal
+        : { first: async () => invoiceById[cond.id] || null });
+      q.whereIn = () => q;
+      q.whereNotIn = () => q;
+      q.whereNot = () => q;
+      q.modify = (fn) => { fn(q); return q; };
+      q.select = async () => splitOffRows;
+      return q;
+    }
+    if (table === 'scheduled_services') {
+      return { where: () => ({ first: async () => stampRow }) };
+    }
+    throw new Error(`unexpected table: ${table}`);
+  };
+}
+
+describe('isPricedCoveredMemberVisit — priced-covered-member widening gate (Codex r21 P1, PR #5021 follow-up)', () => {
+  test('a NON-ANCHOR row stamped to an invoice whose OWN anchor is a different row → true', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } } });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  test('the ANCHOR row itself (stamped invoice.scheduled_service_id === svc.id) → false', async () => {
+    const svc = { id: 'pest-anchor', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } } });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+
+  test('no stamp at all (NULL on the row AND in the database) → false, and never queries the invoices table', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: null };
+    let invoicesQueried = false;
+    let stampReRead = false;
+    const conn = (table) => {
+      if (table === 'invoices') { invoicesQueried = true; return { where: () => ({ first: async () => null }) }; }
+      if (table === 'scheduled_services') {
+        stampReRead = true;
+        return { where: () => ({ first: async () => ({ first_application_invoice_id: null }) }) };
+      }
+      throw new Error(`unexpected table: ${table}`);
+    };
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+    expect(stampReRead).toBe(true);
+    expect(invoicesQueried).toBe(false);
+  });
+
+  // Codex r3 P1 on #5237: a NULL on the caller's row can be stale (the sweep
+  // stamps it after completion read the visit), so a NULL is re-read by id.
+  test('a NULL stamp on a stale svc row is re-read — stamped since → true', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: null };
+    const conn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  test('a svc without the column (narrow select) reads the stamp by id first, same as readFirstApplicationStamp', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const conn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  test('the stamped invoice row is unreadable (deleted/orphaned) → false, never throws', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: {} });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+
+  test('missing svc.id or conn → false', async () => {
+    await expect(isPricedCoveredMemberVisit({}, fakeAnchorLookupConn())).resolves.toBe(false);
+    await expect(isPricedCoveredMemberVisit({ id: 'lawn-sibling', first_application_invoice_id: 'x' }, null)).resolves.toBe(false);
+  });
+
+  test('a throwing conn reads TRUE (routes to the fail-closed coverage check), never false and never an unhandled rejection', async () => {
+    // pre-push P1 on acb6a0ad54: false on a read error would let a covered
+    // priced member mint its own price — the double charge this gate stops.
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = () => { throw new Error('db down'); };
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  // Split off by hand (#5237 review P2): a member whose base application a
+  // LIVE invoice of its OWN already bills is no longer covered —
+  // liveBaseApplicationInvoiceVisitIdsOn, the same split evidence the
+  // backfill and the sweep use.
+  test('a member split off by hand — its OWN base-application invoice is LIVE — is no longer covered → false', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+      splitOffRows: [{
+        id: 'inv-split', scheduled_service_id: 'lawn-sibling',
+        line_items: JSON.stringify([{ client_id: 'scheduled_lawn-sibling_primary', description: 'Lawn Care', amount: 56.4 }]),
+      }],
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+
+  // Codex r3 P2 on #5237: an own REFUNDED invoice keeps the member in review
+  // even beside a live replacement — completion parks on that coexistence,
+  // so Charge Now and the schedule sheet must not read it as split off.
+  test('an own REFUNDED invoice beside a live replacement keeps the member covered (→ refund hold) → true', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+      ownTerminalInvoice: { id: 'inv-own-refunded', invoice_number: 'INV-9', status: 'refunded' },
+      splitOffRows: [{
+        id: 'inv-replacement', scheduled_service_id: 'lawn-sibling',
+        line_items: JSON.stringify([{ client_id: 'scheduled_lawn-sibling_primary', description: 'Lawn Care', amount: 56.4 }]),
+      }],
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+});
+
+// pricedCoveredMemberOwnRefundHold — #5237 review r2 P2: a priced covered
+// member whose OWN base-application invoice is REFUNDED (the combined
+// invoice may still be live) reuses completion's OWN classifier
+// (completionTerminalInvoiceLookup) so Charge Now / the schedule sheet can
+// never disagree with completion for this input.
+describe('pricedCoveredMemberOwnRefundHold', () => {
+  function fakeConn({ refundedRow = null } = {}) {
+    return (table) => {
+      if (table !== 'invoices') throw new Error(`unexpected table: ${table}`);
+      const q = {};
+      q.where = () => q;
+      q.whereIn = () => q;
+      q.orderBy = () => q;
+      q.first = async () => refundedRow;
+      return q;
+    };
+  }
+
+  test('finds THIS visit\'s own refunded base-application invoice', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const refunded = { id: 'inv-own-refund', invoice_number: 'WPC-TEST-0077', status: 'refunded' };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, fakeConn({ refundedRow: refunded }))).resolves.toEqual(refunded);
+  });
+
+  test('no refunded invoice on this row → null', async () => {
+    const svc = { id: 'lawn-sibling' };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, fakeConn())).resolves.toBeNull();
+  });
+
+  test('missing svc.id or conn → null, no query attempt', async () => {
+    await expect(pricedCoveredMemberOwnRefundHold({}, fakeConn())).resolves.toBeNull();
+    await expect(pricedCoveredMemberOwnRefundHold({ id: 'lawn-sibling' }, null)).resolves.toBeNull();
+  });
+
+  test('a read failure PROPAGATES (never swallowed) — this decides a refusal, not a widening gate', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const conn = () => { throw new Error('db down'); };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, conn)).rejects.toThrow('db down');
+  });
+});
+
+// Codex r4 P1 on #5237: completion's in-lock mint guard.
+describe('refuseCoveredMemberMintInTrx — completion mint guard under the visit lock', () => {
+  test('a covered member (stamp read fresh by id) → 409 FIRST_APPLICATION_COVERED', async () => {
+    const conn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(refuseCoveredMemberMintInTrx(conn, 'lawn-sibling')).rejects.toMatchObject({
+      code: 'FIRST_APPLICATION_COVERED', status: 409,
+    });
+  });
+
+  test('the anchor, or an unstamped visit → no refusal', async () => {
+    const anchorConn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(refuseCoveredMemberMintInTrx(anchorConn, 'pest-anchor')).resolves.toBeUndefined();
+    const unstampedConn = fakeAnchorLookupConn({ stampRow: { first_application_invoice_id: null } });
+    await expect(refuseCoveredMemberMintInTrx(unstampedConn, 'lawn-sibling')).resolves.toBeUndefined();
+  });
+
+  test('a read error refuses (never mints on an unknown)', async () => {
+    const conn = () => { throw new Error('db down'); };
+    await expect(refuseCoveredMemberMintInTrx(conn, 'lawn-sibling')).rejects.toMatchObject({ code: 'FIRST_APPLICATION_COVERED' });
   });
 });

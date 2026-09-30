@@ -1,0 +1,910 @@
+[
+  {
+    "slug": "indian-meal-moth",
+    "kind": "organism",
+    "common_name": "Indian Meal Moth",
+    "aka": [
+      "Pantry Moth"
+    ],
+    "aliases": [
+      "indian meal moth",
+      "indianmeal moth",
+      "pantry moth",
+      "plodia interpunctella"
+    ],
+    "scientific_name": "Plodia interpunctella",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small moth (about 5/8 to 3/4 inch wingspan), outer two-thirds of the wings coppery reddish-brown, base pale gray",
+      "Larvae are small, off-white to pinkish caterpillars found crawling in or near dry food",
+      "Fine silk webbing strands and small silk cocoons show up in and around infested food",
+      "Adults flutter near pantry shelves at dusk rather than gathering at windows or lights"
+    ],
+    "look_alikes": [
+      {
+        "slug": "webbing-clothes-moth",
+        "difference": "Indian meal moth has a two-toned wing (coppery tip, pale base) in food; clothes moth is uniform tan/gold with a reddish head tuft, in fabric",
+        "next_photo": "A close-up of the wing pattern plus a note of what it was found near, food or fabric",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "kitchen",
+      "garage-storage"
+    ],
+    "looks": [
+      "moth-butterfly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The most common pantry moth, usually traced back to one opened bag of flour, cereal, pet food or birdseed. Finding webbing or small caterpillars in dry goods means it's time to check every open package and clean the shelves, not just toss the one bag.",
+      "fact": "Larvae can travel surprisingly far from the food they hatched in before settling down to spin a cocoon, which is why they sometimes turn up on ceilings or in nearby cabinets."
+    },
+    "tech_notes": "Trace to source package(s); discard infested goods, vacuum shelf seams/cracks for larvae and webbing, and check nearby unopened packages before any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN153"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN153 (Featured Creatures: Indianmeal Moth), which is common in Florida and lives outdoors here too; wingspan corrected to the source's 16-20mm (about 5/8-3/4 inch), not the 3/8 inch a general reference had given.",
+      "approval_hash": "754b2befeaab1e5de46eec7bc24d2bd8f4735f35c6aaa3506337f0f7a775066b"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "rice-weevil",
+    "kind": "organism",
+    "common_name": "Rice Weevil",
+    "aka": [],
+    "aliases": [
+      "rice weevil",
+      "rice weevils",
+      "sitophilus oryzae"
+    ],
+    "scientific_name": "Sitophilus oryzae",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (about 1/10 inch, 2-3mm), reddish-brown to black weevil with a long, curved snout",
+      "Four faint orange-red spots arranged in a cross pattern on its back",
+      "Can fly, and often found around containers of rice, corn, wheat or birdseed",
+      "Larvae feed and pupate hidden inside individual grain kernels, hollowing them out from within"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sawtoothed-grain-beetle",
+        "difference": "Rice weevil has a long curved snout and faint orange spots; sawtoothed grain beetle has no snout and saw-like teeth along the sides of its thorax",
+        "next_photo": "A close-up of the head/front-of-body area, checking for a snout versus tooth-edged shoulders",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "garage-storage"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The larvae hollow out grain kernels from the inside, so an infestation is often already established by the time adults are seen walking around a pantry. Finding these in rice, corn or birdseed means checking and likely discarding that container.",
+      "fact": "Because it can fly, it's one of the few stored-grain pests that can spread between nearby containers or even into a neighboring cabinet on its own."
+    },
+    "tech_notes": "Trace to source grain/birdseed container and discard; check nearby stored grains for kernels with tiny exit holes before any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Sitophilus_oryzae",
+      "https://edis.ifas.ufl.edu/publication/IG120"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-261/IG120, \"Rice Weevil, Sitophilus oryzae\" (P. G. Koehler). It confirms size (1/10 inch, 2-3mm), reddish-brown to black color with four light yellow/reddish spots on the elytra, long snout, ability to fly and attraction to lights, and larvae developing hidden inside individual grain kernels — matching this entry's traits (size corrected from 1/8in to the source's 1/10in). It also confirms a serious-pest status in the southern US specifically. No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim itself is resolved.",
+      "approval_hash": "396ccc76b4f939f3f9a998f62829c6f7c0acf5f166220ddda527535c3796a28e"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "drugstore-beetle",
+    "kind": "organism",
+    "common_name": "Drugstore Beetle",
+    "aka": [
+      "Biscuit Beetle"
+    ],
+    "aliases": [
+      "drugstore beetle",
+      "drugstore beetles",
+      "biscuit beetle",
+      "stegobium paniceum"
+    ],
+    "scientific_name": "Stegobium paniceum",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (about 1/8 inch), reddish-brown, cylindrical beetle with fine grooves running lengthwise on its back",
+      "Flies readily and is drawn to lights at night",
+      "Chews clean, rounded holes through cardboard or plastic packaging to reach food",
+      "Feeds on an unusually wide range of dry goods: spices, pet food, dried flowers, even some book bindings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cigarette-beetle",
+        "difference": "Drugstore beetle has fine lengthwise grooves on its wing covers; cigarette beetle's wing covers are smooth with no grooves",
+        "next_photo": "A close-up under bright light or a hand lens of the back, checking for grooves versus a smooth surface",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "An unusually indiscriminate eater that can chew straight through cardboard and plastic packaging, so it's worth checking beyond just food: dried flowers, spices and even some book bindings are fair game. Finding several is a good reason to check nearby cabinets and shelves.",
+      "fact": "It can develop inside some surprisingly tough materials, including dried museum specimens and certain book bindings, not just food."
+    },
+    "tech_notes": "Trace to source package(s) and check adjoining shelves/cabinets, including non-food items like dried florals or spice racks; discard infested goods before any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN385"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN385 (Featured Creatures: Drugstore Beetle): cylindrical body about 2.25-3.5mm, clubbed antennae (vs. cigarette beetle's saw-like antennae), and striated wing covers, matching this entry's traits.",
+      "approval_hash": "b70ea4f9258bda4c7975e70f9897ca1889ba70454b3be0046b8e60fb0897671f"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "cigarette-beetle",
+    "kind": "organism",
+    "common_name": "Cigarette Beetle",
+    "aka": [
+      "Tobacco Beetle"
+    ],
+    "aliases": [
+      "cigarette beetle",
+      "cigarette beetles",
+      "tobacco beetle",
+      "lasioderma serricorne"
+    ],
+    "scientific_name": "Lasioderma serricorne",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (about 1/10 inch), reddish-brown, oval and humpbacked beetle with smooth wing covers (no grooves)",
+      "Flies readily, especially in the evening",
+      "Feeds on an unusually broad range of dry goods: tobacco, spices, dried flowers, cereal, pet food",
+      "Larvae are small, hairy, and C-shaped, feeding hidden inside packaging or product"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drugstore-beetle",
+        "difference": "Cigarette beetle's wing covers are smooth with no grooves; drugstore beetle has fine lengthwise grooves on its back",
+        "next_photo": "A close-up under bright light or a hand lens of the back, checking for grooves versus a smooth surface",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "This beetle is unusual for tolerating tobacco, but around the house it's just as likely to be found in spices, dried flowers or pet food. A handful of these calls for checking every open dry-goods package nearby, not just one.",
+      "fact": "It's one of the very few insects that can feed on tobacco and pass the nicotine through its system largely unharmed."
+    },
+    "tech_notes": "Trace to source package(s), including spice racks, dried florals or stored tobacco products; discard infested goods before any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN384"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN384 (Featured Creatures: Cigarette Beetle): serrated (saw-like) antennae, smooth wing covers with fine hairs, reddish-brown, and a broad diet, matching this entry's traits.",
+      "approval_hash": "6c6effb3e938778aa499db2be7e69dfe8b720a61aeec3e5de8dff8f9a145ffd2"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "sawtoothed-grain-beetle",
+    "kind": "organism",
+    "common_name": "Sawtoothed Grain Beetle",
+    "aka": [],
+    "aliases": [
+      "sawtoothed grain beetle",
+      "saw-toothed grain beetle",
+      "oryzaephilus surinamensis"
+    ],
+    "scientific_name": "Oryzaephilus surinamensis",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender, flattened, dark brown beetle about 1/10 inch long",
+      "Six saw-like teeth along each side of the area just behind the head",
+      "Cannot fly; found crawling in cereal, pet food, dried fruit or other stored grain products",
+      "Flattened body lets it squeeze into tightly sealed packaging through tiny gaps"
+    ],
+    "look_alikes": [
+      {
+        "slug": "red-flour-beetle",
+        "difference": "Sawtoothed grain beetle has saw-like teeth along its thorax and a flatter body; red flour beetle has a smooth thorax with no teeth and a more rounded body",
+        "next_photo": "A close-up of the area just behind the head, checking the edges for tooth-like notches",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "garage-storage"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Its flat body is built to slip into packaging most other pantry pests can't reach, so finding it usually means checking every cereal box and dry-goods bag nearby, even ones that looked sealed. It doesn't fly, so it spreads by crawling between containers.",
+      "fact": "Its body is so flattened that it can squeeze through gaps not much wider than a sheet of paper to get into packaging."
+    },
+    "tech_notes": "Trace to source package(s), including pet food and dried fruit; discard infested goods before any residual treatment. Cannot fly, so spread is by crawling/contact between containers.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN345"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "UF/IFAS EDIS IN345 (a related stored-products pest, Oryzaephilus acuminatus) compares that species against the sawtoothed grain beetle (Oryzaephilus surinamensis) directly: smaller eyes, longer temples, a less-elongate body, and a cereal-based life cycle for O. surinamensis, consistent with this entry's traits. It doesn't give this species its own dedicated page, but nothing in it contradicts the traits here.",
+      "approval_hash": "adacc63f1b4b6ba79cb23c257c05c77979dacac7af7334f9ed365bb95ea076d1"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "red-flour-beetle",
+    "kind": "organism",
+    "common_name": "Red Flour Beetle",
+    "aka": [],
+    "aliases": [
+      "red flour beetle",
+      "red flour beetles",
+      "tribolium castaneum"
+    ],
+    "scientific_name": "Tribolium castaneum",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (about 1/8 inch), flattened, reddish-brown beetle with a smooth, rounded thorax (no teeth or grooves)",
+      "Can fly and often shows up in large numbers once flour or cereal is infested",
+      "Gives off a foul, pungent odor when populations get dense inside a package",
+      "Found in flour, cereal, pasta, spices, and other dry, starchy foods"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sawtoothed-grain-beetle",
+        "difference": "Red flour beetle has a smooth thorax with no teeth and a rounder body; sawtoothed grain beetle has saw-like teeth along its thorax and is flatter",
+        "next_photo": "A close-up of the area just behind the head, checking the edges for tooth-like notches",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "kitchen",
+      "garage-storage"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Populations can build up quickly in flour or cereal, sometimes to the point of giving the food an off, musty odor before the beetles are even noticed. A strong smell from a flour or cereal container is worth checking along with the obvious sighting.",
+      "fact": "It's considered one of the most common stored-food pests worldwide, largely because it can fly between containers and pantries."
+    },
+    "tech_notes": "Trace to source package(s); discard infested/odorous goods and check nearby flour, cereal or pasta before any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN566"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN566 (Confused Flour Beetle and Red Flour Beetle): red flour beetle has a smooth, slightly curved thorax with no teeth and can fly, matching this entry's traits.",
+      "approval_hash": "2ada9372cac157e1e24e061230f0b3e2545bf0fbfa31bec62056deb1c314078a"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "carpet-beetle",
+    "kind": "organism",
+    "common_name": "Carpet Beetle",
+    "aka": [
+      "Varied Carpet Beetle",
+      "Black Carpet Beetle"
+    ],
+    "aliases": [
+      "carpet beetle",
+      "carpet beetles",
+      "varied carpet beetle",
+      "black carpet beetle",
+      "woolly bear"
+    ],
+    "scientific_name": "Anthrenus / Attagenus spp.",
+    "rank": "genus",
+    "group": "pantry-fabric",
+    "subgroup": "irritant-fabric-beetles",
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Adults are tiny (under 1/8 inch), rounded beetles mottled with white, brown and yellow scales in wavy bands",
+      "Larvae ('woolly bears') are fuzzy, bristly, tan to brown, tapering toward the rear with tufts of hair",
+      "Larvae leave irregular holes and bare patches in wool rugs, felt, fur or stored clothing",
+      "Shed larval skins and fine, gritty droppings collect in closets, vents or under rugs where they've been feeding"
+    ],
+    "look_alikes": [
+      {
+        "slug": "webbing-clothes-moth",
+        "difference": "Carpet beetle larvae are bristly, hairy grubs and adults are small round beetles; clothes moth larvae are smooth and hairless and the adult is a small tan moth",
+        "next_photo": "From a safe distance, zoom in on the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "living-areas",
+      "bedroom",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "The bristly larvae can trigger mild skin irritation or an allergic-type reaction in sensitive people who handle them a lot; this is not a bite or sting.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Adults often fly in from outside in spring to lay eggs, but it's the larvae indoors that do the damage, quietly chewing holes in wool rugs, sweaters or stored fur over weeks to months. Repeated damage to natural-fiber items is worth a closer look at closets, vents and rug edges.",
+      "fact": "Adult carpet beetles feed on pollen and nectar outdoors and can look like tiny ladybird beetles on flowers before anyone realizes where the indoor larvae came from."
+    },
+    "tech_notes": "Confirm larval hair pattern and inspect wool/fur items, closets, vents and under rugs for shed skins and frass; check for a dead-insect or dead-animal source (e.g., attic) feeding an indoor population.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN873",
+      "https://ask.ifas.ufl.edu/publication/IN144"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Entry covers the several common household carpet beetle species (Anthrenus, Attagenus) collectively. Confirmed via UF/IFAS EDIS IN873 (Common Carpet Beetle): \"may also cause dermatitis when human skin comes in contact with shed larval skins.\" IN144 (Black Carpet Beetle) adds that people in close contact may have allergic reactions to beetle fragments, cast skins or dust. Safety line kept as contact/handling-based irritation, not a bite or sting. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "cb8513d724b04862f351706bd079768106317ca25bd31202057fa34b6223b289"
+    },
+    "role": "nuisance",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "webbing-clothes-moth",
+    "kind": "organism",
+    "common_name": "Webbing Clothes Moth",
+    "aka": [
+      "Clothes Moth"
+    ],
+    "aliases": [
+      "webbing clothes moth",
+      "clothes moth",
+      "clothing moth",
+      "tineola bisselliella"
+    ],
+    "scientific_name": "Tineola bisselliella",
+    "rank": "species",
+    "group": "pantry-fabric",
+    "subgroup": null,
+    "site_category": "Pantry & fabric pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (about 1/4 to 1/2 inch wingspan) moth, uniformly pale gold to tan with a tuft of reddish hair on its head",
+      "Avoids light, fluttering weakly near dark closets rather than at windows or lamps",
+      "Larvae are small, smooth, whitish with a dark head, spinning a stationary silk feeding mat in one spot rather than a portable case",
+      "Damage shows up as irregular holes in wool sweaters, rugs or fur, often hidden in folds or under collars"
+    ],
+    "look_alikes": [
+      {
+        "slug": "indian-meal-moth",
+        "difference": "Clothes moth is uniformly pale tan/gold with a reddish head tuft and is found in fabric; Indian meal moth has a two-toned wing and is found in food",
+        "next_photo": "A close-up of the wing pattern plus a note of what it was found near, fabric or food",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "carpet-beetle",
+        "difference": "Clothes moth larvae are smooth and hairless and the adult is a small tan moth; carpet beetle larvae are bristly, hairy grubs and adults are small round beetles",
+        "next_photo": "From a safe distance, zoom in on the larva checking for hairs/bristles versus a smooth body, or a photo of the adult if seen.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "bedroom",
+      "living-areas",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "moth-butterfly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Damage almost always shows up before the moth itself is noticed, since larvae feed hidden in folds, under collars, or inside a rolled rug. New holes in wool clothing, blankets or rugs stored in a closet are worth a full check of everything nearby made of wool, fur or silk.",
+      "fact": "It actively avoids light, which is why it's rarely seen flying at a lamp or window the way pantry moths are."
+    },
+    "tech_notes": "Inspect wool/silk/fur items and storage areas for silk feeding mats or larval cases; laundering/dry-cleaning and cold or heat treatment of infested items pairs with any residual treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Tineola_bisselliella",
+      "https://ask.ifas.ufl.edu/ig090"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-223/IG090, \"Clothes Moths\" (covers the webbing clothes moth as the most commonly encountered species). It confirms adult size (1/4 to 1/2 inch), golden/yellowish coloring with unspotted wings, and larvae that are white with a dark head and are stationary, feeding in one spot under a silk tube (unlike the portable-case-making behavior of the related case-making clothes moth). Traits corrected accordingly (removed an inaccurate 'portable case' description that actually applies to the other species). No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim is resolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "74ced610aaa5fb85aad1e8c0e24c7b56d5d4dc79368dd5c7c705f7a6b0c67356"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  }
+]

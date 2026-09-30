@@ -60,6 +60,10 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId =
     q.where = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
+    q.join = jest.fn(() => q);
+    q.noWait = jest.fn(() => q);
+    q.select = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.first = jest.fn(async () => {
@@ -75,6 +79,16 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId =
       }
       return undefined;
     });
+    // Owner ruling — REFUSE AFTER A VOID: an UNPRICED svc linked to an
+    // estimate runs siblingInvoiceCoverageVerdict's combinedInvoiceVoidedWithoutLiveReplacement
+    // guard under this same transaction — its 'invoices as i' query is
+    // AWAITED DIRECTLY (thenable — mirrors knex's `.select()`), never
+    // through `.first()`. Every existing test in this file wants "nothing
+    // on the estimate" (the ordinary case), so this resolves to `[]`.
+    if (table === 'invoices as i') {
+      q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      q.catch = (reject) => Promise.resolve([]).catch(reject);
+    }
     return q;
   };
   trx.raw = jest.fn(async () => undefined);
@@ -302,6 +316,17 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
         const q = {};
         q.where = jest.fn(() => q);
         q.whereNot = jest.fn(() => q);
+        q.whereNotIn = jest.fn(() => q);
+        q.whereNull = jest.fn(() => q);
+        // Owner ruling — REFUSE AFTER A VOID: this priced svc's own mint
+        // never asks the sibling-coverage question at all
+        // (isSiblingCoverageEligibleVisit requires !hasOwnPrice), so no
+        // extra query shape is needed here — these chain methods are kept
+        // only for parity with the other stubs in this file.
+        q.whereIn = jest.fn(() => q);
+        q.join = jest.fn(() => q);
+        q.forUpdate = jest.fn(() => q);
+        q.noWait = jest.fn(() => q);
         q.orderBy = jest.fn(() => q);
         q.first = jest.fn(async () => undefined); // no existing invoice
         return q;
@@ -333,6 +358,102 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       const path = require('path');
       const routeSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
       expect(routeSource).not.toMatch(/taxRate:/);
+    });
+  });
+
+  // Codex round-6 P1: two sibling visits under the SAME estimate, charged
+  // at the same moment while neither has an invoice, could both run
+  // recheckInTrx's sibling lookup (lockRows: true — FOR UPDATE OF i locks
+  // nothing when no row matches), both see 'none', and both mint a
+  // collectible base invoice for the same trip. The estimate-scoped ledger
+  // lock (the ONE key every estimate-scoped writer already shares) must be
+  // taken BEFORE recheckInTrx so only one mint per estimate can even reach
+  // the recheck at a time — the loser's recheck (or resolver snapshot) then
+  // sees the winner's freshly committed invoice and refuses instead of
+  // minting beside it.
+  // Codex round-6 P1 (pre-push): a sibling-coverage verdict — both the
+  // resolver's pre-lock read and this transaction's own recheckInTrx —
+  // classifies coverage against `svc.scheduled_date`. A reschedule between
+  // that read and this lock invalidates it exactly like a moved customer or
+  // estimate: both lookups would classify the OLD day's siblings, letting
+  // an extras-only invoice mint on a now-uncovered visit. The locked
+  // svc row now carries scheduled_date and is compared the same
+  // unconditional way as customer_id/source_estimate_id.
+  describe('reschedule guard (scheduled_date moved under the lock)', () => {
+    const datedSvc = { ...svc, scheduled_date: '2026-09-27' };
+
+    it('409s SCHEDULED_BILLING_SOURCE_MOVED when the locked scheduled_date differs from the caller snapshot', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-10-04' } }));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc: datedSvc, buildCreateParams }),
+      ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_BILLING_SOURCE_MOVED' });
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('mints normally when the locked scheduled_date matches', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-09-27' } }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc: datedSvc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+
+    it('a caller snapshot with no scheduled_date field never trips the guard (legacy/pure callers)', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-10-04' } }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      // `svc` (module-level fixture) carries no scheduled_date at all.
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+  });
+
+  describe('estimate ledger lock precedes the caller recheck', () => {
+    it('acquires the estimate-scoped ledger lock BEFORE calling recheckInTrx', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+      const order = [];
+      mockLedgerLock.mockImplementationOnce(async () => { order.push('ledger_lock'); });
+      const recheckInTrx = jest.fn(async () => { order.push('recheck'); });
+
+      await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, recheckInTrx });
+
+      expect(order).toEqual(['ledger_lock', 'recheck']);
+    });
+
+    it('still runs recheckInTrx when the visit has no source estimate (no ledger lock to take)', async () => {
+      programTransactions(makeTrx({ sourceEstimateId: null }));
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+      const recheckInTrx = jest.fn(async () => {});
+
+      await mintScheduledServiceInvoiceWithDeposit({
+        svc: { ...svc, source_estimate_id: null }, buildCreateParams, recheckInTrx,
+      });
+
+      expect(mockLedgerLock).not.toHaveBeenCalled();
+      expect(recheckInTrx).toHaveBeenCalledTimes(1);
+    });
+
+    it('a recheckInTrx refusal still throws AFTER the ledger lock was taken, never before — proves the order under a failure too', async () => {
+      programTransactions(makeTrx());
+      const order = [];
+      mockLedgerLock.mockImplementationOnce(async () => { order.push('ledger_lock'); });
+      const recheckInTrx = jest.fn(async () => {
+        order.push('recheck');
+        const e = new Error('sibling coverage changed while charging');
+        e.status = 409;
+        e.code = 'SIBLING_COVERAGE_CHANGED';
+        throw e;
+      });
+
+      await expect(mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, recheckInTrx }))
+        .rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
+      expect(order).toEqual(['ledger_lock', 'recheck']);
+      expect(mockCreate).not.toHaveBeenCalled();
     });
   });
 });

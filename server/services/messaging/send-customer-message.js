@@ -330,6 +330,9 @@ async function sendCustomerMessage(input) {
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
+  // Short codes the SMS link wrap put in THIS attempt's body (stamped to the
+  // sms_log row in the finally below once the send is accepted).
+  let wrappedLinkCodes = [];
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
@@ -354,6 +357,20 @@ async function sendCustomerMessageCore(input) {
     preProviderCheck,
     preSendCheck,
     providerPreSendCheck: suppliedProviderPreSendCheck,
+    onDispatchStart,
+    onDispatchAbort,
+    // codex #5196 r4 P2: same shape as onDispatchAbort, fired instead when
+    // twilio.js's own messages.create() throws a definitive rejection —
+    // the phone lock is still held at that point (onDispatchAbort's own
+    // comment explains why).
+    onDispatchRejected,
+    // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
+    // INTO the handoff transaction (twilio.js's dispatch() reads this same
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort/
+    // onDispatchRejected, through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // Omitted (the default for every caller that doesn't name it), twilio.js
+    // falls back to origin/main's own post-handoff, out-of-transaction insert.
+    logInHandoff,
     withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
     // Invoice-send-via-SMS's explicit billing Email leg only (see
@@ -419,7 +436,48 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'sms_auto_send_executor'
       && input.metadata?.original_message_type === 'ai_gratitude'
       && Boolean(input.metadata?.agentDecisionId)
-      && typeof providerPreSendCheck === 'function');
+      && typeof providerPreSendCheck === 'function')
+    // The delayed booking-link follow-up (call-booking-link-text.js, codex
+    // #5018 r11 P1): a lead with no customer row yet, so there is no
+    // customer-comms lock to hold — only the phone-lock leg (matching the
+    // STOP writer's own lockSmsPhone) applies. Suppression/consent reload
+    // under that lock, then the lane's own providerPreSendCheck (its mutable
+    // never-send checks) re-runs on the SAME held connection right after.
+    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
+      && input.entryPoint === 'call_booking_link_text'
+      && typeof providerPreSendCheck === 'function')
+    // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
+    // #5018 r15 P2): staff can type any message, a manual consultation
+    // link included — the SAME phone lock the automated lane above takes
+    // serializes the two so a concurrent worker's own delivered-link check
+    // and this send can't interleave. Either audience, since the route
+    // resolves 'customer' when the lead's own linked customer owns this
+    // exact phone, 'lead' otherwise — manual semantics are unconditional
+    // either way, so no providerPreSendCheck requirement here.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'conversational'
+      && input.entryPoint === 'admin_leads_send_sms')
+    // Communications composer sends (admin-communications.js POST /sms,
+    // codex #5018 pre-push P2): the SAME shape and reason as the manual
+    // Leads-page compose above — a consultation link can ride this
+    // composer's body too, racing the SAME worker's own delivered-link
+    // check. Covers both purposes this ONE route's sendMessage ever emits
+    // (card_request when the composer carries a visit's card-request link,
+    // conversational otherwise) — applied to every composer SMS from this
+    // route, not only consultation-carrying ones, since it is a phone lock
+    // only and manual semantics are unconditional either way.
+    || (['lead', 'customer'].includes(input.audience)
+      && ['conversational', 'card_request'].includes(input.purpose)
+      && input.entryPoint === 'admin_communications_manual_sms')
+    // The estimate page's "text me the packet" send (estimate-public.js
+    // POST /:token/service-details/send, B01): a bearer-token page whose
+    // recipient can be a stranger's wrong number, so the phone lock (the STOP /
+    // wrong-number writers' own lockSmsPhone) is held through the provider
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
+      && input.entryPoint === 'estimate_service_details_send'
+      && input.metadata?.original_message_type === 'estimate_service_details');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -615,6 +673,32 @@ async function sendCustomerMessageCore(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
+  // GATE_SMS_LINK_WRAP: every portal link in a customer/lead SMS becomes a
+  // tracked /l/<code> short link (sms-link-wrap.js). Here — after the
+  // withheld-link rewrite, the app/billing routing and every earlier body
+  // transform, immediately before countSegments — so the audit row, segment
+  // count and the text that goes out all describe the SAME wrapped body. Never
+  // blocks: any failure inside keeps the original link.
+  if (sendInput.channel === 'sms') {
+    try {
+      const linkWrap = await require('./sms-link-wrap').wrapPortalLinks({
+        body: sendInput.body,
+        channel: sendInput.channel,
+        audience: sendInput.audience,
+        purpose: sendInput.purpose,
+        hasMedia: sendHasMedia,
+        customerId: sendInput.customerId,
+        leadId: sendInput.leadId,
+      });
+      if (linkWrap.codes.length) {
+        sendInput.body = linkWrap.body;
+        wrappedLinkCodes = linkWrap.codes;
+      }
+    } catch (err) {
+      logger.warn(`[send_customer_message] SMS link wrap failed, body unchanged: ${err?.name || 'error'}`);
+    }
+  }
+
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
@@ -1022,6 +1106,31 @@ async function sendCustomerMessageCore(input) {
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
     providerPreSendCheck: activeProviderPreSendCheck,
+    // The REAL attempt boundary (codex #5018 r15 P1) — invoked by twilio.js
+    // itself, immediately before dispatchStarted flips true and
+    // messages.create() runs, AFTER providerPreSendCheck and
+    // disclaimedNumberBlocksSend/preSendCheck.isStillValid have all
+    // cleared. A caller's durable "this attempt may have reached the
+    // provider" marker belongs here, never inside providerPreSendCheck
+    // itself, which still has real refusal paths ahead of it.
+    onDispatchStart,
+    // codex #5018 r15 pre-push P1: onDispatchStart's own await is real
+    // wall-clock time, which can itself cross the send window's close
+    // boundary that the LAST synchronous isStillValid() check ran before
+    // it. twilio.js invokes this to let the caller UNDO its own marker
+    // when that recheck, run again right after onDispatchStart, finds the
+    // window has closed — otherwise a send that never reached
+    // messages.create() would be misclassified as ambiguous forever.
+    onDispatchAbort,
+    // codex #5196 r4 P2: fired instead of onDispatchAbort when
+    // messages.create() itself throws a definitive rejection — still
+    // inside the handoff, lock held. See twilio.js's dispatch().
+    onDispatchRejected,
+    // codex #5018 structural fix (post-r7): threaded straight through, same
+    // as onDispatchStart/onDispatchAbort/onDispatchRejected above — see
+    // this file's own destructure comment and twilio.js's dispatch() for
+    // what it gates.
+    logInHandoff,
     providerHandoffReservation,
   });
   };
@@ -1045,7 +1154,10 @@ async function sendCustomerMessageCore(input) {
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
   // proves no leg was sent. Accepted or uncertain remains authoritative.
-  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
+  // A prior visible App event settles its original copy independently of
+  // a later native guard refusal; never replace that event's witness.
+  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent'
+    && !(providerOutcome.provider === 'push' && providerOutcome.error === 'app_event_already_visible')) {
     providerOutcome = {
       ...providerOutcome,
       blocked: true,
@@ -1133,7 +1245,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.eventVisibleAt ? { eventVisibleAt: providerOutcome.eventVisibleAt } : {}), ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
@@ -1191,6 +1303,7 @@ async function sendCustomerMessageCore(input) {
     deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     sentAt: providerOutcome.sentAt,
+    ...(providerOutcome.deduped === true ? { deduped: true } : {}),
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
@@ -1213,6 +1326,14 @@ async function sendCustomerMessageCore(input) {
         .attachReservationContext(providerHandoffReservation, err.providerOutcome);
     }
     throw err;
+  } finally {
+    // Fire-and-forget: stamping never adds latency to the send path. The
+    // .catch is a backstop (settleWrappedLinks never throws); code only, never
+    // the message — a Knex error embeds the bound target_url.
+    if (wrappedLinkCodes.length) {
+      void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
+        .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
+    }
   }
 }
 
@@ -1240,14 +1361,19 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
   // window (codex P1, PR #4403 round 15).
   const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
     ? sendInput.metadata?.series_move_id || null : null;
-  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
-  if (!knownSlot && !seriesMoveId) return;
+  // A notice that quoted no window (promisedWindowUnknown — a windowless
+  // reschedule) records an UNKNOWN-window promise: its renderedSlotMs only
+  // guarded the send, and skipping it would leave the visit on its older
+  // window.
+  const windowUnknown = sendInput.promisedWindowUnknown === true;
+  const knownSlot = !windowUnknown && sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId && !windowUnknown) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null, windowUnknown,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -1339,6 +1465,7 @@ module.exports = {
   // Exposed for tests
   _internals: {
     validateContract,
+    recordPromiseEvidenceFallback,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

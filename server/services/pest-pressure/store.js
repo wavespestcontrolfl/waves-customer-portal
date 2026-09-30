@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const { savepointRead } = require('../../utils/savepoint-read');
 const { DEFAULT_CONFIG } = require('./config');
+const { classifyScoreScale } = require('./score-scale');
 
 // Fields whose values change what the customer sees on a Pest Pressure
 // surface (card visibility, narrative text, breakdown table, explanation
@@ -121,19 +122,43 @@ async function loadActiveConfig(knex = db, { scope = 'global' } = {}) {
  * Read the most recent prior Pest Pressure score for trend resolution.
  * Filters by service_line when provided so quarterly pest reports don't
  * use a lawn baseline.
+ *
+ * currentScale ('technician_rating' | 'blended', see score-scale.js): only a
+ * previous score recorded on the SAME scale is a baseline. #4741 (2026-09-24)
+ * made a technician tap the score directly while older scores were blended,
+ * so a June 0.9 -> September 3.0 "+2.1 vs. last visit" compares two scales.
+ * With no same-scale previous score the result is { value: null } (plus
+ * otherScaleOnly: true when earlier scores exist on the other scale), so no
+ * up/down trend is persisted. Omit currentScale for the legacy
+ * any-scale lookup.
  */
-async function loadPreviousScore(knex, { customerId, serviceLine = null, beforeServiceRecordId = null, beforeServiceDate = null }) {
+const PREVIOUS_SCORE_SCAN_LIMIT = 25;
+
+async function loadPreviousScore(knex, { customerId, serviceLine = null, beforeServiceRecordId = null, beforeServiceDate = null, currentScale = null }) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
     .whereNotNull('displayed_score')
     .whereNot('data_completeness', 'insufficient')
     .orderBy('service_date', 'desc')
-    .orderBy('calculated_at', 'desc')
-    .limit(1);
+    .orderBy('calculated_at', 'desc');
   if (serviceLine) q.where('service_line', serviceLine);
   if (beforeServiceRecordId) q.whereNot('service_record_id', beforeServiceRecordId);
   if (beforeServiceDate) q.where('service_date', '<=', beforeServiceDate);
-  const row = await q.first('displayed_score', 'service_date', 'service_record_id');
+  let row;
+  if (currentScale) {
+    const candidates = await q
+      .limit(PREVIOUS_SCORE_SCAN_LIMIT)
+      .select('displayed_score', 'service_date', 'service_record_id', 'component_scores');
+    row = (candidates || []).find((candidate) => classifyScoreScale({
+      componentScores: candidate.component_scores,
+      at: candidate.service_date,
+    }) === currentScale);
+    // Earlier scores exist, just none on this scale: not a first score
+    // (calculate.js turns this into the neutral 'rescaled' trend).
+    if (!row) return { value: null, otherScaleOnly: (candidates || []).length > 0 };
+  } else {
+    row = await q.limit(1).first('displayed_score', 'service_date', 'service_record_id');
+  }
   if (!row || row.displayed_score === null) return { value: null };
   return {
     value: Number(row.displayed_score),
@@ -390,7 +415,7 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null, excludeCallbacks = false } = {}) {
+async function loadHistoryRows(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null, excludeCallbacks = false } = {}) {
   const q = knex('pest_pressure_scores as pps')
     .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
     .where('pps.customer_id', customerId)
@@ -432,7 +457,7 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
     'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
     'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
     'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-    'pps.calculation_version', 'pps.calculated_at',
+    'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
   );
   // The date bound alone leaks same-day sibling visits: viewing the earlier
   // report after a later same-day visit completes would chart the later
@@ -455,7 +480,7 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
         'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
         'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-        'pps.calculation_version', 'pps.calculated_at',
+        'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
       )
       .first();
     if (currentRow) {
@@ -489,13 +514,26 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
         'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
         'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
-        'pps.calculation_version', 'pps.calculated_at',
+        'pps.calculation_version', 'pps.calculated_at', 'pps.component_scores',
       ).catch(() => []);
       return [currentRow, ...earlierDays].slice(0, limit);
     }
     return rows.slice(0, limit);
   }
   return rows;
+}
+
+// Score history for one customer, newest first. Each row carries pressure_scale
+// ('technician_rating' | 'blended', see score-scale.js) instead of the raw
+// component_scores: #4741 (2026-09-24) made a technician tap the score
+// directly while older scores were blended, so consumers that chart or diff
+// two rows must only pair rows on the same scale.
+async function loadHistoryForCustomer(knex, customerId, options = {}) {
+  const rows = await loadHistoryRows(knex, customerId, options);
+  return (rows || []).map(({ component_scores: componentScores, ...row }) => ({
+    ...row,
+    pressure_scale: classifyScoreScale({ componentScores, at: row.service_date }),
+  }));
 }
 
 module.exports = {

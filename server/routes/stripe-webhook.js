@@ -987,11 +987,11 @@ router.post(
         }
 
         case 'charge.dispute.created':
-          await handleDisputeCreated(event.data.object);
+          await withDisputeRenewalGate(event.data.object, () => handleDisputeCreated(event.data.object));
           break;
 
         case 'charge.dispute.closed':
-          await handleDisputeClosed(event.data.object);
+          await withDisputeRenewalGate(event.data.object, () => handleDisputeClosed(event.data.object));
           break;
 
         case 'charge.dispute.funds_withdrawn':
@@ -3045,6 +3045,11 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       customerId: failedAttemptInvoice.customer_id,
       stripePaymentIntentId: piId,
       failureMessage: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
+      // Codex #4971 r24 P1: payment_intent.payment_failed is a CUSTOMER-side
+      // outcome by definition (bank return, async decline) — its code is
+      // the attempt's decline_code, so the renewal's recovery treats it as
+      // a decline (failure notice + pay link).
+      declineCode: paymentIntent.last_payment_error?.decline_code || failureCode || 'payment_failed',
     });
     if (attemptResolved) {
       logger.info(`[stripe-webhook] Released failed saved-card attempt ${failedSavedCardAttempt.id} for PI ${piId}`);
@@ -3082,7 +3087,16 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // notice with a link back to retry or update their card. Idempotency
   // is per (PI, attempt) so a re-emitted webhook doesn't double-send.
   const isAutopay = paymentIntent.metadata?.type === 'monthly_autopay';
-  if (pmType !== 'us_bank_account' && !isAutopay) {
+  // Codex #4971 r27 P1: an off-session termite RENEWAL charge (source
+  // admin_card_on_file, initiated_by machine — not monthly_autopay) has its
+  // own failure follow-through (leg 7d: one renewal failure notice + pay
+  // link); this generic payment.failed email/SMS would be a second notice
+  // for the same failure. Same rule as the ACH branch: only while the
+  // renewal reconciler is live.
+  const renewalOwnsFailureNotice = Boolean(failedAttemptInvoice?.id)
+    && termiteRenewalReconcilerLive()
+    && (await isTermiteRenewalPrepayInvoice(failedAttemptInvoice.id));
+  if (pmType !== 'us_bank_account' && !isAutopay && !renewalOwnsFailureNotice) {
     const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
     // Combined full-balance PI (codex r7 P2): resolve the ANCHOR invoice and
     // pass the allocation total, so the failure email names the combined
@@ -3547,6 +3561,21 @@ async function handleChargeRefunded(charge) {
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
   const refundedPayment = await db.transaction(async (trx) => {
+    // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate is
+    // this transaction's FIRST lock — the refund stamp below (and the credit
+    // it returns) is exactly what flips a termite parent's paid evidence, so
+    // it either commits before the renewal charge's last parent re-check or
+    // waits until that charge's submission is done. No-op without a termite
+    // term on the charge's invoices / customers. A refund issued from the
+    // Stripe dashboard has already returned the money by the time this event
+    // arrives — only this stamp can be gated; the renewal charge's own
+    // in-gate parent re-check is the limit there. (A refund WE issue —
+    // StripeService.refund — holds the gate across the provider call too:
+    // annual-prepay-renewals withTermiteGateForCharge.)
+    await require('../services/annual-prepay-renewals').acquireTermiteGateForCharge(trx, {
+      chargeId,
+      paymentIntentId: charge.payment_intent,
+    });
     // Fee-lane refunds serialize with settlement's marker adoption (Codex
     // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
     // row) updated here unlocked could commit between settlement's plain
@@ -3700,6 +3729,7 @@ async function handleChargeRefunded(charge) {
             refund_status: 'full',
             stripe_refund_id: refundId,
             metadata: JSON.stringify(metadataWithStampedRefund(row.metadata, refundId)),
+            updated_at: trx.fn.now(), // the ledger's refund time (Codex #4971 r6 P1)
           });
           const invId = meta.invoice_id || null;
           if (invId) {
@@ -3899,6 +3929,9 @@ async function handleChargeRefunded(charge) {
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
         stripe_refund_id: refundId,
+        // The ledger's refund time (Codex #4971 r6 P1: the termite renewal's
+        // late-paid alert dates a parent's revocation by it).
+        updated_at: trx.fn.now(),
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
     let result = pmt;
@@ -5487,6 +5520,31 @@ async function handlePayoutEvent(payout, eventType) {
  * 2nd fail (same invoice): switch to card, flag ACH needs_verification
  * 3rd fail (90 days): suspend ACH, switch default to card
  */
+// Is this invoice a termite annual-plan RENEWAL successor's prepay invoice?
+// (annual_prepay_terms.prepay_invoice_id, renewed_from_term_id set, termite-
+// marked.) Fail-open to "no": a lookup error must never suppress the
+// ordinary ACH handling for a non-renewal debit.
+async function isTermiteRenewalPrepayInvoice(invoiceId) {
+  try {
+    const successor = await db('annual_prepay_terms')
+      .where({ prepay_invoice_id: invoiceId })
+      .whereNotNull('renewed_from_term_id')
+      .whereNotNull('annual_plan_version')
+      .first('id');
+    return Boolean(successor);
+  } catch (err) {
+    logger.debug(`[stripe-webhook] termite renewal invoice lookup failed for ${invoiceId}: ${err.message}`);
+    return false;
+  }
+}
+
+// The renewal charge's own gate, read fresh (the same env read
+// termite-annual-renewal-charge.js termiteAnnualRenewalChargeLive uses).
+function termiteRenewalReconcilerLive() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.gateEnvValue === 'function' && Boolean(gates.gateEnvValue('GATE_TERMITE_ANNUAL_PLAN'));
+}
+
 async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
   const piId = paymentIntent.id;
 
@@ -5500,6 +5558,24 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
     if (achInvoice?.payer_id) {
       logger.info(`[stripe-webhook] ACH failure on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — skipping homeowner ACH handling`);
+      return;
+    }
+    // Codex #4971 r22 P1: a termite annual RENEWAL debit owns its own
+    // failure follow-through (termite-annual-renewal-charge.js leg 7d: the
+    // failed attempt resolves to 'declined' → one renewal failure notice +
+    // pay link, and the renewal is NEVER retried). This generic ladder would
+    // send a second, contradictory message on top (ach_retry_notice promises
+    // an automatic retry) and count the failure toward the customer's ACH
+    // escalation — so it steps aside for a renewal successor's prepay
+    // invoice. Detected on the durable term link, never on PI metadata.
+    // Codex #4971 r25 P1: ONLY while that follow-through can actually run.
+    // runTermiteAnnualRenewalSweep (leg 7d with it) is a no-op while
+    // GATE_TERMITE_ANNUAL_PLAN is off, so a renewal debit that fails after
+    // the gate was turned off would have NO owner at all — with the gate
+    // off this generic ladder keeps handling it like any other ACH failure.
+    const achInvoiceId = achInvoice?.id || payment.invoice_id || null;
+    if (achInvoiceId && termiteRenewalReconcilerLive() && (await isTermiteRenewalPrepayInvoice(achInvoiceId))) {
+      logger.info(`[stripe-webhook] ACH failure on termite renewal invoice ${achInvoiceId} (PI ${piId}) — left to the renewal charge's own follow-through, generic ACH ladder skipped`);
       return;
     }
     const customer = await db('customers').where({ id: payment.customer_id }).first();
@@ -6659,6 +6735,12 @@ async function findInvoiceForPayment(payment) {
 // Both idempotent + run under the statement row lock.
 async function reverseStatementCascadeForDispute(statementId, disputedPi, reason, { database = db } = {}) {
   const run = async (trx) => {
+    // Chokepoint B (Codex #4971 r4 P1): the gate before the statement money
+    // lock — reopening the children revokes a termite parent's paid
+    // evidence when one of them is its prepay invoice. Every caller runs
+    // this as its transaction's first step (or inside withStatementMoneyLock,
+    // which already holds the same keys — a re-grant).
+    await require('../services/annual-prepay-renewals').acquireTermiteGateForStatement(trx, statementId);
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     if (!stmt) return;
@@ -6744,6 +6826,23 @@ async function restoreStatementCascadeForDispute(statementId, disputedPi) {
   logger.info(`[stripe-webhook] statement S-${statementId} dispute won — cascade restored to paid`);
 }
 
+// Codex #4971 r11 P1 (chokepoint B): a dispute's ledger flip and its
+// invoice / term updates run in SEPARATE transactions (phase one stamps
+// payments 'disputed' under the per-PI lock; the reopen and the term
+// suspension commit later). A termite renewal charge that took the renewal
+// gate between them read a parent invoice still marked paid. The whole
+// created / closed handling holds the renewal gates for every termite term
+// the disputed money touches — a SESSION lock (withTermiteGateForCharge, as
+// StripeService.refund holds it across its provider call) taken before the
+// first ledger write, re-entered (skipped) by the reopen transactions' own
+// acquireTermiteGateAtEntry. No termite term involved = no lock at all.
+function withDisputeRenewalGate(dispute, fn) {
+  return require('../services/annual-prepay-renewals').withTermiteGateForCharge(
+    { chargeId: dispute?.charge || null, paymentIntentId: dispute?.payment_intent || null },
+    fn,
+  );
+}
+
 async function handleDisputeCreated(dispute) {
   const chargeId = dispute.charge;
   const reason = dispute.reason || 'unknown';
@@ -6815,6 +6914,7 @@ async function handleDisputeCreated(dispute) {
         const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
         await trx('payments').where({ id: rowInLock.id }).update({
           status: 'disputed',
+          updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
           failure_reason: `Dispute: ${reason}`,
           metadata: JSON.stringify({
             ...meta,
@@ -6883,7 +6983,7 @@ async function handleDisputeCreated(dispute) {
         await reverseStatementCascadeForDispute(disputedStmt.id, dispute.payment_intent, `dispute.created (${reason})`, { database: trx });
         const existingRow = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
         if (existingRow) {
-          await trx('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}` });
+          await trx('payments').where({ id: existingRow.id }).update({ status: 'disputed', failure_reason: `Dispute: ${reason}`, updated_at: new Date() });
         } else {
           await trx('payments').insert({
             customer_id: null,
@@ -7030,6 +7130,7 @@ async function handleDisputeCreated(dispute) {
           if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
           await lockTrx('payments').where({ id: row.id }).update({
             status: 'disputed',
+            updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
             failure_reason: `Dispute: ${reason}`,
             metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
           });
@@ -7055,6 +7156,10 @@ async function handleDisputeCreated(dispute) {
         // that finalized between the lock release and this reopen owns the
         // outcome — a won restore must not be reopened behind its back.
         await db.transaction(async (trx) => {
+          // Chokepoint B (Codex #4971 pre-push lock order): the renewal
+          // parent-decision gate is this transaction's FIRST lock (no-op
+          // without a termite term on the invoice).
+          await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [reopenInvoiceId] });
           const rowNow = await trx('payments').where({ id: reopenRowId }).first('status', 'metadata');
           let rowNowMeta = {};
           try { rowNowMeta = rowNow?.metadata ? (typeof rowNow.metadata === 'string' ? JSON.parse(rowNow.metadata) : rowNow.metadata) : {}; } catch { rowNowMeta = {}; }
@@ -7208,6 +7313,7 @@ async function handleDisputeCreated(dispute) {
     } else {
     await db('payments').where({ id: payment.id }).update({
       status: 'disputed',
+      updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
       failure_reason: `Dispute: ${reason}`,
     });
 
@@ -7253,6 +7359,8 @@ async function handleDisputeCreated(dispute) {
       // critical-write discipline, a rollback fails the event and Stripe
       // retries it.
       await db.transaction(async (trx) => {
+        // Chokepoint B (Codex #4971 pre-push lock order): the gate first.
+        await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
         await require('../services/annual-prepay-renewals')
           .suspendActiveTermsForDisputedInvoice(invoice.id, trx);
 
@@ -7496,6 +7604,7 @@ async function handleDisputeClosed(dispute) {
           } else if (status === 'lost') {
             await lockTrx('payments').where({ id: row.id }).update({
               status: 'disputed',
+              updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
               failure_reason: `Dispute lost — $${amount} returned to customer`,
               metadata: finalRowMeta,
             });
@@ -7767,9 +7876,14 @@ async function handleDisputeClosed(dispute) {
             const lostStatus = String(lostInvoice?.status || '').toLowerCase();
             if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
               && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
-              await db('invoices')
-                .where({ id: invId })
-                .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+              // Gate first (Codex #4971 r4 P1): the reopen revokes a termite
+              // parent's paid evidence when this is its prepay invoice.
+              await db.transaction(async (trx) => {
+                await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+                await trx('invoices')
+                  .where({ id: invId })
+                  .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
+              });
             }
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
             // prepaid coverage this invoice funded — but only when the
@@ -8003,6 +8117,7 @@ async function handleDisputeClosed(dispute) {
         } else if (status === 'lost') {
           await trx('payments').where({ id: payment.id }).update({
             status: 'disputed',
+            updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
             failure_reason: `Dispute lost — $${amount} returned to customer`,
             metadata: lockedFinalMeta,
           });
@@ -8111,8 +8226,17 @@ async function handleDisputeClosed(dispute) {
       // would let a late payment_intent.succeeded resurrect the
       // chargeback to paid), and the invoice is reopened idempotently
       // so dunning chases it even when created/closed arrive reversed.
+      // updated_at dates the revocation (parentChangedAtSql — Codex #4971
+      // r11). Codex #4971 r23 P1: when dispute.created already flipped this
+      // row to 'disputed' (and dated it), closing lost must NOT move that
+      // date forward — a renewal that settled between the two events would
+      // then read as paid BEFORE the change and lose its refund-or-honor
+      // alert. Only a lost-closure with no prior created event dates the
+      // revocation itself.
+      const priorStatus = String((await db('payments').where({ id: payment.id }).first('status'))?.status || '').toLowerCase();
       await db('payments').where({ id: payment.id }).update({
         status: 'disputed',
+        ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
         failure_reason: `Dispute lost — $${amount} returned to customer`,
         metadata: finalMeta,
       });
@@ -8140,14 +8264,20 @@ async function handleDisputeClosed(dispute) {
             dispute_invoice_id: lostInvoice.id,
           }),
         });
-        await db('invoices').where({ id: lostInvoice.id }).update({
-          status: 'overdue',
-          paid_at: null,
-          // Same PI-linkage clear as dispute-created: a lingering
-          // non-canceled intent blocks the pay page / card-on-file
-          // re-collection paths with "payment already in progress".
-          stripe_payment_intent_id: null,
-          stripe_charge_id: null,
+        // Gate first (Codex #4971 r4 P1): a closed(lost) that arrives
+        // without its created event reopens a PAID invoice here, revoking a
+        // termite parent's paid evidence when this is its prepay invoice.
+        await db.transaction(async (trx) => {
+          await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [lostInvoice.id] });
+          await trx('invoices').where({ id: lostInvoice.id }).update({
+            status: 'overdue',
+            paid_at: null,
+            // Same PI-linkage clear as dispute-created: a lingering
+            // non-canceled intent blocks the pay page / card-on-file
+            // re-collection paths with "payment already in progress".
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+          });
         });
       }
       // Annual-prepay claw-back: lost = the money is gone for good — the
@@ -8382,6 +8512,7 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
 module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
+module.exports._withDisputeRenewalGate = withDisputeRenewalGate;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._resolveRefundIdForCharge = resolveRefundIdForCharge;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

@@ -1041,6 +1041,42 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('create_appointment for a member\'s one-off: the card names the member discount and the list price it came off (owner 2026-09-27)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 212.5, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service',
+      listPrice: 250, discountName: 'WaveGuard Member Discount', discountPercent: 15,
+      discountId: 'disc-member', discountType: 'percentage', discountAmount: 15,
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service', time_window: '9:00 AM' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit at 9', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(212.5);
+      // The discount's own identity/terms are pinned alongside the net
+      // price (Codex r2 on #5093, P1) — the executor compares these at
+      // commit, refusing on drift the same way it already does for price.
+      expect(stored.params._booking_list_price).toBe(250);
+      expect(stored.params._booking_discount_id).toBe('disc-member');
+      // The discount's NAME rides the pin too (Codex r3 on #5093, P2): id/
+      // type/amount alone miss a preset renamed between this proposal and
+      // the commit — the executor's fingerprint compares the name as well.
+      expect(stored.params._booking_discount_name).toBe('WaveGuard Member Discount');
+      expect(stored.params._booking_discount_type).toBe('percentage');
+      expect(stored.params._booking_discount_amount).toBe(15);
+      expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');
+      // The pins are execution guards, never disclosures.
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+      // A timed booking texts its confirmation — the contract says so.
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
+    });
+  });
+
   test('create_appointment with no price for a dues-billed member: the card says so', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     scriptModelTurns([

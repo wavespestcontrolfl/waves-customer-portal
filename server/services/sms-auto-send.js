@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -224,6 +224,13 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     }
 
     const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
+    // Codex #5194 P2 — see publishSuggestion's identical comment
+    // (sms-suggest-mode.js): the instant the drafter rendered the SLA phrase
+    // into factsBlock, read back by slaDraftedAt (sms-followup-sla.js) in
+    // place of this row's own (later) created_at.
+    const factsGeneratedAtIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime())
+      ? factsGeneratedAt.toISOString()
+      : null;
     const [row] = await trx('agent_decisions')
       .insert({
         workflow: AUTOSEND_WORKFLOW,
@@ -241,7 +248,15 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
         confidence_label: numericConfidence === null
           ? null
           : numericConfidence >= 0.85 ? 'high' : numericConfidence >= 0.6 ? 'medium' : 'low',
-        input_snapshot: JSON.stringify({ sms: { body: inboundMessage }, draft_id: draftId }),
+        input_snapshot: JSON.stringify({
+          sms: { body: inboundMessage },
+          draft_id: draftId,
+          // Codex P2 (open-times send-time recheck): the minimum needed to
+          // revalidate quoted OPEN TIMES windows at dispatch, threaded from
+          // the drafter through draftShadowReply's maybeAutoSend params.
+          ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+        }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
@@ -285,7 +300,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId };
+    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
   });
 }
 
@@ -295,7 +310,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
  * Any open request/card is a reason to abstain because a courtesy closer must
  * not conceal operational work.
  */
-async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Date() }) {
+async function claimGratitudeSend({ draftId, smsLogId, confidence, promptVersion = null, now = new Date() }) {
   // Process-local, so it needs no lock: see GRATITUDE_ROLLOUT_SETTLE_MS.
   if (!gratitudeRolloutSettled()) return null;
   const suggest = require('./sms-suggest-mode');
@@ -308,8 +323,16 @@ async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Dat
 
     // Gate, epoch, timing, immutable rows, live customer, exact endpoints,
     // complete context and fixed reply are all re-read inside the lock.
+    // prompt_version is the one field that's write-once at insert (nothing
+    // ever updates message_drafts.prompt_version after the draft is
+    // created), so trusting the caller's copy here is trusting an immutable
+    // fact, not a mutable one the re-read discipline above exists to catch —
+    // it judges the version THIS row was drafted under, not "whichever
+    // prompt is live right now" (a v11 row must not fail after a later gate
+    // flip on, nor a v12 row after a later flip off). Null (an
+    // unaware/older caller) still fails closed, same as before.
     if (!isEnabled('smsGratitudeReplies')) return null;
-    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: promptVersion });
     if (!checked.ok) return null;
     const { inbound, customer, draft, expectedReply } = checked;
     const modeRow = await trx('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
@@ -481,8 +504,10 @@ async function maybeAutoSend(params = {}) {
 
     // (5)+(6) Claim under the lock + guard-gauntlet. The ordinary lane parks
     // sibling cards; gratitude refuses them and leaves them untouched.
+    // promptVersion threads the caller's own copy of the row's stamped
+    // version through — see claimGratitudeSend's comment on the re-read.
     const claim = gratitudeLane
-      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence })
+      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence, promptVersion: params.promptVersion })
       : await claimAutoSend({ ...params, customerId: ready.customerId });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
     return await dispatchClaimedSend({
@@ -559,6 +584,21 @@ async function autoSendReadiness(params, gratitudeLane) {
     return { reason: 'price_quote' };
   }
 
+  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
+  //       the real-answers prompt has the model quote the follow-up SLA
+  //       phrase when the facts can't answer, and the prompt now requires an
+  //       escalate action alongside it — but the prompt is not the boundary.
+  //       Deterministic backstop: an SLA phrase in the reply with no
+  //       escalate action means nobody owns the promise; never auto-send it.
+  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
+  //       prompt, and with the gate off auto-send is unchanged by this PR.
+  const followupSla = require('./sms-followup-sla');
+  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
+      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
+    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
+    return { reason: 'unowned_followup' };
+  }
+
   // (4) Server-enforced graduation eligibility — re-checked live every send.
   const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
     intent,
@@ -580,7 +620,20 @@ async function autoSendReadiness(params, gratitudeLane) {
 async function reloadGratitudeCaller({
   draftId, smsLogId, customer, inboundMessage, reply, model = null, promptVersion = null,
 }) {
-  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+  // expectedPromptVersion judges the STORED row, not "whichever prompt is
+  // live right now" — a v11 draft made before a real-answers gate flip must
+  // not start failing after the flip, and a v12 draft must not fail after
+  // the gate flips back off. `promptVersion` is exactly the right value: the
+  // drafter set it once, at insert, to whichever version actually generated
+  // THIS row (sms-shadow-drafter.js's generateGroundedDraft resolves it per
+  // draft), and draftShadowReply threads that same value all the way through
+  // maybeAutoSend's params — the `promptVersion === context.draft.prompt_version`
+  // check two lines below ALREADY proves the two agree; reusing it here (in
+  // place of the static PROMPT_VERSION, which never moves once the gate goes
+  // live) lets a genuinely current v11 OR v12 row pass this contract check
+  // instead of only v11 forever. Null (an older/unaware caller) still fails
+  // closed, same as before.
+  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: promptVersion });
   if (!context.ok) return { reason: context.reason };
   const matches = (customer?.id || null) === context.customer.id
     && inboundMessage === context.inbound.message_body
@@ -740,6 +793,37 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
   const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
   let result;
   try {
+    // OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
+    // threaded from claimAutoSend's own insert — the exact windows a
+    // drafted reply quoted plus the lookup inputs (same shape the shared
+    // /sms and /schedule-sms choke point in admin-communications.js
+    // rechecks). Applies to every claimed auto-send, gratitude included.
+    // Only windows still present in the reply that will actually send are
+    // rechecked; a gone slot, a fetch error, or a timeout all fail closed —
+    // same supersede-via-failClaim mechanism every other refusal in this
+    // function already uses, siblings reopened same as any other pre-send
+    // refusal so a stale slot never silently swallows the thread.
+    if (claim.openTimesSnapshot?.quotedWindows?.length) {
+      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && w?.window && reply.includes(w.window));
+      if (stillQuoted.length) {
+        const { openTimesStillOffered } = require('./sms-shadow-drafter');
+        const recheck = await openTimesStillOffered({
+          city: claim.openTimesSnapshot.lookup?.city || null,
+          customerId: claim.openTimesSnapshot.lookup?.customerId || null,
+          estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
+          // Same service identity the draft was priced with (Codex r3 / audit P1)
+          ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
+          ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
+          quotedWindows: stillQuoted,
+        });
+        if (!recheck.ok) {
+          logger.warn(`[sms-auto-send] open-times stale (decision ${claim.decisionId}): ${recheck.reason}`);
+          const outcome = await notSent(recheck.reason);
+          await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
+          return outcome;
+        }
+      }
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -824,13 +908,37 @@ const SWEEP_PAGE_SIZE = 100;
  * never be claimed again and are excluded.
  */
 function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
+  const drafter = require('./sms-shadow-drafter');
+  // Every currently-recognized live prompt version is an eligible candidate —
+  // not just the static PROMPT_VERSION (which never moves once
+  // GATE_SMS_REAL_ANSWERS goes live; it stays 'house_voice_v11' forever by
+  // design). The gratitude special-case text is identical across all of
+  // them, so which one drafted a row makes no safety difference to the
+  // sweep — but a v11-only filter would silently stop discovering real-
+  // answers candidates the moment the gate flips on, and never resume until
+  // it flips back off. A LIKE-prefix match (not a fixed whereIn list, pre-
+  // push audit P1 round 2): currentPromptVersion() suffixes
+  // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
+  // on (e.g. '...+complaints'), so an exact 2-value list would stop
+  // matching the moment any category gate joins the master one — the
+  // prefix recognizes every such variant without enumerating them. This is
+  // a DISCOVERY filter (no single row to compare against yet), so it's a
+  // membership check rather than the per-row "whichever version this draft
+  // actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
       'md.status': 'shadow',
       'md.intent': GRATITUDE_INTENT,
-      'md.prompt_version': require('./sms-shadow-drafter').PROMPT_VERSION,
       's.direction': 'inbound',
+    })
+    .where(function versionMatch() {
+      // A `this`-bound function, not an arrow — the Knex-documented
+      // subquery convention this codebase already uses elsewhere
+      // (availability.js's whereNotExists(function linkedVisit() {...})).
+      this.where('md.prompt_version', drafter.PROMPT_VERSION)
+        .orWhere('md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION)
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`);
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)
@@ -1089,4 +1197,5 @@ module.exports = {
   maybeAutoSend,
   processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
+  gratitudeCandidatePage,
 };

@@ -1,5 +1,7 @@
 'use strict';
 
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
+
 const crypto = require('node:crypto');
 const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
@@ -112,12 +114,13 @@ async function sendLeg(send, channel, entry) {
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
-  const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined)
-    // A bell committed by this attempt remains visible if native push fails.
-    || (channel === 'push' && result?.bellPersisted === true);
-  if (accepted) {
-    if (await ContactLedger.markDelivered(entry)) return 'delivered';
+  const delivered = billingLegDeliveryState(channel, result || {});
+  if (delivered) {
+    const occurredAt = billingLegContactTime(result);
+    const stamped = occurredAt
+      ? await ContactLedger.markDelivered(entry, { occurredAt })
+      : await ContactLedger.markDelivered(entry);
+    if (stamped) return delivered;
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
   }
@@ -163,10 +166,18 @@ async function sendReminderChannels({
   const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
     && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
-    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
+    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
     invoiceIds: policyInvoiceIds ?? invoiceIds,
     detail: true,
   })));
+  // Partial debt evidence cannot authorize a leg or settle a restored waiver.
+  // Keep the entire pending episode retryable before any delivery mutation.
+  if (permitted.some((verdict) => verdict?.balanceIncomplete)) {
+    for (const channel of pending) {
+      results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' };
+    }
+    return { complete: false, deliveredNow, results };
+  }
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   // A later allowance revokes the old waiver. Persist that deletion before
@@ -206,10 +217,11 @@ async function sendReminderChannels({
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
-    if (state === 'delivered') {
+    if (state === 'resolved') resolved.add(channel);
+    else if (state) {
       delivered.add(channel);
-      if (!result.deduped) deliveredNow.push(channel);
-    } else if (state === 'resolved') resolved.add(channel);
+      if (state === 'delivered') deliveredNow.push(channel);
+    }
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
   return { complete, deliveredNow, results };

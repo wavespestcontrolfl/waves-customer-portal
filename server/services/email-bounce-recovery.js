@@ -25,6 +25,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
 const billingReplay = require('./billing-email-provider-replay');
+const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
@@ -140,7 +141,7 @@ function recoveryIdFromMessage(message) {
  */
 function decideRecoveryAction({
   candidate, suppressed, ownedByOther, hasAttachments,
-  addressOnFile = true, min = 'high',
+  addressOnFile = true, senderRendered = false, min = 'high',
 }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
@@ -159,6 +160,10 @@ function decideRecoveryAction({
   // changed/corrected the record). The bounce is for a stale address — don't
   // auto-resend a correction of it; route to manual.
   if (!addressOnFile) return { action: 'skip', status: 'address_no_longer_on_file' };
+  // A dunning, micro-deposit or pre-visit balance email is never re-sent
+  // from its stored copy (billing-email-no-replay.js). Staff get the
+  // suggested address instead; the sender's next stage uses the fixed one.
+  if (senderRendered) return { action: 'skip', status: 'sender_rendered_not_replayed' };
   return { action: 'send', status: 'resent' };
 }
 
@@ -195,7 +200,7 @@ async function correctedAddressSuppressed(bouncedMessage, correctedEmail) {
   let rows;
   try {
     rows = await db('email_suppressions')
-      .whereRaw('LOWER(email) = ?', [String(correctedEmail).trim().toLowerCase()])
+      .where(require('../utils/email-equivalence').suppressionCoversEmail(correctedEmail))
       .where({ status: 'active' });
   } catch (err) {
     // Fail CLOSED: if we can't verify suppression state we must not resend.
@@ -591,7 +596,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
       authorityRefusal = fence?.reason || 'visit_summary_unavailable';
-    } else if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+    } else if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
       const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(
         bouncedMessage,
         dispatchToProvider,
@@ -684,6 +689,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
  */
 async function attemptRecovery(bouncedMessage, ev = {}) {
   try {
+    // A final billing notice is never re-sent, whatever recovery decides
+    // (or when recovery is off); the helper dedupes per email.
+    if (bouncedMessage?.id && !isRecoveryMessage(bouncedMessage)) await alertFinalNoticeMissed(bouncedMessage, 'bounced');
     if (!recoveryEnabled()) return { skipped: 'disabled' };
     if (!bouncedMessage || !bouncedMessage.id) return { skipped: 'no_message' };
 
@@ -743,6 +751,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
     const decision = decideRecoveryAction({
       candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
+      senderRendered: isSenderRenderedEmail(bouncedMessage),
       min: minConfidence(),
     });
 
@@ -761,7 +770,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
       if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
-        'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required'].includes(decision.status)) {
+        'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
+        'sender_rendered_not_replayed'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
         // Audio re-verification lane (gated, best-effort): the domain
         // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -822,7 +832,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
         updated_at: new Date(),
         metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
       });
-      if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+      if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
           status: sendResult.reason === 'corrected_owned_by_other'
             ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
@@ -1106,6 +1116,7 @@ const UNRECOVERABLE_REASONS = {
   recovery_error: 'the automatic recovery hit an unexpected error',
   billing_replay_reauthorization_required: 'the billing source must be reauthorized before it can be re-sent',
   send_failed: 're-sending to the corrected address failed',
+  sender_rendered_not_replayed: 'billing reminders are not re-sent from their old copy',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
 };
@@ -1121,7 +1132,8 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
     : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
-  const suggestion = candidate?.corrected && ['skipped_low_confidence', 'send_failed', 'has_attachments'].includes(status)
+  const suggestion = candidate?.corrected
+    && ['skipped_low_confidence', 'send_failed', 'has_attachments', 'sender_rendered_not_replayed'].includes(status)
     ? ` Suggested correction: ${candidate.corrected} (${candidate.confidence}).`
     : '';
   await adminAlertDeduped({

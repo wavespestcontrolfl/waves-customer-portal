@@ -23,7 +23,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
@@ -130,7 +130,7 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
       // The same judged deadline as the queue and the watchdog: staffed,
       // else the legacy implicit one for an undated card, snooze-aware.
       .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} <= NOW()`)
-      .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
+      .select('cc.id', db.raw('COUNT(*) OVER () AS total_count'), db.raw('ARRAY_AGG(cc.id::text) OVER () AS all_ids')).limit(1);
   }
   const { rows } = await db.raw(
     `
@@ -138,7 +138,8 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(c.id::text) OVER () AS all_ids
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
     -- Rolling 7-day live worklist (codex r14): callbacks are stateful —
@@ -258,7 +259,14 @@ async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = fals
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(cs.call_summary, ''), 120) AS call_context,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           -- Item identity carries the task's own status (admin-alerts-ring
+           -- follow-up, codex r8 P1; mirrors reschedule-intent-watcher.js's
+           -- visit_status): pending/in_progress silently going expired (or
+           -- surfacing again through the bogus-verified branch) is a new
+           -- incident at the SAME task id — an id-only key would compare it
+           -- as "the same set" and never ring.
+           ARRAY_AGG(t.id::text || ':' || COALESCE(t.status, '')) OVER () AS all_ids
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
     LEFT JOIN csr_call_scores cs ON cs.id = t.call_score_id
@@ -500,7 +508,8 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
     SELECT sr.id, sr.category, sr.subject, sr.urgency, sr.status, sr.created_at,
            sr.customer_id,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(sr.id::text) OVER () AS all_ids
     FROM service_requests sr
     LEFT JOIN customers cu ON cu.id = sr.customer_id
     WHERE sr.status NOT IN ('resolved', 'closed', 'cancelled')
@@ -614,17 +623,74 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // record ids across every lane — a count-only digest can't otherwise
+  // tell "same backlog" from "the whole list turned over" at a flat total.
+  // Full-set identity per lane, lane-prefixed (the lanes read different
+  // tables whose ids can collide). A lane with no full-set proof (the shared
+  // SMS loader carries no all_ids and has overflowed) makes the whole list
+  // unknown — a partial list would read that lane's items as gone or new.
+  const laneKeys = [
+    fullSetItemKeys(callbackCards, { prefix: 'card:' }),
+    fullSetItemKeys(a, { prefix: 'call:' }),
+    // The task's own status rides the key (see loadDroppedFollowUps' all_ids
+    // comment): pending/in_progress -> expired at the same id is new news.
+    fullSetItemKeys(b, { prefix: 'task:', idOf: (row) => (row.id == null ? null : `${row.id}:${row.status || ''}`) }),
+    // Texts: the latest unanswered INBOUND message (source + our endpoint +
+    // its id), so a customer texting again after a reply is a new item.
+    fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => (row.id == null ? null : `${row.source || 'sms'}:${row.endpoint || ''}:${row.id}`) }),
+    fullSetItemKeys(d, { prefix: 'request:' }),
+  ];
+  const itemKeys = laneKeys.every(Array.isArray) ? laneKeys.flat() : null;
+
   return {
     subject,
     text,
     html,
     total,
+    itemKeys,
     callbacks: aTotal,
     followUps: bTotal,
     unanswered: cTotal,
     requests: dTotal,
-    ...(failures.length ? { failedLanes: failures.map((f) => f.lane) } : {}),
+    ...(failures.length
+      // A lane failure needs an engineer, not the owner's comms triage —
+      // no headline/summary here; the ops-digest.js default (FIX -> engineering,
+      // Activity-only) applies.
+      ? { failedLanes: failures.map((f) => f.lane) }
+      // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy,
+      // the full digest still lands in `detail`.
+      : unworkedCommsHeadlineAndSummary({ callbacks: aTotal, unanswered: cTotal, followUps: bTotal, requests: dTotal })),
   };
+}
+
+// Lead the headline with the first NONZERO bucket in this priority order —
+// callbacks, unanswered texts, follow-ups, open requests — so a day with
+// zero callbacks but 93 unanswered texts reads "Comms — 93 unanswered
+// texts", never "Comms — 0 callbacks waiting". The summary lists whatever
+// nonzero buckets are left, or is omitted entirely when there are none.
+// (total > 0 is guaranteed by the caller — composeUnworkedCommsDigest
+// returns null before this runs when every bucket is zero.)
+function unworkedCommsHeadlineAndSummary({ callbacks, unanswered, followUps, requests }) {
+  const phrase = (count, kind) => {
+    if (kind === 'callback') return `${count} callback${count === 1 ? '' : 's'} waiting`;
+    if (kind === 'unanswered') return `${count} unanswered text${count === 1 ? '' : 's'}`;
+    if (kind === 'followup') return `${count} follow-up${count === 1 ? '' : 's'} due`;
+    return `${count} open request${count === 1 ? '' : 's'}`;
+  };
+  const buckets = [
+    { count: callbacks, kind: 'callback' },
+    { count: unanswered, kind: 'unanswered' },
+    { count: followUps, kind: 'followup' },
+    { count: requests, kind: 'request' },
+  ].filter((b) => b.count > 0);
+  const [lead, ...rest] = buckets;
+  const headline = `Comms — ${phrase(lead.count, lead.kind)}`;
+  if (!rest.length) return { headline, summary: null };
+  const restPhrases = rest.map((b) => phrase(b.count, b.kind));
+  const restText = restPhrases.length === 1 ? restPhrases[0]
+    : `${restPhrases.slice(0, -1).join(', ')} and ${restPhrases[restPhrases.length - 1]}`;
+  return { headline, summary: `Plus ${restText}.` };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -730,6 +796,10 @@ async function runUnworkedCommsWatcher(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
+      count: composed.total,
+      itemKeys: composed.itemKeys,
       link: '/admin/communications',
       // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
       // drop callbacks, follow-ups and texts older than 30 days, so a
@@ -759,6 +829,7 @@ module.exports = {
   runUnworkedCommsWatcher,
   _private: {
     composeUnworkedCommsDigest,
+    unworkedCommsHeadlineAndSummary,
     loadCallbackCalls,
     loadDroppedFollowUps,
     loadUnansweredThreads,

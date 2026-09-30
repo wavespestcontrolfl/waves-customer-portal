@@ -7,6 +7,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocked: true })));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
+  // This file never manipulates GATE_SMS_REAL_ANSWERS — runAutoExamSweep now
+  // reads currentPromptVersion() (pre-push audit P1), so it must match
+  // PROMPT_VERSION/CURRENT below for every existing "same version" fixture.
+  currentPromptVersion: jest.fn(() => 'house_voice_v9_test'),
   generateGroundedDraft: jest.fn(),
   // effective profile = none unless a test overrides — keeps the pin inert
   resolveEffectiveVoiceProfile: jest.fn(async () => null),
@@ -108,6 +112,21 @@ describe('runAutoExamSweep', () => {
     expect(result.legs.openai.outcome).toBe('already_examined');
     expect(examRunner).not.toHaveBeenCalled();
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('reads the live version through currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit P1)', async () => {
+    // The sweep's whole job is "does the CURRENT version have a completed
+    // exam" — if it read the frozen PROMPT_VERSION constant instead, it
+    // would keep confirming v11 forever and never sweep v12 once
+    // GATE_SMS_REAL_ANSWERS goes live. Prove the dynamic resolver is what's
+    // actually consulted.
+    const examRunner = jest.fn(async () => ({ status: 'complete' }));
+    const dbi = makeDbi({ completeByLeg: {} });
+    const drafter = require('../services/sms-shadow-drafter');
+    drafter.currentPromptVersion.mockClear();
+    const result = await runAutoExamSweep({ dbi, examRunner, summaryFn: summaryBothClean });
+    expect(drafter.currentPromptVersion).toHaveBeenCalled();
+    expect(result.version).toBe(CURRENT);
   });
 
   test('COMPLETE beats a NEWER failed rerun — no re-spend on a covered version (codex P2)', async () => {

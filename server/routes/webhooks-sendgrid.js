@@ -889,8 +889,20 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   }
   if (updates.subscriberAction && delivery.subscriber_id) {
     const at = updates.subscriberAt;
+    // A delivery can be re-pointed at the surviving subscriber when a
+    // customer's email typo merges two subscriber rows (customer-email-fanout).
+    // BOUNCES are fenced to the address the delivery was mailed to: a late
+    // bounce from the dead OLD mailbox must not bounce-count the corrected
+    // address. Opt-outs (unsubscribe / spam complaint) are NEVER fenced: an
+    // opt-out is honored on the subscription even if its address moved —
+    // over-honoring is safe, dropping one is not.
+    const subscriberRow = () => {
+      const q = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
+      const mailed = String(delivery.email || '').trim().toLowerCase();
+      return mailed ? q.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : q;
+    };
     if (updates.subscriberAction === 'bounce_increment') {
-      await client('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+      await subscriberRow().update({
         bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
         last_bounced_at: at,
         updated_at: at,

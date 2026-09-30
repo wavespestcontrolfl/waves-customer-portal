@@ -44,7 +44,8 @@ test('long address lists cannot widen the existing facts and obligations lane', 
   const request = 'Please call me';
   const message = `${request}\n${'Additional information. '.repeat(40)}\n${quote}`;
   const result = groundExtraction(parsed([address], { obligations: [{ party: 'waves', kind: 'callback',
-    description: request, quote: request, basis: 'request', property_id: null, due_text: null, due_at: null, answered_by_payment: false }] }), context(message));
+    description: request, quote: request, basis: 'request', property_id: null, due_text: null, due_at: null, due_date: null,
+    promise_firm: false, answered_by_payment: false }] }), context(message));
   expect(result.additional_properties).toHaveLength(1);
   expect(result.obligations).toEqual([]);
   expect(result.facts).toEqual([]);

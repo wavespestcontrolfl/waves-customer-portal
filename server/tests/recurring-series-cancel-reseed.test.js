@@ -749,3 +749,23 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(b).toMatch(/try \{\s*results\.push\(await reseedRecurringSeriesAfterCancel\([\s\S]*?\} catch \(e\) \{[\s\S]*?results\.push\(\{ added: \[\], skipped: 'error', parentId: rootId, error: e\.message \}\);/);
   });
 });
+
+describe('cancelMayReseedPlan — the Intelligence Bar refuses card-confirmed cancels of these', () => {
+  const { cancelMayReseedPlan } = require('../services/recurring-series-cancel-reseed');
+  const env = process.env.GATE_CANCEL_RESEEDS_RECURRING;
+  afterEach(() => { if (env === undefined) delete process.env.GATE_CANCEL_RESEEDS_RECURRING; else process.env.GATE_CANCEL_RESEEDS_RECURRING = env; });
+
+  it('a counting plan-series visit may reseed while the gate is live', () => {
+    process.env.GATE_CANCEL_RESEEDS_RECURRING = 'true';
+    expect(cancelMayReseedPlan({ is_recurring: true, recurring_parent_id: 'root-1', status: 'confirmed' })).toBe(true);
+  });
+  it('gate off, a one-time visit, a booster, a callback, or a non-counting status never reseeds', () => {
+    delete process.env.GATE_CANCEL_RESEEDS_RECURRING;
+    expect(cancelMayReseedPlan({ is_recurring: true, status: 'confirmed' })).toBe(false);
+    process.env.GATE_CANCEL_RESEEDS_RECURRING = 'true';
+    expect(cancelMayReseedPlan({ is_recurring: false, recurring_parent_id: null, status: 'confirmed' })).toBe(false);
+    expect(cancelMayReseedPlan({ is_recurring: false, recurring_parent_id: 'root-1', status: 'confirmed' })).toBe(false);
+    expect(cancelMayReseedPlan({ is_recurring: true, is_callback: true, status: 'confirmed' })).toBe(false);
+    expect(cancelMayReseedPlan({ is_recurring: true, status: 'rescheduled' })).toBe(false);
+  });
+});

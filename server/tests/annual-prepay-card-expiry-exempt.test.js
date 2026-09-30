@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false), stampedZeroFreeLive: jest.fn(() => false) }));
 jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeObligation: jest.fn(async () => ({ owed: false })) }));
 jest.mock('../services/estimate-card-holds', () => ({ isCardHoldEnabled: jest.fn(() => true) }));
 
@@ -723,6 +723,43 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       terms: coveredAlways(['c-prepaid']),
       visits: [baseVisit({ source_estimate_id: 'est-1' })],
       invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-sibling' })] : []),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  // Owner ruling (round 13, codex pre-push P2): "propagate the new void
+  // hold to billing projections". findFirstApplicationInvoiceForEstimateService's
+  // own query excludes 'void' entirely, so a voided combined invoice with
+  // no live replacement reports the SAME `{invoice: null}` as "nothing was
+  // ever minted" — before this fix, that read as a genuine 'none' verdict
+  // and this projection kept the card-expiry warning alive for a charge
+  // completion's own REFUSE AFTER A VOID guard actually holds for manual
+  // review. Keyed on the VISIT's shape (unpriced, estimate-linked, not a
+  // callback), never the customer's current billing_mode — see the lane
+  // test below.
+  test('a voided combined invoice with no live replacement (per_application lane) holds the projection — stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({
+        billing_mode: 'per_application', per_application_fee: '98.00', source_estimate_id: 'est-1', estimated_price: null,
+      })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('void')] : []),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  // Codex r12 P2 (PR #5023): the hold must NOT depend on the customer's
+  // CURRENT lane. Completion's REFUSE AFTER A VOID park checks only the
+  // visit's shape, so a customer moved from per_application to another
+  // lane after the void is still parked at completion — this projection
+  // has to agree, or it keeps a card-expiry warning alive for a charge
+  // completion never makes. Same voided-sibling shape on baseVisit's own
+  // default (annual_prepay) lane → held → exempt.
+  test('a voided combined invoice holds the projection whatever lane the customer sits in today — stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ source_estimate_id: 'est-1', estimated_price: null })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('void')] : []),
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });

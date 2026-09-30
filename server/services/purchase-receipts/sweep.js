@@ -217,17 +217,24 @@ async function processReceiptEmail(email, { notify } = {}) {
 
   const notifyAdmin = adminNotifier(notify);
   const summary = emptySummary();
-  // An itemless "Delivered: N Lawn & Garden item(s)" email (see the parser's
-  // header) gets one no_items placeholder line, titled with its subject.
-  const lines = parsed.items.length
-    ? parsed.items.map((item) => amazonLine(item, parsed.orderNumber))
-    : [{ item: { title: email.subject, quantity: 1 }, forcedStatus: 'no_items' }];
+  const lines = amazonEmailLines(email, parsed);
   for (const [index, line] of lines.entries()) {
     await recordLineOutcome({
       ...line, receipt: AMAZON, email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, lineNo: index + 1, notifyAdmin, summary,
     });
   }
   return summary;
+}
+
+// The lines one parsed Amazon Delivered email records, in order (line N is
+// index N-1): each item through amazonLine, or — for an itemless "Delivered:
+// N Lawn & Garden item(s)" email (see the parser's header) — one no_items
+// placeholder titled with its subject. Shared with the read-only replay
+// tool so it sees exactly these lines.
+function amazonEmailLines(email, parsed) {
+  return parsed.items.length
+    ? parsed.items.map((item) => amazonLine(item, parsed.orderNumber))
+    : [{ item: { title: email.subject, quantity: 1 }, forcedStatus: 'no_items' }];
 }
 
 // A stocked Amazon item is held rather than logged when its quantity was
@@ -335,4 +342,9 @@ module.exports = {
   // line the agent gate stranded is restored to the status it would have
   // held under without the agent, and rings the SAME "not added" bell text.
   HELD_REASONS,
+  // The live lanes' own line builders, reused by the read-only replay tool
+  // (ops/agents/inventory-agent-replay.js) so it replays exactly the lines
+  // this sweep records — authentication, copy ownership, placeholders and
+  // holds included — never a re-implementation of them.
+  amazonEmailLines, siteOneInvoiceLines, authenticated,
 };

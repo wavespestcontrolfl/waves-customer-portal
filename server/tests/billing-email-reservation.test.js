@@ -16,6 +16,15 @@ const context = {
   notificationEventKey: 'late-payment:invoice-1:14', collections_ledger_id: 'email-ledger-1',
 };
 
+function acceptedDatabase(current = { id: 'message-1', send_attempt_token: null, sent_at: new Date() }) {
+  const query = {};
+  for (const method of ['where', 'whereNull', 'forUpdate']) query[method] = jest.fn(() => query);
+  query.first = jest.fn(async () => current);
+  const trx = jest.fn(() => query);
+  const database = { transaction: jest.fn(async (callback) => callback(trx)) };
+  return { database, query, trx };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   readStoredBillingReplayContext.mockReturnValue(context);
@@ -24,12 +33,13 @@ beforeEach(() => {
 });
 
 test('accepted delivery stamps only the fully bound Email reservation', async () => {
-  const database = jest.fn();
+  const { database, query, trx } = acceptedDatabase();
   await expect(Reservation.markBillingEmailReservationDelivered({ id: 'message-1', sent_at: new Date() }, database))
     .resolves.toBe(true);
+  expect(query.whereNull).toHaveBeenCalledWith('send_attempt_token');
   expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
     { id: 'email-ledger-1' },
-    { database, match: {
+    { database: trx, match: {
       customerId: 'customer-1', channel: 'email', source: 'late_payment_checker',
       notificationEventKey: 'late-payment:invoice-1:14', invoiceId: 'invoice-1',
     } },
@@ -37,16 +47,20 @@ test('accepted delivery stamps only the fully bound Email reservation', async ()
 });
 
 test('invoice follow-up replay matches the producer ledger source', async () => {
-  const database = jest.fn();
+  const current = { id: 'message-1', send_attempt_token: 'attempt-1', sent_at: new Date() };
+  const { database, query, trx } = acceptedDatabase(current);
   readStoredBillingReplayContext.mockReturnValueOnce({
     ...context,
     source_entry_point: 'invoice_followup_sequence',
   });
-  await expect(Reservation.markBillingEmailReservationDelivered({ sent_at: new Date() }, database))
+  await expect(Reservation.markBillingEmailReservationDelivered({
+    id: 'message-1', send_attempt_token: 'attempt-1', sent_at: new Date(),
+  }, database))
     .resolves.toBe(true);
+  expect(query.where).toHaveBeenCalledWith({ send_attempt_token: 'attempt-1' });
   expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
     { id: 'email-ledger-1' },
-    { database, match: expect.objectContaining({ source: 'invoice_followups' }) },
+    { database: trx, match: expect.objectContaining({ source: 'invoice_followups' }) },
   );
 });
 
@@ -63,12 +77,20 @@ test('terminal refusal resolves the Email reservation without claiming delivery'
 });
 
 test('invalid context and writer failures stay held without throwing', async () => {
+  const invalid = acceptedDatabase();
   readStoredBillingReplayContext.mockReturnValueOnce(null);
-  await expect(Reservation.markBillingEmailReservationDelivered({ id: 'invalid', sent_at: new Date() }))
+  await expect(Reservation.markBillingEmailReservationDelivered({ id: 'message-1', sent_at: new Date() }, invalid.database))
     .resolves.toBe(false);
+  const failed = acceptedDatabase();
   ContactLedger.markDelivered.mockRejectedValueOnce(new Error('connection lost'));
-  await expect(Reservation.markBillingEmailReservationDelivered({ id: 'accepted', sent_at: new Date() }))
+  await expect(Reservation.markBillingEmailReservationDelivered({ id: 'message-1', sent_at: new Date() }, failed.database))
     .resolves.toBe(false);
+});
+
+test('accepted evidence without a persisted message id cannot stamp delivery', async () => {
+  await expect(Reservation.markBillingEmailReservationDelivered({ sent_at: new Date() }))
+    .resolves.toBe(false);
+  expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
 });
 
 test('provider identity and a started phase cannot stamp delivery', async () => {

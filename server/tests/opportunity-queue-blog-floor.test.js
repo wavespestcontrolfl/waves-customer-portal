@@ -10,6 +10,8 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn();
+  // claimNext runs its lock + claim in one transaction; the trx is the db.
+  fn.transaction = jest.fn((cb) => cb(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -92,7 +94,7 @@ describe('claimNext action-aware floor', () => {
 
     await queue.claimNext({});
 
-    const [sql, bindings] = db.raw.mock.calls[0];
+    const [sql, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).toContain(`CASE WHEN ${effectiveActionSql}`);
     expect(sql.split(effectiveActionSql).join('action_type')).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket IN \('no_content_yet', 'local_gap'\) AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
     // bindings: [claimed_at, maxAttempts, blogFloor, rewriteFloor,
@@ -110,7 +112,7 @@ describe('claimNext action-aware floor', () => {
 
     await queue.claimNext({ minScore: 0 });
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(bindings[2]).toBe(0);
     expect(bindings[3]).toBe(0);
     expect(bindings[4]).toBe(0);
@@ -122,7 +124,7 @@ describe('claimNext action-aware floor', () => {
 
     await queue.claimNext({ minScore: 90 });
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(bindings[2]).toBe(90);
     expect(bindings[3]).toBe(90);
     expect(bindings[4]).toBe(90);
@@ -135,7 +137,7 @@ describe('claimNext action-aware floor', () => {
 
     await queue.claimNext({});
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(bindings[2]).toBe(50);
   });
 
@@ -146,7 +148,7 @@ describe('claimNext action-aware floor', () => {
 
     await queue.claimNext({});
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(bindings[3]).toBe(60);
     expect(bindings[4]).toBe(THRESHOLDS.minScoreToAct);
   });

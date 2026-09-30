@@ -4,12 +4,23 @@
  *
  * Gives Claude access to GSC data, rank tracking,
  * blog content pipeline, and site health metrics for wavespestcontrol.com.
+ *
+ * submit_gsc_sitemap (IB scope expansion item 1, owner ruling 2026-09-28) is
+ * the one outside-write tool here: structurally two-step (write-gates.js
+ * OUTSIDE_WRITE_TOOL_NAMES), full-access-only (ib-access.js ibFullAccess,
+ * enforced in routes/admin-intelligence-bar.js — not here). Confirmed, it
+ * submits ONLY the pinned property + sitemap URL /confirm-action verified
+ * against the live preview (`_verified_gsc_property` /
+ * `_verified_gsc_sitemap_url`), through search-console-v2.js's submitSitemap
+ * — its own client scoped `webmasters`; every read keeps the read-only
+ * (`webmasters.readonly`) client. The service account must be a Full user of
+ * the property; a 401/403 surfaces as "needs write access", nothing changed.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { extractDomain } = require('../../utils/normalize-url');
+const { extractDomain, NETWORK_DOMAINS, HUB_DOMAINS } = require('../../utils/normalize-url');
 const { dispatchSeoPipeline } = require('../seo/seo-pipeline-dispatcher');
 
 const SEO_TOOLS = [
@@ -330,7 +341,23 @@ Use for: "find orphan pages", "internal linking gaps", "which pages have no inbo
       },
     },
   },
+  {
+    name: 'submit_gsc_sitemap',
+    description: `Submit a domain's sitemap to Google Search Console so Google re-crawls it sooner. Owner login only, through a confirmation card.
+Use for: "resubmit the sitemap for bradentonflpestcontrol.com", "tell Google to recrawl the sitemap"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain whose sitemap to submit, e.g. "bradentonflpestcontrol.com"' },
+        sitemap_path: { type: 'string', description: 'Sitemap path on the domain (default "/sitemap-index.xml" — the @astrojs/sitemap default; the hub also serves "/sitemap.xml")' },
+      },
+      required: ['domain'],
+    },
+  },
 ];
+
+const GSC_NOT_CONFIGURED_MESSAGE = 'Search Console access is not configured. Add the GOOGLE_SERVICE_ACCOUNT_JSON service variable (a Google service account with Search Console access) in the Railway dashboard.';
+const DEFAULT_SITEMAP_PATH = '/sitemap-index.xml';
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -363,10 +390,19 @@ async function executeSeoTool(toolName, input, context = {}) {
       case 'seo_action_queue': return await seoActionQueueReport(input);
       case 'approve_seo_action': return await approveSeoAction(input, context);
       case 'seo_experiment_results': return await seoExperimentResults(input);
+      case 'submit_gsc_sitemap': return await submitGscSitemap(input);
       default: return { error: `Unknown SEO tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:seo] Tool ${toolName} failed:`, err);
+    // Outside-write refusals can echo operator/model-supplied target text
+    // (a zone, project, service, domain or assignee — possibly customer
+    // text), so those log the tool and status only; the operator still gets
+    // the full message (Codex r5 on #5275). Read tools keep full logs.
+    if (require('./write-gates').OUTSIDE_WRITE_TOOL_NAMES.has(toolName)) {
+      logger.error(`[intelligence-bar:seo] Tool ${toolName} failed (status=${err.status || 'n/a'})`);
+    } else {
+      logger.error(`[intelligence-bar:seo] Tool ${toolName} failed:`, err);
+    }
     return { error: err.message };
   }
 }
@@ -1441,6 +1477,135 @@ async function internalLinkGraphReport(input) {
       diagnosis: o.primary_diagnosis,
     })),
   };
+}
+
+// Unconfirmed: resolve the domain against fleet_sites live so the card names
+// the actual site (not just an operator-typed domain string), never submits
+// anything. Confirmed: submits the pinned property + sitemap URL (see
+// SearchConsoleV2.submitSitemap). Full access is enforced by the route
+// (ib-access.js ibFullAccess).
+// The two hub domains never have a fleet_sites row (see the NETWORK_DOMAINS
+// import note below), so their display name is fixed here rather than read
+// from a table that doesn't carry them.
+const HUB_SITE_NAMES = {
+  'wavespestcontrol.com': 'Waves Pest Control (hub)',
+  'waveslawncare.com': 'Waves Lawn Care (hub)',
+};
+
+async function submitGscSitemap(input) {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    return { configured: false, message: GSC_NOT_CONFIGURED_MESSAGE };
+  }
+  const domain = String(input.domain || '').trim();
+  if (!domain) throw new Error('domain is required.');
+  const sitemapPath = String(input.sitemap_path || DEFAULT_SITEMAP_PATH).trim() || DEFAULT_SITEMAP_PATH;
+  if (input.confirmed !== true) {
+    const normalized = domain.toLowerCase();
+    // "Tracked" is decided against the canonical network-domain registry
+    // (normalize-url.js), not fleet_sites — fleet_sites is the SPOKE-ONLY
+    // table (renamed from wordpress_sites, migration
+    // 20260423000006_remove_legacy_integrations.js) and carries no rows for
+    // the two hub domains, so resolving against it alone refused every hub
+    // sitemap submission as "not a tracked site" (codex r2 P2 on #5275).
+    const canonical = NETWORK_DOMAINS.find((d) => d.toLowerCase() === normalized);
+    // Untracked (not on the canonical list at all) is still a refusal, with
+    // near misses offered — never picked.
+    if (!canonical) {
+      const close = NETWORK_DOMAINS.filter((d) => d.toLowerCase().includes(normalized)).slice(0, 5);
+      throw new Error(`"${domain}" is not a tracked site.${close.length ? ` Close matches: ${close.join(', ')}.` : ''} Use the exact domain.`);
+    }
+    const canonicalDomain = canonical.toLowerCase();
+    let site;
+    if (HUB_DOMAINS.has(canonicalDomain)) {
+      site = { domain: canonicalDomain, name: HUB_SITE_NAMES[canonicalDomain] || canonicalDomain, area: 'hub' };
+    } else {
+      // Spoke domain — resolve the real fleet_sites row for its display
+      // name/area. Exact (case-insensitive, trimmed) match ONLY — never the
+      // substring whereILike this used to run (pre-push audit #5275): an
+      // unescaped "%"/"_" in the operator's input was interpreted as a SQL
+      // wildcard, and even without one, a substring match with no ORDER BY
+      // could pick a DIFFERENT row than a later lookup of the same raw
+      // string. Fetch every tracked site and filter in JS, exactly like the
+      // Cloudflare/Railway/GitHub write tools do.
+      const rows = await db('fleet_sites').select('domain', 'name', 'area');
+      const matches = rows.filter((r) => String(r.domain || '').trim().toLowerCase() === canonicalDomain);
+      if (matches.length > 1) {
+        throw new Error(`Multiple tracked sites share the domain "${domain}" — this should not happen; contact engineering before submitting.`);
+      }
+      // The canonical registry already proved this domain belongs to the
+      // fleet even if its fleet_sites row hasn't landed yet — fall back to
+      // the bare domain rather than refuse a site the registry confirms.
+      site = matches[0] || { domain: canonicalDomain, name: canonicalDomain, area: null };
+    }
+    // A domain the fleet registry confirms is still not necessarily a
+    // property THIS service account can submit to — a URL-prefix property
+    // ("https://domain/") and a domain property ("sc-domain:domain") are
+    // different Search Console properties, and only one may actually be
+    // verified for this account. Resolve the real, exact property live
+    // (reusing search-console-v2.js's own URL-prefix/sc-domain: resolution)
+    // rather than synthesizing a URL that merely looks right (codex r3 P1 on
+    // #5275) — a synthesized property that isn't accessible would commit to
+    // nothing.
+    const SearchConsoleV2 = require('../seo/search-console-v2');
+    const resolved = await SearchConsoleV2.resolveAccessibleProperty(canonicalDomain);
+    if (resolved.error === 'not_accessible') {
+      throw new Error(`Neither Search Console property for "${canonicalDomain}" (${resolved.checked.join(' or ')}) is accessible to this service account.`);
+    }
+    if (resolved.error) throw new Error(resolved.error);
+    // The pinned canonical property identifier — Search Console's own
+    // verified form, never a synthesized guess — is what the confirmed
+    // commit submits against.
+    const siteUrl = resolved.siteUrl;
+    // A URL-prefix property only accepts sitemaps under its own origin
+    // (e.g. https://www.wavespestcontrol.com/), so build the feed URL from
+    // it; an sc-domain: property covers every host, so keep the canonical one.
+    const sitemapOrigin = siteUrl.startsWith('sc-domain:')
+      ? `https://${canonicalDomain}`
+      : new URL(siteUrl).origin;
+    const sitemapUrl = `${sitemapOrigin}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
+    return {
+      preview: true,
+      tool: 'submit_gsc_sitemap',
+      site: { domain: site.domain, name: site.name, area: site.area },
+      property: siteUrl,
+      sitemap_url: sitemapUrl,
+      note: `Submit "${sitemapUrl}" to Google Search Console property "${siteUrl}" for ${site.name} (${site.domain}).`,
+    };
+  }
+  // Confirmed: act ONLY on the pinned property + sitemap URL /confirm-action
+  // verified against the live preview above — never re-resolve domain or
+  // sitemap_path from this call's own input (untrusted here). The submit runs
+  // on SearchConsoleV2's own write-scoped client; every read stays on the
+  // read-only one.
+  const pinnedProperty = String(input._verified_gsc_property || '');
+  const pinnedSitemapUrl = String(input._verified_gsc_sitemap_url || '');
+  if (!pinnedProperty || !pinnedSitemapUrl) {
+    return {
+      error: 'Missing the verified property/sitemap identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // A URL-prefix property only accepts sitemaps under its own origin.
+  if (!pinnedProperty.startsWith('sc-domain:')) {
+    let origin = null;
+    try { origin = new URL(pinnedProperty).origin; } catch { /* malformed pin */ }
+    if (!origin || !pinnedSitemapUrl.startsWith(`${origin}/`)) {
+      return {
+        error: 'The verified sitemap is not under the verified Search Console property — ask again for a fresh confirmation card.',
+        code: 'target_changed',
+        preview_changed: true,
+      };
+    }
+  }
+  const SearchConsoleV2 = require('../seo/search-console-v2');
+  const submitted = await SearchConsoleV2.submitSitemap(pinnedProperty, pinnedSitemapUrl);
+  if (!submitted?.ok) {
+    return {
+      error: submitted?.error || 'Search Console did not accept the sitemap.',
+      ...(submitted?.writeAccessRequired ? { code: 'write_access_required' } : {}),
+    };
+  }
+  return { success: true, tool: 'submit_gsc_sitemap', property: pinnedProperty, sitemap_url: pinnedSitemapUrl };
 }
 
 async function seoActionQueueReport(input) {

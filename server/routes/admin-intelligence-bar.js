@@ -18,12 +18,13 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
   TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -59,9 +60,15 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
+const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
-const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const {
+  UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
+} = require('../services/intelligence-bar/write-gates');
+const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
@@ -69,6 +76,7 @@ const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -104,6 +112,7 @@ const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
 const CLOSEOUT_TOOL_NAMES = new Set(CLOSEOUT_TOOLS.map(t => t.name));
+const CLOSEOUT_REPAIR_TOOL_NAMES = new Set(CLOSEOUT_REPAIR_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
@@ -149,6 +158,10 @@ const INFRA_TOOLS = [
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
   ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
   ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
+  // The sitemap submit is advertised with the other outside-service writes in
+  // the global infrastructure prompt, so it rides the global infra set too —
+  // not only the seo/blog contexts' SEO_TOOLS (Codex r4 on #5275).
+  ...SEO_TOOLS.filter(t => t.name === 'submit_gsc_sitemap'),
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -184,6 +197,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  // Closeout repair queues customer report emails / receipts — admin only,
+  // like the closeout reads it builds on.
+  ...CLOSEOUT_REPAIR_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -419,18 +435,101 @@ function withCacheBreakpoint(messages) {
 // /confirm-action commits) while reads stay available; the fallback for a
 // broken confirm UI is the normal admin screen, never ungated AI execution.
 // (GATE_IB_UI_CONFIRM is retired and intentionally ignored.)
-// cancel_appointment is NOT card-confirmable (W0B): its post-commit rails
-// (late-cancel fee, invoice void via the shared status writer, inspection-
-// credit reversal) settle amounts by re-reading state after commit, so no
-// contract the card shows can be exact. Cancels happen on the Dispatch
-// screen, which owns the waiver and review controls, until a rails-binding
-// lane makes the effect set pinnable.
+// cancel_appointment card-confirm (ib-cancel-pinned-effects lane, owner
+// ruling 2026-09-28): its post-commit rails (late-cancel fee, invoice void
+// via the shared status writer, inspection-credit reversal) settle amounts
+// by re-reading state after commit, so no contract the card shows can be
+// exact UNLESS the exact effect set is pinned and re-verified immediately
+// before commit. PR A (server/services/appointment-cancel-impact.js) built
+// the deterministic pre-commit impact computation and the commit-side
+// refuse-on-drift check (tools.js cancelAppointment reads
+// input._frozen_cancellation_impact); it shipped dark. PR B wires this
+// route: behind GATE_IB_CANCEL_APPOINTMENT (ibCancelAppointmentLive()),
+// proposePendingWrite computes the impact fresh, refuses a non-simple visit
+// (card_cancel_refusals — a card fee agreement, a card payment on the
+// invoice, an estimate deposit, a possible plan make-up visit, or a
+// grouped visit (row.visit_id set — Codex round-4 P2: cancelling one
+// member can detach or dissolve the group via visit-groups.js's
+// handleChildTerminal, a side effect this card does not disclose); the bar
+// cancels SIMPLE, UNGROUPED visits only, everything else goes to Dispatch)
+// or a not-found/unreadable appointment, and otherwise pins the impact onto
+// params._frozen_cancellation_impact and preview.cancellation so the card
+// renders it and the contract hash covers it (authorization-contract.js's
+// cancel_appointment branch, already wired by PR A). /confirm-action only
+// dispatches a cancel_appointment pending action when the gate is live AND
+// the stored action carries that frozen pin — a legacy row minted before
+// this pin existed (or a row minted while the gate was on, then turned off)
+// still refuses, never executes unpinned. A terminal appointment (already
+// completed/cancelled/skipped/no_show) also refuses AT PROPOSAL, before any
+// pending action is minted — a fresh proposal is never the commit-time
+// idempotent-replay path. The impact also carries card_cancel_refusals'
+// invoice_holds_money (an invoice the void preview EXCLUDES — paid,
+// processing, or on a finalized statement — that would still hold money;
+// card_payment_on_invoice alone only covers a PaymentIntent on a WOULD-VOID
+// candidate) and inspection_credit (ANY redeemed inspection-credit offer —
+// reversed, deferred, or rebound — refuses outright: inspection-credit.js's
+// independent HOURLY sweepInspectionCreditRedemptions sweep later re-voids
+// a stale redeemed offer's booking UNPINNED, no card, no way for this lane
+// to thread a skip into a cron; refusing here means it never has a
+// bar-cancelled booking to touch, Codex round-2 P1), plus customer_notice
+// ('none' | 'may_send' — the existing GATE_CANCEL_NOTICE_HOOK cancellation-
+// text hook may still text the customer; this card DISCLOSES that, via
+// job-status.js's read-only previewCancellationNoticeVerdict, rather than
+// the earlier draft of this lane silently claiming cancellations never
+// contact anyone — 'none' ONLY when the gate is off (a process-level value
+// that cannot change mid-transaction); every DB-backed condition, a live
+// merged-slot survivor (Codex round-2 P1) AND whether an appointment_
+// reminders row currently exists (Codex round-3 P1b — the reminder self-
+// healer can insert one before commit), is mutable and never grounds
+// 'none'), plus a human-readable appointment window (Codex round-3/round-4
+// P1 — so two same-day visits for the same customer are distinguishable on
+// the card; prefers formatting the AUTHORITATIVE window_start/window_end
+// bounds — every mover of the row writes these — and falls back to the
+// legacy time_window label only when no bounds are stored at all, since
+// the label is never kept in sync by a reschedule, tools.js ~3517), plus
+// the visit's effective service address (Codex round-4 P1 —
+// switchAppointmentProperty can move a visit to a different saved
+// property than the customer's primary one; the stamped service_address_*
+// columns on the row, falling back to the customer's primary address for
+// a legacy unstamped row), plus identity_fingerprint (a hash over EVERY
+// scheduled_services column bar a tiny denylist of columns that churn for
+// unrelated operational reasons — route_order, the stops-ahead display
+// cache, updated_at — appointment-cancel-impact.js's computeRowFingerprint;
+// so a same-day window move, a property switch, a recurrence-flag change,
+// or a repoint to a differently-owned but identically-named customer is
+// drift too, even though the display facts alone would read identical.
+// Replaces an earlier hand-picked identity subset — proposal-pins.js's
+// normalizeAppointmentPin/appointmentPinFingerprint — that rounds 2
+// through 4 of review each found one more relevant column missing from,
+// a non-converging pattern the whole-row fingerprint closes structurally).
+// That fingerprint is re-verified TWICE at confirm: once by the pre-check
+// below (computeCancelAppointmentImpact, outside any lock) and once more
+// by tools.js cancelAppointment itself, which locks the scheduled_services
+// row FOR UPDATE inside its own mutation transaction and recomputes the
+// fingerprint from what THAT lock sees before transitioning anything
+// (Codex round-3 P1a — closes the race in the gap between the pre-check's
+// read and the transaction's own commit); the same locked read also
+// re-derives the plan-reseed and grouped-visit refusal verdicts directly
+// (Codex round-4 P1/P2), rather than relying only on the fingerprint
+// match to imply them. Gate off
+// (default) is byte-identical to before this lane: every cancel_appointment
+// proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
+// and cancels happen from the Dispatch screen, which owns the waiver and
+// review controls.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
   return process.env.IB_WRITES_DISABLED === 'true';
 }
 const IB_WRITES_DISABLED_MESSAGE = 'Intelligence Bar writes are currently disabled by the operator (IB_WRITES_DISABLED). Reads still work; make the change on the normal admin screen.';
+
+// tool_health_events.error_message is a separate telemetry sink from
+// intelligence_bar_queries (the redacted prompt/response above) — a PII or
+// outside-write tool's refusal text (a GitHub PR title, a Sentry issue
+// title, a customer name) must not land there verbatim either (Codex r3 P1
+// on #5275). The operator-visible result.error in the tool_result content is
+// never touched by this — only this health-event copy.
+const REDACTED_TOOL_HEALTH_ERROR = '[redacted — PII or outside-write tool]';
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
@@ -622,6 +721,67 @@ function maskEmail(address) {
   return `${local.slice(0, 1)}***@${domain}`;
 }
 
+// Curated card fields for tools whose preview pins a resolved target. Each
+// returns null when its pin is absent (the caller then falls through to the
+// generic display). A table instead of one branch per tool keeps
+// confirmationDisplayParams from growing with every write tool (Codex round
+// 11 on #5224).
+function pinnedRecipientDisplay(params, preview) {
+  // The card must show WHO the confirmed send goes to — the pinned identity
+  // resolved at proposal time, not a raw partial name that /confirm-action
+  // would re-resolve to somebody else.
+  if (!preview?.pinned_recipient) return null;
+  return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+}
+
+const PINNED_DISPLAY_BUILDERS = {
+  trigger_review_request: pinnedRecipientDisplay,
+  reply_via_sms: pinnedRecipientDisplay,
+  send_sms: pinnedRecipientDisplay,
+  send_email_reply: (params, preview) => (preview?.pinned_recipient
+    ? { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined }
+    : null),
+  submit_review_reply: (params, preview) => (preview?.review ? { ...preview.review, reply_text: params.reply_text } : null),
+  approve_price: (params, preview) => {
+    const a = preview?.pinned_approval;
+    if (!a) return null;
+    return {
+      ...params,
+      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
+    };
+  },
+  reschedule_appointment: (params, preview) => {
+    const a = preview?.pinned_appointment;
+    if (!a) return null;
+    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
+  },
+  // The operator must see WHICH queued text the irreversible cancel hits —
+  // customer, masked recipient, send time and the body preview — not just
+  // the ids (Codex round 11 on #5224, P1).
+  cancel_queued_message: (params, preview) => (preview?.proposal === true
+    ? {
+      customer: preview.customer_name || preview.customer_id,
+      recipient: preview.masked_recipient,
+      kind: preview.kind,
+      scheduled: preview.scheduled_time,
+      message: preview.body_preview,
+    }
+    : null),
+};
+
+// Where a fingerprint-verified preview's `_version` rides to the executor,
+// which re-asserts that exact state under its own locks — never a freshly
+// sampled one. Inventory writes bind the resolved product + full-precision
+// preview; cancel_queued_message binds the queued text's pinned claim state
+// (scheduled_for, recipient, full-body digest), so a text that started
+// sending, was rescheduled or edited in the meantime is never touched.
+const VERIFIED_VERSION_PARAMS = {
+  adjust_stock: '_verified_inventory_version',
+  create_restock_request: '_verified_inventory_version',
+  update_restock_request: '_verified_inventory_version',
+  cancel_queued_message: '_verified_message_version',
+};
+
 function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
@@ -683,22 +843,8 @@ function confirmationDisplayParams(toolName, params, preview) {
       moving: preview.moving,
     };
   }
-  if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
-    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
-  }
-  if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
-    return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
-  }
-  if (toolName === 'submit_review_reply' && preview?.review) {
-    return { ...preview.review, reply_text: params.reply_text };
-  }
-  if (toolName === 'approve_price' && preview?.pinned_approval) {
-    const a = preview.pinned_approval;
-    return {
-      ...params,
-      approval: `${a.product_name || 'product'}${a.vendor_name ? ` @ ${a.vendor_name}` : ''} — ${a.new_price != null ? `$${a.new_price.toFixed(2)}` : '?'}${a.new_quantity ? ` / ${a.new_quantity}` : ''} (${a.status})`,
-    };
-  }
+  const pinnedDisplay = PINNED_DISPLAY_BUILDERS[toolName]?.(params, preview);
+  if (pinnedDisplay) return pinnedDisplay;
   if ((toolName === 'toggle_estimate_v2_view' || toolName === 'toggle_show_one_time_option') && preview?.pinned_estimate) {
     const e = preview.pinned_estimate;
     return {
@@ -707,28 +853,26 @@ function confirmationDisplayParams(toolName, params, preview) {
       change: `${e.flag}: ${e.current} → ${e.next}`,
     };
   }
-  if (toolName === 'reschedule_appointment' && preview?.pinned_appointment) {
-    const a = preview.pinned_appointment;
-    return { ...params, appointment: `${a.service_type || 'visit'}${a.customer_name ? ` — ${a.customer_name}` : ''} on ${a.scheduled_date}${a.time_window ? ` ${a.time_window}` : ''} (${a.status})` };
-  }
-  if (toolName === 'send_sms' && preview?.pinned_recipient) {
-    // The card must show WHO the confirmed send goes to — the pinned
-    // identity resolved at proposal time, not a raw partial name that
-    // /confirm-action would re-resolve to somebody else.
-    return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
-  }
   if (toolName === 'create_appointment') {
     // The price the visit will carry — the pinned one, stated or catalog —
     // is a money fact the card must show (owner 2026-09-27); the contract
     // carries this display line as a billing effect.
     const pinnedPrice = preview?.pinned_price;
     const { price, ...unpriced } = params;
-    const shown = !pinnedPrice ? params : {
-      ...unpriced,
-      price: pinnedPrice.amount != null
-        ? `$${Number(pinnedPrice.amount).toFixed(2)} (${pinnedPrice.source === 'stated' ? 'as stated' : `catalog price, ${pinnedPrice.service_name}`}) — invoiced when the visit is completed`
-        : 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type',
-    };
+    const money = (n) => `$${Number(n).toFixed(2)}`;
+    // A member discount names itself and the list price it came off (owner
+    // 2026-09-27: members get the WaveGuard member discount on a one-off).
+    const discounted = pinnedPrice?.discount_name
+      ? `catalog price ${money(pinnedPrice.list_price)} less ${pinnedPrice.discount_percent != null ? `${pinnedPrice.discount_percent}% ` : ''}${pinnedPrice.discount_name}`
+      : null;
+    let priceLine = null;
+    if (pinnedPrice && pinnedPrice.amount == null) {
+      priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
+    } else if (pinnedPrice) {
+      const basis = pinnedPrice.source === 'stated' ? 'as stated' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
+      priceLine = `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
+    }
+    const shown = !pinnedPrice ? params : { ...unpriced, price: priceLine };
     if (!preview?.pinned_technician) return shown;
     // Show the pinned tech by NAME (the id is opaque on a card) — the visit
     // binds to exactly this technician at commit.
@@ -820,9 +964,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // Two-step executors are contract-tested to be mutation-free without
     // confirmed — run them for the rich preview (on a copy: the stored
-    // params gain execution pins after this call).
-    preview = await executeToolByName(toolUse.name, { ...params }, null);
+    // params gain execution pins after this call). fullAccess travels here
+    // too (owner ruling 2026-09-28): under GATE_IB_PLATFORM this is what
+    // lets ActionRegistry.execute's own allowed() check pass for an outside-
+    // service write proposed by the full-access owner, and correctly refuse
+    // one from anyone else even if a forged tool_use reached this far.
+    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
     if (isToolFailure(preview)) {
+      return { failed: true, modelResult: preview };
+    }
+    // An unconfigured integration ({ configured: false } — a missing token)
+    // is a refusal, not a card: confirming it could only fail (Codex r1 on
+    // #5275, P2).
+    if (preview?.configured === false) {
       return { failed: true, modelResult: preview };
     }
     // A duplicate phone/email makes create_customer a no-op: the preview
@@ -974,12 +1128,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
       if (booking.error) return { failed: true, modelResult: { error: booking.error } };
       // Server pins, set unconditionally so a model-supplied value can never
-      // stand in for them.
+      // stand in for them. The discount identity/terms (Codex r2 on #5093,
+      // P1) ride alongside the net price and service id: the card shows the
+      // GROSS list price and the discount's name/percent, so a drift in
+      // EITHER at commit — a different discount row, a re-typed percent, or
+      // a preset swapped for one that happens to net the same dollars —
+      // must refuse the same way a net-price mismatch already does, not
+      // silently commit a visit the card never actually showed.
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
+      params._booking_list_price = booking.listPrice;
+      params._booking_discount_id = booking.discountId;
+      params._booking_discount_name = booking.discountName;
+      params._booking_discount_type = booking.discountType;
+      params._booking_discount_amount = booking.discountAmount;
       preview = {
         ...preview,
-        pinned_price: { amount: booking.price, source: booking.source, service_name: booking.serviceName },
+        pinned_price: {
+          amount: booking.price,
+          source: booking.source,
+          service_name: booking.serviceName,
+          list_price: booking.listPrice,
+          discount_name: booking.discountName,
+          discount_percent: booking.discountPercent,
+        },
       };
     }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
@@ -1142,7 +1314,52 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
     }
     if (toolUse.name === 'cancel_appointment') {
-      return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+      if (!ibCancelAppointmentLive()) {
+        return { failed: true, modelResult: { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE } };
+      }
+      // Gate on: compute the SAME deterministic pre-commit impact the
+      // commit path (tools.js cancelAppointment) recomputes and compares
+      // against — fee, invoices, inspection-credit, the technician/customer
+      // notice verdicts, and the card_cancel_refusals verdict
+      // (appointment-cancel-impact.js). A throw means some part of that
+      // effect set could not be read, which must refuse rather than
+      // propose an unverified card. actorId is the proposing operator —
+      // the SAME id the commit-time recheck passes as its own confirming
+      // actor in the common case (propose then immediately confirm), so
+      // technician_notice reads the same at both points.
+      const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
+      let impact;
+      try {
+        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
+      } catch (err) {
+        logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
+        return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
+      }
+      if (!impact) {
+        return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      }
+      // Terminal appointments — including one already cancelled — refuse
+      // at proposal (Codex round-1 P2): computeCancelAppointmentImpact does
+      // not check status (it previews the money rails only), so without
+      // this a terminal visit would mint a full confirmation card that
+      // tools.js's own commit-time guard then refuses outright (or, for an
+      // already-cancelled row, silently re-runs the idempotent replay path
+      // — never a fresh cancellation a NEW proposal should represent).
+      // Same set the reschedule_appointment proposal pin already refuses on.
+      if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(impact.appointment?.status))) {
+        return { failed: true, modelResult: { error: `This appointment is already ${impact.appointment.status} and can't be cancelled.` } };
+      }
+      // Owner ruling 2026-09-28: the bar cancels BARE visits only — no
+      // invoice of any kind on record, no inspection-credit offer tied to
+      // it, no card fee agreement or hold, no plan make-up visit, not a
+      // follow-up visit, not grouped — sends the operator to Dispatch
+      // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
+      // commit-side refusal (tools.js) rather than a second copy.
+      if ((impact.card_cancel_refusals || []).length) {
+        return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE } };
+      }
+      params._frozen_cancellation_impact = impact;
+      preview = { ...preview, cancellation: impact };
     }
     if (toolUse.name === 'approve_price' && params.approval_id) {
       // The card must show WHAT price is being authorized (product, vendor,
@@ -1675,6 +1892,7 @@ PESTICIDE / FERTILIZER / RODENTICIDE / IGR / ADJUVANT APPLICATION RATES (HARD RU
 EPA pesticide labels are legally enforceable — using a product inconsistently with labeling violates federal law. Apply these rules to every rate question:
 - Return rates ONLY from the label-backed product knowledge base. Never infer a rate from general training-data memory.
 - When you give a rate, include: product name, target pest/site, rate (with the rate basis e.g. "per 1000 sq ft" or "per gallon"), and EPA Reg. No. when available.
+- Never state a rate or amount in mL (owner rule), and never convert an mL figure yourself. A label rate the catalog keeps in mL comes back from get_product_info without a rate: say "Check the current label before applying." Say the same when a knowledge-base passage gives a rate only in mL. A container size (e.g. "250 ml") is how the product is sold and may be quoted as-is.
 - State PPE / re-entry interval (REI) / watering-in ONLY from the product's \`safety\` block returned by get_product_info — never from memory. If a safety field is absent there, say "check the product label" rather than supplying a default.
 - If label data is missing, stale, ambiguous, or you can't confirm the rate from the knowledge base, say: "Check the current label before applying." Do NOT guess, interpolate, or recall a number.
 - Never describe an off-label use, off-label site, or off-label combination — even if the tech asks.
@@ -1911,14 +2129,15 @@ RESPONSE STYLE:
 // context (getToolsForContext), so this block is appended for every admin
 // request rather than living inside one context prompt. Tech and non-admin
 // requests never load the tools, so their prompts must not describe them.
-const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a confirmation card (owner-only).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a confirmation card (owner-only).
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a confirmation card (owner-only); request_codex_review always posts the exact text "@codex review".
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
 - GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
@@ -1936,19 +2155,41 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+- Beyond the short owner-only preview list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
 
 
 // Default-off capability gates applied to EVERY context's list in one place
 // (codex #4348 r14 P1): merge_customers is offered only while
 // GATE_IB_MERGE_CUSTOMERS is on. The executor refuses at execution time
 // too, so a forced call fails closed with the list.
-function getToolsForContext(context, isAdmin = false) {
-  const tools = toolsForContextUngated(context, isAdmin);
+// fullAccess (owner ruling 2026-09-28, ibFullAccess()) is the ONLY thing
+// that widens a tool LIST to include a red-tier (confirmed-endpoint) tool —
+// still never a card: the /query tool loop refuses to execute one from the
+// model regardless of role (CONFIRMED_ACTION_TOOL_NAMES branch), so a
+// full-access request that sees the tool listed can only ever be told to
+// use the owner-only /execute confirm flow. A request without full access
+// never sees it at all, so the bar never proposes it there.
+//
+// The same fullAccess gate ALSO applies to FULL_ACCESS_TWO_STEP_TOOL_NAMES
+// (IB scope expansion item 1, owner ruling 2026-09-28: outside-service
+// writes — Sentry/Cloudflare/Railway/GitHub/Search Console — are yellow-tier
+// (a card, via WRITE_TWO_STEP_TOOL_NAMES) but STILL full-access-only, unlike
+// every other yellow-tier tool, which any admin gets. Infra ops modules load
+// on EVERY admin context regardless of role (INFRA_TOOLS below), so this
+// filter is the ONLY place that keeps these out of a non-full-access list —
+// there is no per-module QUERY-only export to fall back to.
+function getToolsForContext(context, isAdmin = false, fullAccess = false) {
+  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+    // Defense in depth: catches a future red tool reaching a context list
+    // through a module that forgot its own write-free "query" export
+    // (banking-tools.js / seo-tools.js already build one for the branches
+    // below) — never offered without full access, whatever module it rides.
+    .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
+    .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
   return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
 }
 
-function toolsForContextUngated(context, isAdmin = false) {
+function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
     return TECH_TOOLS;
@@ -1975,14 +2216,17 @@ function toolsForContextUngated(context, isAdmin = false) {
   // — and only while GATE_IB_THREADS is on (the tool refuses at execution
   // time too, so a forced call fails closed with the rest of threads).
   const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
+  const closeoutRepair = isAdmin ? CLOSEOUT_REPAIR_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS, ...infra];
+    // Minus anything the global infra set already carries (submit_gsc_sitemap)
+    // — a duplicate tool name is rejected by the API.
+    return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS).filter(t => !INFRA_TOOL_NAMES.has(t.name)), ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...base, ...PROCUREMENT_TOOLS, ...infra];
@@ -2010,7 +2254,7 @@ function toolsForContextUngated(context, isAdmin = false) {
     return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
+    return [...base, ...(fullAccess ? BANKING_TOOLS : BANKING_QUERY_TOOLS), ...infra];
   }
   if (context === 'estimates') {
     // create_agent_estimate_draft's trust boundary (feature gate + forced UI
@@ -2045,7 +2289,11 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeReviewTool(toolName, input, actionContext);
   }
   if (COMMS_TOOL_NAMES.has(toolName)) {
-    return executeCommsTool(toolName, input);
+    // actionContext.technicianId is the confirming admin — cancel_queued_
+    // message threads it into cancelScheduledSmsRow so a reopened parked
+    // decision records the real admin, not a hardcoded null (Codex round 3
+    // on #5224, P2). Every other comms tool ignores the extra parameter.
+    return executeCommsTool(toolName, input, actionContext);
   }
   if (TAX_TOOL_NAMES.has(toolName)) {
     return executeTaxTool(toolName, input);
@@ -2064,6 +2312,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (CLOSEOUT_TOOL_NAMES.has(toolName)) {
     return executeCloseoutTool(toolName, input);
+  }
+  if (CLOSEOUT_REPAIR_TOOL_NAMES.has(toolName)) {
+    return executeCloseoutRepairTool(toolName, input, actionContext);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input, actionContext);
@@ -2284,7 +2535,13 @@ async function runQuery(req, res, next) {
     const context = req.techRole === 'admin' ? requestedContext : 'tech';
     const platformEnabled = gateEnvValue('GATE_IB_PLATFORM') && req.techRole === 'admin'
       && context !== 'agent_estimate' && context !== 'tech';
-    const actionScope = { role: req.techRole, context };
+    // fullAccess (owner ruling 2026-09-28): the ActionRegistry-path mirror of
+    // getToolsForContext's fullAccess filter above — allowed() in
+    // action-registry.js refuses FULL_ACCESS_TWO_STEP_TOOL_NAMES (the
+    // outside-service writes) without it, so a non-full-access admin never
+    // sees or can invoke one through initialTools/discover/validateInput
+    // either, whatever GATE_IB_PLATFORM is set to.
+    const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
     let taskContext = null;
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -2374,7 +2631,7 @@ async function runQuery(req, res, next) {
 The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -2398,9 +2655,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       techName: req.technicianName || pageData?.tech_name || null,
     } : null;
 
-    // Select tools based on context and role (email tools are admin-only)
+    // Select tools based on context and role (email tools are admin-only).
+    // Red-tier tools additionally require full access (owner ruling
+    // 2026-09-28) — never a card either way; see getToolsForContext.
     let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
-      : getToolsForContext(context, req.techRole === 'admin')).map(apiToolDefinition);
+      : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
@@ -2455,6 +2714,15 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
+    // Gap reports (server/services/agent-gap-reports.js): what the bar could
+    // not do this request, for the owner's weekly review. Platform mode gets
+    // the full collector (its own discover_capabilities searches). The tech
+    // portal has no discovery loop to sample, so its collector only ever
+    // gathers a flush()-time `ask` fallback (see below) — source 'tech-bar',
+    // independent of platformEnabled (tech requests never set it).
+    const gapCollector = platformEnabled
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) })
+      : context === 'tech' ? createGapCollector({ source: 'tech-bar' }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.
@@ -2510,7 +2778,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const results = [];
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
-        const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name)
+        // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
+        // takes an account email, and their scope is 'none' so they are never
+        // in PII_TOOL_NAMES.
+        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name);
+        const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
@@ -2540,6 +2812,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           const byName = new Map(tools.map(t => [t.name, t]));
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
+          gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
@@ -2550,6 +2823,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           errorMessage = result.error;
         } else if (ADMIN_ONLY_TOOL_NAMES.has(toolUse.name) && req.techRole !== 'admin') {
           result = { error: 'Admin access required for this action' };
+          failed = true;
+          errorMessage = result.error;
+        } else if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name) && !ibFullAccess(req)) {
+          // Outside-service writes (owner ruling 2026-09-28) are full-access
+          // only, whatever GATE_IB_PLATFORM is set to — this guard runs
+          // whether or not the tool was ever actually offered in `tools`
+          // (a forced/hallucinated call under the legacy, non-platform path
+          // has no "was this offered" check at all), so it is the one place
+          // that cannot be bypassed by either mode.
+          result = { error: 'This action is limited to the owner account.' };
           failed = true;
           errorMessage = result.error;
         } else if (!isToolAllowedForRole(toolUse.name, req.techRole)) {
@@ -2632,6 +2915,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Only a card that exists blocks further writes; a proposal refused at
         // preflight left nothing to reconcile, so a corrected call may follow.
         if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
+        // Codex r3 P1 on #5275: a github-ops refusal (no failed checks / label
+        // already present) embeds the PR title in `error`, and this sink is
+        // NOT the redacted intelligence_bar_queries telemetry (finding above)
+        // — it is a separate table this route writes unconditionally, so the
+        // same sensitivity test applies here too, on the health-event copy
+        // only. The operator-visible result.error (in the tool_result content
+        // below) is untouched.
         recordToolEvent({
           source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
           context: context || null,
@@ -2639,8 +2929,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           success: !failed,
           durationMs: Date.now() - toolStartedAt,
           circuitOpen,
-          errorMessage,
+          // Only PII and outside-write tools lose their health-event error
+          // text — not every tool under GATE_IB_PLATFORM (which redacts
+          // logged INPUTS wholesale): tool-health triage keeps real errors.
+          errorMessage: (PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)) && errorMessage
+            ? REDACTED_TOOL_HEALTH_ERROR
+            : errorMessage,
         });
+        gapCollector?.toolResult(toolUse.name, result, failed);
 
         results.push({
           type: 'tool_result',
@@ -2674,13 +2970,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       ];
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
-
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
+    // Gap reports: records only when this reply says the bar could not do
+    // something. Awaited — flush() never rejects and writes nothing on an
+    // ordinary request. `ask` is the tech-bar's fallback signal (no
+    // discover_capabilities loop there to gather signals from); the admin
+    // platform collector already searches first, so passing it there too is
+    // inert on every request that already gathered a signal.
+    await gapCollector?.flush({ reply: finalResponse, ask: context === 'tech' ? prompt : undefined });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -2705,8 +3007,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // or an earlier image turn is still in the window and its OCR-derived
     // answer can be echoed by a follow-up that carries no images itself.
     // Either way Claude can surface a customer's name/address/phone with no
-    // tool call at all.
-    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
+    // tool call at all. Outside-write tools (Sentry/Cloudflare/Railway/GitHub/
+    // GSC, #5275 Codex r2 P1) have scope 'none' — with GATE_IB_PLATFORM off
+    // that keeps them out of PII_TOOL_NAMES entirely, so their raw
+    // prompt/response (assignee email, Sentry titles/culprits, GitHub PR
+    // titles, Pages branch names) would otherwise persist unredacted.
+    // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
@@ -2937,6 +3244,17 @@ router.post('/execute', async (req, res, next) => {
       // replay protection. Structural: no env value changes this.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
     }
+    // Owner-only access model (owner ruling 2026-09-28): red-tier
+    // (confirmed-endpoint) actions run only for the contact@
+    // wavespestcontrol.com login (or IB_FULL_ACCESS_EMAILS). Every other
+    // admin login is otherwise unrestricted (yellow/green stay unchanged).
+    // Checked before the idempotency key is minted and before any executor
+    // runs — no side effect happens for a refused request. Technician
+    // tokens never reach this line: isToolAllowedForRole above already
+    // refused them with their existing, stricter message.
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && !ibFullAccess(req)) {
+      return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
@@ -2972,7 +3290,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,
@@ -3025,11 +3343,19 @@ router.post('/confirm-action', async (req, res, next) => {
     }
     const action = claim.action;
     claimedAction = action;
-    // cancel_appointment is not card-confirmable (rails not pinnable) — a
-    // pending row minted by PRE-refusal code can still be claimed for its
-    // TTL during a rolling deploy (GH r21 P1): refuse it here too, never
-    // dispatch the stored tool.
-    if (action.tool_name === 'cancel_appointment') {
+    // cancel_appointment dispatches only when the gate is live AND the
+    // stored action carries the proposal-time frozen impact pin (PR B of
+    // ib-cancel-pinned-effects). This covers: the gate off (today's
+    // refusal — also what a row minted while the gate was ON, then turned
+    // OFF before Confirm, gets, during a rolling deploy or a mid-window
+    // flip); and a pending row with no frozen pin at all, which only
+    // pre-PR-B code could have minted (this route refused cancel_appointment
+    // unconditionally before this lane) — never dispatch a cancel unpinned.
+    // A gate-on row that DOES carry the pin falls through to the normal
+    // claim/dispatch path below; tools.js cancelAppointment re-verifies the
+    // pin against a fresh impact read and refuses on drift.
+    if (action.tool_name === 'cancel_appointment'
+      && (!ibCancelAppointmentLive() || !action.params?._frozen_cancellation_impact)) {
       const result = { error: CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE };
       await PendingActions.recordResult(action.id, result);
       return res.status(409).json(result);
@@ -3043,6 +3369,16 @@ router.post('/confirm-action', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'Admin access required for this action' });
       return res.status(403).json({ error: 'Admin access required for this action' });
+    }
+
+    // Outside-service writes (owner ruling 2026-09-28) are full-access only.
+    // The propose step already required full access (same guard in the
+    // /query loop) and claimForConfirm above already bound this pending
+    // action to that same actor, so this is defense in depth — never the
+    // only thing stopping a commit.
+    if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action.tool_name) && !ibFullAccess(req)) {
+      await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is limited to the owner account.' });
+      return res.status(403).json({ error: 'This action is limited to the owner account.' });
     }
 
     // Default-deny catch-all: a technician may confirm/execute only the tech
@@ -3201,6 +3537,7 @@ router.post('/confirm-action', async (req, res, next) => {
         const livePreview = await executeApprovedTool(action.tool_name, { ...execParams }, techContextForExecution(req), {
           isAdmin: req.techRole === 'admin',
           technicianId: req.technicianId || req.technician?.id || null,
+          fullAccess: ibFullAccess(req),
           confirmed: false,
         });
         if (isToolFailure(livePreview) || AuthorizationContract.previewFingerprint(livePreview) !== approvedTwoStep) {
@@ -3250,6 +3587,12 @@ router.post('/confirm-action', async (req, res, next) => {
         if (action.tool_name === 'assign_technician' && livePreview?.would_assign_to_id) {
           execParams._verified_tech_id = String(livePreview.would_assign_to_id);
         }
+        // repair_closeout: the verified preview's step list IS the approved
+        // plan — the executor runs exactly these and refuses if its own
+        // re-plan differs (pre-push P1: never add a step the card lacked).
+        if (action.tool_name === 'repair_closeout' && Array.isArray(livePreview?.steps)) {
+          execParams._verified_repair_steps = livePreview.steps;
+        }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate
         // row lock (GH r10 P2) — the stable engine key would still match a
@@ -3265,12 +3608,18 @@ router.post('/confirm-action', async (req, res, next) => {
             execParams._verified_rows_matched = livePreview.rows_matched;
           }
         }
+        // Outside-service writes (Sentry/Cloudflare/Railway/GitHub/GSC): the
+        // fingerprint-verified preview's resolved identifiers ARE the approved
+        // target — hand them to the executor as the only thing it acts on.
+        if (OUTSIDE_WRITE_TOOL_NAMES.has(action.tool_name)) {
+          for (const key of Object.keys(execParams)) if (key.startsWith('_verified_')) delete execParams[key];
+          Object.assign(execParams, outsideWritePins(action.tool_name, livePreview));
+        }
         // Bind every inventory write to the exact resolved product and
         // full-precision preview, then recheck that version under domain locks.
-        if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(action.tool_name)) {
-          execParams._verified_inventory_version = livePreview?._version;
-          if (action.tool_name !== 'update_restock_request' && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
-        }
+        const versionParam = VERIFIED_VERSION_PARAMS[action.tool_name];
+        if (versionParam) execParams[versionParam] = livePreview?._version;
+        if (['adjust_stock', 'create_restock_request'].includes(action.tool_name) && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
       }
     }
 
@@ -3279,6 +3628,7 @@ router.post('/confirm-action', async (req, res, next) => {
       operationId: action.id,
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
+      fullAccess: ibFullAccess(req),
       confirmed: true,
       ...(approvedAgentEstimateFingerprint
         ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
@@ -3632,3 +3982,8 @@ module.exports = router;
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
+// Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
+// keeps that test tied to the route's own offered-tool list instead of a
+// re-implementation of it.
+module.exports.getToolsForContext = getToolsForContext;
+module.exports.confirmationDisplayParams = confirmationDisplayParams;
