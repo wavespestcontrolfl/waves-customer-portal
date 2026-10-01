@@ -363,9 +363,9 @@ class CampaignAdvisor {
     const last7days = await db('ad_performance_daily').where('date', '>=', d7);
     const last30days = await db('ad_performance_daily').where('date', '>=', d30);
 
-    // syncSearchTerms stamps updated_at on every row in Google's rolling
-    // 30-day snapshot and never deletes rows that age out of it, so only rows
-    // refreshed by a recent daily sync carry in-window totals.
+    // syncSearchTerms rewrites every row each run (terms that left Google's
+    // rolling 30-day snapshot are zeroed), so a recent stamp means current
+    // totals; nothing stamped recently means the sync is not running.
     const searchTerms = await db('ad_search_terms')
       .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
       .where('cost', '>', 0)

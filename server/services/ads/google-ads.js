@@ -329,44 +329,56 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     `);
 
     const results = [];
+    // One stamp per run, written in one transaction so a failed run commits
+    // nothing. Every row ends the run carrying this run's numbers: terms Google
+    // no longer reports are zeroed below, so stale spend never outlives the
+    // rolling window (the ads advisor reads cost > 0 as current spend).
+    const syncedAt = new Date();
 
-    for (const row of rows) {
-      const platformId = String(row.campaign.id);
-      const searchTerm = row.search_term_view.search_term;
+    await db.transaction(async (trx) => {
+      for (const row of rows) {
+        const platformId = String(row.campaign.id);
+        const searchTerm = row.search_term_view.search_term;
 
-      const campaign = await db('ad_campaigns')
-        .where({ platform: 'google_ads', platform_campaign_id: platformId })
-        .first();
-      if (!campaign) continue;
+        const campaign = await trx('ad_campaigns')
+          .where({ platform: 'google_ads', platform_campaign_id: platformId })
+          .first();
+        if (!campaign) continue;
 
-      const costDollars = Number(row.metrics.cost_micros || 0) / 1_000_000;
+        const costDollars = Number(row.metrics.cost_micros || 0) / 1_000_000;
 
-      const data = {
-        campaign_id: campaign.id,
-        search_term: searchTerm,
-        match_type: row.search_term_view.status || null,
-        impressions: Number(row.metrics.impressions || 0),
-        clicks: Number(row.metrics.clicks || 0),
-        cost: costDollars,
-        conversions: Number(row.metrics.conversions || 0),
-        conversion_value: Number(row.metrics.conversions_value || 0),
-        updated_at: new Date(),
-      };
+        const data = {
+          campaign_id: campaign.id,
+          search_term: searchTerm,
+          match_type: row.search_term_view.status || null,
+          impressions: Number(row.metrics.impressions || 0),
+          clicks: Number(row.metrics.clicks || 0),
+          cost: costDollars,
+          conversions: Number(row.metrics.conversions || 0),
+          conversion_value: Number(row.metrics.conversions_value || 0),
+          updated_at: syncedAt,
+        };
 
-      // Upsert on campaign_id + search_term
-      const existing = await db('ad_search_terms')
-        .where({ campaign_id: campaign.id, search_term: searchTerm })
-        .first();
+        // Upsert on campaign_id + search_term
+        const existing = await trx('ad_search_terms')
+          .where({ campaign_id: campaign.id, search_term: searchTerm })
+          .first();
 
-      if (existing) {
-        await db('ad_search_terms').where({ id: existing.id }).update(data);
-      } else {
-        await db('ad_search_terms')
-          .insert({ id: uuidv4(), ...data, created_at: new Date() });
+        if (existing) {
+          await trx('ad_search_terms').where({ id: existing.id }).update(data);
+        } else {
+          await trx('ad_search_terms')
+            .insert({ id: uuidv4(), ...data, created_at: syncedAt });
+        }
+
+        results.push(data);
       }
 
-      results.push(data);
-    }
+      // Terms missing from this snapshot had no activity in the window.
+      await trx('ad_search_terms')
+        .where('updated_at', '<', syncedAt)
+        .update({ impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: syncedAt });
+    });
 
     logger.info(`[google-ads] Synced ${results.length} search terms`);
     return results;

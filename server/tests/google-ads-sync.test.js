@@ -308,6 +308,32 @@ describe('Google Ads campaign sync', () => {
   });
 });
 
+describe('syncSearchTerms retires terms missing from the latest snapshot (Codex r8 on #5486)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...process.env,
+      GOOGLE_ADS_DEVELOPER_TOKEN: 'developer-token',
+      GOOGLE_ADS_CLIENT_ID: 'client-id',
+      GOOGLE_ADS_CLIENT_SECRET: 'client-secret',
+      GOOGLE_ADS_REFRESH_TOKEN: 'refresh-token',
+      GOOGLE_ADS_CUSTOMER_ID: '3393936713',
+    };
+  });
+
+  test('rows not rewritten by this run are zeroed and stamped with the run time', async () => {
+    mockCustomerQuery.mockResolvedValue([]);
+    await GoogleAds.syncSearchTerms(30, { throwOnError: true });
+    const retire = mockWhere.mock.calls.find((c) => c[0] === 'updated_at' && c[1] === '<');
+    expect(retire).toBeTruthy();
+    const runAt = retire[2];
+    expect(runAt).toBeInstanceOf(Date);
+    expect(mockUpdate).toHaveBeenCalledWith({
+      impressions: 0, clicks: 0, cost: 0, conversions: 0, conversion_value: 0, updated_at: runAt,
+    });
+  });
+});
+
 describe('sync freshness fence (r12)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
