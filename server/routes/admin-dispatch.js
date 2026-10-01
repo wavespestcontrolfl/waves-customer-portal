@@ -62,14 +62,14 @@ const {
   REENTRY_SEND_SEAL_TTL_MS,
 } = require('../services/service-report/email-delivery');
 
-const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
+const { previewTreeShrubAssessment, treeShrubReviewSignature, treeShrubPhotosHash, suggestLandscapeCondition } = require('../services/tree-shrub-assessment');
 const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -4142,6 +4142,28 @@ router.post('/slot-check', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/tree-shrub/fast-context
+// What the Tree & Shrub Fast Complete sheet loads: eligibility, the visit
+// identity (echoed back as `expectedVisit` on /complete), the catalog with
+// per-product compliance flags, the protocol month's suggested products, the
+// last visit's values and the rotation / palm-spacing warnings. Read-only;
+// dark behind GATE_TS_FAST_COMPLETE AND the caller's ts_fast_complete user
+// flag, rechecked here (not only on the schedule payload) so a revoked or
+// unflagged tech can't reach the sheet. See services/tree-shrub-fast-context.js.
+router.get('/:serviceId/tree-shrub/fast-context', async (req, res, next) => {
+  try {
+    if (!tsFastCompleteLive()) return res.status(404).json({ enabled: false });
+    const flagged = await require('../services/feature-flags')
+      .isUserFeatureEnabled(req.technicianId, 'ts_fast_complete').catch(() => false);
+    if (!flagged) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const ctx = await require('../services/tree-shrub-fast-context').buildTreeShrubFastContext(req.params.serviceId);
+    if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
+    const { ok, ...body } = ctx;
+    res.json({ enabled: true, ...body });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the
@@ -4181,12 +4203,15 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
       },
     });
     if (!result) {
-      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', status: 'failed' });
+      return res.status(200).json({ scores: null, findings: [], aiSummary: 'AI photo review could not score these photos.', suggestedCustomerAction: 'No action needed', suggestedCondition: null, status: 'failed' });
     }
     // Sign the scores + observation + the EXACT photo set so the completion handler
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
+    // Fast Complete's condition suggestion — the tech confirms it; not part of
+    // the signed review.
+    result.suggestedCondition = suggestLandscapeCondition(result.scores?.overallScore);
     return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });

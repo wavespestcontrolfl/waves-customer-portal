@@ -668,6 +668,10 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
+  // GATE_LAWN_REPORT_LEAD: only lawn payloads ever carry `lead` (the server
+  // derives it for lawn alone); tree & shrub is excluded here too, so it
+  // prints exactly as before.
+  const v2Lead = v2 && v2.lead && typeof v2.lead === 'object' && data.serviceLine !== 'tree_shrub' ? v2.lead : null;
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
@@ -676,7 +680,10 @@ export default function ServiceReportDocument({ data, token }) {
       return {
         label: 'Overall',
         value: v2.snapshot.statusHeadline,
-        detail: v2.snapshot.rootCause || v2.snapshot.scoreExplanation,
+        // The PDF has no word budget: a lead "why" the web dropped for its
+        // budget or watering wording falls back to the score explanation
+        // (Fable P2 #5517).
+        detail: v2Lead ? (v2Lead.why || v2.snapshot.scoreExplanation) : (v2.snapshot.rootCause || v2.snapshot.scoreExplanation),
         score: v2.snapshot.overallScore,
       };
     }
@@ -802,7 +809,9 @@ export default function ServiceReportDocument({ data, token }) {
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
   pushAction(v2?.snapshot?.customerAction);
-  pushAction(v2?.followUp?.customerAction);
+  // Lead mode: the follow-up card's stock "No action is needed…" line is a
+  // placeholder, not a task, so it is not added to the list.
+  if (!(v2Lead && /^\s*no action is needed\b/i.test(String(v2?.followUp?.customerAction || '')))) pushAction(v2?.followUp?.customerAction);
   // wavesNext is what WAVES will do next (future tense, never the past-tense
   // wavesAction) — a commitment, so it belongs in the permanent record.
   pushRec(v2?.snapshot?.wavesNext
@@ -1127,7 +1136,9 @@ export default function ServiceReportDocument({ data, token }) {
             ))}
             {v2Insights.map((insight, i) => (
               <Bullet key={insight.category ? `${insight.category}-${i}` : i}>
-                <strong>{insight.headline}{insight.headline ? ':' : ''}</strong> {[insight.whatWeSaw, insight.whyItMatters, insight.wavesAction].filter(Boolean).join(' ')}
+                <strong>{insight.headline}{insight.headline ? ':' : ''}</strong> {(v2Lead
+                  ? [insight.whatWeSaw, insight.status === 'needs_attention' ? insight.whyItMatters : null]
+                  : [insight.whatWeSaw, insight.whyItMatters, insight.wavesAction]).filter(Boolean).join(' ')}
               </Bullet>
             ))}
             {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
