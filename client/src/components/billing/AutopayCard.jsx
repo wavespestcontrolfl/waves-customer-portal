@@ -561,7 +561,13 @@ export default function AutopayCard({
                 {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
               </div>
               <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
-                Now {change.current} per {change.unit}. Next charge at the new rate: {change.next} on {formatDate(change.effectiveDate)}.{' '}
+                Now {change.current} per {change.unit}.{' '}
+                {/* nextCharge comes from the server's surcharge authority for
+                    the Auto Pay method; without Auto Pay nothing charges
+                    automatically, so only the start date is stated. */}
+                {change.nextCharge
+                  ? `Next charge at the new rate: $${Number(change.nextCharge.total).toFixed(2)} on ${formatDate(change.effectiveDate)}${change.nextCharge.surcharge > 0 ? ` ($${Number(change.nextCharge.base).toFixed(2)} + $${Number(change.nextCharge.surcharge).toFixed(2)} credit card surcharge)` : ''}.`
+                  : `The new rate starts ${formatDate(change.effectiveDate)}.`}{' '}
                 <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
               </div>
             </div>

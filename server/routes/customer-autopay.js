@@ -30,6 +30,29 @@ function getStripe() {
   return _stripe;
 }
 
+// Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-applied
+// rate change shows on the billing card as the upcoming rate and the next
+// charge at it. The charge comes from the one surcharge authority for the
+// method Auto Pay will charge — never base-rate arithmetic; no Auto Pay
+// method = no automatic charge to announce (nextCharge null). Gate off or
+// nothing pending = no field (byte-identical payload); a read failure omits
+// the field, never the card.
+async function rateChangesField(customerId, { autopayEnabled, method, funding }) {
+  try {
+    const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
+    if (!changes.length) return {};
+    return {
+      rate_changes: changes.map(({ nextCents, ...change }) => {
+        const charge = autopayEnabled && method && nextCents > 0 ? computeChargeAmount(nextCents / 100, method.method_type, { funding }) : null;
+        return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge } : null };
+      }),
+    };
+  } catch (err) {
+    logger.warn(`[customer-autopay] upcoming rate changes read failed: ${err.message}`);
+    return {};
+  }
+}
+
 async function resolveAutopayCardFunding(paymentMethod) {
   if (!paymentMethod
     || paymentMethod.card_funding
@@ -184,17 +207,6 @@ router.get('/', async (req, res, next) => {
 
     const recentEvents = cancelledRead ? [] : await getRecent(req.customerId, 10);
 
-    // Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-
-    // applied rate change shows on the billing card as the upcoming rate
-    // and the next charge at it. Gate off or nothing pending = no field
-    // (byte-identical payload); a read failure omits it, never the card.
-    let rateChanges = [];
-    try {
-      rateChanges = await require('../services/rate-review-comms').upcomingRateChanges(req.customerId);
-    } catch (rateErr) {
-      logger.warn(`[customer-autopay] upcoming rate changes read failed: ${rateErr.message}`);
-    }
-
     res.json({
       state,
       autopay_enabled: customerAutopayEnabled,
@@ -218,7 +230,7 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
-      ...(rateChanges.length ? { rate_changes: rateChanges } : {}),
+      ...(await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding })),
     });
   } catch (err) { next(err); }
 });

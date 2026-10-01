@@ -53,7 +53,6 @@ const PriceChangeNotices = require('../services/price-change-notices');
 const comms = require('../services/rate-review-comms');
 const { CUSTOMER, ROW, BATCH_KEY, NOW } = fixture;
 
-const NOTICE = (n) => `60000000-0000-4000-8000-00000000000${n}`;
 const COST_BLOCK = 'Technician pay is up [test]% since last January. Product and fuel costs went up too.';
 
 const emailLeg = jest.spyOn(PriceChangeNotices, 'sendNoticeEmail');
@@ -216,10 +215,26 @@ describe('sendBatch', () => {
   });
 
   test('a fresh in-flight claim is never re-sent', async () => {
-    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: new Date() })] }));
-    const preview = await comms.sendPreview(BATCH_KEY, { now: new Date() });
+    mockDb.reset(book({ notices: [draft(1, { status: 'sending', updated_at: NOW })] }));
+    const preview = await comms.sendPreview(BATCH_KEY, { now: NOW });
     expect(preview.customers[0].suppressedLines[0].reason).toBe('in_flight');
-    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: new Date() })).toEqual({ ok: false, reason: 'nothing_to_send' });
+    expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: preview.digest, now: NOW })).toEqual({ ok: false, reason: 'nothing_to_send' });
+  });
+
+  test('a stale claim is recovered with the words its crashed attempt froze, not a rebuild', async () => {
+    const stale = new Date(NOW.getTime() - 60 * 60 * 1000);
+    const claimKey = require('crypto').createHash('sha256').update(fixture.noticeRow(1).id).digest('hex').slice(0, 16);
+    const frozen = { key: claimKey, payload: { first_name: 'Testcust1', effective_date: 'December 10, 2026', cost_block: 'The OLD cost block.', notice_url: 'https://portal.example.com/price-change/x' }, letter: { first_name: 'Testcust1', cost_block: 'The OLD cost block.', lines: [{ current_cents: 11700, new_cents: 12100, effective_date: '2026-12-10' }] } };
+    const n = draft(1, { status: 'sending', updated_at: stale });
+    n.metadata = { ...n.metadata, pending_letter: frozen };
+    mockDb.reset(book({ notices: [n] }));
+    const out = await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(out.sent).toBe(1);
+    expect(emailLeg.mock.calls[0][0].vars.cost_block).toBe('The OLD cost block.');
+    const meta = notices()[0].metadata;
+    const parsed = typeof meta === 'string' ? JSON.parse(meta) : meta;
+    expect(parsed.letter.cost_block).toBe('The OLD cost block.');
+    expect(parsed.pending_letter).toBeUndefined();
   });
 
   test('the gate flipped off mid-batch stops the rest', async () => {
@@ -279,6 +294,42 @@ describe('the letter (real renderer over the seeded template)', () => {
   });
 });
 
+describe('letter wording and order', () => {
+  const { whyFor, planBatch } = comms._private;
+  test('a proposal above the new-customer price never claims "not a dollar over it"', () => {
+    const why = whyFor({ billing_lane: 'per_application', cadence_label: 'application' }, { current_rate_cents: 11600, proposed_rate_cents: 12000, list_rate_cents: 11700 });
+    expect(why).toContain('The new rate of $120 keeps pace with the costs above.');
+    expect(why).not.toContain('not a dollar over');
+  });
+
+  test('the first application is the stored visit only while it is live and on/after the effective date', async () => {
+    const n = draft(1, { metadata: { source: 'rate_review', batch_key: BATCH_KEY, first_visit_id: 'v-1' } });
+    const b = book({ notices: [n] });
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-01', status: 'pending' }];
+    mockDb.reset(b);
+    let out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
+    expect(emailLeg.mock.calls[0][0].vars.line1_first).toBe('on or after December 10, 2026');
+    b.scheduled_services = [{ id: 'v-1', scheduled_date: '2026-12-12', status: 'confirmed' }];
+    mockDb.reset(b);
+    out = await comms.sendPreview(BATCH_KEY, { now: NOW });
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: out.digest, now: NOW });
+    expect(emailLeg.mock.calls[1][0].vars.line1_first).toBe('December 12, 2026');
+  });
+
+  test('lines are ordered by effective date once, for the email and the frozen letter alike', async () => {
+    const later = draft(2, { customer_id: CUSTOMER(1), rate_review_row_id: ROW(2), family_key: 'lawn_care', effective_date: '2026-12-20', noticed_current_cents: 6100, noticed_new_cents: 6400, current_amount_cents: 6100, new_amount_cents: 6400 });
+    const b = book({ notices: [later, draft(1)] });
+    b.rate_review_snapshots[0].customer_id = CUSTOMER(1);
+    mockDb.reset(b);
+    expect(typeof planBatch).toBe('function');
+    await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
+    expect(emailLeg.mock.calls[0][0].vars.line1_service).toMatch(/^Pest control/);
+    const review = comms.publicReview(notices()[0]);
+    expect(review.lines.map((l) => l.effectiveDate)).toEqual(['December 10, 2026', 'December 20, 2026']);
+  });
+});
+
 describe('customer surfaces', () => {
   test('public review: undelivered is unavailable; delivered renders the frozen letter', async () => {
     mockDb.reset(book());
@@ -296,10 +347,22 @@ describe('customer surfaces', () => {
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([
-      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
+      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', nextCents: 12100, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
     ]);
     notices()[0].applied_at = new Date();
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('portal: a prepaid change stays upcoming after the nightly apply, until its renewal date', async () => {
+    const prepay = draft(1, {
+      billing_lane: 'annual_prepay', cadence_label: 'year', effective_date: '2027-05-15', status: 'sent', sent_at: NOW, applied_at: NOW,
+      current_amount_cents: 46800, new_amount_cents: 48400, noticed_current_cents: 46800, noticed_new_cents: 48400,
+    });
+    mockDb.reset(book({ notices: [prepay] }));
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([
+      expect.objectContaining({ unit: 'year', current: '$468', next: '$484', nextCents: 48400, effectiveDate: '2027-05-15' }),
+    ]);
+    expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: new Date('2027-05-16T14:00:00Z') })).toEqual([]);
   });
 });
 

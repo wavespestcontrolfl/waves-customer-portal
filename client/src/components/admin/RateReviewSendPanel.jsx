@@ -53,6 +53,43 @@ function SendRow({ customer }) {
   );
 }
 
+const COUNT_LABELS = [["letters", "letters"], ["email", "by email"], ["sms", "by text"], ["suppressedLines", "held back"], ["alreadySent", "already sent"]];
+
+// One place for the preview's defaults, so the render never re-guards them.
+function normalizePreview(preview) {
+  const counts = Object.fromEntries(COUNT_LABELS.map(([key]) => [key, Number(preview?.counts?.[key]) || 0]));
+  return { counts, customers: preview?.customers || [], costBlockReady: !!preview?.costBlockReady, unscheduled: Number(preview?.unscheduled) || 0 };
+}
+
+function PanelBody({ state, error, view, onRetry }) {
+  if (state === "loading") return <div className="text-ui-body text-ink-secondary">Loading the send list…</div>;
+  if (state === "error") return <ActionFeedback error onRetry={onRetry}>{error}</ActionFeedback>;
+  return (
+    <>
+      {!view.costBlockReady && (
+        <ActionFeedback error>Write the cost block in Settings first. The letter prints it, and nothing sends without it.</ActionFeedback>
+      )}
+      <div className="flex flex-wrap gap-4 text-ui-body text-ink-secondary">
+        {COUNT_LABELS.map(([key, label]) => (
+          <span key={key}><span className="u-nums text-zinc-900">{view.counts[key]}</span> {label}</span>
+        ))}
+      </div>
+      {view.customers.length ? (
+        <Table>
+          <THead>
+            <TR><TH>Customer</TH><TH>Letter</TH><TH>Channels</TH><TH align="right">Status</TH></TR>
+          </THead>
+          <TBody>
+            {view.customers.map((c) => <SendRow key={c.customerId} customer={c} />)}
+          </TBody>
+        </Table>
+      ) : (
+        <div className="text-ui-body text-ink-secondary">No notices are prepared for this batch yet.</div>
+      )}
+    </>
+  );
+}
+
 export default function RateReviewSendPanel({ batchKey }) {
   const [preview, setPreview] = useState(null);
   const [state, setState] = useState("loading"); // loading | ready | off | error
@@ -94,7 +131,7 @@ export default function RateReviewSendPanel({ batchKey }) {
     setBusy(true);
     setFeedback(null);
     try {
-      const data = await adminFetch(`/admin/rate-review/batches/${batchKey}/send`, { method: "POST", body: JSON.stringify({ expectedDigest: preview.digest }) });
+      const data = await adminFetch(`/admin/rate-review/batches/${batchKey}/send`, { method: "POST", body: JSON.stringify({ expectedDigest: preview?.digest || "" }) });
       const extra = [data.unreachable && `${data.unreachable} unreachable`, data.failed && `${data.failed} failed`].filter(Boolean).join(", ");
       setFeedback({ ok: !data.failed, text: `${plural(data.sent || 0, "letter")} sent (${data.emailed || 0} emailed, ${data.texted || 0} texted)${extra ? `; ${extra}` : ""}.` });
     } catch (e) {
@@ -108,9 +145,9 @@ export default function RateReviewSendPanel({ batchKey }) {
 
   if (state === "off") return null;
 
-  const counts = preview?.counts || {};
-  const customers = preview?.customers || [];
-  const canSend = state === "ready" && preview?.costBlockReady && counts.letters > 0;
+  const view = normalizePreview(preview);
+  const canSend = state === "ready" && view.costBlockReady && view.counts.letters > 0;
+  const lettersLabel = plural(view.counts.letters, "letter");
 
   return (
     <Card>
@@ -123,60 +160,31 @@ export default function RateReviewSendPanel({ batchKey }) {
             </div>
           </div>
           <div className="flex gap-2">
-            {preview?.unscheduled > 0 && (
-              <Button variant="secondary" onClick={scheduleDrafts} disabled={busy}>Prepare {plural(preview.unscheduled, "notice")}</Button>
+            {view.unscheduled > 0 && (
+              <Button variant="secondary" onClick={scheduleDrafts} disabled={busy}>Prepare {plural(view.unscheduled, "notice")}</Button>
             )}
-            <Button onClick={() => setConfirming(true)} disabled={!canSend || busy}>Send {plural(counts.letters || 0, "letter")}</Button>
+            <Button onClick={() => setConfirming(true)} disabled={!canSend || busy}>Send {lettersLabel}</Button>
           </div>
         </div>
-
-        {state === "loading" && <div className="text-ui-body text-ink-secondary">Loading the send list…</div>}
-        {state === "error" && <ActionFeedback error onRetry={load}>{error}</ActionFeedback>}
-        {state === "ready" && !preview.costBlockReady && (
-          <ActionFeedback error>Write the cost block in Settings first. The letter prints it, and nothing sends without it.</ActionFeedback>
-        )}
         {feedback && <ActionFeedback error={!feedback.ok}>{feedback.text}</ActionFeedback>}
-
-        {state === "ready" && (
-          <>
-            <div className="flex flex-wrap gap-4 text-ui-body text-ink-secondary">
-              <span><span className="u-nums text-zinc-900">{counts.letters || 0}</span> letters</span>
-              <span><span className="u-nums text-zinc-900">{counts.email || 0}</span> by email</span>
-              <span><span className="u-nums text-zinc-900">{counts.sms || 0}</span> by text</span>
-              <span><span className="u-nums text-zinc-900">{counts.suppressedLines || 0}</span> held back</span>
-              <span><span className="u-nums text-zinc-900">{counts.alreadySent || 0}</span> already sent</span>
-            </div>
-            {customers.length > 0 ? (
-              <Table>
-                <THead>
-                  <TR><TH>Customer</TH><TH>Letter</TH><TH>Channels</TH><TH align="right">Status</TH></TR>
-                </THead>
-                <TBody>
-                  {customers.map((c) => <SendRow key={c.customerId} customer={c} />)}
-                </TBody>
-              </Table>
-            ) : (
-              <div className="text-ui-body text-ink-secondary">No notices are prepared for this batch yet.</div>
-            )}
-          </>
-        )}
+        <PanelBody state={state} error={error} view={view} onRetry={load} />
       </CardBody>
 
       <Dialog open={confirming} onClose={() => !busy && setConfirming(false)} size="md">
-        <DialogHeader><DialogTitle>Send {plural(counts.letters || 0, "letter")}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>Send {lettersLabel}</DialogTitle></DialogHeader>
         <DialogBody className="space-y-3">
           <p className="m-0">
-            {counts.email || 0} by email and {counts.sms || 0} by text go out now. Each customer's new rate applies to
+            {view.counts.email} by email and {view.counts.sms} by text go out now. Each customer's new rate applies to
             their first application on or after the date in their letter, at least 30 days from today.
           </p>
           <p className="m-0 text-ink-secondary">
-            {plural(counts.suppressedLines || 0, "line")} held back stay unsent. If the list or the cost block changed
+            {plural(view.counts.suppressedLines, "line")} held back stay unsent. If the list or the cost block changed
             since this preview, nothing sends and the list reloads.
           </p>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setConfirming(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={send} loading={busy}>Send {plural(counts.letters || 0, "letter")}</Button>
+          <Button onClick={send} loading={busy}>Send {lettersLabel}</Button>
         </DialogFooter>
       </Dialog>
     </Card>

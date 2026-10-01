@@ -103,6 +103,8 @@ function money(centsValue) {
   return PriceChangeNotices.formatMoney(Number(centsValue) || 0);
 }
 
+const byEffective = (a, b) => String(a.effectiveDate).localeCompare(String(b.effectiveDate));
+
 function dateLabel(day) {
   return formatDisplayDate(day, { fallback: day || '' });
 }
@@ -145,9 +147,9 @@ function whyFor(notice, snapshot) {
   if (list > 0 && current > 0 && perUnit === 'application') {
     if (current < list) {
       parts.push(`At ${money(current)} per application, that is below what we charge a new customer for the same service today (${money(list)}).`);
-      parts.push(proposed >= list
-        ? 'The new rate brings you to that number, and not a dollar over it.'
-        : `I am moving it part of the way this year, to ${money(proposed)}, and you stay under the new-customer rate.`);
+      if (proposed === list) parts.push('The new rate brings you to that number, and not a dollar over it.');
+      else if (proposed < list) parts.push(`I am moving it part of the way this year, to ${money(proposed)}, and you stay under the new-customer rate.`);
+      else parts.push(`The new rate of ${money(proposed)} keeps pace with the costs above.`);
     } else {
       parts.push(`Your current rate of ${money(current)} per application is in line with what we charge a new customer for the same service today (${money(list)}). This change keeps pace with the costs above.`);
     }
@@ -198,14 +200,17 @@ function lineFor(notice, snapshot, customer, firstVisitDay) {
     newLabel: `From ${dateLabel(effective)}`,
     new: `${money(next)} per ${unit} (up ${money(next - current)})`,
     firstLabel: unit === 'month' ? 'First month at the new rate' : 'First application at the new rate',
-    first: dateLabel(firstVisitDay || effective),
+    // The stored first visit only while it is still a live visit on or
+    // after the effective date (the apply reprices exactly those); else
+    // the date the rule itself states.
+    first: firstVisitDay ? dateLabel(firstVisitDay) : `on or after ${dateLabel(effective)}`,
     why: whyFor(notice, snapshot),
   };
 }
 
 // The email payload (and the frozen page content) for one customer's lines.
 function letterPayload({ customer, lines, costBlock, noticeUrl }) {
-  const ordered = [...lines].sort((a, b) => (a.effectiveDate < b.effectiveDate ? -1 : a.effectiveDate > b.effectiveDate ? 1 : 0));
+  const ordered = [...lines].sort(byEffective);
   const payload = {
     first_name: firstName(customer),
     effective_date: dateLabel(ordered[0].effectiveDate),
@@ -258,15 +263,57 @@ async function loadBatch(dbh, batchKey) {
   const customers = customerIds.length ? await dbh('customers').whereIn('id', customerIds) : [];
   const prefs = customerIds.length ? await dbh('notification_prefs').whereIn('customer_id', customerIds).catch(() => []) : [];
   const visitIds = notices.map((n) => parseJson(n.metadata, {}).first_visit_id).filter(Boolean);
-  const visits = visitIds.length ? await dbh('scheduled_services').whereIn('id', visitIds).select('id', 'scheduled_date') : [];
+  const visits = visitIds.length ? await dbh('scheduled_services').whereIn('id', visitIds).select('id', 'scheduled_date', 'status') : [];
+  const visitById = new Map(visits.map((v) => [String(v.id), v]));
+  const firstVisits = new Map();
+  for (const n of notices) {
+    const v = visitById.get(String(parseJson(n.metadata, {}).first_visit_id || ''));
+    const day = v && ['pending', 'confirmed'].includes(String(v.status)) ? ymd(v.scheduled_date) : null;
+    if (day && day >= ymd(n.effective_date)) firstVisits.set(String(n.id), day);
+  }
   return {
     snapshots: new Map(snapshots.map((s) => [String(s.notice_id), s])),
     notices,
     customers: new Map(customers.map((c) => [String(c.id), c])),
     prefs: new Map((prefs || []).map((p) => [String(p.customer_id), p])),
-    visitDates: new Map(visits.map((v) => [String(v.id), ymd(v.scheduled_date)])),
+    firstVisits,
     unscheduled: approvedUnscheduled.length,
   };
+}
+
+// Ordered suppression rules — the first that matches holds the line (or,
+// for the account rules, the whole letter).
+const LINE_RULES = [
+  ['not_approved', ({ snapshot }) => !snapshot || String(snapshot.status) !== 'approved'],
+  ['unsupported_line', ({ notice }) => !SERVICE_LABELS[notice.family_key]],
+  ['invalid_amount', ({ line }) => !(line.currentCents > 0 && line.newCents > line.currentCents)],
+  ['too_late', ({ line, today }) => !line.effectiveDate || daysBetween(today, line.effectiveDate) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)],
+  ['in_flight', ({ notice, now }) => !claimable(notice, now)],
+];
+const ACCOUNT_RULES = [
+  ['customer_inactive', ({ customer }) => !customer || !!customer.deleted_at || customer.active === false],
+  ['too_many_lines', ({ entry }) => entry.lines.length > LINE_SLOTS],
+  ['no_contact', ({ entry }) => !entry.channels.email && !entry.channels.sms],
+];
+const firstMatch = (rules, ctx) => (rules.find(([, test]) => test(ctx)) || [null])[0];
+
+function planEntry(data, customerId, notices, { today, now }) {
+  const customer = data.customers.get(customerId) || null;
+  const entry = { customerId, customer, name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer', lines: [], alreadySent: [], suppressedLines: [], reason: null, channels: { email: false, sms: false } };
+  for (const notice of notices) {
+    if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
+    const snapshot = data.snapshots.get(String(notice.id)) || null;
+    const line = lineFor(notice, snapshot, customer, data.firstVisits.get(String(notice.id)));
+    const reason = firstMatch(LINE_RULES, { notice, snapshot, line, today, now });
+    if (reason) entry.suppressedLines.push({ noticeId: notice.id, reason, label: REASONS[reason], service: line.service, effectiveDate: line.effectiveDate });
+    else entry.lines.push({ ...line, notice });
+  }
+  // One order everywhere: the email, the frozen letter and the page.
+  entry.lines.sort(byEffective);
+  if (!entry.lines.length) return entry;
+  if (customer) entry.channels = hasContact(customer, data.prefs.get(customerId));
+  entry.reason = firstMatch(ACCOUNT_RULES, { customer, entry });
+  return entry;
 }
 
 // One entry per customer. Lines whose own state bars them (late, already
@@ -278,38 +325,8 @@ function planBatch(data, { today, now }) {
     if (!byCustomer.has(key)) byCustomer.set(key, []);
     byCustomer.get(key).push(notice);
   }
-  const entries = [];
-  for (const [customerId, notices] of byCustomer) {
-    const customer = data.customers.get(customerId) || null;
-    const entry = { customerId, name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer', lines: [], alreadySent: [], suppressedLines: [], reason: null, channels: { email: false, sms: false } };
-    for (const notice of notices) {
-      const snapshot = data.snapshots.get(String(notice.id)) || null;
-      const effective = ymd(notice.effective_date);
-      if (notice.sent_at) { entry.alreadySent.push(notice.id); continue; }
-      const meta = parseJson(notice.metadata, {});
-      const line = lineFor(notice, snapshot, customer, data.visitDates.get(String(meta.first_visit_id || '')));
-      let lineReason = null;
-      if (!snapshot || String(snapshot.status) !== 'approved') lineReason = 'not_approved';
-      else if (!SERVICE_LABELS[notice.family_key]) lineReason = 'unsupported_line';
-      else if (!(line.newCents > line.currentCents) || !(line.currentCents > 0)) lineReason = 'invalid_amount';
-      else if (!effective || daysBetween(today, effective) < MIN_NOTICE_DAYS + (line.unit === 'year' ? 1 : 0)) lineReason = 'too_late';
-      else if (!claimable(notice, now)) lineReason = 'in_flight';
-      if (lineReason) entry.suppressedLines.push({ noticeId: notice.id, reason: lineReason, label: REASONS[lineReason], service: line.service, effectiveDate: effective });
-      else entry.lines.push({ ...line, notice });
-    }
-    if (entry.lines.length) {
-      if (!customer || customer.deleted_at || customer.active === false) entry.reason = 'customer_inactive';
-      else if (entry.lines.length > LINE_SLOTS) entry.reason = 'too_many_lines';
-      else {
-        entry.channels = hasContact(customer, data.prefs.get(customerId));
-        if (!entry.channels.email && !entry.channels.sms) entry.reason = 'no_contact';
-      }
-    }
-    entry.customer = customer;
-    entries.push(entry);
-  }
-  entries.sort((a, b) => a.customerId.localeCompare(b.customerId));
-  return entries;
+  return [...byCustomer].map(([customerId, notices]) => planEntry(data, customerId, notices, { today, now }))
+    .sort((a, b) => a.customerId.localeCompare(b.customerId));
 }
 
 function digestFor(entries, costBlock) {
@@ -402,8 +419,7 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
   if (!lines.length) {
     const notice = data.notices.find((n) => String(n.id) === String(row.notice_id));
     if (!notice) throw badInput('This row has no scheduled notice yet', 404);
-    const meta = parseJson(notice.metadata, {});
-    lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id)), data.visitDates.get(String(meta.first_visit_id || ''))), notice }];
+    lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id)), data.firstVisits.get(String(notice.id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
   const payload = letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
@@ -420,13 +436,13 @@ async function claimLines(dbh, lines, now) {
       .where({ id: l.noticeId })
       .whereNull('sent_at')
       .whereIn('status', ['draft', 'viewed', 'unreachable'])
-      .update({ status: 'sending', updated_at: now });
+      .update({ status: 'sending', updated_at: new Date() });
     if (!n) {
       n = await dbh('price_change_notices')
         .where({ id: l.noticeId, status: 'sending' })
         .whereNull('sent_at')
         .where('updated_at', '<', new Date(now.getTime() - CLAIM_STALE_MS))
-        .update({ status: 'sending', updated_at: now });
+        .update({ status: 'sending', updated_at: new Date() });
     }
     if (!n) {
       if (claimed.length) await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status: 'draft', updated_at: new Date() });
@@ -437,35 +453,8 @@ async function claimLines(dbh, lines, now) {
   return claimed;
 }
 
-async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
-  const claimed = await claimLines(dbh, entry.lines, now);
-  if (!claimed) return { outcome: 'in_flight' };
-  const customer = entry.customer;
-  const noticeUrl = noticeUrlFor(entry.lines);
-  const payload = letterPayload({ customer, lines: entry.lines, costBlock, noticeUrl });
-  const idHash = crypto.createHash('sha256').update([...claimed].sort().join(',')).digest('hex').slice(0, 16);
-  const email = await PriceChangeNotices.sendNoticeEmail({
-    customer,
-    idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${idHash}`,
-    vars: payload,
-    templateKey: TEMPLATE_KEY,
-    categories: ['billing', 'rate_review_notice'],
-  });
-  const sms = await PriceChangeNotices.sendNoticeSms({
-    customer,
-    vars: { effective_date: payload.effective_date, price_change_url: noticeUrl },
-    actorId,
-    hasEmailLeg: email.sent,
-    operatorInitiated: true,
-  });
-  if (!email.sent && !sms.sent) {
-    const status = (email.attempted || sms.attempted) ? 'draft' : 'unreachable';
-    await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status, updated_at: new Date() });
-    return { outcome: status === 'draft' ? 'failed' : 'unreachable' };
-  }
-  const sentAt = new Date();
-  const letter = {
-    sent_on: etDateString(sentAt),
+function frozenLetter(entry, payload, costBlock) {
+  return {
     first_name: payload.first_name,
     cost_block: costBlock,
     lines: entry.lines.map((l) => ({
@@ -476,11 +465,55 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
       term_end: l.termEnd || null,
     })),
   };
+}
+
+// The letter for this claim. A reclaim of a crashed attempt (same notice
+// set) reuses the words that attempt froze BEFORE it sent — the email leg
+// dedupes on its idempotency key, so the page must show what that email
+// said, never a rebuild from data edited since.
+async function letterForClaim(dbh, entry, { claimKey, costBlock }) {
+  const pending = entry.lines.map((l) => parseJson(l.notice.metadata, {}).pending_letter);
+  if (pending.every((p) => p && p.key === claimKey)) return pending[0];
+  const payload = letterPayload({ customer: entry.customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
+  const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   for (const l of entry.lines) {
     const meta = parseJson(l.notice.metadata, {});
+    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({ metadata: JSON.stringify({ ...meta, pending_letter: frozen }) });
+  }
+  return frozen;
+}
+
+async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
+  const claimed = await claimLines(dbh, entry.lines, now);
+  if (!claimed) return { outcome: 'in_flight' };
+  const customer = entry.customer;
+  const claimKey = crypto.createHash('sha256').update([...claimed].sort().join(',')).digest('hex').slice(0, 16);
+  const { payload, letter } = await letterForClaim(dbh, entry, { claimKey, costBlock });
+  const email = await PriceChangeNotices.sendNoticeEmail({
+    customer,
+    idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
+    vars: payload,
+    templateKey: TEMPLATE_KEY,
+    categories: ['billing', 'rate_review_notice'],
+  });
+  const sms = await PriceChangeNotices.sendNoticeSms({
+    customer,
+    vars: { effective_date: payload.effective_date, price_change_url: payload.notice_url },
+    actorId,
+    hasEmailLeg: email.sent,
+    operatorInitiated: true,
+  });
+  if (!email.sent && !sms.sent) {
+    const status = (email.attempted || sms.attempted) ? 'draft' : 'unreachable';
+    await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status, updated_at: new Date() });
+    return { outcome: status === 'draft' ? 'failed' : 'unreachable' };
+  }
+  const sentAt = new Date();
+  for (const l of entry.lines) {
+    const { pending_letter: _pending, ...meta } = parseJson(l.notice.metadata, {});
     await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
       status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-      metadata: JSON.stringify({ ...meta, letter }), updated_at: sentAt,
+      metadata: JSON.stringify({ ...meta, letter: { ...letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
     });
     await dbh('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
   }
@@ -509,7 +542,7 @@ async function sendBatch(batchKey, { expectedDigest, actorId = null, dbh = db, n
     await Promise.all(sendable.slice(i, i + SEND_CONCURRENCY).map(async (entry) => {
       if (!rateReviewLive()) { summary.stoppedByGate += 1; return; }
       try {
-        const res = await sendEntry(dbh, entry, { batchKey, costBlock, actorId, now: new Date() });
+        const res = await sendEntry(dbh, entry, { batchKey, costBlock, actorId, now });
         if (res.outcome === 'sent') {
           summary.sent += 1;
           if (res.email) summary.emailed += 1;
@@ -587,17 +620,21 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
     .where({ customer_id: customerId })
     .whereNotNull('rate_review_row_id')
     .whereNotNull('sent_at')
-    .whereNull('applied_at')
     .whereIn('status', ['sent', 'viewed'])
     .where('effective_date', '>=', today)
     .orderBy('effective_date', 'asc');
-  return rows.map((n) => {
+  // A prepaid notice is "applied" the night after delivery (the successor
+  // term's amount is written then), but the customer's rate only changes at
+  // renewal — it stays upcoming until its effective date. Every other lane
+  // drops off once the nightly apply writes the new rate.
+  return rows.filter((n) => !n.applied_at || n.billing_lane === 'annual_prepay').map((n) => {
     const unit = unitFor(n);
     return {
       service: SERVICE_LABELS[n.family_key] || null,
       unit,
       current: money(n.noticed_current_cents ?? n.current_amount_cents),
       next: money(n.noticed_new_cents ?? n.new_amount_cents),
+      nextCents: Number(n.noticed_new_cents ?? n.new_amount_cents),
       effectiveDate: ymd(n.effective_date),
       noticePath: `/price-change/${n.notice_token}`,
     };

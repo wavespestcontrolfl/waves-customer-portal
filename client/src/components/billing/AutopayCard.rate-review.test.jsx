@@ -24,14 +24,25 @@ describe('AutopayCard upcoming rate line', () => {
   it('renders the upcoming rate, the next charge at it, and the notice link', async () => {
     mockGetAutopay.mockResolvedValue({
       ...base,
-      rate_changes: [{ service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/abc' }],
+      rate_changes: [{ service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/abc', nextCharge: { total: 124.5, base: 121, surcharge: 3.5 } }],
     });
     render(<AutopayCard customer={{}} />);
     const box = await screen.findByTestId('rate-review-upcoming');
     expect(box).toHaveTextContent('Pest control: $121 per application from Dec 10, 2026');
-    expect(box).toHaveTextContent('Now $117 per application. Next charge at the new rate: $121 on Dec 10, 2026.');
+    expect(box).toHaveTextContent('Now $117 per application. Next charge at the new rate: $124.50 on Dec 10, 2026 ($121.00 + $3.50 credit card surcharge).');
     expect(screen.getByRole('link', { name: 'View notice' })).toHaveAttribute('href', '/price-change/abc');
     expect(box).not.toHaveTextContent(/per visit|monthly/i);
+  });
+
+  it('without Auto Pay, states only when the new rate starts', async () => {
+    mockGetAutopay.mockResolvedValue({
+      ...base, state: 'disabled', autopay_enabled: false,
+      rate_changes: [{ service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/abc', nextCharge: null }],
+    });
+    render(<AutopayCard customer={{}} />);
+    const box = await screen.findByTestId('rate-review-upcoming');
+    expect(box).toHaveTextContent('The new rate starts Dec 10, 2026.');
+    expect(box).not.toHaveTextContent('Next charge');
   });
 
   it('renders nothing extra without rate_changes', async () => {
