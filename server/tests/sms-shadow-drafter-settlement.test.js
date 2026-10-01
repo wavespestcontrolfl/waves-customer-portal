@@ -448,3 +448,51 @@ describe('round-11: not_received contradicted by reversed rows; settlement needs
     }
   });
 });
+
+// Codex round-37 P1 (PR #5331): when billing ownership is UNAVAILABLE (e.g. the payer-linkage lookup failed) the rows still
+// sitting on the context are not trustworthy, so EVERY payment-adjacent claim kind fails closed — refund claims included.
+describe('round-37: billing unavailable fails closed for every claim kind', () => {
+  const refundedRow = { amount: 120, status: 'refunded', refund_status: 'full', refund_amount: 120, payment_date: '2026-09-12', payment_method_type: 'card' };
+  const invoice = { id: 'i1', invoiceNumber: 'WPC-2026-0101', status: 'paid', total: 120, amountDue: 0 };
+  const ctx = (extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: [refundedRow], invoiceStatuses: [invoice], ...extra } });
+
+  test.each([
+    ['refund completed', 'Your $120 refund was issued.'],
+    ['invoice status', 'Invoice #0101 is paid.'],
+  ])('%s: grounded with available billing, rejected once billing is unavailable', (_n, reply) => {
+    expect(check(reply, ctx())).toBe(false);
+    expect(check(reply, ctx({ unavailable: true }))).toBe(true);
+  });
+
+  test('every refund state (pending / failed / "no refund") is rejected when billing is unavailable', () => {
+    for (const reply of ['Your refund is pending.', 'No refund is showing.', 'Your $120 refund failed.']) {
+      expect({ reply, bad: check(reply, ctx({ unavailable: true })) }).toEqual({ reply, bad: true });
+    }
+  });
+
+  test('an anaphoric follow-up ("...but it was refunded") inherits no row when billing is unavailable', () => {
+    const reply = 'We received your $120 payment from Sep 12, but it was refunded.';
+    expect(check(reply, ctx({ unavailable: true, recentPayments: [{ ...refundedRow, status: 'paid' }] }))).toBe(true);
+  });
+
+  test('an owed figure and an invoice-tender claim are rejected when billing is unavailable', () => {
+    expect(check('You owe $120.', ctx({ unavailable: true, outstandingBalance: 120 }))).toBe(true);
+    expect(check('Invoice #0101 is paid with your card.', ctx({ unavailable: true }))).toBe(true);
+  });
+
+  test('gate OFF (byMeaning false) is the unchanged pooled allowlist: unavailable billing does not change the verdict', () => {
+    const off = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: false });
+    expect(off('Your $120 refund was issued.', ctx({ unavailable: true }))).toBe(off('Your $120 refund was issued.', ctx()));
+  });
+});
+
+// Codex round-37 P2 class: the invoice-status list is CUT at 8, so a bare tail ("#0123") cannot be resolved against it.
+describe('round-37: invoice status tail references against a truncated list', () => {
+  const mk = (n, y) => ({ id: `i${y}${n}`, invoiceNumber: `WPC-${y}-${n}`, status: 'paid', total: 120, amountDue: 0 });
+  const billing = (truncated) => ({ outstandingBalance: 0, recentPayments: [], invoiceStatuses: [mk('0123', 2026)], invoiceStatusesTruncated: truncated });
+  test('a tail resolves against a complete list, not a truncated one; a FULL number still resolves', () => {
+    expect(check('Invoice #0123 is paid.', { billing: billing(false) })).toBe(false);
+    expect(check('Invoice #0123 is paid.', { billing: billing(true) })).toBe(true);
+    expect(check('Invoice WPC-2026-0123 is paid.', { billing: billing(true) })).toBe(false);
+  });
+});

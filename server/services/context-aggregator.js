@@ -709,10 +709,13 @@ class ContextAggregator {
     }));
     // The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for
     // "your invoice is paid / processing" statements (Codex round-20 P1). null = billing unavailable (unknown).
-    const invoiceStatuses = billingUnavailable ? null : invoiceRows
+    const invoiceStatusRows = billingUnavailable ? null : invoiceRows
       // a packet invoice WITHDRAWN to a third-party payer keeps payer_id NULL and a collectible status — only its
       // stamp says it is the payer's debt, never the homeowner's (Codex round-23 P1)
-      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft' && !invoiceWithdrawnFromCustomer(inv))
+      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft' && !invoiceWithdrawnFromCustomer(inv));
+    // the list is CUT at 8: a bare tail ("#0123") cannot be resolved against a cut list (Codex round-37 P2 class)
+    const invoiceStatusesTruncated = !!invoiceStatusRows && invoiceStatusRows.length > 8;
+    const invoiceStatuses = invoiceStatusRows && invoiceStatusRows
       .slice(0, 8)
       .map((inv) => ({
         id: inv.id, invoiceNumber: inv.invoice_number || null, status: String(inv.status || ''),
@@ -873,6 +876,7 @@ class ContextAggregator {
         // not conclude "that invoice isn't open" from its absence (Codex round-28 P2)
         openInvoicesTruncated: collectibleOpen.length > OPEN_INVOICES_CAP,
         invoiceStatuses,
+        invoiceStatusesTruncated,
         payerBilledInvoice: hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand

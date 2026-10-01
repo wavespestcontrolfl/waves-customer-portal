@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const { loadPayerLinkage } = require('./payer-linkage');
 const logger = require('./logger');
+const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
 
 const PAYMENT_HISTORY_CAP = 200;
@@ -53,6 +54,9 @@ async function loadPaymentHistory(customerId, dbh = db) {
         `NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ${uuidFromMetadata('payments')} AND i.customer_id = ? AND i.payer_id IS NOT NULL)`,
         [customerId],
       )
+      // A never-attempted collection_hold placeholder is not a payment the customer made: it neither contradicts "your payment
+      // isn't showing" nor grounds "your payment failed". Main's shared SQL exclusion, applied BEFORE the cap (Codex round-37 P1).
+      .modify((qb) => excludeNeverAttemptedHoldDeferrals(qb, 'payments'))
       .orderBy('payments.payment_date', 'desc')
       .orderBy('payments.created_at', 'desc') // deterministic tie-break for same-day attempts (Codex round-27 P1)
       .orderBy('payments.id', 'desc')

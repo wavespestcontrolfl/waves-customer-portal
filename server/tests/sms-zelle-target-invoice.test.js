@@ -281,6 +281,20 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
 });
 
 // Codex round-28 P2: a cut open-invoice list proves nothing about a NAMED invoice.
+describe('truncated open-invoice list: tail matches (round 37 P2)', () => {
+  const list = [inv('a', 'WPC-2026-0123', 100), inv('b', 'WPC-2026-0456', 200)];
+  test('a bare tail ("#0123") does not resolve against a TRUNCATED list; only a full number does', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'Zelle invoice #0123?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'Zelle invoice WPC-2026-0123?')).toEqual({ invoiceId: 'a', reason: 'invoice_number' });
+    // a tail that is just the tail of the named full number is the same reference
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'Zelle invoice WPC-2026-0123 (#0123)?').invoiceId).toBe('a');
+  });
+  test('the same tail still resolves on a complete list (unchanged)', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: false }, 'Zelle invoice #0123?')).toEqual({ invoiceId: 'a', reason: 'invoice_number' });
+    expect(resolveZelleTargetInvoice({ openInvoices: list }, 'Zelle invoice #0123?').invoiceId).toBe('a');
+  });
+});
+
 describe('truncated open-invoice list (round 28)', () => {
   const open = [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 50 }, { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 60 }];
   test('a named invoice absent from a TRUNCATED list is unresolved (not a "conflict")', () => {

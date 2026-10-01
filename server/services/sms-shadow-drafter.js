@@ -2261,7 +2261,7 @@ function validateAbsenceClaim(c, env) {
 // must bind to a CURRENT open invoice or outstanding balance — a voided/canceled invoice
 // (no paid row, nothing open) never grounds it, at draft time or at the send-time recheck.
 function validateUnpaidClaim(c, env) {
-  if (!env.hasOpenObligation) return true;
+  if (env.billingUnavailable || !env.hasOpenObligation) return true;
   return validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a));
 }
 const PRESENCE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
@@ -2289,6 +2289,8 @@ function refundedCentsOfRow(p) {
 // every refund row matching the named amount / date must be in the claimed state; none => ungrounded (an 'absent' claim
 // is the reverse: grounded only when NO refund matches). Truncated, unreadable history fails closed.
 function validateRefundClaim(claim, env) {
+  // billing UNAVAILABLE => no row is trustworthy: neither a refund claim nor a "no refund is showing" denial can be judged (Codex round-37 P1)
+  if (env.billingUnavailable) return true;
   const ctx = env.context;
   if (claim.state === 'unsupported' || claim.state === 'unknown') return true;
   if (ctx?.billing?.recentPaymentsTruncated === true && ctx?.billing?.paymentHistory === null) return true;
@@ -2337,7 +2339,7 @@ const KIND_VALIDATORS = {
   // and unavailable history blocks. (Amount-bearing negated acks stay rejected outright.)
   negated_ack: (c, env) => c.amounts.length > 0 || validateAbsenceClaim({ ...c, family: 'not_received' }, env),
   settlement: (c, env) => env.hasOutstandingObligation || env.billingUnavailable,
-  owed: (c, env) => c.amounts.some((a) => !env.owedCents.has(a)),
+  owed: (c, env) => env.billingUnavailable || c.amounts.some((a) => !env.owedCents.has(a)),
   trusted_owed: () => false,
   // figures explicitly stated as OWED inside a clause that also makes a status / absence claim (round-18)
   owed_figures: (c, env) => !env.trustOwedAmounts && c.amounts.some((a) => !env.owedCents.has(a)),
@@ -2360,6 +2362,7 @@ function isAnaphoricPaymentClause(text, amounts) {
   return ANAPHOR_SUBJECT_RE.test(text);
 }
 function validateAnaphoricClaim(claim, text, env) {
+  if (env.billingUnavailable) return true; // an inherited row is a billing row too (round 37)
   const row = env.antecedent;
   if (!row) return true;
   if (claim.kind === 'status') {
@@ -2381,7 +2384,7 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   claim.matchedInvoice = null;
   claim.matchedInvoices = [];
   const list = env.context?.billing?.invoiceStatuses;
-  if (!Array.isArray(list)) return true; // invoice state unavailable => fail closed
+  if (env.billingUnavailable || !Array.isArray(list)) return true; // invoice state unavailable => fail closed
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const strip0 = (x) => String(x).replace(/^0+/, '') || '0';
   const named = [text, env.inboundText].map(invoiceNumbersNamed);
@@ -2424,6 +2427,7 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   if (refs.length) {
     invoices = [];
     for (const [kind, value] of refs) {
+      if (kind === 'tail' && env.context?.billing?.invoiceStatusesTruncated) return true; // a bare tail cannot be resolved against a CUT list (round 37)
       const hit = resolveNumber(kind, value);
       if (hit.length !== 1) return true; // missing or ambiguous
       if (!invoices.includes(hit[0])) invoices.push(hit[0]);
@@ -2454,6 +2458,7 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
 function invoiceTenderUngrounded(claim, text, env) {
   // the rows that back the invoice's CLAIMED status: settling rows for paid, in-flight rows for processing (Codex round-34)
   if (!claim.matchedInvoice || !['paid', 'pending', 'refunded'].includes(claim.family)) return false;
+  if (env.billingUnavailable) return true; // the backing rows cannot be trusted (round 37)
   // judge the sub-clause(s) asserting the paid status (the whole clause for a receipt-shaped invoice claim); a how-to /
   // offer sub-clause ("pay by card next time") names no past payment
   const ranges = subclauseRanges(text);

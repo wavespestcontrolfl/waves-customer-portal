@@ -13,6 +13,7 @@ function fakeDb(rows, { fail = false, payerInvoices = [], linkageFails = false }
   ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => {
     q[m] = jest.fn((...args) => { calls.push([m, args]); return q; });
   });
+  q.modify = jest.fn((fn) => { fn(q); return q; });
   q.then = (res, rej) => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows)).then(res, rej);
   // the shared payer-linkage lookup (services/payer-linkage.js): the customer's payer-owned invoices
   const inv = {};
@@ -47,6 +48,17 @@ describe('loadPaymentHistory', () => {
     const rec = { whereNull: (c) => { inner.push(['whereNull', c]); return rec; }, orWhereNot: (c, v) => { inner.push(['orWhereNot', c, v]); return rec; } };
     grouped.call(rec);
     expect(inner).toEqual([['whereNull', 'payments.status'], ['orWhereNot', 'payments.status', 'upcoming']]);
+  });
+
+  test('never-attempted collection_hold deferrals are excluded IN SQL, before the limit (Codex round-37 P1)', async () => {
+    const dbh = fakeDb([{ id: 1 }]);
+    await loadPaymentHistory('c1', dbh);
+    const raws = dbh.calls.map(([m, a], i) => [m, a, i]).filter(([m]) => m === 'whereRaw');
+    const hold = raws.find(([, a]) => /deferred_reason/.test(a[0]));
+    expect(hold).toBeDefined();
+    expect(hold[1][0]).toMatch(/^NOT \(/);
+    expect(hold[1][1]).toEqual(['collection_hold', 'absorbed_annual_prepay']);
+    expect(hold[2]).toBeLessThan(dbh.calls.findIndex(([m]) => m === 'limit'));
   });
 
   test('complete is exact: <= cap rows complete; cap+1 rows is truncated to cap and incomplete', async () => {

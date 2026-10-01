@@ -59,7 +59,10 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   const fullTailSet = new Set(named.full.map((f) => stripZeros(f.split('-').pop())));
   const refs = [
     ...named.full.map((f) => (inv) => String(inv.invoiceNumber || '').toUpperCase() === f),
+    // Codex round-37 P2: when the open list was CUT, a bare tail ("#0123") could match the wrong invoice (same tail, another
+    // year, one the list dropped) — it never resolves; only a FULL invoice number does.
     ...named.tail.filter((t) => !fullTailSet.has(stripZeros(t))).map((t) => (inv) => {
+      if (billing?.openInvoicesTruncated) return false;
       const num = String(inv.invoiceNumber || '').toUpperCase();
       return !!num && stripZeros(t) === stripZeros(num.split('-').pop());
     }),
