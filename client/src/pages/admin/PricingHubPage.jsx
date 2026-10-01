@@ -1,9 +1,10 @@
 import React, { useState } from "react";
-import { BarChart3, Calculator, Megaphone } from "lucide-react";
+import { BarChart3, Calculator, ClipboardList, Megaphone } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import PricingLogicPage from "./PricingLogicPage";
 import PricingStrategyPage from "./PricingStrategyPage";
 import AdminPriceChangePage from "./AdminPriceChangePage";
+import RateReviewPage, { useRateReviewAvailable } from "./RateReviewPage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -16,17 +17,25 @@ export const PRICING_AREAS = [
   // technicians rather than mounting a page whose every request 403s.
   { key: "strategy", label: "Strategy", Icon: BarChart3, adminOnly: true },
   { key: "notices", label: "Notices", Icon: Megaphone },
+  // Dark behind GATE_RATE_REVIEW: /api/admin/rate-review answers 404 while
+  // the gate is off, so the area exists only once the probe says enabled.
+  { key: "rate-review", label: "Rate review", Icon: ClipboardList, adminOnly: true, gated: true },
 ];
 
 export default function PricingHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isAdmin = getAdminUser()?.role === "admin";
-  const visibleAreas = PRICING_AREAS.filter(({ adminOnly }) => !adminOnly || isAdmin);
+  // 'pending' | 'on' | 'off' — one probe per mount, admins only.
+  const rateReview = useRateReviewAvailable(isAdmin);
+  const visibleAreas = PRICING_AREAS.filter(({ adminOnly, gated }) => (!adminOnly || isAdmin) && (!gated || rateReview === "on"));
   const visibleAreaKeys = new Set(visibleAreas.map(({ key }) => key));
   const requestedArea = searchParams.get("area");
+  // A deep link to the gated area waits for the probe instead of flashing
+  // Logic & Margins first (the ops email links straight to ?area=rate-review).
+  const awaitingGate = requestedArea === "rate-review" && isAdmin && rateReview === "pending";
   const activeArea = visibleAreaKeys.has(requestedArea)
     ? requestedArea
-    : "logic";
+    : awaitingGate ? null : "logic";
 
   // Usage beacon for the area that actually RENDERS — an invalid or
   // missing ?area= resolves to Logic & Margins without rewriting the URL
@@ -62,7 +71,7 @@ export default function PricingHubPage() {
   // remount this whole subtree, AdminCommandHeader included, on every area
   // switch, since a host element and a component never reconcile. `legacy` is
   // the context default, so those two areas render exactly as they do on main.
-  const density = activeArea === "notices" ? "comfortable" : "legacy";
+  const density = activeArea === "notices" || activeArea === "rate-review" ? "comfortable" : "legacy";
 
   return (
     <UiSurface density={density}>
@@ -94,6 +103,10 @@ export default function PricingHubPage() {
         <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
       )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
+      {activeArea === "rate-review" && <RateReviewPage embedded />}
+      {activeArea === null && (
+        <div role="status" className="text-ui-body text-ink-secondary min-h-[240px] py-10 text-center">Loading pricing…</div>
+      )}
     </UiSurface>
   );
 }
