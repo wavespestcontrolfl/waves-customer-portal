@@ -66,9 +66,22 @@ function fakeDb(tables) {
 const sms = (n, customer, body, h, direction = 'inbound') => ({
   id: id(n), customer_id: customer, direction, message_body: body, created_at: hoursAgo(h),
 });
-const call = (n, customer, h, extra = {}) => ({
-  id: id(n), customer_id: customer, direction: 'inbound', created_at: hoursAgo(h), call_summary: null, ai_extraction: null, processing_status: 'processed', call_outcome: 'info_given', ...extra,
-});
+// The caller's words live in the VALIDATED V2 extraction's evidence quotes
+// (speaker caller, a service_request field). `words` builds that; legacy
+// fixtures that name V1 call_summary / pain_points get the same words as V2
+// caller evidence, so they keep their meaning. `v2: false` leaves V2 out.
+const v2Of = (words) => JSON.stringify({ evidence: [{ field_path: 'service_request.pests_observed', quote: words, speaker: 'caller' }] });
+const call = (n, customer, h, extra = {}) => {
+  const { words, v2, ...rest } = extra;
+  const parsed = typeof rest.ai_extraction === 'string' ? JSON.parse(rest.ai_extraction) : rest.ai_extraction;
+  const legacy = String(parsed?.pain_points || '').trim() || rest.call_summary;
+  const said = words || legacy;
+  return {
+    id: id(n), customer_id: customer, direction: 'inbound', created_at: hoursAgo(h), call_summary: null, ai_extraction: null, processing_status: 'processed', call_outcome: 'info_given',
+    ...(v2 === false || !said ? {} : { v2_extraction_status: 'valid', ai_extraction_enriched: v2Of(said) }),
+    ...rest,
+  };
+};
 
 describe('pickSuggestion', () => {
   test('returns the newest of text vs call', async () => {
@@ -91,7 +104,7 @@ describe('pickSuggestion', () => {
     expect(s.text).toBe('Still seeing spiders');
   });
 
-  test('call falls back to call_summary when pain_points is empty', async () => {
+  test('call words are the caller\'s V2 evidence (fixture built from the same words)', async () => {
     const db = fakeDb({
       sms_log: [],
       call_log: [call(2, CUST, 3, { ai_extraction: { pain_points: '  ' }, call_summary: 'Wasps by the garage door.' })],
@@ -279,5 +292,30 @@ describe('terminal Codex pass 1 (#5518)', () => {
     });
     expect(await pickSuggestion(db, CUST, { now: NOW })).toMatchObject({ kind: 'text', id: id(1) });
     expect((await resolveCustomerRequest(db, CUST, { text: 'Not a customer', suggestionId: id(2), suggestionKind: 'call' }, { now: NOW })).source).toBe('office');
+  });
+});
+
+describe('terminal Codex pass 2 (#5518)', () => {
+  test('no validated V2 = no call suggestion; V1 pain_points / call_summary are never used', async () => {
+    const db = fakeDb({ sms_log: [], call_log: [call(1, CUST, 1, { v2: false, ai_extraction: JSON.stringify({ pain_points: 'Roaches' }), call_summary: 'Roaches' })] });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
+  });
+
+  test('V2 wins over a disagreeing V1: only the caller\'s service-request quotes, agent lines ignored', async () => {
+    const enriched = JSON.stringify({ evidence: [
+      { field_path: 'service_request.pests_observed', quote: 'the ants are back by the patio', speaker: 'caller' },
+      { field_path: 'service_request.pests_observed', quote: 'We can treat ants', speaker: 'agent' },
+      { field_path: 'scheduling.preferred_date', quote: 'Tuesday works', speaker: 'caller' },
+      { field_path: 'service_request.urgency', quote: 'it is getting worse', speaker: 'caller' },
+    ] });
+    const db = fakeDb({ sms_log: [], call_log: [call(1, CUST, 1, { v2: false, v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify({ pain_points: 'Spiders in garage' }) })] });
+    expect((await pickSuggestion(db, CUST, { now: NOW })).text).toBe('the ants are back by the patio ... it is getting worse');
+  });
+
+  test('an opt-out after the 400-character cap still excludes the text', async () => {
+    const body = `${'We have ants in the kitchen again. '.repeat(13)}please stop texting me`;
+    expect(body.length).toBeGreaterThan(400);
+    const db = fakeDb({ sms_log: [sms(1, CUST, body, 1)], call_log: [] });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
   });
 });

@@ -2925,7 +2925,9 @@ the completion-time recheck is unchanged. Kill switch: unset the gate.
 When the office books a pest or lawn re-service (`pest_re_service` /
 `lawn_re_service`) in the New Appointment modal, a "Customer's words" section
 offers the customer's latest INBOUND text (`sms_log`) or call note
-(`call_log`: the extraction's `pain_points`, else the call summary) from the
+(`call_log`: the caller's own service-request quotes from the VALIDATED V2
+extraction's evidence, never V1 `pain_points` / `call_summary`, per the
+AGENTS.md downstream-composer rule; no valid V2 = no call suggestion) from the
 last 72 hours, whichever is newest, labeled with its source and age ("Text,
 3 h ago" / "Call, yesterday") and a "Use this" button, above an editable box
 (400 characters, the call processor's own cap). Optional: an empty box saves

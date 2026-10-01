@@ -65,11 +65,13 @@ function windowFloor(now) {
 // words), a STOP / opt-in keyword or natural-language opt-out, or HELP.
 function smsSuggestionText(row) {
   if (row?.message_type === 'sms_reaction' || isSmsReaction(row?.message_body)) return null;
-  const text = cleanRequestText(row?.message_body);
-  if (!text) return null;
-  if (detectSmsOptCommand(text).action) return null;
-  if (detectHelp(text).help) return null;
-  return text;
+  // Classified on the WHOLE message: an opt-out past the 400-char cap
+  // still excludes it.
+  const full = String(row?.message_body == null ? '' : row.message_body).replace(/\r\n?/g, '\n').trim();
+  if (!full) return null;
+  if (detectSmsOptCommand(full).action) return null;
+  if (detectHelp(full).help) return null;
+  return cleanRequestText(full);
 }
 
 function parseExtraction(value) {
@@ -78,8 +80,11 @@ function parseExtraction(value) {
   try { return JSON.parse(value) || {}; } catch { return {}; }
 }
 
-// A call note's words: the extraction's pain_points when present, else the
-// call summary. Spam / voicemail rows carry no customer words.
+// A call's words: the caller's own quotes about their service request from the
+// VALIDATED V2 extraction (AGENTS.md: downstream composers read v2 + raw
+// transcript, never v1), so the V1 pain_points / call_summary interpretation
+// is never restored. No valid V2 = no call suggestion. Spam / voicemail /
+// misdial rows carry no customer words.
 function callSuggestionText(row) {
   if (!row) return null;
   if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return null;
@@ -90,8 +95,19 @@ function callSuggestionText(row) {
   // Spam / misdial classifications, legacy and validated V2 (the canonical
   // call reader's rule).
   if (ContextAggregator.isExcludedCall(row)) return null;
-  const extraction = parseExtraction(row.ai_extraction);
-  return cleanRequestText(extraction.pain_points) || cleanRequestText(row.call_summary);
+  if (String(row.v2_extraction_status || '') !== 'valid') return null;
+  const enriched = parseExtraction(row.ai_extraction_enriched);
+  const seen = new Set();
+  const quotes = [];
+  for (const item of Array.isArray(enriched.evidence) ? enriched.evidence : []) {
+    if (item?.speaker !== 'caller') continue;
+    if (!String(item.field_path || '').startsWith('service_request')) continue;
+    const quote = String(item.quote || '').replace(/\s+/g, ' ').trim();
+    if (!quote || seen.has(quote.toLowerCase())) continue;
+    seen.add(quote.toLowerCase());
+    quotes.push(quote);
+  }
+  return cleanRequestText(quotes.join(' ... '));
 }
 
 function toIso(value) {
