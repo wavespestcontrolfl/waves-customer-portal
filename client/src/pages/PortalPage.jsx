@@ -5313,7 +5313,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Service notifications</div>
-            <p id="appointment-delivery-note" style={{ margin: '4px 0 0', fontSize: 14, lineHeight: 1.5, color: muted }}>
+            <p id="appointment-delivery-note" style={{ margin: '4px 0 0', fontSize: 16, lineHeight: 1.5, color: muted }}>
               {perPropertyTexts
                 ? 'Delivery methods apply across your account. Turn appointment alerts on or off under Property notifications below.'
                 : 'Choose how you receive each update.'}
@@ -9572,7 +9572,7 @@ function LearnTab({ customer }) {
 
   useEffect(() => {
     api.getAlerts().then(d => setAlerts(d.alerts || [])).catch(() => {});
-    api.getBlogPosts().then(d => setBlogPosts(d.posts || [])).catch(() => {});
+    api.getBlogPosts(24).then(d => setBlogPosts(d.posts || [])).catch(() => {});
     api.getNewsletterPosts().then(d => setNewsletterPosts(d.posts || [])).catch(() => {});
     api.getExpertPosts().then(d => setExpertPosts(d.posts || [])).catch(() => {});
     api.getLocalNews().then(d => setLocalNews(d.posts || [])).catch(() => {});

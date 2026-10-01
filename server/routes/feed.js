@@ -203,9 +203,11 @@ const EXCLUDE_KEYWORDS = /\b(4-h|youth|cooking|nutrition|career|volunteer|obitua
 // =========================================================================
 // GET /api/feed/blog — Waves blog
 // =========================================================================
-// The Learn tab's "View all" lists every post here; the Home rail trims to
-// its own 6 client-side. The hub RSS carries ~25 recent posts.
-const BLOG_FEED_LIMIT = 24;
+// Home keeps the compact six-post response. Learn can explicitly request the
+// expanded list; the full RSS document is cached above and sliced only after
+// lookup, so either request order returns the correct response size.
+const BLOG_FEED_DEFAULT_LIMIT = 6;
+const BLOG_FEED_EXPANDED_LIMIT = 24;
 router.get('/blog', async (req, res, next) => {
   try {
     // The hub is Astro on Cloudflare Pages — its RSS lives at /feed.xml.
@@ -213,8 +215,11 @@ router.get('/blog', async (req, res, next) => {
     // which parsed to zero items and left the Learn tab's blog card empty.
     const data = await fetchWithCache('blog', 'https://www.wavespestcontrol.com/feed.xml');
     const items = parseItems(data?.rss?.channel);
+    const limit = req.query.limit === String(BLOG_FEED_EXPANDED_LIMIT)
+      ? BLOG_FEED_EXPANDED_LIMIT
+      : BLOG_FEED_DEFAULT_LIMIT;
 
-    const posts = await Promise.all(items.slice(0, BLOG_FEED_LIMIT).map(async item => {
+    const posts = await Promise.all(items.slice(0, limit).map(async item => {
       const link = safeLink(item.link) || '';
       return {
         title: item.title || '',
