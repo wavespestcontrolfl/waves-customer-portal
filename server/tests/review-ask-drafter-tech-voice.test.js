@@ -255,6 +255,13 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
   });
 
+  test('Codex r4: a fixed-copy email already sent shows as a prior touch (its generic intro)', async () => {
+    mockTables.review_requests = [{ sequence_step: 1, channel: 'email', custom_body: null, template_key: 'review_request_email' }];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 2 });
+    expect(mockDispatch.mock.calls[0][1].text).toContain('word of mouth is how neighbors find us');
+  });
+
   test('Codex r1: the customer email evidence drops quoted Waves history', async () => {
     mockTables.emails = [{ id: 'e1', subject: null, body_text: 'Sounds good, see you Sunday.\n\nOn Tue, Sep 29, 2026 at 9:00 AM Waves <contact@wavespestcontrol.com> wrote:\n> We sealed every gap in the garage.', received_at: new Date() }];
     mockDispatch.mockResolvedValueOnce(reply(GOOD));

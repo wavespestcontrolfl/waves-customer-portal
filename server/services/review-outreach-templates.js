@@ -290,7 +290,12 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
   return out;
 }
 
+// The review_request_email intro when nothing was drafted. Here (not in
+// review-request.js) so the tech-voice writer can show it as a prior touch.
+const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. Would you take 15 seconds to share a quick Google review of your recent service?";
+
 module.exports = {
+  GENERIC_EMAIL_INTRO,
   OUTREACH_TEMPLATES,
   TEMPLATES_BY_ID,
   DAY0_ASK_TEMPLATE_KEY,

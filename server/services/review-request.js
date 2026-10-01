@@ -382,7 +382,7 @@ async function stampWithRetry(makeQuery, label) {
   }
 }
 
-const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. Would you take 15 seconds to share a quick Google review of your recent service?";
+const GENERIC_EMAIL_INTRO = OUTREACH.GENERIC_EMAIL_INTRO;
 
 /**
  * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
@@ -4642,6 +4642,10 @@ const ReviewService = {
       && !canonicalTemplate
       && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
     const day0Controlled = day0Template && !techVoice;
+    // The tech-voice writer speaks AS the technician, so it gets the one the
+    // RECORD resolves to (same rule as the {tech} sign-off below: the name
+    // cached on the sequence can be a newer visit's technician).
+    const voiceTechName = techVoice && technicianId ? ((await technicianFirstName(technicianId)) || techName) : techName;
     const smsTemplateId = canonicalTemplate
       ? null
       : day0Template
@@ -4712,7 +4716,7 @@ const ReviewService = {
           serviceDate,
         };
         const drafted = techVoice
-          ? await Drafter.draftTechVoice({ ...draftInput, serviceRecordId, sequenceId, channel: "sms" })
+          ? await Drafter.draftTechVoice({ ...draftInput, techName: voiceTechName, serviceRecordId, sequenceId, channel: "sms" })
           : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
@@ -4775,7 +4779,7 @@ const ReviewService = {
             serviceDate,
           };
           const drafted = techVoice
-            ? await Drafter.draftTechVoice({ ...draftInput, serviceRecordId, sequenceId, channel: "email" })
+            ? await Drafter.draftTechVoice({ ...draftInput, techName: voiceTechName, serviceRecordId, sequenceId, channel: "email" })
             : await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }
@@ -5016,7 +5020,9 @@ const ReviewService = {
     // long link within the existing one-extra-segment trade below).
     if (/_tech_voice$/.test(String(request.template_key || "")) && customBody && tpl && !isNoLink) {
       const { countSegments } = require("./messaging/segment-counter");
-      const rendered = require("./messaging/gsm-normalize").normalizeGsmPunctuation(body);
+      // Counted as delivered: sendCustomerMessage strips the URL scheme.
+      const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
+      const rendered = require("./messaging/gsm-normalize").normalizeGsmPunctuation(stripSmsUrlScheme(body));
       if (countSegments(rendered).segmentCount > 2) {
         body = OUTREACH.renderOutreachBody(tpl.body, renderVars, { requireLink: requiresLink });
         logger.info(`[review] tech-voice draft over two segments with the long link — template sent (requestId=${request.id} template=${templateId})`);

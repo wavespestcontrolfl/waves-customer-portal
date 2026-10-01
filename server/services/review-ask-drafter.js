@@ -464,7 +464,10 @@ async function priorSequenceTouches(sequenceId, sequenceStep) {
       .select("sequence_step", "channel", "custom_body", "template_key");
     return rows.map((r) => {
       const baseKey = String(r.template_key || "").replace(/_(?:email_)?(?:personalized|tech_voice)$/, "");
-      const body = r.custom_body || OUTREACH.getOutreachTemplate(baseKey)?.body || "";
+      // An email that sent its fixed copy has no custom_body and no outreach
+      // template entry: show the generic intro it carried.
+      const body = r.custom_body || OUTREACH.getOutreachTemplate(baseKey)?.body
+        || (r.channel === "email" ? OUTREACH.GENERIC_EMAIL_INTRO : "");
       return { step: r.sequence_step, channel: r.channel, body: String(body).slice(0, 600) };
     }).filter((t) => t.body);
   } catch (err) {
