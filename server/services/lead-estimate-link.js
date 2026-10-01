@@ -1446,9 +1446,10 @@ async function convertCustomerLinkRow(database, leadAttributionService, lead, co
   return converted ? root.id : null;
 }
 
-async function resolveCustomerLinkCandidates(database, { source, customerId, phone, email, estimateId }) {
+async function resolveCustomerLinkCandidates(database, { source, customerId, phone, email, estimateId, excludeCallbackRequests = false }) {
   const ownedByUs = (row) => leadOwnedBy(row, { customerId, phone, email });
-  const linked = await findOpenLeadsForCustomer(database, customerId);
+  const linked = (await findOpenLeadsForCustomer(database, customerId))
+    .filter((row) => !(excludeCallbackRequests && isCallbackRequestLead(row)));
   const skip = (reason, why, leadIds) => {
     logger.warn(`[lead-trigger] ${source} customer-link skip — ${why}`, { source, customerId, leadIds });
     return { reason };
@@ -1528,6 +1529,17 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   return { candidates: scoped };
 }
 
+// A /book "Can't find a time?" preferred-time request is a callback ask, never
+// an originating deal. The customer's own /book booking closes it as 'handled'
+// (booking-preferred-time.js closeBookedPreferredLeads), so the booking's
+// conversion call passes `excludeCallbackRequests` to keep the generic
+// customer-link / contact tiers from winning it first (codex #5477 r1 P1). The
+// authoritative estimate tier (leads.estimate_id) is deliberately untouched:
+// a request staff attached an estimate to converts through that estimate.
+// Staff-driven triggers (office scheduling, completion, invoice) leave it off,
+// so a request staff worked by hand still converts as it always did.
+const isCallbackRequestLead = (lead) => !!lead && lead.lead_type === 'book_preferred_time';
+
 async function convertLeadFromEvent({
   source,
   estimateId = null,
@@ -1536,6 +1548,7 @@ async function convertLeadFromEvent({
   email = null,
   requireAcceptedEstimate = false,
   enforceOriginating = false,
+  excludeCallbackRequests = false,
   // The scheduled_services row the event is about (booked or completed).
   // A Waves Assessment is NOT a win (owner ruling 2026-09-08,
   // services/assessment-booking.js): the owner goes out to look and quote,
@@ -1642,7 +1655,7 @@ async function convertLeadFromEvent({
       // through duplicate ancestry, gated to the customer's FIRST close.
       if (resolvedCustomerId) {
         const tier2 = await resolveCustomerLinkCandidates(database, {
-          source, customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail, estimateId,
+          source, customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail, estimateId, excludeCallbackRequests,
         });
         if (tier2.reason) return { converted: false, reason: tier2.reason };
         if (tier2.candidates.length) {
@@ -1654,6 +1667,7 @@ async function convertLeadFromEvent({
       // Tier 3 — contact fallback (never-linked, customer_id IS NULL).
       if (!candidates.length && (resolvedPhone || resolvedEmail)) {
         candidates = await findUnconvertedLeadsByContact(database, resolvedPhone, resolvedEmail);
+        if (excludeCallbackRequests) candidates = candidates.filter((lead) => !isCallbackRequestLead(lead));
         // enforceOriginating (backfill safety): the live triggers fire the moment
         // the deal closes, so a contact-matched open lead is the originating deal.
         // A backfill runs LATER, by which point the customer may have a newer,

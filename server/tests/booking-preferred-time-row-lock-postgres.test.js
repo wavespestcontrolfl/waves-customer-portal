@@ -81,7 +81,7 @@ jest.setTimeout(60000);
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
     await database.raw('CREATE TABLE ??.lead_activities (id serial PRIMARY KEY, lead_id uuid NOT NULL, activity_type text, description text, performed_by text, metadata jsonb, created_at timestamptz DEFAULT now())', [schema]);
-    await database.raw('CREATE TABLE ??.ad_service_attribution (lead_id uuid PRIMARY KEY, service_line text, specific_service text, service_bucket text, funnel_stage text DEFAULT \'lead\')', [schema]);
+    await database.raw('CREATE TABLE ??.ad_service_attribution (id serial PRIMARY KEY, lead_id uuid UNIQUE, lead_source text DEFAULT \'google_ads\', service_line text, specific_service text, service_bucket text, funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
     ({ _internals: { withLockedRecoveryIntent } } = require('../services/booking-abandon-recovery'));
   });
@@ -234,6 +234,49 @@ jest.setTimeout(60000);
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ link: `/admin/leads?lead=${out.leadId}`, dedupeKey: `preferred-time-auto-close:${out.leadId}:${visit[0].id}` });
     expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('closing a request removes its own funnel row (stage lead/contacted) so the booking is not counted beside it, and never one that reached booked/completed (codex #5477 r1 P1)', async () => {
+    const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const mkLead = async (stage) => {
+      const r = await recordPreferredTimeRequest(database, value(), { notify: false });
+      await database('ad_service_attribution').insert({ lead_id: r.leadId, funnel_stage: stage });
+      // one request per phone per day: free the dedupe so the next call files a new lead
+      await database('leads').where({ id: r.leadId }).update({ first_contact_at: new Date(Date.now() - 3 * 86400000), created_at: new Date(Date.now() - 3 * 86400000), extracted_data: JSON.stringify({ last_requested_at: new Date(Date.now() - 3 * 86400000).toISOString() }) });
+      return r.leadId;
+    };
+    const leadStage = await mkLead('lead');
+    const leadContacted = await mkLead('contacted');
+    const leadCompleted = await mkLead('completed');
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    const out = await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect(out.closed).toBe(3);
+    expect(await database('ad_service_attribution').where({ lead_id: leadStage })).toHaveLength(0);
+    expect(await database('ad_service_attribution').where({ lead_id: leadContacted })).toHaveLength(0);
+    // revenue-bearing row survives
+    expect(await database('ad_service_attribution').where({ lead_id: leadCompleted })).toHaveLength(1);
+    // a replay finds the audit rows and changes nothing
+    expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).closed).toBe(0);
+  });
+
+  test('funnel count (dashboard /lead-funnel + Ads /funnel group the same rows): request + its booking is ONE lead reaching booked, not two leads and one booking', async () => {
+    const { closeBookedPreferredLeads } = require('../services/booking-preferred-time');
+    const { buildLeadFunnel } = require('../services/lead-funnel');
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+    await database('ad_service_attribution').insert({ lead_id: req.leadId, funnel_stage: 'lead' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    // what attributeSelfBooking then writes for the booking itself: a lead_id-less row born at 'booked'
+    await database('ad_service_attribution').insert({ lead_id: null, funnel_stage: 'booked' });
+    const rows = await database('ad_service_attribution').select('lead_source', 'funnel_stage').count('* as n').groupBy('lead_source', 'funnel_stage');
+    const funnel = buildLeadFunnel(rows);
+    expect(funnel.totals).toMatchObject({ leads: 1, booked: 1, lost: 0 });
   });
 
   test('the close is written once per (lead, visit): the booking path and the reconcile racing for the same visit write one row and one FYI', async () => {

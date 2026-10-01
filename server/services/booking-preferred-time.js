@@ -516,6 +516,18 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null } = {}
           && (!current.customer_id || String(current.customer_id) === String(customerId));
         if (!stillOurs) return null;
         await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
+        // The request's own funnel row goes with it, in this same transaction:
+        // the booking records its own attribution row (attributeSelfBooking), so
+        // leaving this one at 'lead' would count one journey as two leads and
+        // one booking in the dashboard / Ads funnels (codex #5477 r1 P1).
+        // Nothing references the row (no FKs in, readers key on lead_id /
+        // customer_id), and a row that already reached 'booked' or 'completed'
+        // (revenue attached) is never removed. 'handled' has no funnel mapping,
+        // so the row could not be reconciled any other way.
+        await trx('ad_service_attribution')
+          .where({ lead_id: lead.id })
+          .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
+          .del();
         await trx('lead_activities').insert({
           lead_id: lead.id,
           activity_type: 'status_change',

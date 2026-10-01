@@ -33,6 +33,7 @@ function builder(table) {
       return b;
     },
     orWhere: () => b,
+    orWhereNotIn: () => b,
     whereNull: () => b,
     whereNotNull: () => b,
     whereNot: () => b,
@@ -63,6 +64,11 @@ function builder(table) {
       mockOps.push({ table, op: 'insert', arg: row });
       mockOrder.push(`insert:${table}`);
       return { returning: () => Promise.resolve([{ id: 'lead-1', ...row }]) };
+    },
+    del: () => {
+      mockOps.push({ table, op: 'del' });
+      mockOrder.push(`del:${table}`);
+      return Promise.resolve(1);
     },
     update: (patch) => {
       mockOps.push({ table, op: 'update', arg: patch });
@@ -498,7 +504,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockSendSMS).not.toHaveBeenCalled();
   });
 
-  test('a race booking never wins the lead or touches its funnel row (even with several open requests: each closes as handled, none converted)', async () => {
+  test('a race booking never wins the lead or advances its funnel row — each closed request\'s own row is removed (even with several open requests: each closes as handled, none converted)', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: new Date() };
     mockCustomer = { phone: '+19415550100' };
     mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
@@ -506,7 +512,9 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(r.status).toBe(200);
     expect(bookingNotes().map((o) => o.arg.lead_id).sort()).toEqual(['lead-1', 'lead-2']);
     expect(mockMarkConverted).not.toHaveBeenCalled();
-    expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
+    expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toEqual([
+      { table: 'ad_service_attribution', op: 'del' }, { table: 'ad_service_attribution', op: 'del' },
+    ]);
     expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update' && 'status' in o.arg && o.arg.status !== 'handled')).toHaveLength(0);
     expect(closes()).toHaveLength(2);
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
@@ -820,11 +828,20 @@ describe('a completed booking closes the customer\'s open preferred-time request
     // The status write and its audit row share one transaction, status first.
     expect(mockOrder.indexOf('update:leads')).toBeLessThan(mockOrder.indexOf('insert:lead_activities'));
     expect(mockMarkConverted).not.toHaveBeenCalled();
-    expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
+    // The ONLY funnel-table write is the request's own row leaving (codex #5477 r1 P1),
+    // inside the same transaction as the status write — never an advance or settle.
+    expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toEqual([{ table: 'ad_service_attribution', op: 'del' }]);
+    expect(mockOrder.indexOf('update:leads')).toBeLessThan(mockOrder.indexOf('del:ad_service_attribution'));
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
     expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a request that is not closed (lost the lock re-check) keeps its funnel row', async () => {
+    mockLockedLead = { ...mockLockedLead, status: 'lost' };
+    await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
+    expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
   });
 
   test('the ONLY notification is one admin FYI (Leads area, 60/110 limits, link to the lead, already_done), deduped per (lead, visit)', async () => {

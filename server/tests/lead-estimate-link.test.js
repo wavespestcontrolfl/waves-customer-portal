@@ -984,6 +984,79 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(database._calls.whereNull).toContain('deleted_at');
   });
 
+  describe('excludeCallbackRequests (codex #5477 r1 P1): a /book preferred-time request is closed by the booking, never won by the generic conversion', () => {
+    const customer = { id: 'c1', phone: '+19415550100', member_since: '2026-01-01' };
+    const request = { id: 'Lreq', status: 'new', lead_type: 'book_preferred_time', first_contact_at: '2025-12-15T10:00:00Z' };
+
+    test('contact fallback: the unlinked request is not a candidate, nothing converts', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+      expect(markConverted).not.toHaveBeenCalled();
+    });
+
+    test('contact fallback: the same request still converts for a staff-driven trigger (flag off, behavior unchanged)', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }] });
+      const result = await convertLeadFromEvent({
+        source: 'appointment_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('contact fallback: a real lead beside the request is no longer "ambiguous" — the real lead converts, the request does not', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const real = { id: 'Lreal', status: 'new', lead_type: 'web_form', customer_id: null, first_contact_at: '2025-12-15T10:00:00Z' };
+      const database = makeConvertDb({ customer, contactLeads: [{ ...request, customer_id: null }, real] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreal'] });
+      expect(markConverted).toHaveBeenCalledTimes(1);
+    });
+
+    test('customer-link tier: a request already carrying the customer id is not a candidate either', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, customerOpenLeads: [{ ...request, customer_id: 'c1' }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toEqual({ converted: false, reason: 'no_open_lead' });
+      expect(markConverted).not.toHaveBeenCalled();
+    });
+
+    test('customer-link tier: flag off, the linked request converts as before', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({ customer, customerOpenLeads: [{ ...request, customer_id: 'c1' }] });
+      const result = await convertLeadFromEvent({
+        source: 'recurring_service_booked', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('the estimate-link tier stays authoritative: a request staff attached an estimate to still converts through that estimate', async () => {
+      const markConverted = jest.fn().mockResolvedValue(true);
+      const database = makeConvertDb({
+        estimate: { id: 'e1', customer_id: 'c1' },
+        leadsByEstimate: [{ ...request, estimate_id: 'e1', status: 'estimate_sent' }],
+      });
+      const result = await convertLeadFromEvent({
+        source: 'estimate_accepted', estimateId: 'e1', excludeCallbackRequests: true, database, leadAttributionService: { markConverted },
+      });
+      expect(result).toMatchObject({ converted: true, leadIds: ['Lreq'] });
+    });
+
+    test('both /book conversion calls (primary and replay) pass the flag', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+      const calls = src.match(/convertLeadFromEvent\(\{[^}]*\}\)/g) || [];
+      expect(calls).toHaveLength(2);
+      for (const c of calls) expect(c).toMatch(/excludeCallbackRequests: true/);
+    });
+  });
+
   test('enforceOriginating converts a contact lead first contacted before the customer signed up', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

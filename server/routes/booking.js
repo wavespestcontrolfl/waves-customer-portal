@@ -5976,6 +5976,7 @@ async function createSelfBooking(payload = {}) {
                 source: 'recurring_service_booked',
                 customerId: custId,
                 enforceOriginating: true,
+                excludeCallbackRequests: true,
               });
             } catch (leadErr) {
               logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
@@ -6434,6 +6435,9 @@ async function createSelfBooking(payload = {}) {
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
+          // The customer's own /book booking closes a preferred-time request as
+          // 'handled' (closeBookedPreferredLeads below) — never wins it here.
+          excludeCallbackRequests: true,
         });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);

@@ -108,4 +108,13 @@ describe("lead status 'handled'", () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-pipeline.js'), 'utf8');
     expect(src).toContain("leads.status IS DISTINCT FROM 'handled'");
   });
+  test('AI chart builder (codex #5477 r1 P2): the prompt states the non-prospect rule and the conversion example excludes exactly those statuses', () => {
+    const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
+    const src = fs.readFileSync(path.join(__dirname, '../services/ai-chart-builder.js'), 'utf8');
+    const list = `NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((st) => `'${st}'`).join(',')})`;
+    // the rule line, and the same list inside the example's WHERE
+    expect(src).toContain(`any row whose status is ${list}`);
+    expect(src).toContain(`FROM ai_leads WHERE status ${list} AND first_contact_at`);
+    expect(src).toMatch(/status \[[^\]]*handled\|cancelled\|spam\]/);
+  });
 });
