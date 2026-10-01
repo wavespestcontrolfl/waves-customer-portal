@@ -16,10 +16,11 @@
  *      locks, and on the global pool it costs no second connection of the merge's own), and refuses up
  *      front, for EITHER customer, what a release would refuse: a send in flight, evidence that cannot be
  *      read, a current step whose outcome is unconfirmed while members remain. It writes nothing.
- *   2. FIRST inside the merge transaction, reconcileInMergeTransaction takes both customers' dunning keys
+ *   2. FIRST inside the merge transaction, lockInMergeTransaction takes both customers' dunning keys
  *      EXCLUSIVELY (sorted ids, before any other lock the merge takes: every engine path takes this key
- *      first in a fresh transaction, so the merge never waits on it while holding anything), then closes
- *      each open schedule ON THE MERGE'S TRANSACTION (Schedule.closeUnderLock, closed_reason
+ *      first in a fresh transaction, so the merge never waits on it while holding anything). Then, after
+ *      the merge's own prerequisite locks, releaseInMergeTransaction locks the member invoices (id order)
+ *      and closes each open schedule ON THE MERGE'S TRANSACTION (Schedule.closeUnderLock, closed_reason
  *      released_merge: every surviving member lands on its own per-invoice ladder with no step repeated,
  *      schedule.js §7) against the version step 1 read (any write since, a send included, refuses as
  *      schedule_changed: the evidence may be stale), refuses a schedule that opened after step 1, and
@@ -118,28 +119,55 @@ async function lockCustomers(trx, customerIds) {
 }
 
 /**
- * Step 2 (FIRST inside the merge transaction): take both dunning keys, close every open schedule on `trx`
- * against what step 1 read (`prepared`), and renumber the loser's episodes above the winner's. Returns
- * { renumbers: [{ id, from, to }], released: [{ schedule, landed }] }. Throws a 409 DUNNING_SCHEDULE_BUSY
- * error (the merge rolls back, releases included) when a schedule opened since step 1, changed since its
- * evidence was read, or a release refuses.
+ * Step 2a (FIRST inside the merge transaction): take both dunning keys and refuse a schedule that opened
+ * since step 1 (one step 1 did not prepare). Writes nothing. Returns the plan step 2b carries out.
  */
-async function reconcileInMergeTransaction(trx, { winnerId, loserId, prepared = [], now = new Date() }) {
+async function lockInMergeTransaction(trx, { winnerId, loserId, prepared = [] }) {
   await lockCustomers(trx, [winnerId, loserId]);
   const rows = await readRows(trx, [winnerId, loserId], ['id', 'customer_id', 'episode', 'status']);
+  const toRelease = rows.filter(isOpen).map((row) => {
+    const prep = prepared.find((p) => String(p.schedule.id) === String(row.id));
+    if (!prep) throw mergeBlocked('reopened');
+    return prep;
+  });
+  return { winnerId, loserId, rows, toRelease };
+}
+
+/**
+ * Step 2b, inside the merge transaction AFTER the merge's own prerequisite locks (case, preference,
+ * closeout and combined-session keys, the customer and saved-card rows) and before its first repoint: lock
+ * the member INVOICE rows of both customers in one id-ordered statement, then close every planned schedule
+ * on `trx` against what step 1 read (Schedule.closeUnderLock: schedule row -> invoices -> sequences, the
+ * engine's order), then renumber the loser's episodes above the winner's. An invoice edit locks its invoice
+ * before writing its sequence; taking every member invoice before any member sequence keeps the merge out
+ * of a cycle with it. Returns { renumbers: [{ id, from, to }], released: [{ schedule, landed }] }. Throws a
+ * 409 DUNNING_SCHEDULE_BUSY error (the merge rolls back, releases included) when a schedule changed since
+ * its evidence was read or a release refuses.
+ */
+async function releaseInMergeTransaction(trx, plan, { now = new Date() } = {}) {
+  const { winnerId, loserId, rows, toRelease } = plan;
   const released = [];
-  const openRows = rows.filter(isOpen);
-  if (openRows.length) {
+  if (toRelease.length) {
     const Schedule = require('./schedule');
-    for (const row of openRows) {
-      const prep = prepared.find((p) => String(p.schedule.id) === String(row.id));
-      if (!prep) throw mergeBlocked('reopened');
+    await lockMemberInvoicesOf(trx, Schedule, [winnerId, loserId]);
+    for (const prep of toRelease) {
       const out = await Schedule.closeUnderLock(trx, prep.schedule, MERGE_REASON, now, prep.at, prep.delivery);
       if (!out.closed) throw refused(prep.schedule, out.changed || !out.reason ? 'schedule_changed' : out.reason);
       released.push({ schedule: prep.schedule, landed: out.landed });
     }
   }
   return { renumbers: await renumberLoserEpisodes(trx, rows, { winnerId, loserId }), released };
+}
+
+// Every active member invoice of these customers, locked in ONE id-ordered statement (two per-customer
+// batches would each be ordered but interleave out of order across the pair).
+async function lockMemberInvoicesOf(trx, Schedule, customerIds) {
+  const ids = new Set();
+  for (const id of sortedIds(customerIds)) {
+    for (const row of await Schedule.activeMemberRows(id, { database: trx })) ids.add(String(row.invoice_id));
+  }
+  const sorted = [...ids].sort();
+  if (sorted.length) await trx('invoices').whereIn('id', sorted).orderBy('id').forUpdate().select('id');
 }
 
 async function renumberLoserEpisodes(trx, rows, { winnerId, loserId }) {
@@ -190,7 +218,8 @@ const lockForMergeUndo = (trx, { winnerId, loserId }) => lockCustomers(trx, [win
 module.exports = {
   MERGE_REASON,
   prepareMergeRelease,
-  reconcileInMergeTransaction,
+  lockInMergeTransaction,
+  releaseInMergeTransaction,
   afterMergeCommit,
   lockForMergeUndo,
   _test: { mergeBlocked, BLOCKED_TEXT },

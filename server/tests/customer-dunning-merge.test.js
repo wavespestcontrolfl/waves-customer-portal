@@ -62,6 +62,11 @@ function withNegateRaw(fake) {
   return fake;
 }
 
+// Steps 2a and 2b back to back (executeMerge takes its own locks between them).
+const reconcile = async (trx, opts) => DunningMerge.releaseInMergeTransaction(
+  trx, await DunningMerge.lockInMergeTransaction(trx, opts), { now: opts.now },
+);
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockSchedule.claimIsFresh.mockImplementation(() => false);
@@ -149,7 +154,7 @@ describe('prepareMergeRelease (before the merge transaction: reads, refuses, nev
   });
 });
 
-describe('reconcileInMergeTransaction: the releases run on the merge\'s own transaction', () => {
+describe('lockInMergeTransaction + releaseInMergeTransaction: the releases run on the merge\'s own transaction', () => {
   const prep = (row) => ({ schedule: row, at: { row_version: `v-${row.id}` }, delivery: { tag: row.id } });
 
   test('each open schedule is closed on THE MERGE\'S trx (released_merge) against the version prepared, after both keys', async () => {
@@ -161,7 +166,7 @@ describe('reconcileInMergeTransaction: the releases run on the merge\'s own tran
     const fake = withNegateRaw(fakeDb(rows));
     mockSchedule.closeUnderLock.mockImplementation(async (_trx, schedule) => ({ closed: true, landed: schedule.id === 's-l' ? [{ rowId: 'm1' }] : [] }));
     const prepared = rows.map(prep);
-    const out = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared, now });
+    const out = await reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared, now });
     expect(mockSchedule.closeUnderLock.mock.calls.map(([trx, s, reason, at, version, delivery]) => [trx, s.id, reason, at, version.row_version, delivery.tag]))
       .toEqual([
         [fake.trx, 's-w', 'released_merge', now, 'v-s-w', 's-w'],
@@ -186,9 +191,51 @@ describe('reconcileInMergeTransaction: the releases run on the merge\'s own tran
     ];
     const fake = withNegateRaw(fakeDb(rows));
     mockSchedule.closeUnderLock.mockResolvedValueOnce({ closed: true, landed: [] }).mockResolvedValueOnce(refusal);
-    await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared: rows.map(prep) }))
+    await expect(reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared: rows.map(prep) }))
       .rejects.toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: reason });
     expect(fake.log.some(([kind]) => kind === 'update')).toBe(false); // no renumber either
+  });
+
+  // Pre-push audit P1: member sequences locked before their invoices could deadlock with an invoice edit
+  // (invoice row, then rescheduleForInvoiceEdit's sequence write). Step 2a writes and row-locks nothing;
+  // step 2b locks every member invoice of BOTH customers in one id-ordered statement before any close.
+  test('2a takes the keys and reads, nothing else; 2b locks both customers\' member invoices (one id-ordered statement) before any close', async () => {
+    const rows = [
+      { id: 's-w', customer_id: WINNER, episode: 2, status: 'paused' },
+      { id: 's-l', customer_id: LOSER, episode: 1, status: 'active' },
+    ];
+    const fake = withNegateRaw(fakeDb(rows));
+    const order = [];
+    const base = fake.database.getMockImplementation();
+    fake.database.mockImplementation((name) => {
+      if (name !== 'invoices') return base(name);
+      const q = {
+        whereIn: (col, ids) => { order.push(['lock invoices', ids]); return q; },
+        orderBy: (col) => { order.push(['orderBy', col]); return q; },
+        forUpdate: () => { order.push(['forUpdate']); return q; },
+        select: async () => [],
+      };
+      return q;
+    });
+    mockSchedule.activeMemberRows.mockImplementation(async (id) => (id === WINNER
+      ? [{ invoice_id: 'inv-9' }, { invoice_id: 'inv-2' }] : [{ invoice_id: 'inv-5' }]));
+    mockSchedule.closeUnderLock.mockImplementation(async (_t, schedule) => { order.push(['close', schedule.id]); return { closed: true, landed: [] }; });
+    const plan = await DunningMerge.lockInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared: rows.map(prep) });
+    expect(fake.log.map(([kind]) => kind)).toEqual(['raw', 'raw', 'select']);
+    expect(order).toEqual([]);
+    expect(mockSchedule.activeMemberRows).not.toHaveBeenCalled();
+    await DunningMerge.releaseInMergeTransaction(fake.trx, plan, {});
+    expect(order).toEqual([
+      ['lock invoices', ['inv-2', 'inv-5', 'inv-9']], ['orderBy', 'id'], ['forUpdate'],
+      ['close', 's-w'], ['close', 's-l'],
+    ]);
+  });
+
+  test('nothing open: 2b locks no invoice and reads no member', async () => {
+    const fake = withNegateRaw(fakeDb([{ id: 'w1', customer_id: WINNER, episode: 1, status: 'completed' }]));
+    const plan = await DunningMerge.lockInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    await expect(DunningMerge.releaseInMergeTransaction(fake.trx, plan)).resolves.toEqual({ renumbers: [], released: [] });
+    expect(mockSchedule.activeMemberRows).not.toHaveBeenCalled();
   });
 
   test('afterMergeCommit: the past-final alert per released schedule, post-commit; a failing alert never throws', async () => {
@@ -200,12 +247,12 @@ describe('reconcileInMergeTransaction: the releases run on the merge\'s own tran
   });
 });
 
-describe('reconcileInMergeTransaction (first inside the merge transaction)', () => {
+describe('lockInMergeTransaction / releaseInMergeTransaction: keys and episodes', () => {
   const lockCalls = (log) => log.filter(([kind]) => kind === 'raw');
 
   test('takes both dunning keys EXCLUSIVE in sorted id order before any read or write', async () => {
     const fake = withNegateRaw(fakeDb([]));
-    await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    await reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER });
     const locks = lockCalls(fake.log);
     expect(locks.map(([, sql, b]) => [sql, b])).toEqual([
       ['SELECT pg_advisory_xact_lock(hashtext(?))', [`customer-dunning:${LOSER}`]],
@@ -218,7 +265,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
   test.each(['active', 'held', 'paused', 'autopay_hold'])('an open (%s) schedule on either side that step 1 did not prepare refuses: one opened since', async (status) => {
     for (const owner of [WINNER, LOSER]) {
       const fake = withNegateRaw(fakeDb([{ id: 's', customer_id: owner, episode: 1, status }]));
-      await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER }))
+      await expect(reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER }))
         .rejects.toMatchObject({ statusCode: 409, code: 'DUNNING_SCHEDULE_BUSY', dunningReason: 'reopened' });
       expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
       expect(mockSchedule.closeUnderLock).not.toHaveBeenCalled();
@@ -230,7 +277,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       { id: 'w1', customer_id: WINNER, episode: 1, status: 'completed' },
       { id: 'l1', customer_id: LOSER, episode: 1, status: 'released' },
     ]));
-    const { renumbers: out, released } = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    const { renumbers: out, released } = await reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER });
     expect(out).toEqual([{ id: 'l1', from: 1, to: 2 }]);
     expect(released).toEqual([]);
     expect(fake.table.find((r) => r.id === 'l1').episode).toBe(2);
@@ -244,7 +291,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       { id: 'l9', customer_id: LOSER, episode: 9, status: 'completed' },
       { id: 'l3', customer_id: LOSER, episode: 3, status: 'released' },
     ]));
-    const { renumbers: out } = await DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
+    const { renumbers: out } = await reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER });
     expect(out).toEqual([{ id: 'l3', from: 3, to: 2 }, { id: 'l9', from: 9, to: 3 }]);
     const updates = fake.log.filter(([kind]) => kind === 'update');
     expect(updates[0]).toEqual(['update', 'negate', ['l9', 'l3']]);
@@ -261,7 +308,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       [],
     ]) {
       const fake = withNegateRaw(fakeDb(rows));
-      await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER })).resolves.toEqual({ renumbers: [], released: [] });
+      await expect(reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER })).resolves.toEqual({ renumbers: [], released: [] });
       expect(fake.log.some(([kind]) => kind === 'update')).toBe(false);
     }
   });
@@ -284,7 +331,7 @@ describe('reconcileInMergeTransaction (first inside the merge transaction)', () 
       };
       return q;
     });
-    await expect(DunningMerge.reconcileInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER }))
+    await expect(reconcile(fake.trx, { winnerId: WINNER, loserId: LOSER }))
       .rejects.toMatchObject({ dunningReason: 'schedule_changed' });
     expect(reads).toBe(1);
   });

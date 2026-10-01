@@ -71,6 +71,9 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
     await mockDatabase.destroy();
   });
 
+  // A failed expectation must never leave a spy wrapping the next test's merge.
+  afterEach(() => { jest.restoreAllMocks(); });
+
   async function customer(label, phone) {
     const id = randomUUID();
     created.customers.add(id);
@@ -182,7 +185,7 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
       .select('invoice_id', 'customer_id', 'status', 'step_index', 'next_touch_at', 'paused_reason', 'updated_at'),
   });
 
-  test('a merge refused AFTER the releases (a customer changed since approval) leaves the paused schedule open and its members untouched', async () => {
+  test('a merge refused AFTER the releases rolls them back: the paused schedule stays open, its members untouched', async () => {
     const phone = `+1999558${String(Math.floor(Math.random() * 9000) + 1000)}`;
     const winnerId = await customer('Winner', phone);
     const loserId = await customer('Loser', phone);
@@ -190,23 +193,38 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
     const invoiceA = await memberInvoice(loserId);
     const invoiceB = await memberInvoice(loserId);
     const before = await snapshot([loserOpen.id], [invoiceA, invoiceB]);
-    const prepared = jest.spyOn(DunningMerge, 'prepareMergeRelease');
-    const reconciled = jest.spyOn(DunningMerge, 'reconcileInMergeTransaction');
+    const real = DunningMerge.releaseInMergeTransaction;
+    let insideMerge = null;
+    // anything the merge refuses after the releases (the sweep, the journal): a throw on the same transaction
+    jest.spyOn(DunningMerge, 'releaseInMergeTransaction').mockImplementation(async (trx, plan, opts) => {
+      const out = await real(trx, plan, opts);
+      insideMerge = { released: out.released.map((r) => r.schedule.id), row: await trx(TABLE).where({ id: loserOpen.id }).first('status', 'closed_reason') };
+      throw new Error('executeMerge: a later refusal');
+    });
 
+    await expect(dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:dunning-merge' })).rejects.toThrow('a later refusal');
+
+    // the release DID run inside the merge transaction ...
+    expect(insideMerge).toEqual({ released: [loserOpen.id], row: { status: 'released', closed_reason: 'released_merge' } });
+    // ... and rolled back with it: still open, still paused, members exactly as they were
+    expect(await snapshot([loserOpen.id], [invoiceA, invoiceB])).toEqual(before);
+    expect(await mockDatabase('customer_merge_journal').where({ loser_customer_id: loserId }).first()).toBeUndefined();
+  });
+
+  test('a merge refused by its own validation (a customer changed since approval) never reaches the release', async () => {
+    const phone = `+1999563${String(Math.floor(Math.random() * 9000) + 1000)}`;
+    const winnerId = await customer('Winner', phone);
+    const loserId = await customer('Loser', phone);
+    const loserOpen = await schedule(loserId, 1, 'paused', { paused_reason: 'admin_paused' });
+    const invoiceA = await memberInvoice(loserId);
+    const before = await snapshot([loserOpen.id], [invoiceA]);
+    const released = jest.spyOn(DunningMerge, 'releaseInMergeTransaction');
     await expect(dedupe.executeMerge({
       winnerId, loserId, performedBy: 'test:dunning-merge', expectedVersions: { winner: 'stale-approval', loser: null },
     })).rejects.toMatchObject({ previewChanged: true });
-
-    // the release DID run inside the merge transaction (closed released_merge there) ...
-    expect(prepared).toHaveBeenCalledTimes(1);
-    const out = await reconciled.mock.results[0].value;
-    expect(out.released.map((r) => r.schedule.id)).toEqual([loserOpen.id]);
-    // ... and rolled back with it: still open, still paused, members exactly as they were
-    expect(await snapshot([loserOpen.id], [invoiceA, invoiceB])).toEqual(before);
+    expect(released).not.toHaveBeenCalled();
+    expect(await snapshot([loserOpen.id], [invoiceA])).toEqual(before);
     expect(OPEN).toContain((await mockDatabase(TABLE).where({ id: loserOpen.id }).first()).status);
-    expect(await mockDatabase('customer_merge_journal').where({ loser_customer_id: loserId }).first()).toBeUndefined();
-    prepared.mockRestore();
-    reconciled.mockRestore();
   });
 
   test('one customer\'s schedule releasable, the other\'s in flight: refused before EITHER is released', async () => {
@@ -246,6 +264,46 @@ postgres('customer merge reconciles customer-level overdue reminder schedules (P
     expect(after.members).toEqual(before.members);
     expect(after.schedules).toEqual(before.schedules);
     spy.mockRestore();
+  });
+
+  // Pre-push audit P1: the release used to lock member SEQUENCE rows first and hold them until the merge's
+  // later invoice repoint, while an invoice edit locks its INVOICE first and then writes its sequence
+  // (InvoiceService.update -> rescheduleForInvoiceEdit): a cycle. The merge now locks the member invoices
+  // (id order) before any member sequence.
+  test('an invoice edit racing the merge (invoice row held, then its sequence written): no deadlock, both commit', async () => {
+    const phone = `+1999561${String(Math.floor(Math.random() * 9000) + 1000)}`;
+    const winnerId = await customer('Winner', phone);
+    const loserId = await customer('Loser', phone);
+    await schedule(loserId, 1, 'active');
+    const invoiceA = await memberInvoice(loserId);
+    await memberInvoice(loserId);
+    const edit = await mockDatabase.transaction();
+    await edit('invoices').where({ id: invoiceA }).forUpdate().first('id');
+    const settledMerge = dedupe.executeMerge({ winnerId, loserId, performedBy: 'test:dunning-merge' }).then(() => null, (err) => err);
+    // never leave the edit open on a failed expectation: it would hold its lock past the suite
+    const abandon = async () => { if (!edit.isCompleted()) await edit.rollback().catch(() => {}); await settledMerge; };
+    // the merge reaches a lock the edit holds and waits on it
+    const end = Date.now() + 15000;
+    let waiting = false;
+    while (!waiting && Date.now() < end) {
+      const { rows } = await mockDatabase.raw("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
+      waiting = rows[0].n > 0;
+      if (!waiting) await new Promise((r) => setTimeout(r, 50));
+    }
+    if (!waiting) await abandon();
+    expect(waiting).toBe(true);
+    let editError = null;
+    try {
+      await edit('invoice_followup_sequences').where({ invoice_id: invoiceA }).update({ updated_at: new Date() });
+      await edit('invoices').where({ id: invoiceA }).update({ updated_at: new Date() });
+      await edit.commit();
+    } catch (err) {
+      editError = err;
+      await edit.rollback().catch(() => {});
+    }
+    const mergeError = await settledMerge;
+    expect([editError?.code, mergeError?.code, mergeError?.message]).toEqual([undefined, undefined, undefined]);
+    expect((await mockDatabase('invoices').where({ id: invoiceA }).first()).customer_id).toBe(winnerId);
   });
 
   test('a release the engine refuses (a send in flight) aborts the merge before anything moved', async () => {

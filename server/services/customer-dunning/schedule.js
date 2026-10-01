@@ -592,13 +592,18 @@ async function closeUnderLock(trx, schedule, reason, now, at, delivery, { extra 
   } else if (claimIsFresh(row, now)) {
     return { closed: false, landed: [], reason: 'in_flight' };
   }
+  // The engine's order: key -> schedule row -> member INVOICE rows (id order) -> sequence rows. An invoice
+  // edit locks its invoice and then writes its sequence (InvoiceService.update -> rescheduleForInvoiceEdit),
+  // so locking a member sequence before its invoice could close a cycle with that edit.
+  await lockMemberInvoices(trx, row.customer_id);
+  const members = await activeMemberRows(row.customer_id, { database: trx, forUpdate: true });
   // The evidence fence: any write since the snapshot the evidence was read against (a same-step TOLD
   // delivery that cleared its claim included) makes that evidence stale.
   if (row.row_version !== at.row_version) return { closed: false, landed: [], changed: true };
   // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
   // again on their own ladders, so nothing is released while one remains to land (judged after the
   // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
-  if (delivery?.unconfirmed && (await activeMemberRows(row.customer_id, { database: trx, forUpdate: true })).length) {
+  if (delivery?.unconfirmed && members.length) {
     return { closed: false, landed: [], reason: 'outcome_unconfirmed' };
   }
   await trx(TABLE).where({ id: row.id }).update({
@@ -980,6 +985,7 @@ module.exports = {
   release,
   rowSnapshot,
   closeUnderLock,
+  lockMemberInvoices,
   alertPastFinal,
   nextTouchFor,
   advance,

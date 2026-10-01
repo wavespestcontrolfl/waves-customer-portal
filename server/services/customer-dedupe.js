@@ -1967,17 +1967,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   const result = await db.transaction(async (trx) => {
     // FIRST, before every other lock: both customers' dunning keys
     // (EXCLUSIVE, sorted) — every engine path takes that key first in a
-    // fresh transaction, so waiting on it here holds nothing. Under them, each
-    // open schedule is released on THIS transaction against the version read
-    // above (a write since refuses the merge), one that appeared since refuses
-    // it, and the loser's episodes are renumbered above the winner's so the
-    // FK sweep's repoint keeps UNIQUE (customer_id, episode) — Codex #5503
-    // r2 P1: two episode-1 histories raised 23505 and aborted the merge.
-    const dunning = await DunningMerge.reconcileInMergeTransaction(trx, {
-      winnerId, loserId, prepared: dunningPrepared, now: dunningNow,
-    });
-    dunningEpisodeRenumbers = dunning.renumbers;
-    dunningReleased = dunning.released;
+    // fresh transaction, so waiting on it here holds nothing. Under them a
+    // schedule that opened since the read above refuses the merge. Nothing is
+    // written yet: the releases run below, after the merge's own locks.
+    const dunningPlan = await DunningMerge.lockInMergeTransaction(trx, { winnerId, loserId, prepared: dunningPrepared });
     // The collections case lock for BOTH parties, before anything moves
     // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
     // while the dial surfaces promote/rotate under this same customer lock —
@@ -2238,6 +2231,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw new Error('executeMerge: could not preserve the surviving customer account address as its primary property');
       }
     }
+
+    // Customer-level overdue reminders, released ON THIS TRANSACTION after
+    // every prerequisite lock and refusal above and before the first repoint:
+    // the member invoice rows are locked (id order) before any member
+    // sequence, the engine's order, so an invoice edit (invoice row, then its
+    // sequence) cannot deadlock with this merge. Each open schedule closes
+    // against the version read before the transaction (a write since refuses
+    // the merge), and the loser's episodes are renumbered above the winner's
+    // so the FK sweep's repoint keeps UNIQUE (customer_id, episode) — Codex
+    // #5503 r2 P1. A refusal anywhere later rolls these releases back too.
+    const dunning = await DunningMerge.releaseInMergeTransaction(trx, dunningPlan, { now: dunningNow });
+    dunningEpisodeRenumbers = dunning.renumbers;
+    dunningReleased = dunning.released;
 
     const repointed = {};
     // Row-precise record of every PLAIN repoint for the journal's
