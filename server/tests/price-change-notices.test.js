@@ -26,6 +26,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 
 const crypto = require('crypto');
 const db = require('../models/db');
+db.raw = jest.fn((sql) => ({ sql }));
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const { sendTemplate } = require('../services/email-template-library');
@@ -41,6 +42,7 @@ let customersUpdateCalls;
 let customersWhereNotInCalls;
 let existingNoticeRow;
 let insertConflict;
+let conflictTargets = [];
 let claimRejected;
 
 function customersQuery() {
@@ -67,7 +69,7 @@ function noticesQuery() {
       noticeInserts.push(row);
       const returned = insertConflict ? [] : [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id }];
       const returning = jest.fn(async () => returned);
-      return { onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning })) })), returning };
+      return { onConflict: jest.fn((target) => { conflictTargets.push(target); return { ignore: jest.fn(() => ({ returning })) }; }), returning };
     }),
     where: jest.fn(() => q),
     orderBy: jest.fn(() => q),
@@ -330,6 +332,13 @@ describe('createAndSendBatch delivery', () => {
     expect(sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('targets the legacy (partial) event index by its predicate — rate-review notices key per plan line', async () => {
+    customerRows = [CUSTOMER];
+    conflictTargets = [];
+    await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(conflictTargets).toEqual([{ sql: '(customer_id, effective_date, current_amount_cents, new_amount_cents) WHERE rate_review_row_id IS NULL' }]);
   });
 
   it('skips a customer when a concurrent send wins the event-insert race', async () => {

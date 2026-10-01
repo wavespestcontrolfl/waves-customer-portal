@@ -350,7 +350,9 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
           // onConflict on the event tuple (unique index): if a concurrent
           // /send won the insert race between our lookup and here, we get
           // nothing back — the winner is already sending, so skip rather
-          // than double-text the customer.
+          // than double-text the customer. The legacy event key is a PARTIAL
+          // unique index since 20261001190000 (rate-review notices key per
+          // plan line), so the conflict target names its predicate.
           const inserted = await db('price_change_notices').insert({
             batch_id: batchId,
             customer_id: row.customerId,
@@ -362,7 +364,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
             status: 'draft',
             created_by: actorId || null,
             metadata: JSON.stringify({ increase: inc, location_id: loc }),
-          }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning('*');
+          }).onConflict(db.raw('(customer_id, effective_date, current_amount_cents, new_amount_cents) WHERE rate_review_row_id IS NULL')).ignore().returning('*');
           if (!inserted.length) {
             summary.alreadyNotified += 1;
             return;

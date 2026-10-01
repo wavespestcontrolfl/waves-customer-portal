@@ -138,6 +138,7 @@ const HOLD_COPY = Object.freeze({
   visit_price_structure: 'An upcoming visit has a structured price this review cannot move, so nothing was changed.',
   visit_prepaid: 'An upcoming visit is prepaid, so the series was not repriced.',
   visit_in_reschedule: 'An upcoming visit is parked in a reschedule request, so the series was not repriced.',
+  visit_status_missing: 'An upcoming visit of this plan has no status on file, so the series was not repriced.',
   multiple_series: 'The plan line runs as more than one series, so it needs a hand reprice.',
   series_template_complex: 'The series template carries add-ons or discounts, so later visits would not spawn at the new price.',
   template_overlay_gate_off: 'Series price overrides are switched off, so later visits would spawn at the old price.',
@@ -161,6 +162,7 @@ const HOLD_COPY = Object.freeze({
   successor_already_created: 'The next prepaid term was already created, so the noticed amount was not written to the old one.',
   renewal_window_changed: 'The prepaid term now renews on a different day than the notice named, so nothing was changed.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
+  rate_moved_since_ranking: 'The rate on file changed since the ranking was approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
 
@@ -249,7 +251,8 @@ function laneForRow(row) {
 // never a callback or an included follow-up) so the notice targets exactly
 // the visits the snapshot priced. Includes 'rescheduled' rows (a parked
 // reschedule request) so the apply can refuse rather than leave one at the
-// old price.
+// old price; a legacy NULL-status row is live too (rate-review.js
+// LIVE_STATUS_SQL), and the apply refuses it the same way.
 async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, fromDate }) {
   const { LINE_SQL, CADENCE_SQL, PLAN_ROW_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
@@ -260,7 +263,7 @@ async function loadLineOpenVisits(dbh, { customerId, familyKey, cadence = null, 
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ?
       AND s.scheduled_date >= ?
-      AND s.status IN ('pending', 'confirmed', 'rescheduled')
+      AND (s.status IS NULL OR s.status IN ('pending', 'confirmed', 'rescheduled'))
       AND ${PLAN_ROW_SQL}
       AND ${LINE_SQL} = ?
       AND (?::text IS NULL OR ${CADENCE_SQL} = ?)
@@ -470,6 +473,13 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     term = found.term;
     const visitsPerTerm = Number(term.coverage_visit_count) > 0 ? Number(term.coverage_visit_count) : visitsPerYearFor(row.cadence, row.visits_per_year);
     if (!(visitsPerTerm > 0)) throw hold('prepay_term_not_found', 'no coverage visit count');
+    // The live term must still be the rate the ranking approved (the apply's
+    // own derivation, to the cent) and the noticed renewal a real increase —
+    // never a letter mixing a moved term amount with stale snapshot rates.
+    const livePerApplication = Math.round((Number(term.prepay_amount) / visitsPerTerm) * 100);
+    if (livePerApplication !== Number(row.current_rate_cents) || !(Number(row.proposed_rate_cents) * visitsPerTerm > cents(term.prepay_amount))) {
+      throw hold('rate_moved_since_ranking', { termId: term.id, livePerApplication });
+    }
     Object.assign(metadata, {
       term_id: term.id, term_end: ymd(term.term_end), coverage_visits: visitsPerTerm,
       current_term_amount_cents: cents(term.prepay_amount),
@@ -498,25 +508,41 @@ async function scheduleRow(dbh, row, { batch, customer, lane, today, plannedSend
     const live = await sp('rate_review_snapshots').where({ id: row.id }).forUpdate().first('notice_id', 'status');
     if (!live || String(live.status) !== 'approved') throw hold('row_not_approved', { status: live ? live.status : null });
     if (live.notice_id) return { alreadyScheduled: true, noticeId: live.notice_id };
-    const inserted = await sp('price_change_notices').insert({
-      batch_id: batchId,
-      customer_id: row.customer_id,
-      current_amount_cents: noticedCurrent,
-      new_amount_cents: noticedNew,
-      cadence_label: cadenceLabelFor(lane),
-      effective_date: effectiveDate,
-      notice_token: crypto.randomBytes(16).toString('hex'),
-      status: 'draft',
-      created_by: actorId || null,
-      metadata: JSON.stringify(metadata),
-      rate_review_row_id: row.id,
-      billing_lane: lane,
-      family_key: row.family_key,
-      noticed_current_cents: noticedCurrent,
-      noticed_new_cents: noticedNew,
-      apply_attempts: 0,
-    }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning(['id', 'effective_date']);
-    if (!inserted.length) throw hold('notice_event_collision', { effectiveDate });
+    // One notice per change EVENT: a legacy notice with the same customer,
+    // date and amounts is the same event; another rate-review notice is
+    // only when it is the same plan line (two lines can share date and
+    // amounts and are two changes). Checked here under the batch lock; the
+    // partial unique indexes of migration 20261001190000 are the belt.
+    const sameEvent = await sp('price_change_notices')
+      .where({ customer_id: row.customer_id, effective_date: effectiveDate, current_amount_cents: noticedCurrent, new_amount_cents: noticedNew })
+      .where(function legacyOrSameLine() { this.whereNull('rate_review_row_id').orWhere('family_key', row.family_key); })
+      .first('id');
+    if (sameEvent) throw hold('notice_event_collision', { effectiveDate });
+    let inserted;
+    try {
+      inserted = await sp('price_change_notices').insert({
+        batch_id: batchId,
+        customer_id: row.customer_id,
+        current_amount_cents: noticedCurrent,
+        new_amount_cents: noticedNew,
+        cadence_label: cadenceLabelFor(lane),
+        effective_date: effectiveDate,
+        notice_token: crypto.randomBytes(16).toString('hex'),
+        status: 'draft',
+        created_by: actorId || null,
+        metadata: JSON.stringify(metadata),
+        rate_review_row_id: row.id,
+        billing_lane: lane,
+        family_key: row.family_key,
+        noticed_current_cents: noticedCurrent,
+        noticed_new_cents: noticedNew,
+        apply_attempts: 0,
+      }).returning(['id', 'effective_date']);
+    } catch (err) {
+      // a concurrent insert of the same event won past the check above
+      if (err && err.code === '23505') throw hold('notice_event_collision', { effectiveDate });
+      throw err;
+    }
     await sp('rate_review_snapshots').where({ id: row.id }).update({ notice_id: inserted[0].id, updated_at: new Date() });
     return { noticeId: inserted[0].id };
   });
@@ -750,6 +776,10 @@ async function lockPerApplicationTargets(trx, { notice, customer, effectiveDate,
   // target set and would keep the old price — refuse instead.
   const parkedReschedule = visits.find((v) => String(v.status) === 'rescheduled');
   if (parkedReschedule) throw hold('visit_in_reschedule', { visitId: parkedReschedule.id });
+  // A legacy NULL-status visit is live (it bills at its own stamp when
+  // completed) but the series helper only reprices pending/confirmed rows.
+  const statusless = visits.find((v) => v.status == null);
+  if (statusless) throw hold('visit_status_missing', { visitId: statusless.id });
   const lockedIds = new Set(locked.map((v) => String(v.id)));
   const expected = new Set(visits.filter((v) => UPCOMING_STATUSES.includes(String(v.status))).map((v) => String(v.id)));
   if (lockedIds.size !== expected.size || [...lockedIds].some((id) => !expected.has(id))) throw hold('target_set_changed', { locked: [...lockedIds], expected: [...expected] });

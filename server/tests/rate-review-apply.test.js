@@ -268,6 +268,34 @@ describe('scheduleNoticeRows — per_application effective date', () => {
     expect(again).toMatchObject({ ok: true, created: 0, alreadyScheduled: 1 });
     expect(notices()).toHaveLength(1);
   });
+  test('two plan lines of one customer with the same date and amounts are two changes: each gets its own notice (the event is per plan line)', async () => {
+    const book = pestBook();
+    book.rate_review_snapshots.push(fixture.snapshotRow(1, { id: ROW(2), family_key: 'lawn_care' }));
+    const lawn = fixture.pestSeries(2, ['2026-12-10', '2027-03-10'], { parentOverrides: { customer_id: CUSTOMER(1), _line: 'lawn_care' }, childOverrides: { customer_id: CUSTOMER(1), _line: 'lawn_care' } });
+    book.scheduled_services.push(...lawn.all);
+    const out = await scheduleBook(book);
+    expect(out.held).toEqual([]);
+    expect(out.created).toBe(2);
+    expect(notices().map((n) => n.family_key).sort()).toEqual(['lawn_care', 'pest_control']);
+    expect(new Set(notices().map((n) => n.effective_date))).toEqual(new Set(['2026-12-10']));
+  });
+  test('the per-plan event key: a rate-review notice of the SAME plan line (or a legacy notice) with the same tuple still collides', async () => {
+    const book = pestBook();
+    book.price_change_notices = [fixture.noticeRow(1, { status: 'draft', rate_review_row_id: ROW(9), effective_date: '2026-12-10' })];
+    const out = await scheduleBook(book);
+    expect(out.held.map((h) => h.reason)).toEqual(['notice_event_collision']);
+    expect(notices()).toHaveLength(1);
+  });
+  test('the event-uniqueness migration splits the index: legacy notices keep the 4-column event key, rate-review notices add the plan line', async () => {
+    const migration = require('../models/migrations/20261001190000_price_change_notices_event_uniq_per_plan');
+    const sql = [];
+    const knex = { schema: { hasTable: async () => true, hasColumn: async () => true }, raw: async (q) => { sql.push(q.replace(/\s+/g, ' ').trim()); } };
+    await migration.up(knex);
+    const all = sql.join('\n');
+    expect(all).toMatch(/DROP CONSTRAINT IF EXISTS price_change_notices_event_uniq/);
+    expect(all).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS price_change_notices_event_uniq ON price_change_notices \(customer_id, effective_date, current_amount_cents, new_amount_cents\) WHERE rate_review_row_id IS NULL/);
+    expect(all).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS price_change_notices_plan_event_uniq ON price_change_notices \(customer_id, effective_date, current_amount_cents, new_amount_cents, family_key\) WHERE rate_review_row_id IS NOT NULL/);
+  });
   test('an existing notice with the same event tuple (customer, date, amounts) holds the row instead of silently reusing it', async () => {
     const book = pestBook();
     book.price_change_notices = [fixture.noticeRow(1, { status: 'draft', rate_review_row_id: null, effective_date: '2026-12-10' })];
@@ -322,6 +350,15 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
       term_id: TERM(1), term_end: '2027-05-14', coverage_visits: 4, current_term_amount_cents: 46800, next_term_amount_cents: 48400,
       per_application_current_cents: 11700, per_application_new_cents: 12100,
     });
+  });
+  test('annual_prepay: a term whose amount moved since the ranking (its per-application rate is no longer the approved current rate) is held, never noticed on mixed figures', async () => {
+    let out = await scheduleBook(prepayBook({ prepay_amount: '500.00' }));
+    expect(out.held.map((h) => h.reason)).toEqual(['rate_moved_since_ranking']);
+    expect(notices()).toHaveLength(0);
+    // a non-increase (the proposed rate is not above the live one) is never noticed either
+    out = await scheduleBook(prepayBook({}, { proposed_rate_cents: 11700, delta_cents: 0 }));
+    expect(out.created).toBe(0);
+    expect(notices()).toHaveLength(0);
   });
   test('annual_prepay: a term renewing inside the notice window, or already reminded, is held', async () => {
     let out = await scheduleBook(prepayBook({ term_end: '2026-11-28' }));
@@ -701,6 +738,14 @@ describe('applyDueRateChanges — per_application', () => {
     book.annual_prepay_terms = [{ id: TERM(1), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control', term_start: '2026-11-15', term_end: '2027-11-14' }];
     out = await runApply(book);
     expect(out.holds.map((h) => h.reason)).toEqual(['billing_lane_changed']);
+    expect(visits()[1].estimated_price).toBe('117.00');
+  });
+  test('an upcoming NULL-status visit of the line is live but outside the series helper\'s target set → hold, nothing repriced or marked applied', async () => {
+    const book = sentBook();
+    book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(510), scheduled_date: '2027-01-10', status: null });
+    const out = await runApply(book);
+    expect(out.holds.map((h) => h.reason)).toEqual(['visit_status_missing']);
+    expect(notices()[0].applied_at == null).toBe(true);
     expect(visits()[1].estimated_price).toBe('117.00');
   });
   test('a line running as two series → hold for a hand reprice', async () => {
