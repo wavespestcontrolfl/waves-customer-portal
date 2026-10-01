@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v20');
-    expect(PROMPT_HASH).toMatch(/^v20-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v21');
+    expect(PROMPT_HASH).toMatch(/^v21-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -358,7 +358,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.21.0');
+    expect(SCHEMA_VERSION).toBe('1.22.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

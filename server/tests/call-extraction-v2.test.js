@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.21.0');
+    expect(SCHEMA_VERSION).toBe('1.22.0');
   });
 
   describe('model-output schema', () => {
@@ -1428,6 +1428,8 @@ describe('extraction compat adapter', () => {
     expect(flat).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
     expect(flat).not.toHaveProperty('secondary_on_site_evidence');
     expect(flat).not.toHaveProperty('secondary_on_site_grounded');
+  });
+
   test('flatView maps the commercial dictated booking judgements (schema 1.21.0), null when not judged', () => {
     const v2 = validPersisted();
     const empty = flatView(v2);
