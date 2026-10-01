@@ -3364,14 +3364,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !isIncompleteVisit && visitOutcome !== 'customer_declined' && !isBackfillCompletion
       && require('../config/feature-gates').reportWriterRulesLive()) {
       const stalePromiseIds = await (async () => {
-        try {
-          const VisitPromises = require('../services/service-report/visit-promises');
-          if (!completionProfile || !VisitPromises.promiseCheckInScope(svc.service_type, completionProfile)) return [];
-          return await VisitPromises.staleVisitPromiseMarks(db, { customerId: svc.customer_id, marks: promiseMarks });
-        } catch {
-          return [];
-        }
-      })();
+        const VisitPromises = require('../services/service-report/visit-promises');
+        if (!completionProfile || !VisitPromises.promiseCheckInScope(svc.service_type, completionProfile)) return [];
+        // An optional read: in a grouped closeout `db` is the packet's
+        // transaction, so it runs in a savepoint and a ledger error never
+        // aborts the closeout (Codex #5516; waves-db failSoftRead).
+        return failSoftRead(db, (k) => VisitPromises.staleVisitPromiseMarks(k, { customerId: svc.customer_id, marks: promiseMarks }), []);
+      })().catch(() => []);
       if (stalePromiseIds.length
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: 409, body: {

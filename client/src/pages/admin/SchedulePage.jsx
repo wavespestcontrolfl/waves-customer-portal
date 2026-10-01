@@ -13292,6 +13292,9 @@ export function CompletionPanel({
   // `promiseIncludeAnswered` is the include list the last load answered.
   const [promiseIncludeIds, setPromiseIncludeIds] = useState([]);
   const [promiseIncludeAnswered, setPromiseIncludeAnswered] = useState("");
+  // The last load failed (or timed out): kept apart from a list that came
+  // back empty, so a failed read never drops the marks (Codex #5516).
+  const [promiseCheckUnavailable, setPromiseCheckUnavailable] = useState(false);
   const promiseIncludeKey = promiseIncludeIds.join(",");
   const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
@@ -14678,8 +14681,8 @@ export function CompletionPanel({
   }, [service.id]);
 
   // The promise check: listed only while the writer rules are live on a
-  // visit the writer covers (the server decides). A failed load shows
-  // nothing; marking is optional.
+  // visit the writer covers (the server decides). A failed load shows no
+  // card and keeps any marks as they stand; marking is optional.
   useEffect(() => {
     let cancelled = false;
     setPromiseCheck(null);
@@ -14693,22 +14696,26 @@ export function CompletionPanel({
       ? { signal: AbortSignal.timeout(PROMISE_CHECK_TIMEOUT_MS) } : {};
     adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
       .then((data) => {
-        if (!cancelled) setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+        if (cancelled) return;
+        setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+        setPromiseCheckUnavailable(false);
+        setPromiseIncludeAnswered(include);
       })
       .catch(() => {
-        if (!cancelled) setPromiseCheck(null);
+        if (cancelled) return;
+        setPromiseCheck(null);
+        setPromiseCheckUnavailable(true);
       })
       .finally(() => {
-        if (cancelled) return;
-        setPromiseIncludeAnswered(include);
-        setPromiseCheckLoading(false);
+        if (!cancelled) setPromiseCheckLoading(false);
       });
     return () => { cancelled = true; };
   }, [service.id, promiseReloadKey, promiseIncludeKey]);
   const visitPromises = promiseCheck?.promises || [];
   // Marks on promises the list has not shown yet and has not been asked
-  // for: kept as they stand until the list answers for them.
-  const unlistedMarkIds = promiseCheckLoading ? [] : Object.keys(promiseMarks).filter((id) => (
+  // for: kept as they stand until the list answers for them. Nothing is
+  // asked of a list that could not be read.
+  const unlistedMarkIds = promiseCheckLoading || promiseCheckUnavailable ? [] : Object.keys(promiseMarks).filter((id) => (
     !visitPromises.some((promise) => promise.id === id)
     && !(promiseIncludeAnswered ? promiseIncludeAnswered.split(",") : []).includes(id)
   ));
@@ -14723,13 +14730,18 @@ export function CompletionPanel({
   const promiseMarksSuppressed = quickComplete || backfillCloseout
     || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
   // Marked, listed promises only, each with the wording version the tech saw.
-  const promiseMarksForRequest = promiseMarksSuppressed ? [] : promiseMarksPayload(promiseMarks, visitPromises);
+  // While the list cannot be read, the marks go as the technician made them:
+  // the server checks each one against the promise as it stands, and asks
+  // when one changed (Codex #5516).
+  const markedPromises = Object.entries(promiseMarks || {}).map(([id, entry]) => ({ id, version: entry?.version }));
+  const promiseMarksForRequest = promiseMarksSuppressed ? []
+    : promiseMarksPayload(promiseMarks, promiseCheckUnavailable ? markedPromises : visitPromises);
   // The marks that still hold: once the list loads, only marks on a listed
   // promise's current wording (a restored mark on a reworded promise drops
   // out); while it loads, or while it has yet to answer for a marked
   // promise it did not show, the marks as they stand (so a restore never
   // clears a good report early).
-  const validPromiseMarks = promiseCheckLoading || unlistedMarkIds.length
+  const validPromiseMarks = promiseCheckLoading || promiseCheckUnavailable || unlistedMarkIds.length
     ? promiseMarks
     : Object.fromEntries(visitPromises.flatMap((promise) => {
       const entry = currentMark(promiseMarks, promise);

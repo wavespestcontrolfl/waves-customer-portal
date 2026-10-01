@@ -280,6 +280,36 @@ describe('the promise check on the completion form', () => {
     expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: OLDER.id, mark: 'done', version: OLDER.version }]);
   });
 
+  it('a promise list that cannot be read keeps the restored report and sends the marks for the server to check', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/promises')) throw new TypeError('Failed to fetch');
+      return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+    }));
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: REPORT,
+      generatedReportText: REPORT,
+      installedReportDraft: REPORT,
+      preGenerationNotes: 'Ghost ants on the slider track.',
+      aiReportUsed: true,
+      promiseMarks: { [PROMISES[0].id]: { mark: 'done', version: PROMISES[0].version, stillLeft: '' } },
+      generationPromiseSignature: JSON.stringify([[PROMISES[0].id, 'done', PROMISES[0].version, '']]),
+    }));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    // No promise changed; the list just could not be read: the report stays.
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('/promises'))).toBe(true));
+    await waitFor(() => expect(notes().value).toBe(REPORT));
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: PROMISES[0].id, mark: 'done', version: PROMISES[0].version }]);
+    expect(notes().value).toBe(REPORT);
+  });
+
   it('a marked promise that changed since the report asks: OK sends as is, Cancel reloads the list', async () => {
     const changed = Object.assign(new Error('A promise you marked changed after the report was written (the office closed, reworded or moved it). The report may still mention it.'), { code: 'promise_marks_changed' });
     const onSubmit = vi.fn().mockRejectedValueOnce(changed).mockRejectedValueOnce(changed).mockResolvedValue({});

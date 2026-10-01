@@ -582,7 +582,8 @@ describe('wiring source contracts', () => {
     expect(check).toBeLessThan(completionSource.indexOf('durableCompletionCommitted = true;'));
     const block = completionSource.slice(completionSource.lastIndexOf('if (!promiseMarksConfirmed', check), check + 200);
     expect(block).toMatch(/visitOutcome !== 'customer_declined' && !isBackfillCompletion/);
-    expect(block).toMatch(/staleVisitPromiseMarks\(db, \{ customerId: svc\.customer_id, marks: promiseMarks \}\)/);
+    // In a savepoint: in a grouped closeout `db` is the packet's transaction.
+    expect(block).toMatch(/failSoftRead\(db, \(k\) => VisitPromises\.staleVisitPromiseMarks\(k, \{ customerId: svc\.customer_id, marks: promiseMarks \}\), \[\]\)/);
     expect(block).toMatch(/hasCommittedCompletionAttempt/);
     expect(block).toMatch(/confirmable: true/);
     expect(completionSource).toMatch(/promiseMarksConfirmed = false, \/\/ tech confirmed sending/);
