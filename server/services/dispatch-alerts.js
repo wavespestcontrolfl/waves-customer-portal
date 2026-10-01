@@ -187,8 +187,8 @@ function emitAlert(row) {
 
 async function clearTrackingBells(t, rows) {
   const ids = rows.filter((row) => row?.payload?.source === 'no_show_detector').map((row) => String(row.id));
-  if (ids.length) await t('notifications').whereIn(t.raw("metadata->>'dispatch_alert_id'"), ids)
-    .whereNull('read_at').update({ read_at: t.fn.now() });
+  if (ids.length) await require('./notification-service')._private.openToCloser(t('notifications').whereIn(t.raw("metadata->>'dispatch_alert_id'"), ids), 'dispatch')
+    .update(require('./notification-service')._private.doneColumns({ by: 'dispatch', resolution: 'The dispatch alert was resolved', keepExisting: true, conn: t }));
 }
 
 /**

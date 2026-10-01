@@ -56,6 +56,8 @@ jest.mock('../models/db', () => {
       if (text === 'link IS NOT DISTINCT FROM ?') conds.push((r) => (r.link ?? null) === (args[0] ?? null));
       if (text === 'metadata IS NOT DISTINCT FROM ?::jsonb') conds.push((r) => canon(meta(r)) === canon(args[0] == null ? null : JSON.parse(args[0])));
       if (text === "metadata->'retired'->>'at' = ?") conds.push((r) => meta(r)?.retired?.at === args[0]);
+      // The candidate query leaves a row this module already retired alone.
+      if (text === "metadata->'retired' IS NULL") conds.push((r) => meta(r)?.retired == null);
       // The re-arm pass: this module's stamp, inside the window (ISO text order).
       if (text === "metadata->'retired'->>'by' = ?") conds.push((r) => meta(r)?.retired?.by === args[0]);
       if (text === "metadata->'retired'->>'at' > ?") conds.push((r) => meta(r)?.retired?.at != null && String(meta(r).retired.at) > args[0]);
@@ -77,7 +79,18 @@ jest.mock('../models/db', () => {
         applied = hit();
         applied.forEach((r) => {
           const { metadata, ...rest } = patch;
-          Object.assign(r, rest);
+          // Column raws as Postgres would evaluate them against the row's own
+          // values: doneColumns' keepExisting COALESCEs and the put-back's CASE.
+          const resolved = Object.fromEntries(Object.entries(rest).map(([col, v]) => {
+            if (!v || typeof v !== 'object' || !v.__raw) return [col, v];
+            const sql = String(v.__raw);
+            if (/^COALESCE\(\w+, \?(::timestamptz)?\)$/.test(sql)) return [col, r[col] ?? v.bindings[0]];
+            if (/^CASE WHEN read_at = \?::timestamptz THEN NULL ELSE read_at END$/.test(sql)) {
+              return [col, r.read_at instanceof Date && r.read_at.getTime() === v.bindings[0].getTime() ? null : r.read_at];
+            }
+            throw new Error(`fake db cannot evaluate raw: ${sql}`);
+          }));
+          Object.assign(r, resolved);
           if (metadata && metadata.__raw && /- 'retired'/.test(metadata.__raw)) {
             // jsonb minus every key the expression names.
             const dropped = [...metadata.__raw.matchAll(/- '(\w+)'/g)].map((m) => m[1]);
@@ -265,6 +278,26 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:z' } }))).reason).toBeNull();
   });
 
+  test('promise marks: settled once every promise it names is closed, gone, or acted on by the office after the bell', async () => {
+    const P1 = uid(510);
+    const P2 = uid(511);
+    const marks = note({ category: 'alert', link: `/admin/customers?customerId=${CUST}&tab=comms`, metadata: { dedupeKey: `visit-promise-marks:${VISIT}`, promise_ids: [P1, P2] } });
+    const promises = (one, two) => { mockTables.call_commitments = [{ id: P1, status: 'open', reviewed_at: null, ...one }, { id: P2, status: 'open', reviewed_at: null, ...two }]; };
+    promises({}, {});
+    expect(await reasonFor(marks)).toEqual({ cls: 'promise_marks', reason: null });
+    // One closed, the other still open and untouched: still relevant.
+    promises({ status: 'fulfilled' }, { reviewed_at: BEFORE_BELL });
+    expect((await reasonFor(marks)).reason).toBeNull();
+    // The office acted on the other after the bell (a note, a confirm): settled.
+    promises({ status: 'fulfilled' }, { reviewed_at: AFTER_BELL });
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // Dismissed, or gone.
+    mockTables.call_commitments = [{ id: P1, status: 'dismissed', reviewed_at: null }];
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // A bell that names no promise is never judged.
+    expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
+  });
+
   const move = (metadata = {}) => note({
     category: 'schedule_conflict', link: '/admin/dispatch?tab=schedule',
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },
@@ -418,7 +451,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockHooks['scheduled_services as ss'] = () => { reads += 1; fn(reads); };
   };
 
-  test('retires only unread matching rows whose subject moved on; stamps the reason and touches nothing else', async () => {
+  test('retires every open matching row whose subject moved on (a row someone only READ is still open work); stamps the reason and touches nothing else', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' }), visit({ id: OPEN_VISIT, status: 'on_site' })];
     mockTables.leads = [lead({ deleted_at: AFTER_BELL })];
     const staleMeta = { dedupeKey: `stale-visit:${uid(501)}`, dedupeVersion: 'fp::g2', autoCleared: false, recurrenceGeneration: 2, scheduled_service_id: VISIT, customer_id: CUST };
@@ -431,25 +464,32 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [stale, leadRow, alreadyRead, stillOpen, contact];
 
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(result).toEqual({ skipped: false, scanned: 4, retired: 2, byClass: { stale_visit: 1, new_lead: 1 }, rearmed: 0 });
-    expect(stale.read_at).toBeInstanceOf(Date);
+    expect(result).toEqual({ skipped: false, scanned: 5, retired: 3, byClass: { stale_visit: 2, new_lead: 1 }, rearmed: 0 });
+    // A retire is DONE: it leaves the bell, with its reason as the resolution; an unread row is read at the done instant.
+    expect(stale).toMatchObject({ read_at: NOW, done_at: NOW, done_by: 'relevance', resolution: 'Visit is no longer in progress' });
     // Pure read + retired marker: every emitter-owned key survives as it was,
     // dedupe key included.
     expect(JSON.parse(stale.metadata)).toEqual({ ...staleMeta, retired: { by: 'alert-relevance', reason: 'Visit is no longer in progress', at: NOW.toISOString() } });
-    expect(leadRow.read_at).toBeInstanceOf(Date);
+    expect(leadRow).toMatchObject({ read_at: NOW, done_at: NOW, done_by: 'relevance' });
     expect(JSON.parse(leadRow.metadata)).toEqual({ ...leadBefore, retired: { by: 'alert-relevance', reason: 'Lead was deleted', at: NOW.toISOString() } });
-    expect(alreadyRead.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
-    expect(JSON.parse(alreadyRead.metadata).retired).toBeUndefined();
-    for (const untouched of [stillOpen, contact]) { expect(untouched.read_at).toBeNull(); expect(JSON.parse(untouched.metadata).retired).toBeUndefined(); }
+    // Read is not done: the person's read is retired too, and their own read_at stands.
+    expect(alreadyRead).toMatchObject({ read_at: new Date('2026-09-27T13:00:00Z'), done_at: NOW, done_by: 'relevance', resolution: 'Visit is no longer in progress' });
+    expect(JSON.parse(alreadyRead.metadata).retired).toMatchObject({ by: 'alert-relevance', at: NOW.toISOString() });
+    for (const untouched of [stillOpen, contact]) {
+      expect([untouched.read_at, untouched.done_at ?? null]).toEqual([null, null]);
+      expect(JSON.parse(untouched.metadata).retired).toBeUndefined();
+    }
   });
 
-  test('the candidate query is unread, admin and bell-visible, with no age cut-off (a refreshed bell keeps its first created_at)', async () => {
+  test('the candidate query is open (done_at IS NULL, never read_at), not already retired, admin and bell-visible, with no age cut-off (a refreshed bell keeps its first created_at)', async () => {
     mockTables.notifications = [];
     await runAdminAlertRelevanceSweep({ now: NOW });
     // The retire pass's query (the re-arm pass reads stamped rows first).
-    const q = mockQueries.find((x) => x.table === 'notifications' && x.calls.some(([m, col]) => m === 'whereNull' && col === 'read_at'));
+    const q = mockQueries.find((x) => x.table === 'notifications' && x.calls.some(([m, sql]) => m === 'whereRaw' && sql === "metadata->'retired' IS NULL"));
     const flat = JSON.stringify(q.calls);
-    expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereNull', 'read_at']]));
+    expect(q.calls).toEqual(expect.arrayContaining([['where', { recipient_type: 'admin' }], ['whereRaw', "metadata->'retired' IS NULL", []]]));
+    // Read is not done: a row someone opened is still open work.
+    expect(q.calls).not.toContainEqual(['whereNull', 'read_at']);
     expect(flat).toContain("metadata->>'feed'");
     // created_at is read (a new lead is judged by what came after it), never filtered on.
     expect(JSON.stringify(q.calls.filter(([m]) => m !== 'select'))).not.toContain('created_at');
@@ -460,7 +500,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     const old = { ...staleNote(uid(540)), created_at: new Date('2026-06-01T12:00:00Z') };
     mockTables.notifications = [old];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 1 });
-    expect(old.read_at).toBeInstanceOf(Date);
+    expect(old).toMatchObject({ read_at: NOW, done_at: NOW });
   });
 
   test('the retirement is judged on a fresh read: a visit that reopens after the batch read keeps the stale-visit alert ringing', async () => {
@@ -469,7 +509,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [row];
     onVisitRead((n) => { if (n === 2) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at ?? null]).toEqual([null, null]);
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
@@ -480,7 +520,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [row];
     onVisitRead((n) => { if (n === 3) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
     expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
@@ -491,7 +531,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [row];
     onVisitRead((n) => { if (n === 3) throw new Error('connection reset'); });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
     expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
@@ -504,33 +544,55 @@ describe('runAdminAlertRelevanceSweep', () => {
     // The lead is restored between the retire write and the final judgement.
     mockHooks.leads = () => { leadReads += 1; if (leadReads === 3) mockTables.leads[0].deleted_at = null; };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at, row.done_by, row.resolution]).toEqual([null, null, null, null]);
     expect(JSON.parse(row.metadata)).toEqual(before);
   });
 
-  test('the retire writes an explicit millisecond read_at (never NOW(), whose microseconds a read-back would lose) and the put-back matches it exactly', async () => {
+  test('the retire writes an explicit millisecond done_at (never NOW(), whose microseconds a read-back would lose) and the put-back matches it exactly', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(557));
     mockTables.notifications = [row];
     const retireWrites = [];
     onVisitRead((n) => {
-      if (n === 3) { retireWrites.push(row.read_at); mockTables['scheduled_services as ss'][0].status = 'on_site'; }
+      if (n === 3) { retireWrites.push([row.done_at, row.read_at]); mockTables['scheduled_services as ss'][0].status = 'on_site'; }
     });
     await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(retireWrites[0]).toBeInstanceOf(Date);
-    expect(retireWrites[0]).not.toBe('NOW');
-    expect(row.read_at).toBeNull(); // put back by an exact read_at match
+    expect(retireWrites[0][0]).toBeInstanceOf(Date);
+    expect(retireWrites[0][0]).not.toBe('NOW');
+    expect(retireWrites[0]).toEqual([NOW, NOW]);
+    // Put back by an exact done_at match: open again, and unread because the read was this module's own.
+    expect([row.done_at, row.done_by, row.read_at]).toEqual([null, null, null]);
   });
 
-  test('a person who reads the bell in that window keeps their read: nothing is put back over it', async () => {
+  test('a person who reopens the bell in that window keeps it: nothing is put back over it, and the sweep never retires it again', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(552));
     mockTables.notifications = [row];
-    const theirRead = new Date('2026-09-28T16:00:01Z');
     onVisitRead((n) => {
-      if (n === 3) { mockTables['scheduled_services as ss'][0].status = 'on_site'; row.read_at = theirRead; }
+      if (n === 3) {
+        mockTables['scheduled_services as ss'][0].status = 'on_site';
+        Object.assign(row, { done_at: null, done_by: null, resolution: null }); // their reopen
+      }
     });
     await runAdminAlertRelevanceSweep({ now: NOW });
+    // Their reopen is theirs: the fence (done_at = our stamp) no longer matches, so the row is left exactly as they made it.
+    expect([row.done_at, row.read_at]).toEqual([null, NOW]);
+    expect(JSON.parse(row.metadata).retired).toMatchObject({ by: 'alert-relevance' });
+    // …and the stamp survives the reopen, so a later sweep does not close it behind their back.
+    mockTables['scheduled_services as ss'][0].status = 'completed';
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 0, retired: 0 });
+    expect(row.done_at ?? null).toBeNull();
+  });
+
+  test('a person who reads the bell in that window keeps their read: the put-back reopens it but never un-reads it', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(558));
+    mockTables.notifications = [row];
+    const theirRead = new Date('2026-09-27T13:00:00Z');
+    row.read_at = theirRead; // read before the sweep got to it
+    onVisitRead((n) => { if (n === 3) mockTables['scheduled_services as ss'][0].status = 'on_site'; });
+    await runAdminAlertRelevanceSweep({ now: NOW });
+    expect([row.done_at, row.done_by]).toEqual([null, null]);
     expect(row.read_at).toBe(theirRead);
   });
 
@@ -550,7 +612,7 @@ describe('runAdminAlertRelevanceSweep', () => {
       if (n === 1) mockTables.notifications[0] = { ...row, metadata: JSON.stringify({ ...JSON.parse(row.metadata), dedupeVersion: 'refreshed' }) };
     });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(mockTables.notifications[0].read_at).toBeNull();
+    expect([mockTables.notifications[0].read_at, mockTables.notifications[0].done_at ?? null]).toEqual([null, null]);
   });
 
   test('switch off: no reads, no writes, nothing retired', async () => {
@@ -562,15 +624,27 @@ describe('runAdminAlertRelevanceSweep', () => {
     expect(mockTables.notifications[0].read_at).toBeNull();
   });
 
-  test('a row a person reads mid-sweep is never touched', async () => {
+  test('a row a person READS mid-sweep is still retired (read is not done) and keeps their read_at', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
     const row = staleNote(uid(520));
     mockTables.notifications = [row];
     const readAt = new Date('2026-09-28T15:59:00Z');
     onVisitRead((n) => { if (n === 1) row.read_at = readAt; });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
+    expect(result).toMatchObject({ scanned: 1, retired: 1, byClass: { stale_visit: 1 } });
+    expect(row).toMatchObject({ read_at: readAt, done_at: NOW, done_by: 'relevance' });
+    expect(JSON.parse(row.metadata).retired).toMatchObject({ by: 'alert-relevance', at: NOW.toISOString() });
+  });
+
+  test('a row a person marks DONE whose subject moved on is taken over (done_by relevance, no Reopen), not retired: their done, resolution and read stand', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'completed' })];
+    const row = staleNote(uid(521));
+    mockTables.notifications = [row];
+    const doneAt = new Date('2026-09-28T15:59:00Z');
+    onVisitRead((n) => { if (n === 1) Object.assign(row, { done_at: doneAt, done_by: '7', resolution: 'Handled by phone', read_at: doneAt }); });
+    const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 1, retired: 0, byClass: {} });
-    expect(row.read_at).toBe(readAt);
+    expect(row).toMatchObject({ done_at: doneAt, done_by: 'relevance', resolution: 'Handled by phone', read_at: doneAt });
     expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
@@ -579,7 +653,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = Array.from({ length: 205 }, (_v, i) => staleNote(uid(1000 + i)));
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result).toMatchObject({ scanned: 205, retired: 205 });
-    expect(mockTables.notifications.every((r) => r.read_at instanceof Date)).toBe(true);
+    expect(mockTables.notifications.every((r) => r.read_at instanceof Date && r.done_at instanceof Date)).toBe(true);
     // The batched first pass reads visits once per page; each retirement then
     // judges its row on a fresh read before the write and once after it.
     expect(mockQueries.filter((q) => q.table === 'scheduled_services as ss')).toHaveLength(2 + 205 * 2);
@@ -592,7 +666,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     mockTables.notifications = [odd, good];
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(result.retired).toBe(1);
-    expect(good.read_at).toBeInstanceOf(Date);
+    expect(good).toMatchObject({ read_at: NOW, done_at: NOW });
   });
 
   test('a refresh that rewrote the bell between the fresh read and the write keeps it ringing: the retire lands only on the version it judged', async () => {
@@ -604,7 +678,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     // refresh rewrites the same row onto a visit that is still open.
     onVisitRead((n) => { if (n === 2) row.metadata = JSON.stringify(refreshed); });
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at ?? null]).toEqual([null, null]);
     expect(JSON.parse(row.metadata)).toEqual(refreshed);
   });
 
@@ -615,7 +689,7 @@ describe('runAdminAlertRelevanceSweep', () => {
     const refreshed = { ...JSON.parse(row.metadata), scheduled_service_id: OPEN_VISIT, dedupeVersion: 'refreshed' };
     let reads = 0;
     // 1st read: the fresh read before the write. 2nd: the read after it — a
-    // quiet refresh (read_at untouched, the stamp merged in) lands just before,
+    // quiet refresh (done_at untouched, the stamp merged in) lands just before,
     // onto a visit that is still open.
     mockHooks['notifications:first'] = () => {
       reads += 1;
@@ -625,7 +699,7 @@ describe('runAdminAlertRelevanceSweep', () => {
       }
     };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ scanned: 1, retired: 0 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at, row.done_by]).toEqual([null, null, null]);
     expect(JSON.parse(row.metadata)).toEqual(refreshed);
   });
 });
@@ -634,9 +708,12 @@ describe('re-arm: a retirement holds only while its rule does', () => {
   const AT = '2026-09-27T16:00:00.123Z';
   const READ_AT = new Date(AT);
   const retiredStamp = (reason, at = AT) => ({ retired: { by: 'alert-relevance', reason, at } });
-  // As the sweep writes it: the stamp's `at` is the read_at it stored.
+  // As the sweep writes it: the stamp's `at` is the done_at (and, on an unread row, the read_at) it stored.
   const swept = (row, reason, at = AT) => {
     row.read_at = new Date(at);
+    row.done_at = new Date(at);
+    row.done_by = 'relevance';
+    row.resolution = reason;
     row.metadata = JSON.stringify({ ...JSON.parse(row.metadata), ...retiredStamp(reason, at) });
     return row;
   };
@@ -651,10 +728,10 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     mockTables.notifications = [reopened, stillClosed, bookingCancelled];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 2, retired: 0 });
     for (const back of [reopened, bookingCancelled]) {
-      expect(back.read_at).toBeNull();
+      expect([back.read_at, back.done_at, back.done_by, back.resolution]).toEqual([null, null, null, null]);
       expect(JSON.parse(back.metadata).retired).toBeUndefined();
     }
-    expect(stillClosed.read_at).toEqual(READ_AT);
+    expect([stillClosed.read_at, stillClosed.done_at, stillClosed.done_by]).toEqual([READ_AT, READ_AT, 'relevance']);
     expect(JSON.parse(stillClosed.metadata).retired).toMatchObject({ by: 'alert-relevance', at: AT });
   });
 
@@ -665,33 +742,52 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     const other = { ...staleNote(uid(712), { retired: { by: 'someone-else', at: AT } }), read_at: READ_AT };
     mockTables.notifications = [final, human, other];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
-    expect(final.read_at).toEqual(new Date('2026-09-13T15:59:59.000Z'));
+    expect([final.read_at, final.done_at]).toEqual([new Date('2026-09-13T15:59:59.000Z'), new Date('2026-09-13T15:59:59.000Z')]);
     for (const row of [human, other]) expect(row.read_at).toEqual(READ_AT);
   });
 
-  test('the put-back lands only on the version read: a row rewritten or read again meanwhile is left alone', async () => {
+  test('the put-back lands only on the version read: a row rewritten or closed again by a person meanwhile is left alone', async () => {
     mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
     const rewritten = swept(staleNote(uid(720)), 'Visit is no longer in progress');
     const reread = swept(staleNote(uid(721)), 'Visit is no longer in progress');
+    const THEIR_DONE = new Date('2026-09-28T15:00:00Z');
     mockTables.notifications = [rewritten, reread];
     // New row versions land between the page read and the write (the page
     // holds the versions it read, as Postgres would).
     mockHooks['scheduled_services as ss'] = () => {
       mockTables.notifications = mockTables.notifications.map((r) => {
         if (r.id === rewritten.id) return { ...r, metadata: JSON.stringify({ ...JSON.parse(r.metadata), note: 'refreshed' }) };
-        if (r.id === reread.id) return { ...r, read_at: new Date('2026-09-28T15:00:00Z') };
+        // A person reopened it and closed it again by hand: a done of their own.
+        if (r.id === reread.id) return { ...r, done_at: THEIR_DONE, done_by: '7', resolution: 'Handled', read_at: THEIR_DONE };
         return r;
       });
     };
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
     const live = (id) => mockTables.notifications.find((r) => r.id === id);
-    expect(live(rewritten.id).read_at).toEqual(READ_AT);
-    expect(live(reread.id).read_at).toEqual(new Date('2026-09-28T15:00:00Z'));
-    // …and on every later run: the stamp still names this module's read, which is no longer the row's.
+    expect([live(rewritten.id).read_at, live(rewritten.id).done_at]).toEqual([READ_AT, READ_AT]);
+    expect(live(reread.id)).toMatchObject({ read_at: THEIR_DONE, done_at: THEIR_DONE, done_by: '7', resolution: 'Handled' });
+    // …and on every later run: the stamp still names this module's done, which is no longer the row's.
     mockHooks['scheduled_services as ss'] = null;
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
-    expect(live(reread.id).read_at).toEqual(new Date('2026-09-28T15:00:00Z'));
-    expect(live(rewritten.id).read_at).toBeNull();
+    expect(live(reread.id)).toMatchObject({ read_at: THEIR_DONE, done_at: THEIR_DONE, done_by: '7' });
+    expect([live(rewritten.id).read_at, live(rewritten.id).done_at]).toEqual([null, null]);
+  });
+
+  test('a person who read the retired bell keeps their read through the put-back; the row is open again', async () => {
+    mockTables['scheduled_services as ss'] = [visit({ status: 'on_site' })];
+    const THEIR_READ = new Date('2026-09-28T15:00:00Z');
+    const row = swept(staleNote(uid(722)), 'Visit is no longer in progress');
+    row.read_at = THEIR_READ; // read after the retire: the row's read is no longer the module's own
+    // …and one a person had already read BEFORE the retire (the retire kept their read_at, not the stamp's).
+    const earlier = swept(staleNote(uid(723)), 'Visit is no longer in progress');
+    earlier.read_at = new Date('2026-09-27T13:00:00Z');
+    mockTables.notifications = [row, earlier];
+    expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 2 });
+    expect([row.done_at, row.done_by, row.resolution]).toEqual([null, null, null]);
+    expect(row.read_at).toBe(THEIR_READ);
+    expect([earlier.done_at, earlier.done_by]).toEqual([null, null]);
+    expect(earlier.read_at).toEqual(new Date('2026-09-27T13:00:00Z'));
+    expect(JSON.parse(row.metadata).retired).toBeUndefined();
   });
 
   test('a backlog past the page cap is walked across runs: the next run resumes where the last one stopped', async () => {
@@ -701,9 +797,9 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     const last = swept(staleNote(uid(30000), { scheduled_service_id: OPEN_VISIT }), 'Visit is no longer in progress');
     mockTables.notifications = [...backlog, last];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
-    expect(last.read_at).toEqual(READ_AT);
+    expect([last.read_at, last.done_at]).toEqual([READ_AT, READ_AT]);
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
-    expect(last.read_at).toBeNull();
+    expect([last.read_at, last.done_at]).toEqual([null, null]);
   });
 
   test('a retire whose put-back failed is judged again by the next run: kept while still moved on, put back once relevant', async () => {
@@ -711,9 +807,9 @@ describe('re-arm: a retirement holds only while its rule does', () => {
     const row = swept(staleNote(uid(730)), 'Visit is no longer in progress');
     mockTables.notifications = [row];
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 0 });
-    expect(row.read_at).toEqual(READ_AT);
+    expect([row.read_at, row.done_at]).toEqual([READ_AT, READ_AT]);
     mockTables['scheduled_services as ss'][0].status = 'on_site';
     expect(await runAdminAlertRelevanceSweep({ now: NOW })).toMatchObject({ rearmed: 1 });
-    expect(row.read_at).toBeNull();
+    expect([row.read_at, row.done_at]).toEqual([null, null]);
   });
 });

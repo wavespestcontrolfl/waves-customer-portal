@@ -8,7 +8,11 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real done writer: a system close is done, not just read (read is not done).
+  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -2993,6 +2997,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
     const second = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 5 * 60000) });
     expect(second).toMatchObject({ fulfilled: 1 });
+    // The system closed it on proof: the bell is done, not only read.
+    expect(await mockPg('notifications').whereNull('done_at')).toHaveLength(0);
     expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'sms', record_id: guide.id });
     expect(await mockPg('notifications')).toHaveLength(1);
     expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(0);

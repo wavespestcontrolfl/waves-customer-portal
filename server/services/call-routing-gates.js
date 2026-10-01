@@ -405,6 +405,50 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
   'created_at',
 ];
 
+// REVISIONS of a reviewed decision. A row a human has reviewed is never
+// mutated, but every later pass must still have ONE writable row that records
+// its decision AND its later outcome (codex #5377 r4 / r7 / r8 P1). A decision's
+// FAMILY is its base version row plus one '+r1' revision (distinct audit key,
+// varchar(30) safe): the pass writes the family's UNREVIEWED member — the base
+// when nothing is reviewed, else the other member — whatever its verdict, and
+// the same-run outcome update lands on that row. route_feedback is unique per
+// call (one current verdict, re-review repoints it), so at most ONE member is
+// reviewed at a time and base + one revision always suffice. Bounded so every
+// revision version is enumerable for the history-spanning readers
+// (V2_DECISION_VERSIONS_WITH_REVISIONS). Independent of any one gate.
+const ROUTE_DECISION_MAX_REVISIONS = 1;
+const routeDecisionRevisionVersion = (baseVersion, n) => `${baseVersion}+r${n}`;
+const routeDecisionRevisionVersions = (baseVersion) => Array.from(
+  { length: ROUTE_DECISION_MAX_REVISIONS }, (_, i) => routeDecisionRevisionVersion(baseVersion, i + 1),
+);
+// A decision version and every revision of it.
+const routeDecisionFamilyVersions = (baseVersion) => [baseVersion, ...routeDecisionRevisionVersions(baseVersion)];
+const V2_DECISION_VERSIONS_WITH_REVISIONS = V2_DECISION_VERSIONS.flatMap(routeDecisionFamilyVersions);
+
+// THE join every reader uses to attach a route_feedback verdict to a
+// route_decisions row (codex #5377 r8 + r9 P1). A verdict attaches ONLY to the
+// row it points at (or, for a legacy verdict, when it carries no decision link).
+// There is deliberately NO sibling inheritance: a later pass writes the family's
+// other row (see upsertRouteDecision), and that row is a new decision nobody has
+// judged — even when its recommendation and reasons repeat the judged one, the
+// extraction behind it (name, service, address, slot, model, prompt, schema) can
+// differ, and a verdict on the old row must not vouch for it. So the inbox shows
+// it unreviewed, which is correct. One shared helper so every reader stays in
+// lockstep. Pure SQL text (no bindings) over the aliases given, so it drops into
+// a knex joinRaw. Nothing here writes: reviewed rows are never mutated.
+function routeFeedbackJoinCondition(decisionAlias = 'route_decisions', feedbackAlias = 'route_feedback') {
+  const d = decisionAlias;
+  const f = feedbackAlias;
+  return `${f}.call_log_id = ${d}.call_log_id AND (${f}.route_decision_id IS NULL OR ${f}.route_decision_id = ${d}.id)`;
+}
+// `query` already selects FROM route_decisions (alias `decisionAlias`).
+function leftJoinRouteFeedback(query, decisionAlias = 'route_decisions') {
+  return query.joinRaw(`LEFT JOIN route_feedback ON ${routeFeedbackJoinCondition(decisionAlias, 'route_feedback')}`);
+}
+function innerJoinRouteFeedback(query, decisionAlias = 'route_decisions') {
+  return query.joinRaw(`JOIN route_feedback ON ${routeFeedbackJoinCondition(decisionAlias, 'route_feedback')}`);
+}
+
 // EVERY writer of route_decisions takes the CALL row lock first, then the decision
 // rows (codex #5446 r1 + r2 P1): FOR UPDATE on the decision rows that exist now
 // cannot stop another writer INSERTING a new decision row, so the verdict writers
@@ -443,9 +487,9 @@ const ROUTE_DECISION_REVISION_SQL = `${ROUTE_DECISION_XMIN_TEXT} AS revision`;
 // #5446 r2 P2).
 const LISTED_ROUTE_DECISION_MODE = 'enforce';
 const isListedRouteDecision = (row) => !!row && row.mode === LISTED_ROUTE_DECISION_MODE
-  && V2_DECISION_VERSIONS.includes(row.decision_version);
+  && V2_DECISION_VERSIONS_WITH_REVISIONS.includes(row.decision_version);
 function routeDecisionsListedScope(query) {
-  return query.whereIn('decision_version', V2_DECISION_VERSIONS).where('mode', LISTED_ROUTE_DECISION_MODE);
+  return query.whereIn('decision_version', V2_DECISION_VERSIONS_WITH_REVISIONS).where('mode', LISTED_ROUTE_DECISION_MODE);
 }
 
 // Every write to an existing route_decisions row (the refresh above and the
@@ -466,6 +510,15 @@ function excludeReviewedDecisions(query, conn) {
   });
 }
 
+// A scope value that is an ARRAY matches any of its members (the processor's
+// outcome update names a decision's whole revision family).
+function applyRouteDecisionScope(query, scope) {
+  for (const [col, val] of Object.entries(scope)) {
+    if (Array.isArray(val)) query.whereIn(col, val); else query.where(col, val);
+  }
+  return query;
+}
+
 // Lock the route_decisions rows matching `scope`, then update those of them a
 // human has not reviewed. Must run inside a transaction (`trx`) so the lock
 // spans both statements; the second statement takes a fresh READ COMMITTED
@@ -474,7 +527,7 @@ function excludeReviewedDecisions(query, conn) {
 async function updateUnreviewedRouteDecisions(trx, scope, patch) {
   // Call row first, like every route_decisions writer (lockCallRow).
   if (scope.call_log_id && !Array.isArray(scope.call_log_id)) await lockCallRow(trx, scope.call_log_id);
-  const locked = await trx('route_decisions').where(scope).forUpdate().select('id');
+  const locked = await applyRouteDecisionScope(trx('route_decisions'), scope).forUpdate().select('id');
   if (!locked.length) return 0;
   return excludeReviewedDecisions(
     trx('route_decisions').whereIn('id', locked.map((r) => r.id)).update(patch),
@@ -534,50 +587,66 @@ function resolveDisplayedRouteDecision(rows, displayedId, newestOf, displayedRev
 }
 const STALE_ROUTE_DECISION = 'STALE_ROUTE_DECISION';
 
-// Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
-// (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
-// three-column constraint and the recording-keyed index during a rolling
-// deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
-//   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
-//   2. a keyed, ROW-LOCKED UPDATE of the refresh columns (a later pass lands
-//      here) — see updateUnreviewedRouteDecisions.
-// `fence` ({ callLogId, processingToken }) makes BOTH statements conditional on
-// this pass still owning the call's processing_token: the ownership row is
-// locked FOR UPDATE and re-read in the same transaction as the writes (the
-// processor's own fence shape), so a superseded worker can neither insert a
-// first decision nor overwrite a newer pass's (codex #5371 r8 P1). A fence that
-// was ASKED FOR but is incomplete fails closed: nothing is written. Refreshes
-// also skip a decision a human already reviewed. The unfenced path runs in a
+// Insert-or-refresh, so the INSERT stays TARGETLESS (ON CONFLICT DO NOTHING
+// names no constraint: tolerant of BOTH the legacy three-column constraint and
+// the recording-keyed index during a rolling deploy, Codex #3736 r9 P1 —
+// Postgres cannot do a targetless DO UPDATE). Everything after it is ONE
+// FAMILY RULE under the row lock (codex #5377 r4 / r7 / r8 P1): read the
+// decision's family (base + '+r1') FOR UPDATE — every route_feedback writer
+// takes the same row lock, so a verdict cannot land mid-write — find the
+// REVIEWED member (route_feedback is one verdict per call: at most one), and
+// write the OTHER one: the base when nothing (or the revision) is reviewed, else
+// the revision, insert-or-refresh, WHATEVER the pass's verdict. A reviewed row
+// is never touched. So every pass has exactly one writable row that records its
+// decision and, later, its outcome; that row is a new, unreviewed decision (a
+// verdict attaches only to the row it points at: routeFeedbackJoinCondition).
+// `fence` ({ callLogId, processingToken }) makes ALL of it conditional on this
+// pass still owning the call's processing_token: the ownership row is locked FOR
+// UPDATE and re-read in the same transaction as the writes (the processor's own
+// fence shape), so a superseded worker can neither insert a first decision nor
+// overwrite a newer pass's (codex #5371 r8 P1). A fence that was ASKED FOR but is
+// incomplete fails closed: nothing is written. The unfenced path runs in a
 // transaction too: the row lock needs one.
-// Returns rows refreshed / 0 / null (null = fence not held: nothing written).
-async function upsertRouteDecision(conn, decision, fence = null) {
+// Returns 1 (written) / null (fence not held: nothing written). `out`, when
+// given, receives `decisionVersion`: the version of the row this pass wrote (null
+// only on a lost fence) — the same-run outcome update targets it.
+async function upsertRouteDecision(conn, decision, fence = null, out = null) {
+  const report = (version) => { if (out) out.decisionVersion = version; };
   const write = async (c) => {
     // Call row first (lockCallRow): the unfenced path (audit/backfill) takes the
     // lock too; the fenced path already holds it from the ownership read below.
     await lockCallRow(c, decision.call_log_id);
     await c('route_decisions').insert(decision).onConflict().ignore();
-    const refresh = {};
-    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
-    // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
-    // points at a decision row by id and calibration joins that row's CURRENT
-    // action / reasons to the human's verdict, so mutating a reviewed row would
-    // re-attach an old verdict to a decision the reviewer never saw.
-    return updateUnreviewedRouteDecisions(c, {
-      call_log_id: decision.call_log_id,
-      decision_version: decision.decision_version,
-      mode: decision.mode,
-      recording_sid: decision.recording_sid,
-    }, refresh);
+    const base = decision.decision_version;
+    const scope = { call_log_id: decision.call_log_id, mode: decision.mode, recording_sid: decision.recording_sid };
+    const family = await applyRouteDecisionScope(c('route_decisions'), { ...scope, decision_version: routeDecisionFamilyVersions(base) })
+      .forUpdate().select('*');
+    const ids = family.map((r) => r.id);
+    const reviewedIds = new Set(ids.length
+      ? (await c('route_feedback').whereIn('route_decision_id', ids).select('route_decision_id')).map((r) => r.route_decision_id)
+      : []);
+    const reviewed = family.find((r) => reviewedIds.has(r.id)) || null;
+    const target = reviewed && reviewed.decision_version === base ? routeDecisionRevisionVersion(base, 1) : base;
+    const existing = family.find((r) => r.decision_version === target);
+    if (existing) {
+      const refresh = {};
+      for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
+      await c('route_decisions').where({ id: existing.id }).update(refresh);
+    } else {
+      await c('route_decisions').insert({ ...decision, decision_version: target }).onConflict().ignore();
+    }
+    report(target);
+    return 1;
   };
   if (!fence) return conn.transaction(write);
-  if (!fence.callLogId || !fence.processingToken) return null;
+  if (!fence.callLogId || !fence.processingToken) { report(null); return null; }
   return conn.transaction(async (trx) => {
     const owned = await trx('call_log')
       .where({ id: fence.callLogId })
       .where('processing_token', fence.processingToken)
       .forUpdate()
       .first('id');
-    if (!owned) return null;
+    if (!owned) { report(null); return null; }
     return write(trx);
   });
 }
@@ -1037,7 +1106,19 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   'email_bounce_reverify',
 ]);
 
+// Owner ruling 2026-09-30: a street-level address hold's review card (the
+// outbound_booking_review card whose payload.street_level_address is set) also
+// survives a recording swap. It lives exactly as long as its visit is
+// unconfirmed — confirm, correct or cancel resolve it — so a replacement that no
+// longer books never strands the pending visit without its task. Two-valued
+// (COALESCE) so an ordinary card, or one with no payload, still retires.
+// The same rule keeps the owed-follow-up card the confirm hook files for such a
+// hold (its skipped_reason marker): a sweep must not retire the office's task or
+// make a system resolution read as "handled".
+const SUPERSEDE_KEPT_CARD_SQL = "NOT ((reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true') OR (reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked'))";
+
 module.exports = {
+  SUPERSEDE_KEPT_CARD_SQL,
   excludeReviewedDecisions,
   updateUnreviewedRouteDecisions,
   withLockedRouteDecisions,
@@ -1060,4 +1141,11 @@ module.exports = {
   buildTriageItem,
   V2_DECISION_VERSION,
   V2_DECISION_VERSIONS,
+  V2_DECISION_VERSIONS_WITH_REVISIONS,
+  ROUTE_DECISION_MAX_REVISIONS,
+  routeDecisionRevisionVersion,
+  routeDecisionFamilyVersions,
+  routeFeedbackJoinCondition,
+  leftJoinRouteFeedback,
+  innerJoinRouteFeedback,
 };

@@ -2208,6 +2208,12 @@ function BacklinksTab() {
                 {llmDash.benchmark.measured} measured answers (a model change
                 keeps its answers separate). Recommended counts a mentioned
                 answer with positive sentiment ranked in the top 3 brands
+                {(llmDash.benchmark.rankMethods || []).includes("known_list_v1")
+                  ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
+                  : ""}
+                {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
+                  ? " (some ranks are read from the answer text, so they are conservative and never better than the true rank)"
+                  : ""}
                 {llmDash.benchmark.unclassified > 0
                   ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
                   : ""}
@@ -2280,6 +2286,82 @@ function BacklinksTab() {
                     </div>
                   </div>
                 ))
+              )}
+            </UiCard>
+          )}
+          {llmDash?.citedPageRanking && (
+            <UiCard className="p-6">
+              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+                Cited pages to win
+              </h3>
+              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
+                Directory and article pages answer engines cite, ranked page by
+                page. First: pages cited in a current &ldquo;who should I
+                hire&rdquo; answer that does not name Waves. Since{" "}
+                {llmDash.citedPageRanking.since}.
+              </p>
+              {llmDash.citedPageRanking.pages.length === 0 ? (
+                <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
+                  No directory or article pages cited in this window.
+                </p>
+              ) : (
+                llmDash.citedPageRanking.pages.map((p) => (
+                  <div
+                    key={p.key}
+                    className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+                  >
+                    <a
+                      href={p.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 break-words"
+                    >
+                      {p.rank}. {p.url}
+                    </a>
+                    <div className="text-ink-secondary">
+                      {p.currentMisses > 0
+                        ? `In ${p.currentMisses} current answer${p.currentMisses === 1 ? "" : "s"} without Waves (${p.missEngines.join(", ")})`
+                        : p.tier === 2
+                          ? "Cited in current answers that name Waves"
+                          : p.currentCitations > 0
+                            ? "Cited in current answers, not to a who-to-hire question"
+                            : "Cited earlier in the window"}
+                      {" · "}cited {p.citations}x · {p.category}
+                      {p.subtype ? ` (${p.subtype.replace(/_/g, " ")})` : ""}
+                    </div>
+                    <div className="text-ink-secondary">
+                      {p.questions
+                        .slice(0, 3)
+                        .map((q) => `${q.id ? `${q.id}: ` : ""}${q.query}`)
+                        .join(" · ")}
+                    </div>
+                  </div>
+                ))
+              )}
+              {llmDash.citedPageRanking.placements?.length > 0 && (
+                <>
+                  <h4 className="text-ui-body text-zinc-900 font-medium [margin:16px_0_4px]">
+                    Placements live on a cited page
+                  </h4>
+                  {llmDash.citedPageRanking.placements.map((r) => (
+                    <div
+                      key={r.prospectId}
+                      className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+                    >
+                      <div className="text-zinc-900">
+                        {r.host} · live since {r.liveOn} ·{" "}
+                        {PLACEMENT_VERDICT_LABEL[r.verdict] || r.verdict}
+                      </div>
+                      <div className="text-ink-secondary">
+                        Waves named in {r.before.named}/{r.before.answers}{" "}
+                        answers before, {r.after.named}/{r.after.answers} since
+                        {r.after.citingPage > 0
+                          ? ` (${r.after.namedWhenCiting}/${r.after.citingPage} that cite the page)`
+                          : ""}
+                      </div>
+                    </div>
+                  ))}
+                </>
               )}
             </UiCard>
           )}
@@ -2554,6 +2636,14 @@ function EntityFactsTable({ label, rows, first = "Group" }) {
     </UiCard>
   );
 }
+// cited-pages.js recheckPlacements verdicts
+const PLACEMENT_VERDICT_LABEL = {
+  too_early: "too early to tell",
+  named_when_cited: "Waves now named where the page is cited",
+  page_not_cited_now: "engines no longer cite the page",
+  not_named_yet: "not named yet",
+};
+
 function AeoRateTable({ label, rows }) {
   return (
     <UiCard className="p-6 [flex:1] [min-width:0px]">

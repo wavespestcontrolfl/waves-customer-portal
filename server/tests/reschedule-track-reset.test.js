@@ -17,6 +17,8 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+// The shared field-advance seam asks the street-level hold predicate (fails closed on a bare fake db).
+jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn().mockResolvedValue({ success: false }),
   sendTechArrived: jest.fn().mockResolvedValue({ success: false }),
@@ -132,6 +134,7 @@ describe('markEnRoute stale-attempt self-heal', () => {
     // The status-rewind heal runs its write + history insert in one trx;
     // the mock hands the same db queue to the callback.
     db.transaction = jest.fn(async (fn) => fn(db));
+    db.raw = jest.fn(async () => ({ rows: [] })); // the flip's row lock
   });
 
   test('stale on_property from an earlier ET day is rewound and the flip proceeds', async () => {
@@ -698,6 +701,7 @@ describe('markOnProperty stale-attempt repair (arrival-first signals)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    db.raw = jest.fn(async () => ({ rows: [] })); // the flip's row lock
   });
 
   test('entirely-old on_property row rewinds before a fresh arrival flip', async () => {

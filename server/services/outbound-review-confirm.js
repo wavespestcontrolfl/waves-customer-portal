@@ -19,6 +19,7 @@
  */
 
 const logger = require('./logger');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit } = require('./street-level-hold');
 const db = require('../models/db');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -391,13 +392,24 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       // Shared per-call lock contract (utils/triage-locks.js) with the other
       // triage writers — serialize before the card update so an overlapping
       // sweep/verdict can't deadlock or interleave the aggregate.
-      const { lockTriageCall } = require('../utils/triage-locks');
+      const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
       await db.transaction(async (trx) => {
         await lockTriageCall(trx, svc.source_call_log_id);
+        // Street-level address holds only (one lookup): every other pending office-review
+        // booking resolves its card exactly as before.
+        const hold = await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
+        const isHold = !!hold?.payload?.street_level_address;
+        if (isHold) {
+          await fileOwedFollowUpForStreetLevelHold(trx, svc, hold);
+          await stampBookedDispositionForStreetLevelHold(trx, svc, hold);
+        }
         await trx('triage_items')
           .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', updated_at: trx.fn.now() });
+        // The hold's call review state closes with its last open card (same aggregate
+        // every card writer keeps, under the same per-call lock).
+        if (isHold) await syncCallReviewStatus(trx, svc.source_call_log_id);
       });
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
@@ -673,6 +685,182 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
 }
 
 /**
+ * A street-level address hold (call-recording-processor: the review card
+ * carries payload.street_level_address) deferred the promised second visit
+ * instead of booking it at an unverified address. Once the office confirms the
+ * visit, that follow-up must not vanish: file the existing owed-follow-up card
+ * (attached_booking_followup_unbooked, carrying follow_up_plan) that the office
+ * books by hand and Resolves — the same card the settled house-number dispute
+ * files. Idempotent: nothing is filed when a child visit already exists, when
+ * an owed-follow-up card was already handled, and an open card just takes the
+ * current plan. Runs inside the caller's transaction, before the review card
+ * is resolved.
+ */
+async function fileOwedFollowUpForStreetLevelHold(trx, svc, knownCard) {
+  // The visit's latest street-level card, open or already superseded by a
+  // recording replacement: the promised follow-up must not depend on it staying open.
+  const card = knownCard || await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
+  const payload = card?.payload || null;
+  if (!payload?.follow_up_plan) return false;
+  const owned = await trx('scheduled_services')
+    .where((q) => q.where({ parent_service_id: svc.id }).orWhere({ followup_source_service_id: svc.id }))
+    .first('id');
+  if (owned) return false;
+  const handled = await trx('triage_items')
+    .where({ call_log_id: svc.source_call_log_id, reason_code: 'attached_booking_followup_unbooked' })
+    .whereIn('status', ['resolved', 'dismissed'])
+    .first('id');
+  if (handled) return false;
+  const { buildTriageItem } = require('./call-routing-gates');
+  await trx('triage_items')
+    .insert(buildTriageItem({
+      callLogId: svc.source_call_log_id,
+      flag: 'attached_booking_followup_unbooked',
+      extraction: { meta: { call_summary: 'Address confirmed — the follow-up visit promised on the call is still unbooked' }, scheduling: { status: 'confirmed' } },
+      extraPayload: { follow_up_plan: payload.follow_up_plan, skipped_reason: 'street_level_address_confirmed_follow_up_unbooked' },
+    }))
+    .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge({
+      payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+      summary: trx.raw('EXCLUDED.summary'),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+/**
+ * Owner ruling 2026-09-30: a street-level address hold counts as booked only
+ * once the office confirms. At call time the disposition was recorded as
+ * lead_response_flow_triggered (reason appointment_pending_office_review); the
+ * confirm stamps 'booked'. Compare-and-swap on that exact value, so a human's
+ * own disposition tag or a later reprocess is never overwritten. No-op unless
+ * the disposition gate is live and the card is a street-level hold for this
+ * visit. Runs before the review card is resolved.
+ */
+async function stampBookedDispositionForStreetLevelHold(trx, svc, knownCard) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callDispositionV1')) return false;
+  if (!(knownCard || await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id }))) return false;
+  const stamped = await trx('call_log')
+    .where({ id: svc.source_call_log_id, disposition: 'lead_response_flow_triggered' })
+    .update({ disposition: 'booked', updated_at: new Date() });
+  if (stamped) logger.info(`[outbound-review-confirm] call ${svc.source_call_log_id} disposition booked (street-level hold confirmed for ${svc.id})`);
+  return stamped > 0;
+}
+
+/**
+ * Runs AFTER customer_confirmed is stamped. The hook's own disposition / review
+ * legs run before the stamp, so a call-processor pass still in flight can read
+ * the visit as unconfirmed and write the pending disposition or reopen
+ * review_status after them. Once the stamp has landed, put both right under the
+ * shared per-call lock: disposition booked (compare-and-swap on the pending
+ * value) and review_status recomputed from the call's open cards. Street-level
+ * holds only; best-effort, never throws.
+ */
+async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
+  try {
+    if (!svc?.source_call_log_id) return false;
+    const card = await findStreetLevelHoldCard(dbh, { callLogId: svc.source_call_log_id, visitId: svc.id });
+    if (!card) return false;
+    const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+    await dbh.transaction(async (trx) => {
+      await lockTriageCall(trx, svc.source_call_log_id);
+      await stampBookedDispositionForStreetLevelHold(trx, svc);
+      await syncCallReviewStatus(trx, svc.source_call_log_id);
+    });
+    return true;
+  } catch (e) {
+    logger.warn(`[street-level-hold] post-stamp reconcile failed for ${svc?.id}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+// True when the visit has a recorded transition TO confirmed BY A USER (the office confirm
+// route's transitionJobStatus row) from ANY prior status: a hold SmartRebooker moved is
+// already `confirmed`, so the office's later confirm records confirmed -> confirmed and
+// must still count. Fails closed (false) on a lookup error.
+async function hasRecordedOfficeConfirm(dbh, serviceId) {
+  try {
+    const row = await dbh('job_status_history')
+      .where({ job_id: serviceId, to_status: 'confirmed' })
+      // SmartRebooker records its own pending -> confirmed on a move with transitioned_by NULL;
+      // the office confirm route records the acting user. Only the latter is an approval.
+      .whereNotNull('transitioned_by')
+      .first('job_id');
+    return !!row;
+  } catch (e) {
+    logger.warn(`[street-level-hold] confirm-history lookup failed for ${serviceId}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+/**
+ * Owner ruling 2026-10-01: COMPLETING a street-level hold's visit counts as confirming its
+ * address (the technician or admin is at the property). Called by the shared completion
+ * engine once the completion attempt is claimed: confirms the visit (pending -> confirmed,
+ * attributed to the completing user) and runs the same office-confirm activation the
+ * confirm route runs (card resolved, reminders armed, lead converted, disposition booked),
+ * so the visit is no longer a hold and its recap sends normally. The card-on-file request
+ * is skipped (the tech collects in person). No-op for every other visit; best-effort, never
+ * throws — a failed release leaves the hold (and its customer-message hold) in place.
+ * @returns {Promise<boolean|null>} null when the visit is not a hold (nothing to do), true when THIS
+ *   call released it, false when it is a hold that could not be released
+ */
+async function releaseStreetLevelHoldForPerformedCompletion(serviceId, actor = {}, routeTag = 'completion') {
+  try {
+    const dbh = require('../models/db');
+    const svc = await dbh('scheduled_services').where({ id: serviceId }).first('id', 'source_action', 'customer_confirmed');
+    return await releaseStreetLevelHoldForCompletion(svc, actor, routeTag);
+  } catch (e) {
+    logger.warn(`[${routeTag}] street-level hold release lookup failed for ${serviceId}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = 'completion') {
+  try {
+    const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
+    if (!svc?.id || svc.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || svc.customer_confirmed === true) return null;
+    const dbh = require('../models/db');
+    if (!(await isStreetLevelHoldVisit(svc.id, dbh))) return null;
+    // Read the CURRENT row: completion may already have moved the visit to 'completed'.
+    let row = await dbh('scheduled_services').where({ id: svc.id }).first(
+      'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'source_call_log_id', 'is_callback', 'estimated_price', 'status',
+    );
+    if (row && String(row.status) === 'pending') {
+      const { transitionJobStatus } = require('./job-status');
+      await transitionJobStatus({
+        jobId: svc.id,
+        fromStatus: 'pending',
+        toStatus: 'confirmed',
+        transitionedBy: actor.technicianId || null,
+        notes: 'Confirmed by completing the visit (the address was confirmed on site)',
+        legacyOutboundActivation: 'caller',
+      });
+      row = { ...row, status: 'confirmed' };
+    }
+    if (!row) return false;
+    let released = await runOfficeConfirmActivation(dbh, row, routeTag, { skipCardRequest: true });
+    if (!released) {
+      // The completion's own transition to 'completed' also schedules the lazy activation post-commit;
+      // if that one won the confirmed stamp, this call's stamp matched no row and answered false even
+      // though the hold IS released (the hook legs are idempotent, the stamp at-most-once). Re-read
+      // before calling it a failure.
+      const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed');
+      if (after?.customer_confirmed === true) released = true;
+    }
+    if (released) {
+      // The caller's snapshot reflects the confirmed state from here on.
+      svc.customer_confirmed = true;
+    }
+    return released;
+  } catch (e) {
+    logger.warn(`[${routeTag}] street-level hold release failed for ${svc?.id}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+/**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
  * OR a voice-agent booking, which is created with the same pending/
@@ -694,24 +882,38 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
  */
 async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation', opts = {}) {
   try {
-    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
     const row = await db('scheduled_services')
       .where({ id: serviceId })
       .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
         'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
-        'is_callback', 'estimated_price');
+        'is_callback', 'estimated_price', 'field_confirmed_at');
     if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
     }
-    // Rejected rows are not activated — a cancelled/skipped legacy review
-    // booking was the office declining it. Completed/no_show rows DO
-    // activate: transitionJobStatus defers its own activation to this
-    // helper post-commit, so by the time it runs the row already carries
-    // the terminal status — and the lead conversion / card resolution /
-    // credit evidence are exactly what a worked visit still owes.
-    if (['cancelled', 'skipped'].includes(String(row.status || ''))) {
-      return false;
+    // A street-level address hold is released ONLY by the office's explicit confirm: no writer that
+    // merely moves the visit (SmartRebooker, update-details, the bulk paths, the sweep) may activate it.
+    // Status 'confirmed' is NOT proof (SmartRebooker writes it on a move); the proof is a recorded
+    // pending -> confirmed transition BY A USER (SmartRebooker's own row has transitioned_by NULL), or,
+    // for a COMPLETED hold, the field-confirmation stamp the completion engine commits with the status
+    // when the closeout was performed at the property (an incomplete / declined closeout carries none, and
+    // the stamp also keeps the card funnel off in the hook). A hold the office confirmed whose hook then
+    // failed stays on the retry rail. Fails closed.
+    // (Recognized by its card whatever its state: a hold the completion settled without approving — an
+    // incomplete / declined closeout — stays a non-activatable hold.)
+    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })) {
+      const approved = (row.status === 'completed' && !!row.field_confirmed_at)
+        || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
+      if (!approved) {
+        logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
+        return false;
+      }
     }
+    // Rejected rows are not activated (a cancelled/skipped booking was the office declining it);
+    // completed/no_show rows DO — the lead conversion / card resolution / credit evidence are what a
+    // worked visit still owes. The fresh re-read below is the rejection check (the first read may be
+    // arbitrarily stale by the time a sweep batch reaches this row; a just-committed cancel/skip wins,
+    // Codex #3361 r8 P1).
     // Fresh rejection re-check immediately before the side effects: the
     // first read above may be arbitrarily stale by the time a sweep batch
     // reaches this row, and a just-committed cancel/skip must win
@@ -751,6 +953,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
+    if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(db, row);
     return stamped > 0;
   } catch (e) {
     logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
@@ -813,6 +1016,7 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
       // cancelled/skipped row confirmed (same guard as the lazy helper).
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
+    if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(dbh, svc);
     return stamped > 0;
   } catch (e) {
     logger.error(`[${routeTag}] office-confirm stamp failed for ${svc.id}: ${e.message}`);
@@ -896,9 +1100,15 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 }
 
 module.exports = {
+  releaseStreetLevelHoldForCompletion,
+  releaseStreetLevelHoldForPerformedCompletion,
+  fileOwedFollowUpForStreetLevelHold,
+  reconcileStreetLevelHoldAfterStamp,
+  stampBookedDispositionForStreetLevelHold,
   runOutboundReviewConfirmHook,
   runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
   verifyReminderSlotAfterRegistration,
+  _test: { hasRecordedOfficeConfirm },
 };

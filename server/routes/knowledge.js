@@ -56,7 +56,10 @@ router.post('/query', async (req, res) => {
 // GET /api/knowledge/queries — recent query log
 router.get('/queries', async (req, res) => {
   try {
-    const queries = await getDb()('knowledge_queries').orderBy('created_at', 'desc').limit(50);
+    const { withoutSavedGaps } = require('../services/knowledge/knowledge-gaps-weekly');
+    const queries = await withoutSavedGaps(getDb()('knowledge_queries'))
+      .orderBy('created_at', 'desc')
+      .limit(50);
     res.json(queries);
   } catch (err) {
     res.status(500).json({ error: err.message });

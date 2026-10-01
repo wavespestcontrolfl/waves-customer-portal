@@ -46,6 +46,10 @@ async function recordConsent({
   consentTextSnapshot = null,
   consentTextVersion = null,
   evidenceContractId = null,
+  // { text, version }: the exact checkbox copy an accept recorded as shown
+  // (a 'v<N>' card-copy version). Recorded verbatim, never re-derived, so a
+  // webhook recovery after a copy change still records what the customer saw.
+  renderedConsent = null,
   // A caller that must decide something ELSE atomically with this row (the
   // pay surface re-judges Bill-To ownership in the same transaction, so a
   // withdrawal committing mid-request cannot leave consent recorded against
@@ -59,21 +63,26 @@ async function recordConsent({
   if ((consentTextSnapshot || evidenceContractId) && !(consentTextSnapshot && consentTextVersion && evidenceContractId)) {
     throw new Error('recordConsent: an agreement-backed consent needs its snapshot, version, and contract id');
   }
-  const consentText = consentTextSnapshot || getConsentText(methodType, { variant: consentVariant });
+  const rendered = !consentTextSnapshot && renderedConsent ? renderedConsent : null;
+  if (rendered && !(typeof rendered.text === 'string' && rendered.text && /^v\d+(?:[_-]|$)/.test(String(rendered.version || '')))) {
+    throw new Error('recordConsent: a rendered consent needs its text and a v<N> version');
+  }
+  const consentText = consentTextSnapshot || rendered?.text || getConsentText(methodType, { variant: consentVariant });
+  const consentVersion = consentTextVersion || rendered?.version || consentVersionForVariant(consentVariant, methodType);
 
   const [row] = await database('payment_method_consents').insert({
     customer_id: customerId,
     payment_method_id: paymentMethodId,
     stripe_payment_method_id: stripePaymentMethodId,
     source,
-    consent_text_version: consentTextVersion || consentVersionForVariant(consentVariant, methodType),
+    consent_text_version: consentVersion,
     consent_text_snapshot: consentText,
     ip,
     user_agent: userAgent,
     ...(evidenceContractId ? { evidence_contract_id: evidenceContractId } : {}),
   }).returning('*');
 
-  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentTextVersion || consentVersionForVariant(consentVariant, methodType)}, methodType=${methodType})`);
+  logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${consentVersion}, methodType=${methodType})`);
   return row;
 }
 
@@ -138,9 +147,9 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
 // immediate-charge authorization in the ledger even when an older
 // future-invoice consent exists, while webhook-backstop retries must not
 // stack duplicate rows).
-async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, source = null, dbh = db } = {}) {
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, text: renderedText = null, since = null, source = null, dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
-  const text = getConsentText(methodType, { variant });
+  const text = renderedText || getConsentText(methodType, { variant });
   const q = dbh('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text });
   // `source` scopes the idempotency to ONE capture surface: an identical

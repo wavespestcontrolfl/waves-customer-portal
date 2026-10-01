@@ -2,13 +2,33 @@
  * Intelligence Bar — GrowthBook Experimentation Tools
  * server/services/intelligence-bar/growthbook-tools.js
  *
- * Read-only visibility into GrowthBook: running/stopped experiments and
- * feature flags. Reads only — the standing rule is that GrowthBook changes
- * happen in the GrowthBook UI by the owner, never through automation, so
- * this module deliberately has no mutation surface at all.
+ * Visibility into GrowthBook: running/stopped experiments and feature flags,
+ * plus one write tool, set_growthbook_feature_environment (enable or disable a
+ * feature in one environment — GrowthBook's environment switch, not the value
+ * the feature serves). The earlier standing rule —
+ * GrowthBook changes happen only in the GrowthBook UI, never through
+ * automation — was OVERRIDDEN by the owner on 2026-09-28 (Decision 5: GrowthBook
+ * flag toggles may be made from the Intelligence Bar), so the bar may now
+ * propose a flag toggle through the usual confirmation card (full-access login
+ * only, write-gates.js OUTSIDE_WRITE_TOOL_NAMES).
  *
- * Auth: GROWTHBOOK_API_KEY (a read-only secret key is sufficient and
- * preferred). GROWTHBOOK_API_BASE overrides for self-hosted.
+ * set_growthbook_feature_environment reads the feature
+ * (GET /api/v1/features/{id}) and shows the environment's current state.
+ * Confirmed, it acts ONLY on the `_verified_growthbook_*` pins: it re-reads
+ * the feature and refuses unless it is unarchived, the environment still has
+ * the prior state the card showed, and the feature's dateUpdated / revision
+ * are unchanged (an edit made anywhere — including the GrowthBook UI —
+ * refuses). Then it calls GrowthBook's documented toggle endpoint,
+ * POST /api/v2/features/{id}/toggle with
+ * { environments: { "<env>": true|false } } only, which publishes
+ * immediately. (The v1 toggle is deprecated in favor of v2, same body; the
+ * reads stay on v1.) GrowthBook has no conditional toggle, so the re-read
+ * narrows the race window but cannot close it.
+ *
+ * Auth: GROWTHBOOK_API_KEY. The reads work with a read-only secret key; a
+ * toggle needs a key with Publish access for the environment — a 401/403
+ * refuses as write_access_required. GROWTHBOOK_API_BASE overrides for
+ * self-hosted.
  */
 
 const logger = require('../logger');
@@ -44,9 +64,29 @@ Use for: "what feature flags exist in GrowthBook?", "is the pricing-hub flag on 
       },
     },
   },
+  {
+    name: 'set_growthbook_feature_environment',
+    description: `Propose ENABLING or DISABLING a GrowthBook feature in one environment (default production). Owner login only, through a confirmation card showing whether the feature is enabled there now, the value it serves by default and how many targeting rules it has.
+This is GrowthBook's environment switch, NOT the value the flag serves: an enabled feature can still serve false (its default value), and disabling an environment makes SDK callers fall back to their own code default. If the operator asks to make a flag serve a different value, say this tool cannot change values or rules — that happens in the GrowthBook UI.
+Use for: "enable the pricing-hub feature in production", "disable the X feature in GrowthBook production"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        feature_id: { type: 'string', description: 'The GrowthBook feature key (id), exactly as shown by get_growthbook_features' },
+        enabled: { type: 'boolean', description: 'true = enable the feature in the environment, false = disable it there (not the value it serves)' },
+        environment: { type: 'string', description: "GrowthBook environment name (default 'production')" },
+      },
+      required: ['feature_id', 'enabled'],
+    },
+  },
 ];
 
-const NOT_CONFIGURED_MESSAGE = 'GrowthBook access is not configured. Add the GROWTHBOOK_API_KEY service variable (a read-only GrowthBook secret key) in the Railway dashboard.';
+const READ_ONLY_KEY_MESSAGE = 'The GrowthBook key cannot change flags — it needs a secret key with Publish access for this environment (or the environment requires approval) before this action can commit.';
+const FEATURE_CHANGED_MESSAGE = 'The GrowthBook feature changed after the card was shown (edited, archived, or its environment state moved). Nothing was changed — ask again for a fresh confirmation card.';
+const FEATURE_ID_RE = /^[A-Za-z0-9_.:-]{1,100}$/;
+const ENVIRONMENT_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+const NOT_CONFIGURED_MESSAGE = 'GrowthBook access is not configured. Add the GROWTHBOOK_API_KEY service variable (a GrowthBook secret key — a read-only key is enough to look, toggling a flag will need write access) in the Railway dashboard.';
 
 function clampLimit(limit) {
   return Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
@@ -66,6 +106,34 @@ async function gbGet(path) {
     });
     if (res.status === 401 || res.status === 403) {
       throw new Error('GrowthBook rejected the key — check GROWTHBOOK_API_KEY.');
+    }
+    if (!res.ok) throw new Error(`GrowthBook API returned HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`GrowthBook API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function gbPost(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${GROWTHBOOK_API_BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.GROWTHBOOK_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      const err = new Error(READ_ONLY_KEY_MESSAGE);
+      err.writeAccessRequired = true;
+      throw err;
     }
     if (!res.ok) throw new Error(`GrowthBook API returned HTTP ${res.status}`);
     return await res.json();
@@ -232,6 +300,173 @@ async function getExperimentResultsSummary() {
   return { experiments: out, running: out.length };
 }
 
+// ── set_growthbook_feature_environment ──────────────────────────────────
+
+// Values are shown in full, never truncated: the card is the operator's
+// only view of what a confirm puts live.
+function fullValue(v) {
+  if (v === undefined || v === null) return null;
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+// Every targeting rule in the environment, one line each. Enabling the
+// environment puts ALL of these live at once (Codex r1 on #5514, P1), so the
+// card shows each rule COMPLETE — every field GrowthBook returns, including
+// allocation (hashAttribute, namespace, ranges, seed, bucketing) — never a
+// chosen subset (r2). Its type, on/off and description lead; the rest
+// follows as the rule's own JSON. Keyed rule_1, rule_2, … so the card
+// renders one line per rule.
+function describeRules(rules) {
+  if (!Array.isArray(rules) || !rules.length) return null;
+  return Object.fromEntries(rules.map((r, i) => {
+    const { type, enabled, description, ...rest } = r && typeof r === 'object' ? r : { value: r };
+    const head = `${type || 'rule'}${enabled === false ? ' (this rule is turned off)' : ''}${description ? ` "${description}"` : ''}`;
+    return [`rule_${i + 1}`, Object.keys(rest).length ? `${head} · ${JSON.stringify(rest)}` : head];
+  }));
+}
+
+async function setGrowthbookFeatureEnvironment(input) {
+  if (input.confirmed === true) return commitGrowthbookFeatureEnvironment(input);
+  const featureId = typeof input.feature_id === 'string' ? input.feature_id.trim() : '';
+  const environment = input.environment === undefined || input.environment === null || input.environment === ''
+    ? 'production' : String(input.environment).trim();
+  if (!FEATURE_ID_RE.test(featureId)) {
+    return { error: 'feature_id must be a GrowthBook feature key (letters, digits, dots, dashes, underscores).', code: 'invalid_feature_id' };
+  }
+  if (!ENVIRONMENT_RE.test(environment)) {
+    return { error: 'environment must be a GrowthBook environment name such as production.', code: 'invalid_environment' };
+  }
+  if (typeof input.enabled !== 'boolean') {
+    return { error: 'enabled must be true (enable in the environment) or false (disable there).', code: 'invalid_enabled' };
+  }
+
+  let json;
+  try {
+    json = await gbGet(`/api/v1/features/${encodeURIComponent(featureId)}`);
+  } catch (err) {
+    // A missing flag is an answer, not an outage.
+    if (isNotFound(err)) return { error: 'GrowthBook has no feature with that key. Check the exact key with get_growthbook_features.', code: 'feature_not_found' };
+    throw err;
+  }
+  const feature = json && json.feature;
+  if (!feature || typeof feature !== 'object') throw new Error('GrowthBook returned no feature for that key.');
+  if (feature.archived) {
+    return { error: 'That GrowthBook feature is archived, so nothing was proposed.', code: 'feature_archived' };
+  }
+  const envs = feature.environments && typeof feature.environments === 'object' ? feature.environments : {};
+  const envCfg = Object.prototype.hasOwnProperty.call(envs, environment) ? envs[environment] : null;
+  if (!envCfg || typeof envCfg !== 'object') {
+    return { error: `This feature has no "${environment}" environment. Environments: ${Object.keys(envs).join(', ') || 'none'}.`, code: 'environment_not_found' };
+  }
+  const priorEnabled = Boolean(envCfg.enabled);
+  if (priorEnabled === input.enabled) {
+    return {
+      already_set: true,
+      code: 'already_set',
+      message: `Feature "${feature.id || featureId}" is already ${priorEnabled ? 'enabled' : 'disabled'} in ${environment} — nothing to change. (Enabled is not the same as serving true: it serves its default value and rules.)`,
+    };
+  }
+  const word = (b) => (b ? `enabled in ${environment}` : `disabled in ${environment}`);
+  const ruleCount = Array.isArray(envCfg.rules) ? envCfg.rules.length : 0;
+  return {
+    preview: true,
+    tool: 'set_growthbook_feature_environment',
+    feature: feature.id || featureId,
+    environment,
+    current_state: word(priorEnabled),
+    new_state: word(input.enabled),
+    change: `Feature ${feature.id || featureId}: ${word(priorEnabled)} → ${word(input.enabled)}`,
+    default_value: fullValue(envCfg.defaultValue ?? feature.defaultValue),
+    rule_count: ruleCount,
+    rules: describeRules(envCfg.rules),
+    // What the switch actually does to served values — enabled is not "on":
+    // an enabled feature serves its default value and rules; a disabled
+    // environment makes SDK callers fall back to their own code default.
+    effect_note: input.enabled
+      ? `Once enabled, ${environment} serves the feature's default value (${fullValue(envCfg.defaultValue ?? feature.defaultValue) ?? 'none set'}) plus ALL ${ruleCount} targeting rule(s) listed on this card at once — enabling does not by itself make it serve true.`
+      : `Once disabled, ${environment} stops serving this feature's value and rules; SDK callers fall back to the default written in their own code.`,
+    // Pins for the commit path: the toggle must refuse if the flag was edited
+    // (anywhere, including the GrowthBook UI) after this card was shown. Named
+    // without a trailing "_at" so the fingerprint keeps them (it strips volatile
+    // timestamp keys).
+    prior_enabled: priorEnabled,
+    ...featureVersion(feature),
+    note: `${input.enabled ? 'Enable' : 'Disable'} GrowthBook feature ${feature.id || featureId} in ${environment} (currently ${word(priorEnabled)}).`,
+  };
+}
+
+// Confirmed set_growthbook_feature_environment: acts ONLY on the pins
+// /confirm-action derived from the fingerprint-verified live preview — never
+// on feature_id / environment / enabled from this call's own input.
+// The edit stamps a card pins and a confirm re-checks: an edit made anywhere
+// (including the GrowthBook UI) moves one of them.
+function featureVersion(feature) {
+  return {
+    feature_version: feature.dateUpdated || null,
+    revision_version: feature.revision?.version ?? null,
+  };
+}
+
+async function commitGrowthbookFeatureEnvironment(input) {
+  const featureId = input._verified_growthbook_feature_id;
+  const environment = input._verified_growthbook_environment;
+  const priorEnabled = input._verified_growthbook_prior_enabled;
+  if (!FEATURE_ID_RE.test(featureId || '') || !ENVIRONMENT_RE.test(environment || '') || typeof priorEnabled !== 'boolean') {
+    return {
+      error: 'Missing the verified feature change for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  const changed = { error: FEATURE_CHANGED_MESSAGE, code: 'target_changed', preview_changed: true };
+  let feature;
+  try {
+    ({ feature } = await gbGet(`/api/v1/features/${encodeURIComponent(featureId)}`));
+  } catch (err) {
+    if (isNotFound(err)) return changed;
+    throw err;
+  }
+  // Unarchived, the environment still in the state the card showed, and the
+  // same edit stamps — compared as one key against the pins.
+  const envCfg = feature?.environments?.[environment];
+  const live = feature && !feature.archived && envCfg && typeof envCfg === 'object'
+    ? JSON.stringify([Boolean(envCfg.enabled), featureVersion(feature)])
+    : null;
+  // An absent pin compares as null, the same as a stamp the feature lacks.
+  const pinned = JSON.stringify([priorEnabled, {
+    feature_version: input._verified_growthbook_feature_updated,
+    revision_version: input._verified_growthbook_revision,
+  }], (_key, value) => (value === undefined ? null : value));
+  if (live !== pinned) return changed;
+  const enabled = !priorEnabled;
+  const word = enabled ? 'enabled' : 'disabled';
+  try {
+    // Only the environment switch the card showed — no extra fields (Codex
+    // r1 on #5514: an undisclosed reason/comment would be a write the
+    // operator never saw).
+    await gbPost(`/api/v2/features/${encodeURIComponent(featureId)}/toggle`, {
+      environments: { [environment]: enabled },
+    });
+  } catch (err) {
+    // Only a permission refusal proves nothing changed. GrowthBook applies a
+    // toggle before its audit/response work and maps an untyped error after
+    // it to HTTP 400, so any other error once the request went out may have
+    // applied it — never report "failed".
+    if (err.writeAccessRequired) throw err;
+    return {
+      outcome_unknown: true,
+      warning: `GrowthBook did not confirm the toggle of ${featureId} in ${environment}. Check the feature in GrowthBook before trying again.`,
+    };
+  }
+  return {
+    success: true,
+    tool: 'set_growthbook_feature_environment',
+    feature: featureId,
+    environment,
+    enabled,
+    note: `Feature ${featureId} is now ${word} in ${environment}. SDK clients pick it up on their next feature refresh.`,
+  };
+}
+
 async function executeGrowthbookTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -243,11 +478,18 @@ async function executeGrowthbookTool(toolName, input = {}) {
     switch (toolName) {
       case 'get_growthbook_experiments': return await getGrowthbookExperiments(input);
       case 'get_growthbook_features': return await getGrowthbookFeatures(input);
+      case 'set_growthbook_feature_environment': return await setGrowthbookFeatureEnvironment(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:growthbook] Tool ${toolName} failed:`, err);
-    return { error: err.message };
+    // The write tool's refusals can echo operator-supplied text (a feature key
+    // or environment), so it logs the tool name only; reads keep full logs.
+    if (require('./write-gates').OUTSIDE_WRITE_TOOL_NAMES.has(toolName)) {
+      logger.error(`[intelligence-bar:growthbook] Tool ${toolName} failed`);
+    } else {
+      logger.error(`[intelligence-bar:growthbook] Tool ${toolName} failed:`, err);
+    }
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

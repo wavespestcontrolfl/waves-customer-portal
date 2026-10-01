@@ -98,7 +98,7 @@ import {
   formatInvoiceDate,
   isInvoiceDueDateOverdue,
 } from "../../lib/invoiceDates";
-import { formatETDate } from "../../lib/timezone";
+import { formatETDate, formatETDateTime } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
@@ -120,10 +120,12 @@ async function adminFetch(path, options = {}) {
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
     let code = null;
+    let serverError = null;
     try {
       const data = await r.clone().json();
       message = data.error || data.message || message;
       code = data.code || null;
+      if (typeof data.error === "string" && data.error) serverError = data.error;
     } catch {
       const text = await r.text().catch(() => "");
       if (text) message = text;
@@ -131,6 +133,7 @@ async function adminFetch(path, options = {}) {
     const err = new Error(message);
     err.status = r.status;
     if (code) err.code = code;
+    if (serverError) err.serverError = serverError;
     throw err;
   }
   return r.json();
@@ -9017,6 +9020,56 @@ function CreateInvoice({
 }
 
 // ── Follow-up Sequence Panel (per-invoice) ──
+
+const pluralInvoices = (n) => `${n} invoice${n === 1 ? "" : "s"}`;
+
+// Who a combined send reaches, as the confirm names it. No number when the server sent none (it could not
+// read the balance in time): "all invoices", never a count that may be wrong.
+const combinedAudience = (invoiceCount) => {
+  if (!Number.isInteger(invoiceCount) || invoiceCount < 1) return "all invoices";
+  return invoiceCount === 1 ? "the 1 invoice" : `all ${invoiceCount} invoices`;
+};
+
+// The panel's line for a customer on combined reminders (GET /:id/followup
+// `customerSchedule`): this invoice is reminded together with the customer's
+// other overdue invoices, at the combined step. Exported for tests.
+export function combinedReminderSummary(customerSchedule) {
+  if (!customerSchedule) return null;
+  const { stepLabel, invoiceCount, status, nextTouchAt } = customerSchedule;
+  // invoiceCount is null when the server could not read the balance in time: no number then.
+  const lead = Number.isInteger(invoiceCount) && invoiceCount > 0
+    ? `On combined reminders with ${pluralInvoices(invoiceCount)} for this customer.`
+    : "On combined reminders for this customer.";
+  if (status === "paused") return `${lead} Combined reminders are paused.`;
+  if (!stepLabel) return lead;
+  // Eastern wall clock (the portal is Eastern-only), whatever zone the browser is in.
+  const when = nextTouchAt ? ` on ${formatETDateTime(nextTouchAt)} ET` : "";
+  return `${lead} Next: the ${stepLabel}${when}.`;
+}
+
+// What "Send now" asks and posts. For a customer on combined reminders the
+// server sends the COMBINED step to all of the customer's overdue invoices,
+// and only with this explicit confirmation of the step shown (a stale panel
+// gets a 409 instead). Exported for tests.
+export function followupSendNowPlan(data) {
+  const customerSchedule = data?.customerSchedule;
+  if (!customerSchedule) {
+    return { confirmText: "Send the next follow-up SMS right now?", body: undefined };
+  }
+  const { id, stepIndex, stepLabel, invoiceCount } = customerSchedule;
+  const step = stepLabel ? `the ${stepLabel}` : "the current combined reminder";
+  return {
+    confirmText: `This customer is on combined reminders. Send ${step} now to ${combinedAudience(invoiceCount)} on their balance, not just this one?`,
+    body: { combined: true, scheduleId: id, stepIndex },
+  };
+}
+
+// A follow-up action the server refused: its own message (in flight, not
+// sent, paused, confirm required) when it sent one. Exported for tests.
+export function followupActionErrorMessage(err) {
+  return err?.serverError || "Action failed";
+}
+
 function FollowupPanel({ invoiceId, showToast, isMobile }) {
   const busyRef = useRef(false);
   const [data, setData] = useState(null);
@@ -9044,8 +9097,10 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
       });
       showToast("Done");
       await load();
-    } catch {
-      showToast("Action failed");
+    } catch (err) {
+      showToast(followupActionErrorMessage(err));
+      // A refusal means what the panel shows is out of date: show the current state.
+      if (err?.status === 409) await load();
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -9071,6 +9126,8 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
   const seq = data.sequence;
   const steps = data.steps || [];
   const nextStep = seq ? steps[seq.step_index] : null;
+  const combinedSummary = combinedReminderSummary(data.customerSchedule);
+  const sendNowPlan = followupSendNowPlan(data);
   return (
     <div
       style={{
@@ -9118,10 +9175,11 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
             <span className="font-medium">{seq.touches_sent}</span>
             of {steps.length}
           </div>
-          {nextStep && seq.next_touch_at && seq.status === "active" && (
+          {combinedSummary && <div>{combinedSummary}</div>}
+          {!combinedSummary && nextStep && seq.next_touch_at && seq.status === "active" && (
             <div>
               Next: <span className="font-medium">{nextStep.label}</span>on{" "}
-              {new Date(seq.next_touch_at).toLocaleString()}
+              {formatETDateTime(seq.next_touch_at)} ET
             </div>
           )}
           {seq.status === "autopay_hold" && (
@@ -9139,7 +9197,7 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           )}
           {seq.last_touch_at && (
             <div>
-              Last touch: {new Date(seq.last_touch_at).toLocaleString()}
+              Last touch: {formatETDateTime(seq.last_touch_at)} ET
             </div>
           )}
         </div>
@@ -9178,8 +9236,8 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
             <Button
               disabled={busy}
               onClick={() => {
-                if (confirm("Send the next follow-up SMS right now?"))
-                  act("send-now");
+                if (confirm(sendNowPlan.confirmText))
+                  act("send-now", sendNowPlan.body);
               }}
               variant={"primary"}
               onClickCapture={(event) =>
@@ -9233,8 +9291,8 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
             <Button
               disabled={busy}
               onClick={() => {
-                if (confirm("Send the next follow-up SMS right now?"))
-                  act("send-now");
+                if (confirm(sendNowPlan.confirmText))
+                  act("send-now", sendNowPlan.body);
               }}
               variant={"primary"}
               onClickCapture={(event) =>

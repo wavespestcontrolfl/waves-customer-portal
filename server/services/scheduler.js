@@ -1003,6 +1003,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Annual-prepay re-stamp backstop: a paid, active term whose activation
+  // stamp pass threw (the Stripe webhook only logs) keeps canonical visits
+  // unstamped, and a visit that completes in that state bills normally on
+  // top of the prepay. The daily renewal-reminder run also does this before
+  // its pending-window reconcile; hourly keeps the window to under an hour.
+  // Idempotent: a fully stamped (or price-held) term is never refreshed.
+  cron.schedule('42 * * * *', async () => {
+    try {
+      await runExclusive('annual-prepay-restamp-sweep', async () => {
+        await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+      });
+    } catch (err) {
+      logger.error(`[annual-prepay-restamp] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Voice-filed re-service tickets whose owner page never went out (process
   // exit between the ticket commit and the alert). The page is the owner-ruled
   // escape hatch from the ticket queue's documented black hole, so a missing
@@ -1618,6 +1634,36 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly turf variance digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:43am ET (owner 2026-10-01: "send
+  // me a weekly email" of the questions the knowledge base could not fully
+  // answer), then hourly at :43 until Tuesday 8:43pm as catch-up ticks: the
+  // once-per-week send stamp makes them no-ops after a successful send, so a
+  // failed send or a deploy over 8:43 still reports that week. Minute 43 on
+  // Mon/Tue 8am-8pm is shared only with the every-minute jobs — no other
+  // scheduled digest or sweep lands on it (#5490 r1: :41 met the autopay
+  // SMS digest at 9:41:30). Kill: KNOWLEDGE_GAPS_WEEKLY=off.
+  // =========================================================================
+  cron.schedule('43 8-20 * * 1,2', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
+        const { runKnowledgeGapsWeekly } = require('./knowledge/knowledge-gaps-weekly');
+        const result = await runKnowledgeGapsWeekly();
+        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
+        if (result?.error || ['query_failed', 'unconfigured', 'recipient'].includes(result?.skipped)) {
+          throw new Error(`knowledge-gaps weekly email did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('knowledge-gaps-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`knowledge-gaps weekly tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly knowledge-gaps email failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4511,6 +4557,27 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
+            // LABEL FACTS revalidation: a scheduled reply that copies a label
+            // sentence (rainfast / re-entry) must still be backed by the
+            // customer's CURRENT latest performed visit - a newer visit, a
+            // visit today, or a changed label blocks it. Same fail-closed
+            // block+retire path, no new mechanism.
+            let labelStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const labelDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                // The reply guard runs on the final body of every real-answers
+                // decision (an edit may not add label timing); the visit recheck
+                // only for a body that still copies a snapshotted sentence.
+                // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
+                labelStale = Boolean(await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body }));
+              } catch (err) {
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                labelStale = true;
+              }
+            }
             // Re-service promise revalidation (Codex round-3 P2): the same
             // "reviewed wording can go stale before it fires" gap as the
             // checks above, for a free re-service promise — the customer's
@@ -4542,7 +4609,7 @@ function initScheduledJobs() {
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4561,9 +4628,11 @@ function initScheduledJobs() {
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : reserviceStale
-                        ? 'stale_reservice_agent_decision'
-                        : 'stale_eta_agent_decision';
+                      : labelStale
+                        ? 'stale_label_facts_agent_decision'
+                        : reserviceStale
+                          ? 'stale_reservice_agent_decision'
+                          : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4595,9 +4664,11 @@ function initScheduledJobs() {
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : reserviceStale
-                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                          : labelStale
+                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            : reserviceStale
+                              ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4861,10 +4932,12 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
+              labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -7009,6 +7082,23 @@ function initScheduledJobs() {
         const result = await runSelfAudit();
         if (!result.skipped) logger.info(`[self-audit] nightly run: ${JSON.stringify({ audited: result.audited, breaches: result.breaches })}`);
       } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
+  // Refreshes unknown outcome evidence, then raises ONE admin item for
+  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
+  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
+  // inside the service); nothing acts on a Jev answer.
+  // =========================================================================
+  cron.schedule('5 8 * * *', async () => {
+    await runExclusive('typed-decisions-daily-review', async () => {
+      try {
+        const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
+        const result = await runDailyReviewItem();
+        if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
+      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
     });
   }, { timezone: 'America/New_York' });
 

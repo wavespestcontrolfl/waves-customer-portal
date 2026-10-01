@@ -37,10 +37,9 @@ describe('structured moisture governs the optional whole-report narrative', () =
     const before = JSON.parse(JSON.stringify(v2));
     const invented = 'Check sprinkler coverage along the pavement.';
     const callModel = jest.fn(async () => ({ ok: true, json: {
-      statusHeadline: invented, mainWatch: invented, customerAction: invented,
+      statusHeadline: invented, customerAction: invented,
       categories: Object.fromEntries(v2.diagnosis.map(d => [d.key, invented])),
       water: `Rain this week met the target. ${invented}`, mowing: invented,
-      treatmentSummary: invented,
       insights: v2.insights.map(() => ({ headline: invented, whatWeSaw: invented, customerAction: invented })),
     } }));
     const overlaid = await applyLawnReportNarrative(v2, { observations: lawnAssessment.observations }, { callModel });

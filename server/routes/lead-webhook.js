@@ -1123,10 +1123,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // (jsonb_strip_nulls drops a key the row never had) so the triage
               // snapshot — whose schema has none of them — can't erase the
               // extra-property ask, the "Wants service" line or the sign host.
+              // The form's stage and normalized address ride along too: the call
+              // pipeline reads them to tell a web-form address from a call's.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('stage', COALESCE(extracted_data, '{}'::jsonb)->'stage', 'address', COALESCE(extracted_data, '{}'::jsonb)->'address', 'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }

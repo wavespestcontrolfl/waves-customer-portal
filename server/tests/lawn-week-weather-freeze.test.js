@@ -220,6 +220,9 @@ describe('freeze contract in the render path', () => {
     expect(LAWN_RENDER_STRATEGY).not.toBe('p4');
     // p6: product-instruction provenance governs watering-plan credits.
     expect(LAWN_RENDER_STRATEGY).not.toBe('p5');
+    // p8: the placeholder photo caption left the payload (renders differ).
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p7-watering-instruction-20260929');
+    expect(LAWN_RENDER_STRATEGY).toMatch(/^p8-/);
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -239,7 +242,7 @@ describe('freeze contract in the render path', () => {
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
     // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap7-watering-instruction-20260929')).toBe(true);
+    expect(signature.startsWith('-lap8-lawn-dead-fields-20261001')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

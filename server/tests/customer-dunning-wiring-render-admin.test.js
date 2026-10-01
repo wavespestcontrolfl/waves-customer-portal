@@ -1,7 +1,5 @@
-// Dunning consolidation PR 2: what is (and is NOT) wired.
-//   * runPending calls ONLY the shadow run, and only under the shadow gate;
-//     promote / runCustomerSchedules / release are unreachable from cron and
-//     routes (PR 3).
+// Dunning consolidation: render + admin controls. (The runPending / route
+// wiring is pinned in customer-dunning-live-wiring.test.js.)
 //   * render.js picks the six frozen combined templates by stage and today's
 //     per-step templates for a single-invoice set.
 //   * admin.js (pause / resume / release / send-now) guards each write on the
@@ -45,63 +43,10 @@ jest.mock('../services/customer-dunning/runner', () => mockRunner);
 
 const Followups = require('../services/invoice-followups');
 const config = require('../config/invoice-followups');
-const logger = require('../services/logger');
 
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const NOW = new Date('2026-10-07T14:16:00Z'); // Wednesday
-
-describe('runPending wiring (PR 2 = shadow only)', () => {
-  beforeEach(() => {
-    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
-    jest.setSystemTime(NOW);
-    jest.clearAllMocks();
-    mockGates.shadow = false;
-  });
-  afterEach(() => jest.useRealTimers());
-
-  test('gate off: no shadow run at all (byte-identical to before)', async () => {
-    await Followups.runPending();
-    expect(mockRunner.shadowRun).not.toHaveBeenCalled();
-  });
-
-  test('shadow gate on: exactly one shadowRun(now) and NEVER the live path', async () => {
-    mockGates.shadow = true;
-    await Followups.runPending();
-    expect(mockRunner.shadowRun).toHaveBeenCalledTimes(1);
-    expect(mockRunner.shadowRun.mock.calls[0][0]).toEqual(NOW);
-    expect(mockRunner.runCustomerSchedules).not.toHaveBeenCalled();
-    expect(mockRunner.processSchedule).not.toHaveBeenCalled();
-    expect(mockRunner.promote).not.toHaveBeenCalled();
-  });
-
-  test('a shadow failure is logged and never costs the run its result', async () => {
-    mockGates.shadow = true;
-    mockRunner.shadowRun.mockRejectedValueOnce(new Error('shadow blew up'));
-    await expect(Followups.runPending()).resolves.toEqual({ sent: 0, skipped: 0 });
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('shadow blew up'));
-  });
-
-  test('outside the send window the shadow does not run either', async () => {
-    jest.setSystemTime(new Date('2026-10-05T14:16:00Z')); // Monday
-    mockGates.shadow = true;
-    await Followups.runPending();
-    expect(mockRunner.shadowRun).not.toHaveBeenCalled();
-  });
-
-  test('static: the ONLY reference to customer-dunning in cron/route code is the shadow helper; the live entry points are referenced nowhere outside the module', () => {
-    const followups = read('services/invoice-followups.js');
-    const refs = followups.split('\n').filter((l) => l.includes('customer-dunning'));
-    expect(refs.join('\n')).toMatch(/runner'\)\.shadowRun\(now\)/);
-    expect(followups).not.toMatch(/runCustomerSchedules|\.promote\(|releaseIfDark|processSchedule/);
-    for (const file of ['services/scheduler.js', 'routes/admin-invoices.js']) {
-      if (fs.existsSync(path.join(ROOT, file))) expect(read(file)).not.toMatch(/customer-dunning\/(runner|schedule|admin)/);
-    }
-    // the per-invoice batch is untouched: no NOT EXISTS ownership predicate yet (PR 3)
-    expect(followups).not.toMatch(/customer_dunning_schedules/);
-    expect(followups).not.toMatch(/pg_advisory_xact_lock_shared/);
-  });
-});
 
 describe('render: template keys by stage', () => {
   const Render = require('../services/customer-dunning/render');

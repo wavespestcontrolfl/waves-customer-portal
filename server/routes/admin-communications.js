@@ -1096,8 +1096,14 @@ router.post('/sms', async (req, res, next) => {
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
       ...(verifiedAgentDecision?.id ? {
-        providerPreSendCheck: require('../services/agent-decision-send-checks')
-          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read at the same boundary.
+        providerPreSendCheck: (() => {
+          const checks = require('../services/agent-decision-send-checks');
+          return checks.composeProviderPreSendChecks(
+            checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.labelFactsProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+          );
+        })(),
       } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the

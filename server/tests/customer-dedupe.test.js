@@ -906,10 +906,13 @@ describe('executeMerge', () => {
     // closeout's invoice-first order).
     const sortedParties = [WINNER, LOSER].map(String).sort();
     const calls = trx.raw.mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(6);
-    for (const [i, args] of [[0, ['collections_case', sortedParties[0]]], [1, ['collections_case', sortedParties[1]]],
-      [2, ['property-preferences', sortedParties[0]]], [3, ['property-preferences', sortedParties[1]]],
-      [4, ['invoice-issued-closeout', sortedParties[0]]], [5, ['invoice-issued-closeout', sortedParties[1]]]]) {
+    // Codex #5503 r2: both dunning keys (customer-dunning/merge.js) come
+    // first of all, sorted, ahead of the case locks.
+    expect(calls.length).toBeGreaterThanOrEqual(8);
+    for (const [i, args] of [[0, [`customer-dunning:${sortedParties[0]}`]], [1, [`customer-dunning:${sortedParties[1]}`]],
+      [2, ['collections_case', sortedParties[0]]], [3, ['collections_case', sortedParties[1]]],
+      [4, ['property-preferences', sortedParties[0]]], [5, ['property-preferences', sortedParties[1]]],
+      [6, ['invoice-issued-closeout', sortedParties[0]]], [7, ['invoice-issued-closeout', sortedParties[1]]]]) {
       expect(String(calls[i][0])).toContain('pg_advisory_xact_lock');
       expect(calls[i][1]).toEqual(args);
     }
@@ -976,7 +979,8 @@ describe('executeMerge', () => {
     // The harness serves no queue rows to the unlocked customers read → not_in_queue.
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
       .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
-    const lockCall = trx.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql)));
+    const lockCall = trx.raw.mock.calls.find(([sql, bindings]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql))
+      && !String(bindings?.[0]).startsWith('customer-dunning:'));
     expect(lockCall).toBeTruthy();
     expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
   });

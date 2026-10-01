@@ -1099,7 +1099,11 @@ function opsQueueGateOn() {
 // ops-queue gate. Cheap by design: no ledger read, no DB.
 router.get('/control/hub', (_req, res) => {
   res.json({
-    features: { queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false },
+    features: {
+      queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false,
+      // GATE_TYPED_DECISIONS: the Typed review tab exists only while the lane is live.
+      typed: require('../config/feature-gates').typedDecisionsLive(),
+    },
     areas: modelSwitchboard.AREAS,
   });
 });
