@@ -255,6 +255,9 @@ function mapWater(waterContext, waterSnapshot = null) {
 }
 
 const MOW_STATUS = { below: 'too_short', above: 'too_tall', in_range: 'ideal' };
+// How many findings the web findings card renders (LawnInsightCards limit).
+const LEAD_VISIBLE_FINDINGS = 3;
+
 function mapMowing(mowingHeight, grassLabel) {
   if (!mowingHeight) return null;
   const measured = num(mowingHeight.heightIn);
@@ -264,10 +267,7 @@ function mapMowing(mowingHeight, grassLabel) {
   // Status + recommendation only apply when a numeric reading was captured; a
   // photo-only visit surfaces just the image.
   const status = measured == null ? null : (MOW_STATUS[mowingHeight.status] || 'ideal');
-  // Lead mode: an out-of-band reading leaves the recommendation null — the
-  // mowing finding card already says "Raise/Lower the mower one setting".
-  const outOfBand = status === 'too_short' || status === 'too_tall';
-  const rec = status == null || (outOfBand && lawnReportLeadLive())
+  const rec = status == null
     ? null
     : status === 'too_short'
       ? `Your ${grassLabel} is being kept a bit short. Short mowing makes turf show heat and dry stress faster — consider raising the mower one setting.`
@@ -806,6 +806,21 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // category above so the insights + coverage-watch reconciliation keep working;
   // we only drop it from the customer-facing cards.
   const displayDiagnosis = diagnosis.filter((c) => c.key !== 'water_moisture_stress');
+
+  // Lead mode (GATE_LAWN_REPORT_LEAD): an out-of-band mowing reading drops the
+  // gauge's own recommendation only when the mowing finding card is on screen
+  // to say "Raise/Lower the mower one setting". The web findings card shows the
+  // top LEAD_VISIBLE_FINDINGS by priority, so a mowing card ranked below them
+  // keeps the gauge line, or the step would print nowhere (codex P1 pre-push).
+  // The PDF prints every finding's step, so it never loses it.
+  if (lawnReportLeadLive() && mowing && (mowing.status === 'too_short' || mowing.status === 'too_tall')) {
+    const shown = insights
+      .filter(Boolean)
+      .slice()
+      .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+      .slice(0, LEAD_VISIBLE_FINDINGS);
+    if (shown.some((card) => card.category === 'mowing')) mowing.recommendation = null;
+  }
 
   return {
     snapshot, diagnosis: displayDiagnosis, insights, water, mowing, treatment, heroPhoto, photos: photoList, photoSummary,

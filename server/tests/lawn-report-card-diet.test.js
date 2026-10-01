@@ -152,6 +152,21 @@ describe('mowing recommendation in lead mode', () => {
     }
   });
 
+  test('a mowing finding ranked below the three findings on screen keeps the gauge line', () => {
+    const crowded = withGate('true', () => buildLawnReportV2({
+      lawnAssessment: {
+        scores: { turfDensity: 40, weedSuppression: 35, colorHealth: 42, stressDamage: 38, fungusControl: 80, overallScore: 45, season: 'peak' },
+        droughtStress: 'moderate',
+        waterContext: { rainfallInches7d: 0.1, irrigationInchesPerWeek: 0.2, effectiveInches7d: 0.3, targetInchesPerWeek: 1.25, irrigationAdvice: { status: 'deficit', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 1.25 } },
+        photos: [],
+      },
+      mowingHeight: { heightIn: 2, status: 'below', band: { min: 3.5, max: 4.0 } },
+    }));
+    const mowCard = cardOf(crowded.insights, 'mowing');
+    expect(mowCard.priority).toBeGreaterThan(3);
+    expect(crowded.mowing.recommendation).toMatch(/kept a bit short/);
+  });
+
   test('the in-range line stays', () => {
     const report = withGate('true', () => build(3.75, 'in_range'));
     expect(report.mowing.recommendation).toMatch(/Mowing height looks good/);
