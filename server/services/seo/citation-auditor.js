@@ -299,13 +299,16 @@ const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|L
 // ("99 Palm Terrace, Atlanta, GA 30303"): a USPS state code (or Florida) followed by a ZIP. Only
 // real codes count, so "PO 12345" or "NO 12345" is not an address. Any case right after a comma
 // ("Atlanta, ga 30303"). Without a comma, upper or title case ("GA 30303", "Ga 30303"), except
-// codes that are also words or ID labels ("Order ID 12345", "Hi 12345"): those need the comma.
+// codes that are also words or ID labels ("Order ID 12345", "Hi 12345"): those need a comma or
+// a house number a few words before ("99 Palm Terrace Boise ID 83702").
 const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY';
 const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
 const AMBIGUOUS_STATE_CODES = new Set(['ID', 'IN', 'OR', 'OK', 'ME', 'HI', 'OH', 'AL', 'LA', 'MS', 'CO', 'DE', 'PA']);
 const BARE_STATE_CODES = US_STATE_CODES.split('|').filter((c) => !AMBIGUOUS_STATE_CODES.has(c));
 const BARE_STATE_ALTS = [...BARE_STATE_CODES, ...BARE_STATE_CODES.map((c) => c[0] + c[1].toLowerCase())].join('|');
 const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|FLORIDA)${ZIP_TAIL}`);
+const AMBIGUOUS_ALTS = [...AMBIGUOUS_STATE_CODES].flatMap((c) => [c, c[0] + c[1].toLowerCase()]).join('|');
+const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}(?:\\s+[A-Za-z0-9.'-]+,?){1,6}\\s+(?:${AMBIGUOUS_ALTS})${ZIP_TAIL}`);
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|Florida)${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
@@ -344,7 +347,7 @@ function judgeTextAddress(nap, office, entityAddress) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }
-  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text);
+  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text) || NUMBERED_STATE_ZIP_RE.exec(nap.text);
   const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
   return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (entityAddress && entityAddress.display) || first };
 }
@@ -388,7 +391,7 @@ function observedNap(nap, who, address) {
 // A branded soft-404 ("Page not found" served as 200, often around stale listing JSON-LD) says
 // so in its <title> or <h1>. Body text never counts: "404 reviews" or a 404-area-code phone on
 // a healthy listing is not a not-found page.
-const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\bcan.?t find (?:that|this|the) page\b/i;
+const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
 // Scripts, styles, templates and comments are never rendered, so an unused error template
 // inside one is not the page's heading.
 const NON_RENDERED_RE = /<!--[\s\S]*?-->|<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;

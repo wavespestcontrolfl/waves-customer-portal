@@ -397,6 +397,7 @@ describe('classifyListing', () => {
       expect(text('<p>Boise, ID 83702</p>').status).toBe('unverified');
       expect(text('<p>Portland, or 97201</p>').status).toBe('unverified');
       expect(text('<p>Atlanta GA 30303</p>').status).toBe('unverified'); // unambiguous code, no comma needed
+      expect(text('<p>99 Palm Terrace Boise ID 83702</p>').status).toBe('unverified'); // house number gives context
     });
 
     test('a page with no state + ZIP and no street-like string is still judged on name + phone', () => {
@@ -450,6 +451,9 @@ describe('classifyListing', () => {
       expect(titled('Error 404 | Directory').detail.reason).toBe('soft_404');
       expect(titled('Page&nbsp;Not&nbsp;Found').detail.reason).toBe('soft_404');
       expect(titled('Page&#160;not&#xA0;found | Directory').detail.reason).toBe('soft_404');
+      expect(titled("Sorry, we couldn't find this page").detail.reason).toBe('soft_404');
+      expect(titled('We could not find that page').detail.reason).toBe('soft_404');
+      expect(titled('We cannot find the page you requested').detail.reason).toBe('soft_404');
     });
 
     test('an unused error template in a script, template or comment is not a soft-404', () => {
