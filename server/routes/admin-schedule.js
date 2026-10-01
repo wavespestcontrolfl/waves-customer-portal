@@ -994,19 +994,7 @@ async function seriesCandidateDateClashes(conn, template, date) {
     windowEnd: block.end,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
-  if (!clash.length) return false;
-  // The customer's own visits this new row would GROUP with (a pest visit on
-  // its own lawn day) are stop partners, never a clash — decided by the same
-  // eligibility automatic grouping applies (visit-groups.partnersForProposedRow:
-  // gate, autopay, property, family, window, status, technician). Anything
-  // else still counts, and nothing is exempt when grouping is unavailable.
-  const own = clash.filter((row) => template.customer_id && String(row.customer_id) === String(template.customer_id));
-  if (own.length < clash.length) return true;
-  const partners = new Set((await require('../services/visit-groups').partnersForProposedRow({
-    customer_id: template.customer_id, property_id: template.property_id, service_id: template.service_id,
-    scheduled_date: date, window_start: block.start, window_end: block.end, technician_id: template.technician_id || null,
-  }, { database: conn })).map(String));
-  return !own.every((row) => partners.has(String(row.id)));
+  return clash.length > 0;
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -18980,71 +18968,6 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
-// GATE_PEST_RIDES_LAWN_AT_ACCEPT: a series parent linked through rides_parent_id
-// to a live lawn series it may ride takes its next dates from the lawn's (the same
-// planRiderDates rule the accept used, which falls back to +84 days on its own
-// when no lawn date is near). null = walk the cadence as before: gate off, no
-// link, host not a matching live series, or any read failing.
-async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends, weekendShift, blackoutDates }) {
-  if (!parent.rides_parent_id || !require('../config/feature-gates').pestRidesLawnAtAcceptLive?.()) return null;
-  try {
-    const {
-      planRiderDates, riderPairingEnabled, riderFamilyOf, liveHostRows,
-    } = require('../services/rider-series-preview');
-    const read = (fn) => (conn.isTransaction ? conn.transaction(fn) : fn(conn));
-    const hostRows = await read(async (sp) => {
-      const host = await sp('scheduled_services').where({ id: parent.rides_parent_id }).first();
-      if (!host || String(host.customer_id) !== String(parent.customer_id)
-        || !riderPairingEnabled(host, riderFamilyOf(parent), parent.recurring_pattern)) return [];
-      const live = await liveHostRows(sp, host, cols, etDateString());
-      if (!live.length || !parent.property_id) return [];
-      // The rider joins the lawn OCCURRENCE as it stands today (dispatch may
-      // have moved its window or tech), and only at the rider's own property.
-      return sp('scheduled_services').whereIn('id', live.map((r) => r.id))
-        .whereNotNull('window_start')
-        .where('property_id', parent.property_id)
-        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
-    });
-    // A lawn date that has since become a closed day (blackout added after
-    // seeding) or a weekend the customer opted out of is not a ride date; the
-    // rule then takes the next lawn date or its own nudged +84 fallback.
-    const { isBlackedOut } = require('../services/scheduling/blackout-nudge');
-    const hostByDate = new Map(hostRows.map((r) => [dateOnly(r.scheduled_date), r]));
-    const hostDates = [...hostByDate.keys()].filter((d) => d
-      && !isBlackedOut(d, blackoutDates)
-      && !(skipWeekends && [0, 6].includes(etParts(parseETDateTime(`${d}T12:00`)).dayOfWeek)));
-    if (!hostDates.length) return null;
-    const dates = planRiderDates({
-      hostDates,
-      lastRiderDate: latestStr,
-      horizonDate: etDateString(addETDays(parseETDateTime(`${latestStr}T12:00`), 1300)),
-      skipWeekends,
-      weekendShift,
-      blackoutDates,
-    });
-    return dates.length ? { dates, hostByDate } : null;
-  } catch (err) {
-    logger.warn(`[recurring] rider extension dates failed for parent=${parent.id} (walking the cadence): ${err.message}`);
-    return null;
-  }
-}
-
-// The rider's window at a lawn occurrence: the lawn's start, the rider's own
-// length (its duration, else its template window's length) — never the lawn's
-// end, which can understate the rider's occupancy.
-function riderStopWindow(host, parent) {
-  const own = occupancyBlockFor(parent);
-  const ownMinutes = parseInt(parent.estimated_duration_minutes, 10)
-    || (own ? (toMinutesHHMM(own.end) - toMinutesHHMM(own.start)) : 0) || 60;
-  const block = occupancyBlockFor({ window_start: host.window_start, window_end: null, estimated_duration_minutes: ownMinutes });
-  return block ? { window_start: block.start, window_end: block.end } : { window_start: host.window_start, window_end: host.window_end };
-}
-
-function toMinutesHHMM(hhmm) {
-  const [h, m] = String(hhmm || '').split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -19127,19 +19050,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // still null AND hitMaxDate true because the horizon, not a busy
     // calendar, is why nothing more got booked (Codex GitHub r1 P2).
     let hitMaxDate = false;
-    const riderDates = await riderExtensionDates(conn, parent, cols, latestStr, {
-      skipWeekends: skipParent, weekendShift: dirParent, blackoutDates: autoExtendBlackoutDates,
-    });
-    const riderProbeTemplate = (date) => {
-      const host = riderDates && riderDates.hostByDate.get(date);
-      return host
-        ? { ...clashProbeTemplate, ...riderStopWindow(host, parent), technician_id: host.technician_id }
-        : clashProbeTemplate;
-    };
     while (attempt <= 12) {
-      const candidate = riderDates
-        ? (riderDates.dates[attempt - 1] || null)
-        : seasonalSafeShift(nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts), parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
+      const rawNext = nextRecurringDate(latestStr, parent.recurring_pattern, attempt, rOpts);
+      const candidate = seasonalSafeShift(rawNext, parent.recurring_pattern, skipParent, dirParent, autoExtendBlackoutDates);
       if (!candidate) {
         attempt++;
         continue;
@@ -19177,22 +19090,14 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // series can lose most of a year's candidates to one recurring
       // conflict. Insert on the cadence date and log the overlap instead.
       if (opts.overlapAdvisoryOnly) {
-        if (await seriesCandidateDateClashes(conn, riderProbeTemplate(candidate), candidate)) {
+        if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
           logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
         }
-      } else if (await seriesCandidateDateClashes(conn, riderProbeTemplate(candidate), candidate)) {
+      } else if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
         attempt++; continue;
       }
       nextStr = candidate;
       break;
-    }
-    // A rider date that is a lawn occurrence takes that occurrence's stop —
-    // its current window and technician — so the two group.
-    const riderHost = nextStr && riderDates ? riderDates.hostByDate.get(nextStr) : null;
-    if (riderHost) {
-      const stop = riderStopWindow(riderHost, parent);
-      nextWindowStart = stop.window_start;
-      nextWindowEnd = stop.window_end;
     }
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the
@@ -19223,9 +19128,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const childIdentity = await resolveSeriesChildIdentity(conn, parent);
       const nextData = {
         customer_id: parent.customer_id,
-        technician_id: await assignableRecurringTemplateTechnicianId(conn, riderHost
-          ? { ...parent, recurring_technician_override: true, recurring_technician_id: riderHost.technician_id }
-          : parent, nextStr),
+        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
         scheduled_date: nextStr,
         window_start: nextWindowStart, window_end: nextWindowEnd,
         service_type: childIdentity.service_type, status: 'pending',

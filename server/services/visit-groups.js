@@ -1241,23 +1241,6 @@ async function groupRowOn(database, rowId, createdBy, { preview = false, lockedG
       'ss.source_action', 'ss.customer_confirmed',
       'ss.window_start', 'ss.window_end', 'ss.technician_id',
       'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
-  const subset = await groupingPartnersFor(database, row);
-  if (!subset) return null;
-  const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
-  if (preview) return { preview: true, rowIds: rows.map((r) => r.id) };
-  if (database && database.isTransaction) {
-    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database, lockedGuard });
-  }
-  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', lockedGuard });
-}
-
-// The read-only half of groupRowOn: every eligibility rule automatic grouping
-// applies (gate, subject identity, property, placed window, status, autopay,
-// partner query, canJoin/windowsOverlap, technician partition) for a subject
-// that may not exist yet. Returns the partner rows the subject would join, or
-// null. Used by groupRowOn and by series extension's clash probe
-// (partnersForProposedRow), so "would these two group?" has one answer.
-async function groupingPartnersFor(database, row) {
   if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
   // Property identity is REQUIRED for automatic grouping (codex #3590
   // r14): a null-property row (legacy / multi-home parent carrying only
@@ -1337,33 +1320,12 @@ async function groupingPartnersFor(database, row) {
       subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
     }
   }
-  return subset;
-}
-
-// A proposed (not yet inserted) scheduled_services row: the ids of the rows it
-// would group with, or [] — gate off, ineligible, or any read failing. Runs in
-// a savepoint on a transaction so a failed read never poisons the caller.
-async function partnersForProposedRow(proposed, { database = db } = {}) {
-  const { gates } = require('../config/feature-gates');
-  if (!gates.visitGroups) return [];
-  try {
-    const run = async (conn) => {
-      const svc = proposed.service_id
-        ? await conn('services').where({ id: proposed.service_id }).first('groupable', 'group_family')
-        : null;
-      const subject = {
-        id: '00000000-0000-0000-0000-000000000000', visit_id: null, status: 'pending',
-        customer_confirmed: false, source_action: null, ...proposed,
-        groupable: svc?.groupable, group_family: svc?.group_family,
-      };
-      const subset = await groupingPartnersFor(conn, subject);
-      return subset ? subset.map((p) => p.id) : [];
-    };
-    return database && database.isTransaction ? await database.transaction(run) : await run(database);
-  } catch (err) {
-    require('./logger').warn(`[visit-groups] partnersForProposedRow skipped: ${err.message}`);
-    return [];
+  const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
+  if (preview) return { preview: true, rowIds: rows.map((r) => r.id) };
+  if (database && database.isTransaction) {
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: database, lockedGuard });
   }
+  return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', lockedGuard });
 }
 
 // ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
@@ -3430,7 +3392,6 @@ module.exports = {
   appointmentSendHeld,
   createOrJoinVisit,
   maybeGroupRow,
-  partnersForProposedRow,
   customerExcludedByAutopay,
   combinedCloseoutBehaviorVersion,
   groupingRefusedByAutopay,
