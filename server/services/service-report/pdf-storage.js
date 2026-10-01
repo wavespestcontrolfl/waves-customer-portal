@@ -65,7 +65,11 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // (GATE_LAWN_WATERING_RULE) and drops the duplicate hero task for hold /
 // water-in visits. Cached p11 objects carry the old list, so they re-render on
 // next open. Supersedes p11, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p12-lawn-watering-line-20260929';
+// p13: the lawn PDF no longer prints the stock "No additional observations from
+// the photo review." line under the service photos (photoSummary is null for
+// that placeholder). Cached p12 objects still carry it, so they re-render on
+// next open. Supersedes p12, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p13-lawn-dead-fields-20261001';
 
 const s3 = new S3Client({
   region: config.s3?.region,

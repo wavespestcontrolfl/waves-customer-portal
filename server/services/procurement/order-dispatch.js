@@ -524,14 +524,13 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
       const row = await trx('vendor_orders').where({ id: ledgerId }).forUpdate().first('id', 'evidence');
       const current = meta(row?.evidence).bell?.v || null;
       if (!row || current !== (v || null)) {
-        await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key(v)]).whereNull('read_at').update({ read_at: new Date() });
+        await require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key(v)]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'Replaced by a newer order alert', keepExisting: true, conn: trx }));
         return 'superseded';
       }
-      await trx('notifications')
+      await require('../notification-service')._private.openToCloser(trx('notifications')
         .whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [key(null), `${key(null)}:%`])
-        .whereRaw("metadata->>'dedupeKey' <> ?", [key(v)])
-        .whereNull('read_at')
-        .update({ read_at: new Date() });
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key(v)]), 'procurement')
+        .update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'Replaced by a newer order alert', keepExisting: true, conn: trx }));
       await trx('vendor_orders').where({ id: ledgerId }).update({
         evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
         updated_at: new Date(),
@@ -754,7 +753,7 @@ async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = nul
 // claim CANCELS the request: a bell telling staff to buy a need that is gone
 // is an unnecessary purchase (Codex r20 P1, r24 P1).
 function retireRequestBell(trx, requestId) {
-  return trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNull('read_at').update({ read_at: new Date() });
+  return require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'The reorder request was handled by the system', keepExisting: true, conn: trx }));
 }
 
 async function cancelAtClaim(trx, { request, product, m, ineligible }) {
@@ -817,7 +816,7 @@ async function lockedProductGuards(trx, { request }) {
 // before this claim can submit, or staff act on it beside a real order
 // (pre-push P0). The versioned key is auto-order:<ledger>[:<v>].
 function retireLedgerBells(trx, ledgerId) {
-  return trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]).whereNull('read_at').update({ read_at: new Date() });
+  return require('../notification-service')._private.openToCloser(trx('notifications').whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`]), 'procurement').update(require('../notification-service')._private.doneColumns({ by: 'procurement', resolution: 'The order is being placed for real, so the dry-run note no longer applies', keepExisting: true, conn: trx }));
 }
 
 // The Restock tab renders the request's OWN vendorSku / vendorProductUrl as
@@ -1320,7 +1319,7 @@ async function bellUndispatchable(conn, requestId, notify) {
   // The request-id dedupe returns the EXISTING row unchanged when the text
   // is the same — and the dispatcher's claim marked that row read on the
   // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
-  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null }); // notifications has no updated_at (hook r27 P1)
+  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, done_at: null, done_by: null, resolution: null }); // notifications has no updated_at (hook r27 P1)
   // Closed while the bell was being written (received / cancelled): retire
   // what was just rung — staff must not be told to buy it (Codex r27 P2).
   const after = await conn('product_restock_requests').where({ id: requestId }).first('status', 'source');

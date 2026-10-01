@@ -13,6 +13,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -90,6 +91,7 @@
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI report paragraph, owner "go" 2026-09-30: one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
+ *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
@@ -739,6 +741,9 @@ const gates = {
   // tree/shrub/palm). Map entry for logGateStatus only; the canonical
   // CALL-TIME reader is reportWriterRulesLive() below.
   reportWriterRules: process.env.GATE_REPORT_WRITER_RULES === 'true',
+  // TypeSafe Jev typed decisions: ships DARK. CALL-TIME reader is
+  // typedDecisionsLive() below; this entry is for logGateStatus only.
+  typedDecisions: gateEnvValue('GATE_TYPED_DECISIONS'),
 
   // Portal "Your yard this month" card. Map entry for logGateStatus only; the
   // canonical CALL-TIME reader is portalYardCalendarLive() below.
@@ -3267,6 +3272,14 @@ const gates = {
   // registry; this entry is for logGateStatus.
   techLines: gateEnvValue('GATE_TECH_LINES'),
 
+  // Customer location line (services/twilio.js deriveOutboundNumber →
+  // config/locations.js resolveServiceLocation). ON: a customer whose city is
+  // blank or unmapped gets the line of the office their ZIP, then geocode,
+  // resolves to. OFF (unset is the kill switch, dev AND prod): city-only, so
+  // those customers default to the Bradenton line. Mapped cities resolve the
+  // same either way. Read at CALL time; this entry is for logGateStatus.
+  smsLineAddressFallback: gateEnvValue('GATE_SMS_LINE_ADDRESS_FALLBACK'),
+
   // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
   // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
   // nothing reminds the tech to tap Complete). ON: one 7 PM ET text
@@ -3758,6 +3771,14 @@ function emailAreaIntelLive() {
 // `reportPhotoContent` gates-map entry above is for logGateStatus only.
 function reportPhotoContentLive() {
   return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
+}
+
+// GATE_TYPED_DECISIONS read at CALL time — ships DARK, off unless set
+// (gateEnvValue: true / 1 / on). Off, askPackage (typed-decisions/jev.js)
+// returns { ok:false, reason:'gate_off' } before any provider call, so a flip
+// needs no redeploy and unset is the kill.
+function typedDecisionsLive() {
+  return gateEnvValue('GATE_TYPED_DECISIONS');
 }
 
 // GATE_REPORT_WRITER_RULES read at CALL time — off unless exactly 'true'.
@@ -4427,3 +4448,6 @@ module.exports.kbSpeciesQaLive = kbSpeciesQaLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.portalYardCalendarLive = portalYardCalendarLive;
+// GATE_TYPED_DECISIONS reader, on its own line so gate PRs adding lines above
+// never touch this one.
+module.exports.typedDecisionsLive = typedDecisionsLive;
