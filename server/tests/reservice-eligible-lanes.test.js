@@ -559,6 +559,16 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['The roaches returns', true, 'pest', false],
     ['The ants are returning', true, 'pest', false],
     ['The ants returned', true, 'pest', false],
+    // Codex round-44 P2: a SUBJECTLESS resolution inherits the prior clause's pest subject and resolves that sighting
+    ['Ants came back but are gone now', false, null, false],
+    ['Ants came back, then disappeared', false, null, false],
+    ['Ants came back but stopped', false, null, false],
+    ['Ants came back and are still here', true, 'pest', false],
+    ['The ants came back and left droppings', true, 'pest', false],
+    ['Ants came back because the treatment stopped', true, 'pest', false],
+    // a chain of subjectless predicates keeps the one pest subject: the LAST return still counts
+    ['Ants came back, went away, came back again', true, 'pest', false],
+    ['Ants came back, went away, and came back again', true, 'pest', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];

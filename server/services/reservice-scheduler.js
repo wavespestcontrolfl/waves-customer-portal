@@ -640,7 +640,7 @@ function maskCoordinatedNouns(text) {
     return m.replace(/,/g, '&').replace(/\b(?:and|plus)\b/gi, (w) => '&'.repeat(w.length));
   });
 }
-const RESERVICE_SUBJECTLESS_PREDICATE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W+)*(?:came|come|comes|returned|returns|returning|reappeared|reappears|showed|shows|started|starts|keep|kept|are|is|were|was|have|has)\b/i;
+const RESERVICE_SUBJECTLESS_PREDICATE_RE = /^\W*(?:(?:and|but|yet|then|now|so)\W+)*(?:came|come|comes|returned|returns|returning|reappeared|reappears|showed|shows|started|starts|keep|kept|are|is|were|was|have|has|disappeared|vanished|went|gone|stopped)\b/i;
 const RESERVICE_PRONOUN_SUBJECT_RE = /^\W*(?:(?:but|and|yet|now|then|so|because)\W+)*(?:they|it|them|those|these|all\s+of\s+(?:them|it))\b/i;
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {
@@ -663,8 +663,9 @@ function reservicePestReportFacts(text) {
     seg.eff = seg.clause;
     if (!seg.blank && RESERVICE_SUBJECTLESS_PREDICATE_RE.test(seg.clause) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) {
       const prevSeg = segs.slice(0, i).reverse().find((x) => !x.blank);
-      const noun = prevSeg && RESERVICE_PEST_NOUN_UNBOUND_RE.exec(prevSeg.clause);
-      if (noun) seg.eff = `${noun[0]} ${seg.clause.trim()}`;
+      // the PREVIOUS clause's effective text, so a chain of subjectless predicates keeps the one pest subject ("Ants came back, went away, came back again")
+      const noun = prevSeg && RESERVICE_PEST_NOUN_UNBOUND_RE.exec(prevSeg.eff);
+      if (noun) { seg.eff = `${noun[0]} ${seg.clause.trim()}`; seg.inherited = true; }
     }
   });
   // A leading HISTORICAL time adjunct ("Back in 2024, the ants came back") is carried into the clause that follows it — the comma split
@@ -681,8 +682,10 @@ function reservicePestReportFacts(text) {
   });
   segs.forEach((seg, i) => {
     const prev = segs.slice(0, i).reverse().find((x) => !x.blank);
-    if (!prev || seg.blank || prev.dropped || !reserviceClauseResolved(seg.clause)) return;
-    if (RESERVICE_PRONOUN_SUBJECT_RE.test(seg.clause) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) prev.dropped = true;
+    if (!prev || seg.blank || prev.dropped || !reserviceClauseResolved(seg.inherited ? seg.eff : seg.clause)) return;
+    // Codex round-44 P2: a SUBJECTLESS resolution inherits the prior clause's pest subject ("Ants came back but are gone now",
+    // "Ants came back, then disappeared") exactly like a pronoun one does.
+    if ((RESERVICE_PRONOUN_SUBJECT_RE.test(seg.clause) || seg.inherited) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) prev.dropped = true;
   });
   const kept = [];
   const asserted = [];

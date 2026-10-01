@@ -1424,7 +1424,9 @@ const PEST_COMPLAINT_TIEBREAK = Object.freeze([
   { label: 'property damage', source: 'damag\\w*' },
   { label: 'a refund/credit demand', source: 'refund\\w*' },
   { label: 'a dispute over what happened or over billing', source: "disput\\w*|chargeback|charged\\s+(?:me\\s+)?(?:wrong|twice|again|incorrect\\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\\w*" },
-  { label: 'a threat to cancel over it', source: 'cancel\\w*' },
+  // Codex round-44 P2: a cancel HAND-OFF is request / threat language — "I want to cancel", "going to cancel", "please cancel my plan",
+  // "I'm cancelling", "cancel my service" — never a past-tense description ("the tech canceled yesterday's appointment").
+  { label: 'a threat to cancel over it', source: "(?:want(?:ed)?|wanna|going|gonna|plan(?:ning)?|need(?:ed)?|ready|decid\\w+|think(?:ing)?|consider(?:ing)?|about|trying|try|please|pls|will|would|should|may|might|could|gotta|have|like|let['’]?s)\\s+(?:to\\s+|of\\s+|about\\s+)?(?:just\\s+|probably\\s+|go\\s+ahead\\s+and\\s+)?cancel(?:l?ing)?\\b|cancel(?:l?ing)?\\s+(?:my|our|the|this|that|it|them|everything|all|service|plan|account|membership|subscription|program|contract|agreement|autopay|us|me|now)\\b|(?:i['’]?m|we['’]?re|i\\s+am|we\\s+are)\\s+(?:just\\s+)?cancel(?:l?ing)\\b|(?:i|we)\\s+(?:just\\s+)?cancel\\b|(?:want|need|like|request(?:ing)?)\\s+(?:a\\s+)?cancell?ation\\b|cancell?ation\\s+(?:please|pls|request)\\b|(?<![\\w'’])cancel(?:l?ing)?(?=\\s*(?:[.!?,;:–—]|$|please\\b|pls\\b|now\\b|asap\\b))" },
 ]);
 function pestComplaintTieBreakLabels() {
   const labels = PEST_COMPLAINT_TIEBREAK.map((c) => c.label);
@@ -1767,7 +1769,7 @@ function reserviceBookedSnapshot(booked) {
 function reserviceBookedDayNames(info) {
   const day = new Date(`${info.date}T12:00:00Z`);
   const fmt = (opts) => day.toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
-  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`];
+  const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`, String(info.date).slice(0, 10)];
   const time = info.windowStart ? require('../utils/sms-time-format').formatSmsTime(info.windowStart) : null;
   return [...names, time, time && time.replace(':00', '')].filter(Boolean);
 }
@@ -1796,13 +1798,21 @@ function reserviceAssertedDays(sentence) {
   for (const m of sentence.matchAll(/\b(sun|mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?)(?:day)?\b/gi)) out.push(m[1].slice(0, 3).toLowerCase());
   for (const m of sentence.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi)) out.push(`${m[1].toLowerCase()} ${Number(m[2])}`);
   for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) out.push(`${Number(m[1])}/${Number(m[2])}`);
+  // Codex round-44 P2: FULL dates — ISO "2026-10-09" (the FREE RE-SERVICE fact renders this form, so a draft copies it) and M/D/YYYY — are
+  // compared year-and-all as an `iso:` token against the live callback date (the M/D token above is pushed too, so a wrong year fails here).
+  for (const m of sentence.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) out.push(`iso:${m[1]}-${m[2]}-${m[3]}`);
+  for (const m of sentence.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/g)) {
+    const year = m[3].length === 2 ? `20${m[3]}` : m[3];
+    out.push(`iso:${year}-${String(Number(m[1])).padStart(2, '0')}-${String(Number(m[2])).padStart(2, '0')}`);
+  }
   return out;
 }
 // The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
 const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|tonight|later\s+today|this\s+(?:morning|afternoon|evening)|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
 function reserviceAssertedTimes(sentence) {
   const out = [];
-  let rest = String(sentence);
+  // an ISO / numeric full date is a DAY (reserviceAssertedDays), not a clock range ("2026-10-09" would read as the range 10–09)
+  let rest = String(sentence).replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ').replace(/\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b/g, ' ');
   const push = (h, mi, mer) => out.push({ minutes: (Number(h) % 12) * 60 + Number(mi || 0) + (mer === 'p' ? 720 : 0), mer: mer || null });
   rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*(?:-|–|—|to|and|until)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h1, m1, mer1, h2, m2, mer2) => {
     const second = mer2[0].toLowerCase();
@@ -1835,7 +1845,7 @@ function reserviceLiveWindowMinutes(windowStart) {
 }
 function reserviceLiveDayTokens(dateStr) {
   const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
-  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`]);
+  return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`, `iso:${String(dateStr).slice(0, 10)}`]);
 }
 // The booked-callback claims of an OUTGOING body, one per referring sentence: { lanes, relative, days, times } where `lanes` are
 // the lanes the SENTENCE names (Codex round-31 P2 — derived from the body itself, never only from snapshotted lanes, so an
