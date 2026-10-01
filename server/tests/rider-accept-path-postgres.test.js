@@ -274,6 +274,36 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('the link is written only when the SAVED rider follow-ups sit on saved lawn dates (retry keeps old dates)', async () => {
+    const RiderAcceptSeeding = require('../services/rider-accept-seeding');
+    const trx = await mockPg.transaction();
+    try {
+      const base = await customerFixture(trx);
+      const first = weekdayAhead(10);
+      const row = (over) => ({
+        customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
+        window_start: '09:00', window_end: '10:00', ...over,
+      });
+      const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', scheduled_date: first })).returning('*');
+      for (let i = 1; i <= 8; i++) {
+        await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', scheduled_date: addDays(first, 42 * i), recurring_parent_id: lawn.id }));
+      }
+      const [offPest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: first })).returning('*');
+      for (const d of [91, 182, 273]) {
+        await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: addDays(first, d), recurring_parent_id: offPest.id }));
+      }
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, offPest, { hostParentId: lawn.id }, { insertedRows: [] });
+      expect((await trx('scheduled_services').where({ id: offPest.id }).first('rides_parent_id')).rides_parent_id).toBeNull();
+
+      const [onPest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: first })).returning('*');
+      for (const d of [84, 168, 252]) {
+        await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', scheduled_date: addDays(first, d), recurring_parent_id: onPest.id }));
+      }
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, onPest, { hostParentId: lawn.id }, { insertedRows: [] });
+      expect((await trx('scheduled_services').where({ id: onPest.id }).first('rides_parent_id')).rides_parent_id).toBe(lawn.id);
+    } finally { await trx.rollback(); }
+  });
+
   test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
     const RiderAcceptSeeding = require('../services/rider-accept-seeding');
     const trx = await mockPg.transaction();

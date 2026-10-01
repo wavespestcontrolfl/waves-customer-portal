@@ -163,7 +163,32 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
     ctx.lawn.seededDates = (seedResult?.insertedRows || []).map((r) => dateOnly(r.scheduled_date)).filter(Boolean);
   }
   if (!rider?.hostParentId) return;
+  // Link only what was actually persisted: on a retried/resumed accept the
+  // seeder keeps a series' existing dates and may insert nothing, so the
+  // proposed override proves nothing. Every live rider follow-up must sit on a
+  // live date of the lawn series.
+  let rides = false;
+  try {
+    rides = await persistedRiderOnHost(conn, parentRow.id, rider.hostParentId);
+  } catch (err) {
+    logger.warn(`[rider-accept] could not verify rider ${parentRow.id} dates (left unlinked): ${err.message}`);
+  }
+  if (!rides) {
+    logger.warn(`[rider-accept] rider ${parentRow.id}'s saved dates are not all lawn dates — left unlinked`);
+    return;
+  }
   await linkRider(conn, parentRow.id, rider.hostParentId);
+}
+
+async function persistedRiderOnHost(conn, riderId, hostId) {
+  const rows = await inSavepoint(conn, (sp) => sp('scheduled_services')
+    .where((q) => q.whereIn('id', [riderId, hostId]).orWhereIn('recurring_parent_id', [riderId, hostId]))
+    .whereNotIn('status', ['cancelled'])
+    .select('id', 'recurring_parent_id', 'scheduled_date'));
+  const seriesOf = (row) => String(row.recurring_parent_id || row.id);
+  const hostDates = new Set(rows.filter((r) => seriesOf(r) === String(hostId)).map((r) => dateOnly(r.scheduled_date)));
+  const riderFollowUps = rows.filter((r) => String(r.recurring_parent_id || '') === String(riderId)).map((r) => dateOnly(r.scheduled_date));
+  return riderFollowUps.length > 0 && riderFollowUps.every((d) => hostDates.has(d));
 }
 
 async function linkRider(conn, riderId, hostParentId) {
