@@ -69,6 +69,39 @@ async function loadPayerLinkage(customerId, dbh = db) {
   return buildPayerLinkage(payerInvRows, { failed });
 }
 
+// LIVE form (Codex round-41 P1, PR #5331): the stamped linkage above only knows invoices whose payer_id / withdrawal stamp was
+// written at creation. An invoice that RESOLVES to a payer today (through its scheduled service or the customer's default) while
+// its own payer_id is still NULL is the payer's too, and so is every payment against it. This asks the ONE shared live verdict
+// (services/invoice-payer-ownership.liveInvoiceOwnership) for each of the customer's remaining invoices and folds the owned ones
+// into the linkage, so authoritative payment history and the in-flight probe judge a payment exactly like the invoice facts do.
+// Unverifiable ownership (a lookup / resolver failure) => `failed` (callers fail closed). `liveOwnedIds` = invoice ids the live
+// resolver named (payer_id NULL, not stamped), so SQL can drop their payments BEFORE a row cap.
+async function loadLivePayerLinkage(customerId, dbh = db) {
+  const base = await loadPayerLinkage(customerId, dbh);
+  if (base.failed) return { ...base, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  let failed = false;
+  const rows = await dbh('invoices')
+    .where({ customer_id: customerId })
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .where(function notWithdrawn() {
+      this.whereNull('scheduled_send_error').orWhere('scheduled_send_error', 'not like', 'payer_billed:%');
+    })
+    .select('id', 'customer_id', 'scheduled_service_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
+    .catch(() => { failed = true; return []; });
+  if (failed) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  let verdict;
+  try {
+    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh);
+  } catch {
+    return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  }
+  if (verdict.unverifiable) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  const liveOwned = rows.filter((r) => verdict.ownedIds.has(String(r.id)));
+  const linkage = buildPayerLinkage([...base.payerInvRows, ...liveOwned]);
+  return { ...linkage, liveOwnedIds: verdict.ownedIds, liveOwnedRows: liveOwned };
+}
+
 module.exports = {
-  invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage,
+  invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
 };

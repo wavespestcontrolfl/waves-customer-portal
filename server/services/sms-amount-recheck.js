@@ -130,7 +130,7 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
 // cleared" read as a historical RECEIPT exactly like a bare verb does.
 const {
-  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim, unrecognizedPaymentAssertion, hasPronounSubjectClause,
+  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, inboundNamesInvoice, zeroBalanceClaim, unrecognizedPaymentAssertion, hasPronounSubjectClause,
 } = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
@@ -348,7 +348,7 @@ async function amountFreeStatusClaimStale({
   // entirely (gratitude/scheduling copy on the auto-send lane).
   // A customer message ABOUT a payment makes a bare pronoun clause ("It settled.") payment-scoped, so the
   // prescreen alone can't clear it (Codex round-30 P1) — the per-clause decision below is the precise one.
-  if (!mayAssertPaymentStatus(text) && !inboundNamesPayment(inboundMessage)) return { stale: false };
+  if (!mayAssertPaymentStatus(text) && !inboundNamesPayment(inboundMessage) && !inboundNamesInvoice(inboundMessage)) return { stale: false }; // an invoice question makes a pronoun clause scoped too (round 41)
   // ONE decision with the draft validator (Codex round-18/24 P1): a clause needs the billing recheck exactly
   // when clauseUngrounded would judge it — the enumerator finds a claim, OR it is an UNRECOGNIZED payment
   // assertion (fail closed: "Your payment settled." is never fresh just because no phrase knows it).
@@ -359,7 +359,7 @@ async function amountFreeStatusClaimStale({
     typeof drafter.paymentClauseNeedsValidation === 'function'
       ? drafter.paymentClauseNeedsValidation(clause, { inboundText })
       : (drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
-        || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null
+        || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage) || inboundNamesInvoice(inboundMessage)) != null
         || zeroBalanceClaim(clause) || unrecognizedPaymentAssertion(clause))));
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };

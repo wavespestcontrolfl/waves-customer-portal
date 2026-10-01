@@ -113,6 +113,10 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     return { invoiceId: null, reason: 'named_amount_differs' }; // the invoice-scoped amount matches no open invoice
   }
   const amounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
+  // Codex round-41 P2: SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are several explicit alternatives — the same
+  // "every named figure resolves" rule as the invoice-scoped amounts above: one that matches no open invoice leaves the target
+  // unresolved (abstain), never silently dropped because a sibling happened to match.
+  if (amounts.length > 1 && amounts.some((a) => !open.some((inv) => dueCentsOf(inv) === a))) return { invoiceId: null, reason: 'ambiguous_amount' };
   if (amounts.length) {
     const byAmount = open.filter((inv) => amounts.includes(Math.round(Number(inv.amountDue) * 100)));
     if (byAmount.length === 1) return { invoiceId: byAmount[0].id, reason: 'unique_amount' };

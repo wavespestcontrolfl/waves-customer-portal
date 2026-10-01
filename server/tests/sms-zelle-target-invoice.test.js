@@ -376,3 +376,17 @@ describe('invoice-scoped amounts that do not all resolve (round 39)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Zelle invoice 0123, the $100 invoice?').invoiceId).toBe('a');
   });
 });
+
+// Codex round-41 P2: several distinct BARE amounts all have to resolve — one that matches no open invoice is not silently ignored.
+describe('several bare amounts (round 41)', () => {
+  const open = [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 100 }, { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 300 }];
+  test('"$100 or $200": the $200 alternative matches nothing, so the target is unresolved — never the $100 invoice', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100 or $200?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $200 or $100?').invoiceId).toBeNull();
+  });
+  test('one bare amount that matches still resolves; a repeated amount is one amount; both alternatives matching stays ambiguous', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100?')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100? Yes the $100.')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100 or $300?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+  });
+});

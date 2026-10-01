@@ -494,6 +494,49 @@ function unrecognizedPaymentAssertion(text, { paymentContext = false } = {}) {
   }
   return false;
 }
+// Codex round-41 P1 (the CLASS: one recognized claim must never shield a second, unsupported one in the same clause). After the
+// recognized claims' spans are blanked, a payment-subject sub-clause may not keep a PREDICATE-shaped word: a past participle /
+// gerund ("settled", "posting", "reconciled") or a status adjective ("complete", "final", "good", "late"). "Your payment is
+// [pending] yet already settled" -> "settled" is an assertion the vocabulary cannot classify: fail closed, at draft time
+// (clauseUngrounded) AND at the send-time recheck (the same chokepoint). Scaffolding words ("on our end yet", "from Sep 12")
+// stay free, and exempt (non-assertive) sub-clauses are skipped exactly as in unrecognizedPaymentAssertion.
+const RESIDUAL_PREDICATE_ADJECTIVES = new Set((
+  'complete done final good fine ok okay clear successful success late overdue current closed open active valid invalid void '
+  + 'gone missing lost stuck safe secure paid settled received posted cancelled canceled'
+).split(/\s+/));
+const RESIDUAL_BENIGN_PARTICIPLES = new Set('ending morning evening during nothing anything something everything billing being following regarding according including need needed'.split(' '));
+const isResidualPredicateWord = (w) => !RESIDUAL_BENIGN_PARTICIPLES.has(w) && (RESIDUAL_PREDICATE_ADJECTIVES.has(w) || /^[a-z]{3,}(?:ed|ing)$/.test(w));
+// A sub-clause with NO subject of its own that opens straight on a predicate ("...and now reconciled", "...yet final") continues the
+// previous payment sub-clause's subject, so it asserts about that payment even though no payment noun appears in it.
+const HEADLESS_PREDICATE_RE = /^\s*(?:(?:now|already|also|just|still|officially|fully|since|then|has|have|had|is|was|are|were|been|being|be|it|it['\u2019]s|that|this)\s+)*([a-z]+(?:-[a-z]+)*)\b/i;
+const headlessPredicateClause = (sub) => {
+  const head = HEADLESS_PREDICATE_RE.exec(String(sub || ''));
+  return !!head && isResidualPredicateWord(head[1].toLowerCase());
+};
+function residualPaymentAssertion(remainder, { paymentContext = false } = {}) {
+  const pieces = String(remainder || '').split(SUBCLAUSE_SPLIT_RE);
+  let prevExempt = false;
+  let prevHit = false;
+  let connector = '';
+  for (let i = 0; i < pieces.length; i += 1) {
+    if (i % 2 === 1) { connector = pieces[i]; continue; }
+    const sub = pieces[i];
+    if (!sub || !sub.trim()) continue;
+    const exempt = isNonAssertivePaymentClause(sub) || (prevExempt && PURPOSE_CONNECTOR_RE.test(connector));
+    prevExempt = exempt;
+    if (exempt) { prevHit = false; continue; }
+    const hit = paymentStatusHit(sub) || (paymentContext && PRONOUN_SUBJECT_CLAUSE_RE.test(sub));
+    if (hit) {
+      const words = sub.toLowerCase().match(/[a-z]+(?:-[a-z]+)*/g) || [];
+      if (words.some(isResidualPredicateWord)) return true;
+      prevHit = true;
+      continue;
+    }
+    if (prevHit && headlessPredicateClause(sub)) return true;
+    prevHit = false;
+  }
+  return false;
+}
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || '')) || ZERO_BALANCE_RE.test(String(text || ''));
 }
@@ -511,6 +554,16 @@ function subclauseRanges(text) {
     pos += piece.length;
   }
   return ranges;
+}
+// Codex round-41 P1: the customer's message is about an INVOICE / BILL (and names no payment object): a pronoun-subject reply
+// ("It is still processing.") is then about THAT invoice — never an unscoped sentence the validators skip. `inboundNamesPayment`
+// deliberately stays payment-only (it feeds the payment-row binder); this is its invoice twin, used to carry invoice context.
+const inboundNamesInvoice = (text) => INVOICE_NOUN_RE.test(String(text || '')) && !PAYMENT_OBJECT_RE.test(withoutTenderPhrases(text));
+// A sub-clause whose subject is a bare pronoun ("It is still processing", "That failed") — NOT the payment-noun anaphors.
+const BARE_PRONOUN_SUBJECT_RE = /^\s*(?:and\s+|but\s+|so\s+|well,?\s+|yes,?\s+)?(?:it|that|they|this(?:\s+one)?)(?:['\u2019](?:s|re|ll|d))?\s+\w+/i;
+function pronounSubjectAt(text, index) {
+  const range = subclauseRanges(text).find((r) => index >= r.start && index <= r.end);
+  return !!range && BARE_PRONOUN_SUBJECT_RE.test(range.text);
 }
 // Is the sub-clause holding character `index` an INVOICE / BILL status clause?
 function invoiceSubjectAt(text, index) {
@@ -541,7 +594,11 @@ module.exports = {
   hasPronounSubjectClause,
   subclauseRanges,
   invoiceSubjectAt,
+  inboundNamesInvoice,
+  pronounSubjectAt,
   unrecognizedPaymentAssertion,
+  residualPaymentAssertion,
+  headlessPredicateClause,
   isNonAssertivePaymentClause,
   REFUND_COMPLETION_RE,
   invoiceSubjectClause,

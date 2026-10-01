@@ -2639,7 +2639,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, isModalNonAssertive, recognizedMatchIsHypothetical, refundSubjectAt, subclauseRanges, isNonAssertivePaymentClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, inboundNamesInvoice, pronounSubjectAt, unrecognizedPaymentAssertion, residualPaymentAssertion, headlessPredicateClause, isModalNonAssertive, recognizedMatchIsHypothetical, refundSubjectAt, subclauseRanges, isNonAssertivePaymentClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -3222,8 +3222,10 @@ function claimedDatesAgree(a, b) {
 // The binding a validator uses: paymentClaimBinding plus the AMOUNT identity — when the
 // customer named amounts, every amount the reply's claim states must be one of them
 // (Codex round-15 P1). An 'unpaid' claim states what is OWED, not the payment asked about.
-function claimBinding(c, env) {
-  const binding = paymentClaimBinding(c.text, env.inboundText);
+// `multiDate`: the caller RESOLVES every named date itself (bindAllTargets' `dates`), so a clause naming several dates is allowed
+// through with binding.claimedDates; every other caller gets null (several dates are several payments — ungrounded).
+function claimBinding(c, env, { multiDate = false } = {}) {
+  const binding = paymentClaimBinding(c.text, env.inboundText, { multiDate });
   if (!binding) return null;
   if (c.family !== 'unpaid') {
     const asked = amountCentsIn(env.inboundText);
@@ -3234,7 +3236,7 @@ function claimBinding(c, env) {
   }
   return binding;
 }
-function paymentClaimBinding(clauseText, inboundText) {
+function paymentClaimBinding(clauseText, inboundText, { multiDate = false } = {}) {
   let claimedTender = replyClaimedTender(clauseText);
   // Codex round-15 P1: the reply's identity must AGREE with the payment the customer
   // asked about — it never overrides it. A reply tender the inbound does not name, or a
@@ -3245,24 +3247,31 @@ function paymentClaimBinding(clauseText, inboundText) {
     // the customer named a card BRAND and the reply says only "card": the brand still constrains the payment
     if (claimedTender === 'card') claimedTender = [...asked].find((a) => a.startsWith('card:')) || claimedTender;
   }
-  const replyDate = parseClaimedPaymentDate(clauseText);
+  // Codex round-41 P1: EVERY date the reply names is an asserted payment date — never "the first date". Several distinct dates
+  // ("Sep 1 through Sep 2") are several payments: only a caller that resolves each one (multiDate => bindAllTargets' `dates`)
+  // may proceed; everyone else fails closed.
+  const replyDates = allClaimedPaymentDates(clauseText);
+  if (replyDates.length > 1 && !multiDate) return null;
+  const replyDate = replyDates.length === 1 ? replyDates[0] : null;
   // Codex round-35 P1: SEVERAL distinct dates in the customer's message ("Sep 1 or Sep 2") are several payments. The reply
   // must name one explicitly (and it must be one of them); silent, the identity is ambiguous — never "the first date".
   const inboundDates = inboundText ? allClaimedPaymentDates(inboundText) : [];
   if (inboundDates.length > 1) {
-    if (!replyDate || !inboundDates.some((d) => claimedDatesAgree(d, replyDate))) return null;
+    if (!replyDates.length || !replyDates.every((rd) => inboundDates.some((d) => claimedDatesAgree(d, rd)))) return null;
   }
   const inboundDate = inboundDates.length === 1 ? inboundDates[0] : null;
-  if (replyDate && inboundDate && !claimedDatesAgree(replyDate, inboundDate)) return null;
+  // the reply's identity must AGREE with the date the customer asked about, for EVERY date it names
+  if (inboundDate && replyDates.some((rd) => !claimedDatesAgree(rd, inboundDate))) return null;
   if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
   if (claimedTender === TENDER_AMBIGUOUS) return null;
   const claimedDate = replyDate || inboundDate || null;
+  const claimedDates = replyDates.length > 1 ? replyDates : null; // claimedDate is null then: each date resolves on its own
   // the SAME customer-message test as the classifier (charge / card / tender subjects included — Codex round-28 P1)
   const inboundNamedPayment = !!inboundText && inboundNamesPayment(inboundText);
   // the customer's message is about a payment but names NO amount / date / tender (Codex round-27 P1)
   const inboundGeneric = !!inboundText && inboundNamedPayment && !amountCentsIn(inboundText).length
     && !inboundDates.length && !tenderLabelsIn(inboundText).size;
-  return { claimedTender, claimedDate, inboundNamedPayment, inboundGeneric };
+  return { claimedTender, claimedDate, claimedDates, inboundNamedPayment, inboundGeneric };
 }
 
 // Codex round-18 P2: the payment identity (amount / date / tender) a message names — what the customer's
@@ -3406,7 +3415,7 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !recognizedMatchIsHypothetical(text, sp.start));
   if (settle.length) { claims.push({ kind: 'settlement' }); spans.push(...settle); settlementSpans = settle; }
   // 2. STATUS families / absence / unpaid — every phrase, every family.
-  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || !!env.paymentContext);
+  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || inboundNamesInvoice(env.inboundText) || !!env.paymentContext);
   if (negated) claims.unshift({ kind: 'negated' });
   for (const family of [...new Set(matches.map((m) => m.family))]) {
     claims.push({ kind: familyClaimKind(family), family, starts: matches.filter((m) => m.family === family).map((m) => m.start) });
@@ -3431,6 +3440,10 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   // ("still processing", "failed", "is paid") are claims about the INVOICE's own status — tagged here, bound
   // to the authoritative invoice status by validateInvoiceStatusClaim, never to a payments row.
   const invoiceSubject = invoiceSubjectClause(masked);
+  // Codex round-41 P1: when the customer asked about an INVOICE, a bare-pronoun sub-clause ("It is still processing.") is about
+  // THAT invoice — tagged exactly like an explicit invoice subject so validateInvoiceStatusClaim resolves it from the inbound.
+  const inboundInvoice = inboundNamesInvoice(env.inboundText);
+  const invoiceAt = (st) => invoiceSubjectAt(masked, st) || (inboundInvoice && pronounSubjectAt(masked, st));
   // Codex round-29 P1: the subject is classified PER SUB-CLAUSE, per status phrase — "Invoice #0123 is still
   // processing because your payment is still processing" makes an INVOICE claim and a PAYMENT claim; a clause-wide
   // "has a payment noun" veto used to drop the invoice one. A family asserted in both kinds of sub-clause is split
@@ -3452,8 +3465,8 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   const splitClaims = [];
   for (const c of claims) {
     if ((c.kind === 'status' || c.kind === 'unpaid') && Array.isArray(c.starts)) {
-      const inv = c.starts.filter((st) => invoiceSubjectAt(masked, st));
-      const pay = c.starts.filter((st) => !invoiceSubjectAt(masked, st));
+      const inv = c.starts.filter((st) => invoiceAt(st));
+      const pay = c.starts.filter((st) => !invoiceAt(st));
       if (inv.length) splitClaims.push({ ...c, subject: 'invoice', starts: inv });
       if (pay.length) splitClaims.push({ ...c, starts: pay });
     } else splitClaims.push(c);
@@ -3465,8 +3478,8 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   } else if (d.receiptShaped) {
     // per SUB-CLAUSE (round 29): "Invoice #0123 is paid while your payment is processing" has an INVOICE receipt and a
     // payment claim; a receipt phrase inside an invoice-subject sub-clause is the invoice's own status
-    const invReceipt = d.receiptStarts.some((st) => invoiceSubjectAt(masked, st));
-    const payReceipt = d.receiptStarts.some((st) => !invoiceSubjectAt(masked, st));
+    const invReceipt = d.receiptStarts.some((st) => invoiceAt(st));
+    const payReceipt = d.receiptStarts.some((st) => !invoiceAt(st));
     if (invReceipt) claims.push({ kind: 'status', family: 'paid', subject: 'invoice' }); // "Your invoice is paid"
     if (payReceipt || !invReceipt) {
       claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
@@ -3548,14 +3561,14 @@ function validateAck(c, env) {
   if (env.billingUnavailable) return true;
   if (!c.amounts.length) return true;
   if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
-  const binding = claimBinding(c, env);
+  const binding = claimBinding(c, env, { multiDate: true });
   if (!binding) return true;
   // a partially refunded row may back "received" ONLY when the same reply itself discloses the partial refund
-  return bindAllTargets(c.amounts, env, (a) => bindPaymentRow({
-    family: 'paid', amountCents: a, context: env.context, ...binding, mostRecentOnly: binding.inboundGeneric,
+  return bindAllTargets(c.amounts, env, (a, d) => bindPaymentRow({
+    family: 'paid', amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), mostRecentOnly: binding.inboundGeneric,
     // a partially refunded row may back "received" ONLY if a disclosure in this reply is bound to THAT row
     allowPartialPaid: env.partialPaidAllowedFor,
-  }));
+  }), binding.claimedDates);
 }
 // THE "every named figure must resolve" chokepoint (Codex round-35/39/40 P1 — ONE class that kept resurfacing per row kind:
 // payments, refunds, invoices). A clause that names several figures asserts about EACH of them, so each figure must resolve on
@@ -3575,8 +3588,18 @@ function resolveEveryFigure(figures, rowsFor, { sameOutcome = null } = {}) {
 }
 // Every target must bind (resolveEveryFigure, one row per target); the FIRST bound row becomes the clause's payment identity for a
 // later anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
-function bindAllTargets(targets, env, bind) {
-  const rows = resolveEveryFigure(targets, (a) => { const row = bind(a); return row ? [row] : []; });
+//
+// Codex round-41 P1: the same chokepoint resolves every named DATE (`dates`, >= 2 distinct dates the clause names): each date must
+// bind a row of its own (bind(figure, date)), and every figure must bind under SOME date — "payments from Sep 1 through Sep 2 are
+// pending" is never grounded by a Sep 1 row alone. (Tenders: replyClaimedTender already yields TENDER_AMBIGUOUS for several, which
+// paymentClaimBinding rejects.)
+function bindAllTargets(targets, env, bind, dates = null) {
+  let rows;
+  if (Array.isArray(dates) && dates.length > 1) {
+    const byDate = resolveEveryFigure(dates, (d) => targets.map((a) => bind(a, d)).filter(Boolean));
+    const byFigure = byDate && resolveEveryFigure(targets, (a) => dates.map((d) => bind(a, d)).filter(Boolean), { sameOutcome: () => true });
+    rows = byFigure ? byDate : null;
+  } else rows = resolveEveryFigure(targets, (a) => { const row = bind(a); return row ? [row] : []; });
   if (!rows) return true;
   env.antecedent = rows[0] || null;
   return false;
@@ -3585,13 +3608,13 @@ function bindAllTargets(targets, env, bind) {
 // row of the family's status matching the same identity rules as a receipt.
 function validateStatusClaim(c, env) {
   if (env.billingUnavailable) return true;
-  const binding = claimBinding(c, env);
+  const binding = claimBinding(c, env, { multiDate: true });
   if (!binding) return true;
   const partialWording = partialRefundWording(c.text);
-  return bindAllTargets(claimTargets(c.amounts, env), env, (a) => bindPaymentRow({
-    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, partialWording, mostRecentOnly: binding.inboundGeneric,
+  return bindAllTargets(claimTargets(c.amounts, env), env, (a, d) => bindPaymentRow({
+    family: c.family, amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), requireDate: false, partialWording, mostRecentOnly: binding.inboundGeneric,
     refundSubject: /\brefunds?\b/i.test(c.text),
-  }));
+  }), binding.claimedDates);
 }
 // Absence ("isn't showing", "haven't received"): judged against the
 // AUTHORITATIVE history (billing.paymentHistory — every own payment, any
@@ -3608,16 +3631,17 @@ function absenceHistoryUnknown(env, vague) {
 }
 function validateAbsenceClaim(c, env) {
   if (env.billingUnavailable) return true;
-  const binding = claimBinding(c, env);
+  const binding = claimBinding(c, env, { multiDate: true });
   if (!binding) return true;
   const targets = claimTargets(c.amounts, env);
-  const vague = targets.every((a) => a == null) && !binding.claimedTender && !binding.claimedDate;
+  const vague = targets.every((a) => a == null) && !binding.claimedTender && !binding.claimedDate && !binding.claimedDates;
   if (absenceHistoryUnknown(env, vague)) return true;
   const hist = env.context?.billing?.paymentHistory;
   const rows = !vague && hist ? hist.rows : null;
-  const contradicted = targets.some((a) => bindPaymentRow({
-    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, onAmbiguous: { ambiguous: true }, rows,
-  }));
+  // several named dates: a row matching ANY of them contradicts the denial
+  const contradicted = targets.some((a) => (binding.claimedDates || [null]).some((d) => bindPaymentRow({
+    family: c.family, amountCents: a, context: env.context, ...binding, ...(d ? { claimedDate: d } : {}), requireDate: false, onAmbiguous: { ambiguous: true }, rows,
+  })));
   // An identified absence with the read bound hit and nothing found in what WAS
   // read: completeness unknown => reject rather than deny.
   return contradicted || (!vague && !!hist && hist.complete === false);
@@ -3883,7 +3907,7 @@ function paymentClauseNeedsValidation(clause, env = {}) {
 // The payment ENVIRONMENT of a clause (Codex round-30 P1): the customer's message is about a payment, or an earlier
 // clause of the reply already made a payment claim — so a pronoun-subject clause ("It settled.") is payment-scoped.
 function paymentScope(env = {}) {
-  return { paymentContext: !!env.paymentContext || inboundNamesPayment(String(env.inboundText || '')) };
+  return { paymentContext: !!env.paymentContext || inboundNamesPayment(String(env.inboundText || '')) || inboundNamesInvoice(String(env.inboundText || '')) };
 }
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
@@ -3894,19 +3918,26 @@ function clauseUngrounded(clause, env) {
   // claim => an unrecognized payment assertion ("we have yet to receive…", whatever comes next). Fail closed,
   // unless the clause is clearly non-assertive (question, conditional, offer/instruction, payment-options
   // reference). Draft and send share this path.
-  if (!claims.length) return unrecognizedPaymentAssertion(text, paymentScope(env));
+  if (!claims.length) {
+    if (unrecognizedPaymentAssertion(text, paymentScope(env))) return true;
+    // Codex round-41 P1: a subject-less predicate IMMEDIATELY after a clause that made a payment claim ("...is pending, [it is] now
+    // reconciled") continues that claim's subject — an assertion no phrase classifies, so it cannot hide behind the clause split.
+    return env.paymentClaimClause === env.clauseIndex - 1 && !isNonAssertivePaymentClause(text) && headlessPredicateClause(text);
+  }
   // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
   const presence = [];
   const anaphoric = isAnaphoricPaymentClause(text, amounts);
   for (const claim of claims) {
     if (claim.kind === 'negated') return true;
-    if (anaphoric && ANAPHORIC_KINDS.has(claim.kind)) {
-      if (validateAnaphoricClaim(claim, text, env)) return true;
-      continue;
-    }
+    // an INVOICE-subject claim (explicit, or a pronoun carrying the customer's invoice — round 41) is judged against the invoice
+    // itself, before the payment-row anaphora rule (there is no antecedent payment row for it to inherit)
     if (claim.subject === 'invoice') {
       if (validateInvoiceStatusClaim(claim, text, amounts, env)) return true;
       if (invoiceTenderUngrounded(claim, masked, env)) return true; // masked: the claim's span offsets are in the amount-masked clause
+      continue;
+    }
+    if (anaphoric && ANAPHORIC_KINDS.has(claim.kind)) {
+      if (validateAnaphoricClaim(claim, text, env)) return true;
       continue;
     }
     const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
@@ -3924,11 +3955,14 @@ function clauseUngrounded(clause, env) {
     if (![...sets[0]].some((st) => sets.every((set) => set.has(st)))) return true;
   }
   env.paymentContext = true;
+  env.paymentClaimClause = env.clauseIndex;
   // Blank every validated span: the remainder must assert nothing more, else fail closed.
   if (negated) return true;
   let remainder = masked;
   for (const sp of [...spans].sort((x, y) => y.start - x.start)) remainder = `${remainder.slice(0, sp.start)} ${remainder.slice(sp.end)}`;
-  return enumerateMaskedClaims(remainder, false, env).claims.length > 0;
+  if (enumerateMaskedClaims(remainder, false, env).claims.length > 0) return true;
+  // Codex round-41 P1: whatever the vocabulary cannot classify must not hide behind a recognized claim ("pending yet already settled")
+  return residualPaymentAssertion(remainder, paymentScope(env));
 }
 
 function replyQuotesUngroundedAmount(reply, context, opts = {}) {

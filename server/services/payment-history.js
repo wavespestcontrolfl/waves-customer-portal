@@ -12,7 +12,7 @@
 // customer_id — same rule as the aggregator), so `complete` is exact:
 // complete = ownRows <= cap.
 const db = require('../models/db');
-const { loadPayerLinkage } = require('./payer-linkage');
+const { loadLivePayerLinkage } = require('./payer-linkage');
 const logger = require('./logger');
 const { excludeNeverAttemptedDeferrals } = require('./failed-payments');
 const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
@@ -30,6 +30,20 @@ function uuidFromMetadata(alias) {
   return `(CASE WHEN ${v} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${v})::uuid END)`;
 }
 
+function excludeLiveOwnedPayerPayments(qb, linkage) {
+  const rows = linkage.liveOwnedRows || [];
+  if (!rows.length) return qb;
+  const ph = (n) => Array.from({ length: n }, () => '?').join(', ');
+  const ids = rows.map((r) => String(r.id));
+  const mdId = uuidFromMetadata('payments');
+  qb.whereRaw(`(${mdId} IS NULL OR ${mdId}::text NOT IN (${ph(ids.length)}))`, ids);
+  const pis = rows.map((r) => r.stripe_payment_intent_id).filter(Boolean);
+  if (pis.length) qb.whereRaw(`(payments.stripe_payment_intent_id IS NULL OR payments.stripe_payment_intent_id NOT IN (${ph(pis.length)}))`, pis);
+  const chs = rows.map((r) => r.stripe_charge_id).filter(Boolean);
+  if (chs.length) qb.whereRaw(`(payments.stripe_charge_id IS NULL OR payments.stripe_charge_id NOT IN (${ph(chs.length)}))`, chs);
+  return qb;
+}
+
 // { rows, complete } or null when the read failed (unknown => callers fail closed).
 async function loadPaymentHistory(customerId, dbh = db) {
   if (!customerId) return null;
@@ -37,7 +51,9 @@ async function loadPaymentHistory(customerId, dbh = db) {
     // ONE shared payer-linkage predicate (services/payer-linkage.js — the one billing-v2 uses for the customer's
     // own history): metadata invoice_id + aliases, PaymentIntent, charge, "Invoice <n> —" description, and the
     // payer_billed: withdrawal stamp. Unknown ownership (lookup failed) => unknown history (null) — Codex round-28 P1.
-    const linkage = await loadPayerLinkage(customerId, dbh);
+    // LIVE verdict (Codex round-41 P1): invoices that resolve to a payer TODAY (scheduled service / customer default) while their
+    // own payer_id is still NULL are the payer's too — folded in by loadLivePayerLinkage, whose failure is unknown history.
+    const linkage = await loadLivePayerLinkage(customerId, dbh);
     if (linkage.failed) return null;
     const fetched = await dbh('payments')
       .where({ 'payments.customer_id': customerId })
@@ -54,6 +70,9 @@ async function loadPaymentHistory(customerId, dbh = db) {
         `NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ${uuidFromMetadata('payments')} AND i.customer_id = ? AND i.payer_id IS NOT NULL)`,
         [customerId],
       )
+      // Live-owned payer invoices (payer_id still NULL) are dropped IN SQL too, so their payments can never displace the
+      // homeowner's rows inside the cap (Codex round-41 P1): by metadata invoice, PaymentIntent and charge.
+      .modify((qb) => excludeLiveOwnedPayerPayments(qb, linkage))
       // A never-attempted placeholder (collection_hold OR lock_contention deferral) is not a payment the customer made: it neither
       // contradicts "your payment isn't showing" nor grounds "your payment failed". ONE shared SQL exclusion for every placeholder
       // kind (services/failed-payments.js), applied BEFORE the cap (Codex round-37/38 P1).
@@ -122,21 +141,28 @@ const IN_FLIGHT_PAYMENTS_SQL = `SELECT id, metadata, stripe_payment_intent_id, s
   WHERE customer_id = ? AND payer_id IS NULL
     AND lower(status) IN ('pending', 'processing', 'requires_action')
   LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
-const IN_FLIGHT_INVOICE_SQL = `SELECT 1 AS in_flight FROM invoices
+// Processing invoices come back as ids (capped) and are judged through the LIVE payer verdict in JS (Codex round-41 P1): a processing
+// invoice that resolves to a payer today is the payer's money in flight, not the homeowner's.
+const IN_FLIGHT_INVOICE_SQL = `SELECT id FROM invoices
   WHERE customer_id = ? AND payer_id IS NULL AND lower(status) = 'processing'
     AND (scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')
-  LIMIT 1`;
+  LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
 const rowsOf = (res) => (res && (res.rows || (Array.isArray(res) ? res : []))) || [];
 async function hasInFlightMoney(customerId, dbh = db) {
   if (!customerId) return null;
   try {
-    const linkage = await loadPayerLinkage(customerId, dbh);
+    // LIVE ownership (Codex round-41 P1): same shared verdict as the history and the invoice facts.
+    const linkage = await loadLivePayerLinkage(customerId, dbh);
     if (linkage.failed) return null; // ownership unknown => unknown (callers read null as in flight)
     const candidates = rowsOf(await dbh.raw(IN_FLIGHT_PAYMENTS_SQL, [customerId]));
     if (candidates.some((p) => !linkage.isPayerLinked(p))) return true;
     // every candidate was payer-linked but the read was FULL: rows beyond the cap are unseen => unknown, not "clear"
     if (candidates.length >= IN_FLIGHT_PAYMENTS_LIMIT) return null;
-    return rowsOf(await dbh.raw(IN_FLIGHT_INVOICE_SQL, [customerId])).length > 0;
+    const processing = rowsOf(await dbh.raw(IN_FLIGHT_INVOICE_SQL, [customerId]));
+    if (processing.some((r) => !linkage.liveOwnedIds.has(String(r.id)))) return true;
+    // every processing invoice seen is live payer-owned but the read was FULL: unseen rows => unknown, not "clear"
+    if (processing.length >= IN_FLIGHT_PAYMENTS_LIMIT) return null;
+    return false;
   } catch (err) {
     logger.warn(`[payment-history] in-flight read failed for customer ${customerId}: ${err.message}`);
     return null;

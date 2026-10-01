@@ -5,9 +5,28 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+// the LIVE payer verdict (services/invoice-payer-ownership -> services/payer.resolveForInvoice), Codex round-41 P1
+const mockResolve = jest.fn();
+jest.mock('../services/payer', () => ({ resolveForInvoice: (...a) => mockResolve(...a) }));
+beforeEach(() => { mockResolve.mockReset(); mockResolve.mockResolvedValue({ payerId: null }); });
+// The two invoices reads of services/payer-linkage.loadLivePayerLinkage: 1st = stamped payer invoices, 2nd = the remaining
+// (payer_id NULL) invoices the live resolver judges.
+function invoicesChains({ payerInvoices = [], linkageFails = false, liveInvoices = [], liveFails = false } = {}) {
+  let n = 0;
+  return () => {
+    const mine = n++;
+    const inv = {};
+    ['where', 'select', 'whereNotNull', 'whereNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
+    inv.catch = (handler) => {
+      if (mine === 0) return linkageFails ? Promise.resolve(handler(new Error('linkage down'))) : Promise.resolve(payerInvoices);
+      return liveFails ? Promise.resolve(handler(new Error('live down'))) : Promise.resolve(liveInvoices);
+    };
+    return inv;
+  };
+}
 const { loadPaymentHistory, ensureAbsenceHistory, PAYMENT_HISTORY_CAP } = require('../services/payment-history');
 
-function fakeDb(rows, { fail = false, payerInvoices = [], linkageFails = false } = {}) {
+function fakeDb(rows, { fail = false, payerInvoices = [], linkageFails = false, liveInvoices = [], liveFails = false } = {}) {
   const calls = [];
   const q = {};
   ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => {
@@ -16,10 +35,8 @@ function fakeDb(rows, { fail = false, payerInvoices = [], linkageFails = false }
   q.modify = jest.fn((fn) => { fn(q); return q; });
   q.then = (res, rej) => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows)).then(res, rej);
   // the shared payer-linkage lookup (services/payer-linkage.js): the customer's payer-owned invoices
-  const inv = {};
-  ['where', 'select', 'whereNotNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
-  inv.catch = (handler) => (linkageFails ? Promise.resolve(handler(new Error('linkage down'))) : Promise.resolve(payerInvoices));
-  const dbh = jest.fn((table) => (table === 'invoices' ? inv : q));
+  const invoices = invoicesChains({ payerInvoices, linkageFails, liveInvoices, liveFails });
+  const dbh = jest.fn((table) => (table === 'invoices' ? invoices() : q));
   dbh.calls = calls;
   // number of PAYMENTS reads (the linkage lookup is a second, invoices, query)
   dbh.paymentReads = () => dbh.mock.calls.filter(([t]) => t === 'payments').length;
@@ -165,11 +182,9 @@ describe('Codex round-12 P0: the aggregator\'s Recent payments read excludes pay
 describe('hasInFlightMoney', () => {
   const { hasInFlightMoney, IN_FLIGHT_PAYMENTS_SQL, IN_FLIGHT_INVOICE_SQL } = require('../services/payment-history');
   // dbh: the shared payer-linkage lookup (invoices query chain) + two raw reads (candidate payments, processing invoice)
-  function flightDb({ candidates = [], invoiceRows = [], payerInvoices = [], linkageFails = false, rawThrows = false } = {}) {
-    const inv = {};
-    ['where', 'select', 'whereNotNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
-    inv.catch = (h) => (linkageFails ? Promise.resolve(h(new Error('down'))) : Promise.resolve(payerInvoices));
-    const dbh = jest.fn(() => inv);
+  function flightDb({ candidates = [], invoiceRows = [], payerInvoices = [], linkageFails = false, rawThrows = false, liveInvoices = [] } = {}) {
+    const invoices = invoicesChains({ payerInvoices, linkageFails, liveInvoices });
+    const dbh = jest.fn(() => invoices());
     dbh.raw = jest.fn(async (sql) => {
       if (rawThrows) throw new Error('db down');
       return { rows: sql === IN_FLIGHT_PAYMENTS_SQL ? candidates : invoiceRows };
@@ -190,7 +205,7 @@ describe('hasInFlightMoney', () => {
   test('an own in-flight payment => true; nothing => false; a processing own invoice => true', async () => {
     expect(await hasInFlightMoney('c1', flightDb({ candidates: [{ id: 'p1', metadata: null }] }))).toBe(true);
     expect(await hasInFlightMoney('c1', flightDb({}))).toBe(false);
-    expect(await hasInFlightMoney('c1', flightDb({ invoiceRows: [{ in_flight: 1 }] }))).toBe(true);
+    expect(await hasInFlightMoney('c1', flightDb({ invoiceRows: [{ id: 'inv-proc' }] }))).toBe(true);
   });
   test('payer-linked in-flight rows do NOT count, through EVERY linkage (not just metadata.invoice_id)', async () => {
     const linked = [
@@ -306,4 +321,73 @@ describe('isNeverAttemptedDeferral (shared placeholder predicate, Codex round-38
     expect(isNeverAttemptedDeferral({ ...base, stripe_payment_intent_id: 'pi_x', metadata: { deferred_reason: 'lock_contention' } })).toBe(false);
     expect(isNeverAttemptedDeferral({ ...base, metadata: { type: 'monthly_autopay' } })).toBe(false);
   });
+});
+
+// Codex round-41 P1 (PR #5331): history + in-flight probe judge payer ownership through the LIVE verdict
+// (services/invoice-payer-ownership via payer-linkage.loadLivePayerLinkage), not just the stamped payer_id.
+describe('live payer ownership (round-41)', () => {
+  const { hasInFlightMoney, IN_FLIGHT_PAYMENTS_SQL } = require('../services/payment-history');
+  // an invoice with payer_id NULL that RESOLVES to a payer today (scheduled service svc-ap)
+  const LIVE_AP = { id: '11111111-1111-4111-8111-111111111111', customer_id: 'c1', scheduled_service_id: 'svc-ap', stripe_payment_intent_id: 'pi_live', stripe_charge_id: 'ch_live', invoice_number: 'WPC-2026-0900' };
+  const OWN = { id: '22222222-2222-4222-8222-222222222222', customer_id: 'c1', scheduled_service_id: 'svc-own', invoice_number: 'WPC-2026-0901' };
+  beforeEach(() => {
+    mockResolve.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'svc-ap' ? 'payer-1' : null }));
+  });
+
+  test('loadPaymentHistory drops a payment tied to a live-resolved payer invoice through every linkage; keeps the homeowner\'s', async () => {
+    const rows = [
+      { id: 'a', metadata: { invoice_id: LIVE_AP.id } }, { id: 'b', stripe_payment_intent_id: 'pi_live' }, { id: 'c', stripe_charge_id: 'ch_live' },
+      { id: 'd', description: 'Invoice WPC-2026-0900 — zelle' }, { id: 'own1', metadata: { invoice_id: OWN.id } }, { id: 'own2', metadata: null },
+    ];
+    const out = await loadPaymentHistory('c1', fakeDb(rows, { liveInvoices: [LIVE_AP, OWN] }));
+    expect(out.rows.map((r) => r.id)).toEqual(['own1', 'own2']);
+  });
+
+  test('live-owned invoices are excluded IN SQL, before the cap, so a payer\'s rows cannot displace the homeowner\'s', async () => {
+    const dbh = fakeDb([{ id: 'own' }], { liveInvoices: [LIVE_AP, OWN] });
+    await loadPaymentHistory('c1', dbh);
+    const raws = dbh.calls.map(([m, a], i) => [m, a, i]).filter(([m]) => m === 'whereRaw');
+    const live = raws.find(([, a]) => Array.isArray(a[1]) && a[1].includes(LIVE_AP.id));
+    expect(live).toBeDefined();
+    expect(live[1][1]).not.toContain(OWN.id); // a self-pay invoice is never excluded
+    expect(live[2]).toBeLessThan(dbh.calls.findIndex(([m]) => m === 'limit'));
+    expect(raws.some(([, a]) => /stripe_payment_intent_id/.test(a[0]) && a[1].includes('pi_live'))).toBe(true);
+    expect(raws.some(([, a]) => /stripe_charge_id/.test(a[0]) && a[1].includes('ch_live'))).toBe(true);
+  });
+
+  test('no live-owned invoice => no extra SQL exclusion', async () => {
+    const dbh = fakeDb([{ id: 'own' }], { liveInvoices: [OWN] });
+    await loadPaymentHistory('c1', dbh);
+    expect(dbh.calls.filter(([m, a]) => m === 'whereRaw' && /NOT IN/.test(a[0]) && !/deferred_reason/.test(a[0]))).toHaveLength(0);
+  });
+
+  test('unverifiable ownership (resolver down, or the invoices read fails) => history unavailable (null), fail closed', async () => {
+    mockResolve.mockRejectedValue(new Error('resolver down'));
+    expect(await loadPaymentHistory('c1', fakeDb([{ id: 'x' }], { liveInvoices: [OWN] }))).toBeNull();
+    mockResolve.mockResolvedValue({ payerId: null });
+    expect(await loadPaymentHistory('c1', fakeDb([{ id: 'x' }], { liveFails: true }))).toBeNull();
+  });
+
+  test('hasInFlightMoney: an in-flight payment against a live-resolved payer invoice is NOT the homeowner\'s money', async () => {
+    const linked = { id: 'p1', metadata: { invoice_id: LIVE_AP.id } };
+    expect(await hasInFlightMoney('c1', flightFor({ candidates: [linked], liveInvoices: [LIVE_AP] }))).toBe(false);
+    expect(await hasInFlightMoney('c1', flightFor({ candidates: [linked, { id: 'own', metadata: null }], liveInvoices: [LIVE_AP] }))).toBe(true);
+  });
+  test('hasInFlightMoney: a PROCESSING invoice that resolves to a payer does not count; the homeowner\'s does; full read of payer-owned => unknown', async () => {
+    expect(await hasInFlightMoney('c1', flightFor({ invoiceRows: [{ id: LIVE_AP.id }], liveInvoices: [LIVE_AP] }))).toBe(false);
+    expect(await hasInFlightMoney('c1', flightFor({ invoiceRows: [{ id: LIVE_AP.id }, { id: OWN.id }], liveInvoices: [LIVE_AP, OWN] }))).toBe(true);
+    const full = Array.from({ length: 200 }, () => ({ id: LIVE_AP.id }));
+    expect(await hasInFlightMoney('c1', flightFor({ invoiceRows: full, liveInvoices: [LIVE_AP] }))).toBeNull();
+  });
+  test('hasInFlightMoney: unverifiable live ownership => null (the aggregator reads it as in flight)', async () => {
+    mockResolve.mockRejectedValue(new Error('resolver down'));
+    expect(await hasInFlightMoney('c1', flightFor({ liveInvoices: [OWN] }))).toBeNull();
+  });
+
+  function flightFor({ candidates = [], invoiceRows = [], liveInvoices = [] }) {
+    const invoices = invoicesChains({ liveInvoices });
+    const dbh = jest.fn(() => invoices());
+    dbh.raw = jest.fn(async (sql) => ({ rows: sql === IN_FLIGHT_PAYMENTS_SQL ? candidates : invoiceRows }));
+    return dbh;
+  }
 });
