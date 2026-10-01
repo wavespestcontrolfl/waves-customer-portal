@@ -2067,12 +2067,33 @@ function accountFirstVisits(firstVisits, book) {
   return accountFirst;
 }
 
+// The occurrence of a line's anniversary this batch reviews: the one inside
+// the window, or — for a line an earlier batch (within 90 days) held or
+// skipped — that batch's review date, carried forward. A line with no
+// anniversary at all is listed (it is held as no_anniversary). Null = not
+// in this batch.
+function reviewOccurrence(entry, latest, { from, to, carryFloor }) {
+  if (!entry.anniversary.date) return { reviewDate: null, carriedFrom: null };
+  // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
+  // decision for that cycle, not a hold to carry — the line returns at its
+  // next anniversary (or a catch-up build), as the screen says. Consecutive
+  // windows share their boundary day, so the occurrence the owner skipped is
+  // not listed again by the next window either.
+  const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
+  const inWindow = anniversaryInWindow(entry.anniversary.date, from, to);
+  if (inWindow) return ownerSkipped && dateColumn(latest.review_date) === inWindow ? null : { reviewDate: inWindow, carriedFrom: null };
+  if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) return null;
+  const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
+  if (!anchor || anchor < carryFloor || anchor > to) return null;
+  return { reviewDate: anchor, carriedFrom: latest.batch_key };
+}
+
 function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
   const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
   const accountFirst = accountFirstVisits(firstVisits, book);
   const selected = [];
   for (const entry of book) {
-    const anniversary = resolveAnniversary({
+    entry.anniversary = resolveAnniversary({
       firstCompletedVisit: firstCompletedVisitFor(entry.first, entry.acceptedAt),
       acceptedAt: entry.acceptedAt,
       // member_since is a DATE; the created_at fallback is an instant.
@@ -2080,31 +2101,15 @@ function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = 
       accountFirstVisit: accountFirst.get(entry.customer.id) || null,
       presenceWindowDays: presenceWindowFor(entry.visitsPerYear),
     });
-    entry.anniversary = anniversary;
-    entry.reviewDate = anniversaryInWindow(anniversary.date, from, to);
-    entry.carriedFrom = null;
-    const latest = latestByLine.get(`${entry.customer.id}|${entry.familyKey}`);
-    // An owner's skip (admin_skipped: Include unticked / Skip this cycle) is a
-    // decision for that cycle, not a hold to carry — the line returns at its
-    // next anniversary (or a catch-up build), as the screen says.
-    const ownerSkipped = !!latest && (parseJson(latest.flags) || []).includes('admin_skipped');
-    if (!anniversary.date || entry.reviewDate) {
-      // Consecutive windows share their boundary day: the occurrence the owner
-      // skipped in the previous batch is not listed again by the next one.
-      if (ownerSkipped && entry.reviewDate && dateColumn(latest.review_date) === entry.reviewDate) continue;
-      selected.push(entry);
-      continue;
-    }
-    if (!latest || !CARRY_FORWARD_STATUSES.includes(latest.status) || ownerSkipped) continue;
-    const anchor = dateColumn(latest.review_date) || etDay(latest.computed_at);
-    if (!anchor || anchor < carryFloor || anchor > to) continue;
-    entry.reviewDate = anchor;
-    entry.carriedFrom = latest.batch_key;
+    const occurrence = reviewOccurrence(entry, latestByLine.get(`${entry.customer.id}|${entry.familyKey}`), { from, to, carryFloor });
+    if (!occurrence) continue;
+    entry.reviewDate = occurrence.reviewDate;
+    entry.carriedFrom = occurrence.carriedFrom;
+    // Tenure is measured AT the review date (the anniversary's occurrence in
+    // the window, or the carried-forward one), never at build time.
+    entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
     selected.push(entry);
   }
-  // Tenure is measured AT the review date (the anniversary's occurrence in
-  // the window, or the carried-forward one), never at build time.
-  for (const entry of selected) entry.tenureMonths = entry.anniversary.date && entry.reviewDate ? monthsBetween(entry.anniversary.date, entry.reviewDate) : null;
   return selected;
 }
 
