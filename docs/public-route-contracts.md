@@ -3139,7 +3139,8 @@ accepted or declined estimate (`estimateIsPriceLocked`) the disclosure prints
 only on persisted evidence that the customer saw it — the recorded
 acceptance's verbatim snapshot carried the sentence (the 'plan' drawer
 below), or the accept stamped `estimate_data.rateReviewDisclosedAtAccept` —
-written atomically with a recurring-residential-plan acceptance ONLY on
+written atomically with a recurring-residential-plan acceptance — the public
+accept and the admin's manual mark-accepted alike — ONLY on
 persisted evidence that the customer was served the line while the estimate
 was open: that same recorded 'plan' drawer snapshot, or
 `estimate_data.rateReviewTermsServed` at the current shared
