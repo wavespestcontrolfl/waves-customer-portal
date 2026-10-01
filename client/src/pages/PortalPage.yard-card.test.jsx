@@ -90,19 +90,15 @@ describe('Local Conditions slot', () => {
     expect(screen.getByRole('tab', { name: 'Lawn' })).toBeInTheDocument();
   });
 
-  it('native app: the lawn calendar teaser opens in the in-app overlay, not a new window', async () => {
+  it('native app: the lawn calendar teaser shows without its external link (the site cannot be framed)', async () => {
     native.enabled = true;
-    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
-    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
     api.getYardMonth.mockResolvedValue({
       ...YARD, plan: { lawn: false, pest: true, treeShrub: false, mosquito: false, rodent: false, termite: false },
     });
     render(<LocalConditionsSlot customer={customer} nextService={null} onOpenPhotoId={null} />);
     await settle();
-    fireEvent.click(screen.getByRole('link', { name: /See what to look for/ }));
-    expect(await screen.findByRole('dialog', { name: 'Lawn pest calendar' })).toBeInTheDocument();
-    expect(open).not.toHaveBeenCalled();
-    open.mockRestore();
+    expect(screen.getByText(/Your lawn in/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /See what to look for/ })).not.toBeInTheDocument();
   });
 
   it('shows the widget loading panel while the gate answer is pending', () => {

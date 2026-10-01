@@ -252,7 +252,7 @@ function lawnTeaser(items, monthName) {
   return `Your lawn in ${monthName}: ${top.map((i) => i.name).join(' and ')} ${verb} ${lawn[0].level === 3 ? 'at peak' : 'in season'}.`;
 }
 
-export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null, onOpenLink = null }) {
+export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null, externalLinks = true }) {
   const [weather, setWeather] = useState(null);
   const tabs = yardTabsFor(yard.plan);
 
@@ -347,16 +347,18 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
 
       {teaser && (
         <div style={{ border: `1px dashed ${SHELL.borderStrong}`, borderRadius: 10, padding: '10px 12px', fontSize: 14, color: SHELL.body, lineHeight: 1.42 }}>
-          {teaser}{' '}
-          <a
+          {teaser}
+          {/* The app's webview cannot frame wavespestcontrol.com
+              (X-Frame-Options SAMEORIGIN) and a new-window link strands the
+              SPA (F-017), so the app shows the teaser without the link. */}
+          {externalLinks && <>{' '}<a
             href={LAWN_CALENDAR_URL}
             target="_blank"
             rel="noopener noreferrer"
-            onClick={onOpenLink ? (e) => { e.preventDefault(); onOpenLink(LAWN_CALENDAR_URL, 'Lawn pest calendar'); } : undefined}
             style={{ color: '#065A8C', fontWeight: 700, textDecoration: 'none' }}
           >
             See what to look for →
-          </a>
+          </a></>}
         </div>
       )}
 

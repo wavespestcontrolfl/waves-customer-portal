@@ -9096,11 +9096,6 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
   const onOpenReport = isNativeApp()
     ? (url) => openPagePreview({ id: 'yard-last-lawn-visit', title: 'Lawn service report' }, url)
     : null;
-  // The teaser's wavespestcontrol.com calendar page strands the SPA the same
-  // way (F-017), so the app opens it in that same overlay.
-  const onOpenLink = isNativeApp()
-    ? (url, title) => openPagePreview({ id: 'yard-lawn-calendar', title }, url)
-    : null;
   if (yard.status === 'loading') return (
     <PortalStatePanel
       icon="cloud"
@@ -9110,7 +9105,7 @@ function LocalConditionsSlot({ customer, nextService, onOpenPhotoId }) {
     />
   );
   if (yard.status === 'on') return <>
-    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} onOpenLink={onOpenLink} />
+    <YardMonthCard yard={yard.data} onOpenPhotoId={onOpenPhotoId} onOpenReport={onOpenReport} externalLinks={!isNativeApp()} />
     {preview && <DocumentPreviewOverlay key="report-preview"
       preview={preview} onClose={closePreview}
       onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />}

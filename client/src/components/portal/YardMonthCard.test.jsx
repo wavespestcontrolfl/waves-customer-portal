@@ -204,13 +204,11 @@ describe('lawn teaser link', () => {
     expect(link).toHaveAttribute('target', '_blank');
   });
 
-  it('in the native app it opens through the in-app handler instead of navigating the webview', async () => {
-    const onOpenLink = vi.fn();
-    render(<YardMonthCard yard={PEST_ONLY} onOpenPhotoId={null} onOpenLink={onOpenLink} />);
+  it('in the native app the teaser shows without the external link', async () => {
+    render(<YardMonthCard yard={PEST_ONLY} onOpenPhotoId={null} externalLinks={false} />);
     await act(async () => {});
-    const notPrevented = fireEvent.click(screen.getByRole('link', { name: /See what to look for/ }));
-    expect(notPrevented).toBe(false);
-    expect(onOpenLink).toHaveBeenCalledWith(CAL, 'Lawn pest calendar');
+    expect(screen.getByText(/Your lawn in/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /See what to look for/ })).not.toBeInTheDocument();
   });
 });
 
