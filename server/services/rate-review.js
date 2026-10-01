@@ -823,9 +823,38 @@ function hasSizeInput(inputs, line) {
 // Engine `services.<key>` entries → ranking family, and the engine's
 // qualifying-service keys per family (priorQualifyingServices vocabulary).
 const ENGINE_INPUT_SERVICE_FAMILY = Object.freeze({
-  pest: 'pest_control', lawn: 'lawn_care', treeShrub: 'tree_shrub', mosquito: 'mosquito',
+  pest: 'pest_control', lawn: 'lawn_care', treeShrub: 'tree_shrub', palmInjection: 'tree_shrub', palm: 'tree_shrub', mosquito: 'mosquito',
   termite: 'termite', termiteBait: 'termite', termite_bait: 'termite', rodent: 'rodent', rodentBait: 'rodent', rodent_bait: 'rodent',
 });
+// Within the tree_shrub family the engine prices two PROGRAMS under
+// different input keys — `treeShrub` (the bed program) and `palmInjection`
+// / `palm` (estimate-engine.js: services.palmInjection || services.palm).
+// The current-bundle reconciliation works per program, never per family: a
+// saved program survives only while an active line still carries it,
+// judged by the line's catalog service keys (palm_injection* = palm,
+// anything else = tree/shrub), so a cancelled tree/shrub program cannot
+// keep its qualifying discount on the strength of a surviving palm rider.
+const ENGINE_INPUT_SERVICE_PROGRAM = Object.freeze({ ...ENGINE_INPUT_SERVICE_FAMILY, palmInjection: 'palm', palm: 'palm' });
+function isPalmServiceKey(key) {
+  return /palm/.test(String(key || '').toLowerCase());
+}
+// The programs an active plan line carries. A tree_shrub line without
+// catalog keys is of unknown composition: it keeps whatever was sold.
+function linePrograms(line) {
+  if (!line || !line.familyKey) return [];
+  if (line.familyKey !== 'tree_shrub') return [line.familyKey];
+  const keys = Array.isArray(line.serviceKeys) ? line.serviceKeys : [];
+  if (!keys.length) return ['tree_shrub', 'palm'];
+  const out = [];
+  if (keys.some((k) => !isPalmServiceKey(k))) out.push('tree_shrub');
+  if (keys.some(isPalmServiceKey)) out.push('palm');
+  return out;
+}
+// The program a line's QUALIFYING key (qualifyingKeyForLine) stands for —
+// for a tree_shrub line that is the bed program; palm qualifies for nothing.
+function qualifyingProgramForLine(line) {
+  return line && line.familyKey ? line.familyKey : null;
+}
 const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
   pest_control: 'pest_control', lawn_care: 'lawn_care', tree_shrub: 'tree_shrub', mosquito: 'mosquito', termite: 'termite_bait', rodent: 'rodent_bait',
 });
@@ -835,7 +864,7 @@ const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
 function qualifyingKeyForLine(line) {
   const keys = (line && Array.isArray(line.serviceKeys) ? line.serviceKeys : []).map((k) => String(k || '').toLowerCase());
   if (line.familyKey === 'tree_shrub') {
-    if (keys.length && keys.every((k) => /palm/.test(k))) return null; // standalone palm program
+    if (keys.length && keys.every(isPalmServiceKey)) return null; // standalone palm program
     return 'tree_shrub';
   }
   return QUALIFYING_KEY_FOR_FAMILY[line.familyKey] || null;
@@ -895,16 +924,18 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
   }
   if (Array.isArray(activeFamilies) && clean.services && typeof clean.services === 'object') {
     const lines = activeFamilies.map((f) => (typeof f === 'string' ? { familyKey: f, serviceKeys: [] } : f));
-    const active = new Set(lines.map((l) => l.familyKey));
-    const present = new Set();
+    const activePrograms = new Set(lines.flatMap(linePrograms));
+    const present = new Set(); // programs the surviving saved services price inside the bundle
     for (const [service, value] of Object.entries(clean.services)) {
-      const family = ENGINE_INPUT_SERVICE_FAMILY[service];
-      if (!family) continue; // one-time / commercial / unknown keys are left as saved
+      const program = ENGINE_INPUT_SERVICE_PROGRAM[service];
+      if (!program) continue; // one-time / commercial / unknown keys are left as saved
       if (!value) continue;
-      if (active.has(family)) present.add(family);
+      if (activePrograms.has(program)) present.add(program);
       else delete clean.services[service]; // cancelled since the quote
     }
-    const priors = [...new Set(lines.filter((l) => !present.has(l.familyKey)).map(qualifyingKeyForLine).filter(Boolean))];
+    // every other active program the engine counts toward the tier goes in
+    // as a prior — a bed program added after a pest + palm quote included
+    const priors = [...new Set(lines.filter((l) => !present.has(qualifyingProgramForLine(l))).map(qualifyingKeyForLine).filter(Boolean))];
     clean.priorQualifyingServices = priors;
     if (priors.length) clean.recurringCustomer = true;
   }
@@ -2104,9 +2135,21 @@ async function alreadyEmailed(dbh, batchKey) {
   return !!(row && row.email_sent_at);
 }
 
-async function stampEmailed(dbh, batchKey, subject) {
+// The stamp names the batch VERSION the digest described (computed_at, set
+// by buildBatch and replaced on every rebuild): a rebuild that lands
+// between composing and stamping updates no row, email_sent_at stays
+// null, and the next delivery (the day 1–7 tick, or the admin route) sends
+// the rebuilt rankings — the owner is never told a batch is delivered when
+// the digest described an older one. The admin build also runs under the
+// tick's own lock (routes/admin-rate-review.js), so the two entry points
+// never interleave in the first place.
+async function stampEmailed(dbh, batchKey, subject, computedAt) {
   // literal table name — see the writer note in buildBatch
-  await dbh('rate_review_batches').where({ batch_key: batchKey }).update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
+  const stamped = await dbh('rate_review_batches')
+    .where({ batch_key: batchKey })
+    .where('computed_at', computedAt)
+    .update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
+  return Number(stamped) > 0;
 }
 
 async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
@@ -2114,6 +2157,8 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
   const { deliverOpsDigest } = require('./ops-digest');
   const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
   const batch = await getBatch(batchKey, dbh);
+  if (!batch.batch || !batch.batch.computed_at) return { sent: false, skipped: 'no_batch' };
+  const version = batch.batch.computed_at;
   const composed = composeBatchEmail(batch);
   if (typeof sendgrid.isConfigured === 'function' && !sendgrid.isConfigured()) {
     logger.warn('[rate-review] mailer not configured — skipping batch email');
@@ -2146,8 +2191,9 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
       suppressErrorLog: true,
     }),
   });
-  await stampEmailed(dbh, batchKey, composed.subject);
-  return { sent: true, subject: composed.subject, rows: batch.summary.rows };
+  const stamped = await stampEmailed(dbh, batchKey, composed.subject, version);
+  if (!stamped) logger.warn(`[rate-review] digest for ${batchKey} described a version the batch no longer has — not stamped; the rebuilt rankings go out on the next delivery`);
+  return { sent: true, stamped, subject: composed.subject, rows: batch.summary.rows };
 }
 
 // Scheduler entry (1st of the month): build the batch for anniversaries in

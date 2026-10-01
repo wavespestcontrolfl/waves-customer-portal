@@ -30,6 +30,11 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 const mockSendBatchEmail = jest.fn();
+const mockRunExclusive = jest.fn(async (_name, fn) => fn());
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: (...args) => mockRunExclusive(...args),
+  wasLockSkipped: (result) => !!(result && result.skipped === true),
+}));
 jest.mock('../services/rate-review', () => ({
   listBatches: (...args) => mockListBatches(...args),
   getBatch: (...args) => mockGetBatch(...args),
@@ -152,6 +157,21 @@ describe('POST /batches/:key/build', () => {
       const failed = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(failed.status).toBe(200);
       expect(failed.body.digest).toBe('reset');
+    });
+  });
+  test('a build (and its resend) runs under the monthly tick\'s own lock; a held lock answers 409, no connection 503', async () => {
+    await withServer(async (base) => {
+      const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(out.status).toBe(200);
+      expect(mockRunExclusive).toHaveBeenCalledWith('rate-review-monthly', expect.any(Function), { recordHealth: false, waitForSlot: false });
+      mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+      const held = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(held.status).toBe(409);
+      expect(held.body.reason).toBe('build_in_progress');
+      mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+      const noConn = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(noConn.status).toBe(503);
+      expect(noConn.body.reason).toBe('lock_unavailable');
     });
   });
   test('refuses once any row in the batch was sent', async () => {

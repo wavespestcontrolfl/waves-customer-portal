@@ -17,8 +17,15 @@ const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { rateReviewLive } = require('../config/feature-gates');
 const { validCalendarDate } = require('../utils/datetime-et');
+const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const logger = require('../services/logger');
 const rateReview = require('../services/rate-review');
+
+// The same advisory lock the monthly tick holds (scheduler.js
+// runExclusive('rate-review-monthly')): a build and its digest never
+// interleave across the two entry points. No job_health row for an admin
+// build, and no waiting — a held lock answers 409.
+const BUILD_LOCK = 'rate-review-monthly';
 
 const BATCH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/; // a real month, never 2026-13
 
@@ -70,22 +77,32 @@ router.post('/batches/:key/build', async (req, res) => {
     return res.status(400).json({ error: 'anniversaryFrom / anniversaryTo must be real calendar dates, YYYY-MM-DD' });
   }
   try {
-    const result = await rateReview.buildBatch({ batchKey: key, anniversaryFrom: from, anniversaryTo: to });
+    const locked = await runExclusive(BUILD_LOCK, async () => {
+      const result = await rateReview.buildBatch({ batchKey: key, anniversaryFrom: from, anniversaryTo: to });
+      if (!result.ok) return { result };
+      // The owner already read this batch's digest → it is stale now: deliver
+      // the updated one (the same ops email to contact@; never a customer
+      // send) — inside the same lock, so no tick interleaves.
+      let digest = result.digestReset ? 'reset' : 'unchanged';
+      if (result.digestReset) {
+        try {
+          const sent = await rateReview.sendBatchEmail({ batchKey: key });
+          digest = sent && sent.sent ? 'resent' : 'reset';
+        } catch (err) {
+          logger.error(`[admin-rate-review] updated digest for ${key} could not be sent (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
+        }
+      }
+      return { result, digest };
+    }, { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(locked)) {
+      if (locked.reason === 'lease_held') return res.status(409).json({ error: 'A rate review build is running right now — try again in a minute.', reason: 'build_in_progress' });
+      return res.status(503).json({ error: 'The rate review build lock is unavailable — try again shortly.', reason: 'lock_unavailable' });
+    }
+    const { result, digest } = locked;
     if (!result.ok && result.reason === 'batch_has_sent_rows') {
       return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
     }
     if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
-    // The owner already read this batch's digest → it is stale now: deliver
-    // the updated one (the same ops email to contact@; never a customer send).
-    let digest = result.digestReset ? 'reset' : 'unchanged';
-    if (result.digestReset) {
-      try {
-        const sent = await rateReview.sendBatchEmail({ batchKey: key });
-        digest = sent && sent.sent ? 'resent' : 'reset';
-      } catch (err) {
-        logger.error(`[admin-rate-review] updated digest for ${key} could not be sent (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
-      }
-    }
     return res.json({ ok: true, batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

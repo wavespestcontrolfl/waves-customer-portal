@@ -618,6 +618,34 @@ describe('engine replay runs at the line\'s own cadence', () => {
     // bare family strings still work as before
     expect(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'rodent'] }).priorQualifyingServices).toEqual(['rodent_bait']);
   });
+  test('tree/shrub and palm are reconciled as separate programs: a cancelled tree/shrub program never survives on a palm rider', () => {
+    const pestLine = { familyKey: 'pest_control', serviceKeys: ['pest_control_quarterly'] };
+    // sold pest + tree/shrub; the tree/shrub program was cancelled since, palm injections remain
+    const sold = { homeSqFt: 2100, services: { pest: { frequency: 'quarterly' }, treeShrub: { tier: 'enhanced' } } };
+    const out = P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['palm_injection_semiannual'] }] });
+    expect(out.services.treeShrub).toBeUndefined();
+    expect(out.priorQualifyingServices).toEqual([]); // palm qualifies for nothing → pest replays at Bronze
+    expect(out.recurringCustomer).toBeUndefined();
+    // sold pest + palm; palm cancelled since, a real tree/shrub program added
+    const soldPalm = { homeSqFt: 2100, palmCount: 6, services: { pest: { frequency: 'quarterly' }, palmInjection: { count: 6 } } };
+    const out2 = P.listReplayInputs(soldPalm, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program'] }] });
+    expect(out2.services.palmInjection).toBeUndefined();
+    expect(out2.priorQualifyingServices).toEqual(['tree_shrub']);
+    // both programs active (one consolidated family line) → both saved services survive, nothing is a prior
+    const out3 = P.listReplayInputs({ homeSqFt: 2100, services: { treeShrub: { tier: 'enhanced' }, palm: { count: 2 } } }, { familyKey: 'tree_shrub', cadence: 'bimonthly', activeFamilies: [{ familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] }] });
+    expect(out3.services.treeShrub).toBeDefined();
+    expect(out3.services.palm).toBeDefined();
+    expect(out3.priorQualifyingServices).toEqual([]);
+    // sold pest + palm; a bed program added later (same consolidated line) counts as a prior even though the palm rider survived
+    const out5 = P.listReplayInputs(soldPalm, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: [pestLine, { familyKey: 'tree_shrub', serviceKeys: ['tree_shrub_program', 'palm_injection_semiannual'] }] });
+    expect(out5.services.palmInjection).toBeDefined();
+    expect(out5.priorQualifyingServices).toEqual(['tree_shrub']);
+    // a tree_shrub line without catalog keys is of unknown composition: it keeps whatever was sold
+    const out4 = P.listReplayInputs({ homeSqFt: 2100, services: { pest: { frequency: 'quarterly' }, treeShrub: { tier: 'enhanced' }, palm: { count: 2 } } }, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'tree_shrub'] });
+    expect(out4.services.treeShrub).toBeDefined();
+    expect(out4.services.palm).toBeDefined();
+    expect(out4.priorQualifyingServices).toEqual([]);
+  });
   test('the ORIGINAL-mix replay restores the server-stamped prior qualifying services; the client-posted copy never survives', () => {
     const inputs = { lotSqFt: 8000, priorQualifyingServices: ['pest_control', 'mosquito'], recurringCustomer: true, services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } };
     // original mix with the server-stamped evidence → priors restored (sold as a Silver add-on)
@@ -1586,6 +1614,33 @@ describe('runMonthlyRateReview', () => {
     expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toMatch(/cron\.schedule\('20 6 1-7 \* \*'/);
+  });
+  test('the delivery stamp names the batch version it described: a rebuild that lands mid-send leaves email_sent_at unset for the next delivery', async () => {
+    const book = fixture.decemberBook();
+    const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null, batchStampRows: 0 };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out.emailed).toBe(true);
+    expect(out.email.stamped).toBe(false);
+    // the stamp was conditioned on the version the digest was composed from (buildBatch's computed_at)
+    const stamp = db.mock.results.map((r) => r.value).find((q) => q && Array.isArray(q.calls) && q.calls.some(([n]) => n === 'update') && q.calls.some(([n, a]) => n === 'where' && a[0] === 'computed_at'));
+    expect(stamp).toBeDefined();
+    expect(stamp.calls.find(([n, a]) => n === 'where' && a[0] === 'computed_at')[1][1]).toEqual(NOW);
+    expect(stamp.calls.find(([n]) => n === 'update')[1][0].email_sent_at).toBeInstanceOf(Date);
+    // with the version intact the stamp lands
+    scenario.batchStampRows = 1;
+    scenario.batchRow = { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' };
+    const again = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(again.email.stamped).toBe(true);
+    // no batch row at all → nothing to describe, nothing sent
+    const empty = fixture.scriptedDb({ priorReviews: [], batchRow: null });
+    db.mockImplementation((table) => empty(table));
+    expect(await rateReview.sendBatchEmail({ batchKey: '2026-11' })).toEqual({ sent: false, skipped: 'no_batch' });
   });
   test('an external recipient fails closed — the body names customers', async () => {
     const scripted = fixture.scriptedDb({ priorReviews: [], batchRow: { batch_key: '2026-12' } });

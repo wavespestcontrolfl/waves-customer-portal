@@ -14,7 +14,7 @@ const TERM = (n) => `20000000-0000-4000-8000-00000000000${n}`;
 // Chainable query stub. Every builder method records its args and returns
 // the chain; awaiting resolves `rows(q)`, first() resolves `first(q)` (or
 // `count(q)` once .count()/.sum()/.max() was called on the chain).
-function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, count = () => ({ n: 0 }), onInsert = null, onDelete = null, onUpdate = null } = {}) {
+function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, count = () => ({ n: 0 }), onInsert = null, onDelete = null, onUpdate = null, updateRows = () => 1 } = {}) {
   const q = { calls: [], customerId: null, whereArgs: [], counted: false };
   const record = (name) => (...args) => {
     q.calls.push([name, args]);
@@ -36,7 +36,7 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
   q.ignore = record('ignore');
   q.returning = async () => [];
   q.delete = async (...args) => { record('delete')(...args); if (onDelete) onDelete(q); return 1; };
-  q.update = async (...args) => { record('update')(...args); if (onUpdate) onUpdate(args[0], q); return 1; };
+  q.update = async (...args) => { record('update')(...args); if (onUpdate) onUpdate(args[0], q); return updateRows(q); };
   q.first = async (...args) => { record('first')(...args); return q.counted ? count(q) : first(q); };
   q.then = (resolve, reject) => Promise.resolve().then(() => rows(q)).then(resolve, reject);
   q.catch = (fn) => Promise.resolve(rows(q)).catch(fn);
@@ -49,6 +49,8 @@ function chain({ rows = () => [], first = (q) => (rows(q) || [])[0] || null, cou
 // signals { [customerId]: { callbacks, cancellationCases, retentionOffers, holds } }.
 function scriptedDb(scenario) {
   const writes = { snapshotInserts: [], snapshotDeletes: 0, batchUpserts: [], batchUpdates: [] };
+  // every batch row carries its version (buildBatch stamps computed_at; the digest stamp is conditioned on it)
+  const withVersion = (row) => ({ computed_at: new Date('2026-11-01T11:20:00Z'), ...row });
   const signalsFor = (id) => (scenario.signals && scenario.signals[id]) || {};
   const db = jest.fn((table) => {
     switch (table) {
@@ -66,10 +68,18 @@ function scriptedDb(scenario) {
         });
       case 'rate_review_batches':
         return chain({
-          rows: () => (scenario.batchRow ? [scenario.batchRow] : []),
-          first: () => scenario.batchRow || null,
+          rows: () => (scenario.batchRow ? [withVersion(scenario.batchRow)] : []),
+          // the digest's whole-row read (`.first()`, no columns) sees the row the build just upserted
+          // when the scenario pins none; the column reads (existing window, delivery marker) do not
+          first: (q) => {
+            if (scenario.batchRow) return withVersion(scenario.batchRow);
+            const wholeRow = q.calls.some(([name, args]) => name === 'first' && args.length === 0);
+            return wholeRow && writes.batchUpserts.length ? withVersion(writes.batchUpserts[writes.batchUpserts.length - 1]) : null;
+          },
           onInsert: (row) => writes.batchUpserts.push(row),
           onUpdate: (patch) => writes.batchUpdates.push(patch),
+          // the delivery stamp's row count (0 = the batch was rebuilt between composing and stamping)
+          updateRows: () => (scenario.batchStampRows == null ? 1 : scenario.batchStampRows),
         });
       case 'customers':
         return chain({ rows: () => scenario.customers || [] });
