@@ -4760,6 +4760,13 @@ describe('public estimate one-time breakdown', () => {
     expect(declinedHtml).toContain('Cancel anytime &mdash; no contract');
     expect(declinedHtml).not.toContain('Rate reviewed once a year');
     expect(declined).not.toHaveBeenCalled();
+    // The handler could not prove the evidence durable: re-rendered without
+    // the item (card kept), no report.
+    const withheld = jest.fn();
+    const withheldHtml = renderPage('terms-cb-withheld', recurring, data, undefined, { onRateReviewTermsRendered: withheld, withholdRateReviewTerms: true });
+    expect(withheldHtml).toContain('Cancel anytime &mdash; no contract');
+    expect(withheldHtml).not.toContain('Rate reviewed once a year');
+    expect(withheld).not.toHaveBeenCalled();
     // No billing card at all (quote required): no report.
     const quote = jest.fn();
     renderPage('terms-cb-quote', { ...recurring, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0 }, { result: { recurring: { services: [] }, oneTime: { items: [], specItems: [] }, specItems: [], results: {} } }, undefined, { onRateReviewTermsRendered: quote });

@@ -41,6 +41,7 @@ const {
   documentCarriesRateReviewTerms,
   rateReviewTermsServedIsCurrent,
   recordRateReviewTermsServed,
+  recordRateReviewTermsServedOutcome,
   ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveProposalBillingContext,
@@ -552,36 +553,45 @@ describe('ensureRateReviewTermsEvidenceBeforeRender (the /pdf pre-render step)',
   beforeEach(() => mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false));
   afterEach(() => mockEstimateMakesNoGuaranteeClaim.mockReset());
 
-  test('an eligible open row is marked and returned as-is', async () => {
+  test('an eligible open row is marked and returned as-is, line allowed', async () => {
     const { update, first } = stubEstimates({ updateResult: 1 });
     const estimate = openPlan();
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toBe(estimate);
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: false });
     expect(update).toHaveBeenCalledTimes(1);
     expect(first).not.toHaveBeenCalled();
   });
 
-  test('a zero-row write (the row froze) re-reads and returns the current row', async () => {
+  test('a zero-row write (the row froze) re-reads and returns the frozen row, line allowed (the stamp decides)', async () => {
     const frozen = { id: 'e-open', status: 'accepted', price_locked_at: '2026-10-01T06:00:00.000Z', estimate_data: '{}' };
     const { update, first } = stubEstimates({ updateResult: 0, fresh: frozen });
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(openPlan(), { billing })).resolves.toBe(frozen);
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(openPlan(), { billing })).resolves.toEqual({ estimate: frozen, withholdRateReviewTerms: false });
     expect(update).toHaveBeenCalledTimes(1);
     expect(first).toHaveBeenCalledTimes(1);
   });
 
-  test('a failed re-read falls back to the row in hand (never throws)', async () => {
-    stubEstimates({ updateResult: 0, firstThrows: true });
+  test('a FAILED write withholds the line (GH Codex r8 P0); so does a zero-row write whose re-read fails or shows an open row', async () => {
     const estimate = openPlan();
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toBe(estimate);
+    stubEstimates({ updateResult: 0, firstThrows: true });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+    const throwing = { where: jest.fn(() => throwing), whereNull: jest.fn(() => throwing), whereNotIn: jest.fn(() => throwing), update: jest.fn(async () => { throw new Error('db down'); }) };
+    mockDb.mockImplementation(() => throwing);
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
+    await expect(recordRateReviewTermsServedOutcome(estimate)).resolves.toBe('failed');
+    stubEstimates({ updateResult: 0, fresh: { ...estimate } });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toEqual({ estimate, withholdRateReviewTerms: true });
   });
 
   test('already current: no write, no re-read; ineligible (frozen, or no line): passthrough without touching the database', async () => {
     const { update, first } = stubEstimates({ updateResult: 1 });
     const current = openPlan({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(current, { billing })).resolves.toBe(current);
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(current, { billing })).resolves.toEqual({ estimate: current, withholdRateReviewTerms: false });
+    await expect(recordRateReviewTermsServedOutcome(current)).resolves.toBe('current');
     const frozen = { ...openPlan(), status: 'accepted' };
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(frozen, { billing })).resolves.toBe(frozen);
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(frozen, { billing })).resolves.toEqual({ estimate: frozen, withholdRateReviewTerms: false });
+    await expect(recordRateReviewTermsServedOutcome(frozen)).resolves.toBe('frozen');
     const authored = openPlan({ proposal: { enabled: false, terms: 'Operator terms.', buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 55, frequency: 'quarterly' }] }] } });
-    await expect(ensureRateReviewTermsEvidenceBeforeRender(authored, { billing })).resolves.toBe(authored);
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(authored, { billing })).resolves.toEqual({ estimate: authored, withholdRateReviewTerms: false });
     expect(update).not.toHaveBeenCalled();
     expect(first).not.toHaveBeenCalled();
   });

@@ -5717,7 +5717,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // rate review item (frozen-document contract; Sonnet fallback audit on
   // #5434): nothing is being sold, and the served-evidence write is refused
   // for a frozen row anyway.
-  const showRateReviewItem = showBillingCard && !planTermsNeutral && est.status !== 'declined';
+  // opts.withholdRateReviewTerms: the view handler could not prove the
+  // served-evidence write durable and re-renders without the item (GH
+  // Codex r8 P0).
+  const showRateReviewItem = showBillingCard && !planTermsNeutral && est.status !== 'declined' && opts.withholdRateReviewTerms !== true;
   if (showRateReviewItem && typeof opts.onRateReviewTermsRendered === 'function') opts.onRateReviewTermsRendered();
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
@@ -9072,7 +9075,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     let rateReviewTermsRendered = false;
-    const pageHtml = renderEstimatePageHtml(req.params.token, {
+    const renderLegacyPage = (renderOpts = {}) => renderEstimatePageHtml(req.params.token, {
       id: estimate.id,
       // The page's guarantee rule, decided from the same normalized rows the
       // React view reads (renderPage only sees this view and the data).
@@ -9137,7 +9140,9 @@ async function handleEstimateView(req, res, next) {
       payAfterFirstVisitCopy,
       // renderPage reports whether this page PRINTS the rate review item.
       onRateReviewTermsRendered: () => { rateReviewTermsRendered = true; },
+      ...renderOpts,
     });
+    let pageHtml = renderLegacyPage();
     if (rateReviewTermsRendered) {
       // Served-disclosure evidence (pre-push Codex on #5434's merge head):
       // the page about to be sent shows the customer the annual rate review
@@ -9152,8 +9157,12 @@ async function handleEstimateView(req, res, next) {
       // freshness read is best-effort — a failure falls through to the
       // page, never a 500.
       const billingMod = require('../services/estimate-proposal-billing');
-      const marked = await billingMod.recordRateReviewTermsServed(estimate);
-      if (!marked && !billingMod.estimateIsPriceLocked(estimate)
+      const outcome = await billingMod.recordRateReviewTermsServedOutcome(estimate);
+      if (outcome === 'failed') {
+        // Persistence unproven (GH Codex r8 P0): never send a page showing
+        // a term no evidence backs — re-render it without the item.
+        pageHtml = renderLegacyPage({ withholdRateReviewTerms: true });
+      } else if (outcome === 'zero_rows' && !billingMod.estimateIsPriceLocked(estimate)
         && !billingMod.rateReviewTermsServedIsCurrent(estimate.estimate_data)) {
         let frozeUnderUs = false;
         try {
@@ -26783,12 +26792,15 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
     const billing = await resolveProposalBillingContext(estimate);
-    const documentEstimate = await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
+    const { estimate: documentEstimate, withholdRateReviewTerms } = await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
     // The pdfkit fallback prints by its billing context (livePricing picks
     // OUTSTANDING vs FROZEN pricing): resolve it for the row it renders when
     // that row moved under us (Sonnet fallback audit on #5434).
     const documentBilling = documentEstimate === estimate ? billing : await resolveProposalBillingContext(documentEstimate);
-    if (featureGates.isEnabled('estimateDocPdf')) {
+    // Evidence unproven (the write failed — GH Codex r8 P0): the browser
+    // renderer reads the row itself and cannot be told to withhold the
+    // line, so the pdfkit document is served with the line withheld.
+    if (featureGates.isEnabled('estimateDocPdf') && !withholdRateReviewTerms) {
       let browserDocument = null;
       try {
         const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
@@ -26813,6 +26825,7 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
     generateEstimateProposalPDF(documentEstimate, res, {
       ...documentBilling,
+      ...(withholdRateReviewTerms ? { withholdRateReviewTerms: true } : {}),
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),

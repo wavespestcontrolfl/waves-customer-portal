@@ -1826,9 +1826,36 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'))).toHaveLength(1);
     expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
     // The renderer received the frozen row, not the open snapshot.
-    const [renderedEstimate] = generate.mock.calls.at(-1);
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
     expect(renderedEstimate.status).toBe('accepted');
     expect(renderedEstimate.price_locked_at).toBe('2026-10-01T06:00:00.000Z');
+    expect(renderedBilling.withholdRateReviewTerms).toBeUndefined();
+  });
+
+  test('GET /:token/pdf: when the evidence write FAILS, the document is served with the line withheld (GH Codex r8 P0)', async () => {
+    const generate = require('../services/pdf/estimate-pdf').generateEstimateProposalPDF;
+    generate.mockClear();
+    seed({
+      id: 'est-pdf-fail',
+      token: 'tok-pdf-fail-x0123456789',
+      estimate_data: JSON.stringify({
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 60 }],
+        result: { recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [], membershipFee: 99 } },
+      }),
+    });
+    let estimateTouches = 0;
+    db.__state.onTable = (table) => {
+      if (table !== 'estimates') return;
+      estimateTouches += 1;
+      if (estimateTouches === 2) throw new Error('db down'); // the evidence UPDATE
+    };
+    const res = await fetch(`${base}/api/estimates/tok-pdf-fail-x0123456789/pdf`);
+    db.__state.onTable = null;
+    expect(res.status).toBe(200);
+    expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
+    const [renderedEstimate, , renderedBilling] = generate.mock.calls.at(-1);
+    expect(renderedEstimate.status).toBe('sent');
+    expect(renderedBilling.withholdRateReviewTerms).toBe(true);
   });
 
   test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {

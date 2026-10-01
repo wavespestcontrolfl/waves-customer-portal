@@ -596,7 +596,11 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     callbackTermsEligible: proposalCallbackTermsEligible(proposal, estimate?.id),
     // Frozen (accepted/declined) documents keep their original terms: the
     // disclosure rides only when the recorded acceptance carried it.
-    rateReviewTermsEligible: proposalRateReviewTermsEligible(proposal, estimate?.id, { estimate, acceptance: billing?.acceptance || null }),
+    // withholdRateReviewTerms (GH Codex r8 P0): the /pdf route could not
+    // prove the served-evidence write durable — never print the line then.
+    rateReviewTermsEligible: billing?.withholdRateReviewTerms === true
+      ? false
+      : proposalRateReviewTermsEligible(proposal, estimate?.id, { estimate, acceptance: billing?.acceptance || null }),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

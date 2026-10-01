@@ -225,9 +225,18 @@ function rateReviewTermsServedIsCurrent(estimateData) {
   const data = parseEstimateDataLoose(estimateData);
   return !!data && data[RATE_REVIEW_TERMS_SERVED_KEY] === RATE_REVIEW_TERMS_VERSION;
 }
-async function recordRateReviewTermsServed(estimate, { database = db } = {}) {
-  if (!estimate?.id || estimateIsPriceLocked(estimate)) return false;
-  if (rateReviewTermsServedIsCurrent(estimate.estimate_data)) return false;
+// Outcome-reporting form (GH Codex r8 P0): callers that are about to SHOW
+// the line must tell a zero-row write (the row froze — render the frozen
+// row) from a FAILED write (persistence unproven — withhold the line), so a
+// document never carries a disclosure whose evidence is not durable.
+//   'persisted' — written now · 'current' — already at this version ·
+//   'frozen' — the row in hand is already price-locked (no write) ·
+//   'zero_rows' — the guarded UPDATE matched nothing (froze under us) ·
+//   'failed' — the write threw.
+async function recordRateReviewTermsServedOutcome(estimate, { database = db } = {}) {
+  if (!estimate?.id) return 'failed';
+  if (estimateIsPriceLocked(estimate)) return 'frozen';
+  if (rateReviewTermsServedIsCurrent(estimate.estimate_data)) return 'current';
   const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
   try {
     const updated = await database('estimates')
@@ -240,11 +249,14 @@ async function recordRateReviewTermsServed(estimate, { database = db } = {}) {
           [RATE_REVIEW_TERMS_VERSION],
         ),
       });
-    return Number(updated) > 0;
+    return Number(updated) > 0 ? 'persisted' : 'zero_rows';
   } catch (err) {
     logger.warn(`[estimate-proposal] rate review served marker not written for estimate ${estimate.id}: ${err.message}`);
-    return false;
+    return 'failed';
   }
+}
+async function recordRateReviewTermsServed(estimate, options = {}) {
+  return (await recordRateReviewTermsServedOutcome(estimate, options)) === 'persisted';
 }
 // Whether the document THIS server prints for an open estimate carries the
 // line right now — the /pdf route's question for both renderers: the same
@@ -268,24 +280,38 @@ async function documentPrintsRateReviewTerms(estimate, { billing = null } = {}) 
 // that read and this write — the accept it lost to recorded no evidence —
 // so the document is rendered from the row as it is NOW (frozen: no line
 // unless the accept stamped it) rather than from the stale open snapshot.
-// Returns the estimate row the renderer must use. Never throws.
+// Returns `{ estimate, withholdRateReviewTerms }`: the row the renderer
+// must use, and whether the line must be WITHHELD because its evidence
+// could not be proven durable (GH Codex r8 P0: a failed write — or an
+// unreadable row after a zero-row write — never produces a document
+// carrying a disclosure the accept could not honor). Never throws.
 async function ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing = null, database = db } = {}) {
+  let prints = false;
   try {
-    if (!(await documentPrintsRateReviewTerms(estimate, { billing }))) return estimate;
+    prints = await documentPrintsRateReviewTerms(estimate, { billing });
   } catch (err) {
     logger.warn(`[estimate-proposal] rate review document check failed for estimate ${estimate?.id || 'unknown'}: ${err.message}`);
-    return estimate;
+    // Fail closed: eligibility unknown ⇒ the line is withheld.
+    return { estimate, withholdRateReviewTerms: true };
   }
-  const marked = await recordRateReviewTermsServed(estimate, { database });
-  if (marked || rateReviewTermsServedIsCurrent(estimate.estimate_data)) return estimate;
-  try {
-    const fresh = await database('estimates').where({ id: estimate.id }).first();
-    if (fresh) logger.info(`[estimate-proposal] estimate ${estimate.id} froze before its rate review evidence could be written — rendering the document from the current row`);
-    return fresh || estimate;
-  } catch (err) {
-    logger.warn(`[estimate-proposal] could not re-read estimate ${estimate.id} after a zero-row evidence write: ${err.message}`);
-    return estimate;
+  if (!prints) return { estimate, withholdRateReviewTerms: false };
+  const outcome = await recordRateReviewTermsServedOutcome(estimate, { database });
+  if (outcome === 'persisted' || outcome === 'current') return { estimate, withholdRateReviewTerms: false };
+  if (outcome === 'zero_rows') {
+    try {
+      const fresh = await database('estimates').where({ id: estimate.id }).first();
+      if (fresh && estimateIsPriceLocked(fresh)) {
+        logger.info(`[estimate-proposal] estimate ${estimate.id} froze before its rate review evidence could be written — rendering the document from the current row`);
+        return { estimate: fresh, withholdRateReviewTerms: false };
+      }
+    } catch (err) {
+      logger.warn(`[estimate-proposal] could not re-read estimate ${estimate.id} after a zero-row evidence write: ${err.message}`);
+    }
   }
+  // 'failed', 'frozen' with an open-looking row, or a zero-row write on a
+  // row that is not provably frozen: persistence unproven ⇒ withhold.
+  logger.warn(`[estimate-proposal] rate review evidence unproven for estimate ${estimate.id} (${outcome}) — the document is rendered without the line`);
+  return { estimate, withholdRateReviewTerms: true };
 }
 
 // An estimate with no customer_id still links at accept through the SAME
@@ -490,6 +516,7 @@ module.exports = {
   documentPrintsRateReviewTerms,
   rateReviewTermsServedIsCurrent,
   recordRateReviewTermsServed,
+  recordRateReviewTermsServedOutcome,
   ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveLivePricing,
