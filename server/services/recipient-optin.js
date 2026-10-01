@@ -166,11 +166,14 @@ async function applyMarkerEntry(h, customer, phoneKey, marker, replays) {
 
 async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
   const replays = [];
-  await withSavepoint(dbh, async (h) => {
+  const committed = await withSavepoint(dbh, async (h) => {
     const rows = await h('recipient_optin').where({ phone_key: phoneKey, status: 'confirmed' }).whereNotNull('customer_id').select('customer_id');
     let stampHeld = null;
     for (const { customer_id: customerId } of rows || []) {
-      const customer = await h('customers').where({ id: customerId }).first();
+      // Row lock: two slot recipients answering YES at once serialize here, so
+      // the second reads the first's committed confirmation before deciding
+      // whether the whole row is covered.
+      const customer = await h('customers').where({ id: customerId }).forUpdate().first();
       if (!customer) continue;
       const stamp = await stampConsentOnConfirm(h, customerId, phoneKey, customer);
       if (!stamp.stamped) {
@@ -200,8 +203,10 @@ async function applyDemoteMarkersOnConfirm(phoneKey, { dbh = db } = {}) {
       optin_result: 'confirmed',
       ...(stampHeld ? { consent_stamp: `held:${stampHeld}` } : {}),
     });
+    return true;
   });
-  return { replays };
+  // A rolled-back savepoint undid the stamp and the demotion: send nothing.
+  return { replays: committed ? replays : [] };
 }
 
 // Send the booking confirmation to a recipient who just said YES, for the visit

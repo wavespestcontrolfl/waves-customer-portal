@@ -144,6 +144,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
         where: jest.fn((f) => { if (f && typeof f === 'object') Object.assign(ctx.filter, f); return q; }),
         whereNot: jest.fn(() => q),
         whereNotNull: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
         whereNull: jest.fn((c) => { ctx.nullCols.push(c); return q; }),
         whereIn: jest.fn((c, v) => { ctx.whereIn = [c, v]; return q; }),
         whereRaw: jest.fn((sql, binds) => { ctx.raw = binds; return q; }),
@@ -212,6 +213,17 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
     expect(state.customer.service_preferences.demote_primary_on_optin).toEqual({});
     expect(replays.map((r) => r.scheduledServiceId).sort()).toEqual(['s1', 's9']);
+  });
+
+  test('a step failing after a replay was queued rolls the savepoint back: no replay is returned', async () => {
+    const { dbh } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed() });
+    const inner = dbh.getMockImplementation();
+    dbh.mockImplementation((table) => {
+      if (table === 'triage_items') throw new Error('card write failed');
+      return inner(table);
+    });
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(replays).toEqual([]);
   });
 
   describe('reconcileDemoteMarker: the opt-in already settled when the booking wrote the marker', () => {
