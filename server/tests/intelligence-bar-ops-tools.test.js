@@ -657,10 +657,25 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('a gate that takes a timestamp or mode instead of on/off is refused', async () => {
+  test.each([
+    ['a timestamp gate', 'GATE_PEST_STRANDED_RECOVERY'],
+    ['an off | shadow | auto gate', 'GATE_REVIEW_AUTO_REPLY'],
+    ['a shadow | true gate', 'GATE_SMS_SPAM_CLASSIFIER'],
+  ])('%s is refused (no bare true/false write), with no network call', async (_label, name) => {
     configure();
-    const result = await propose({ gate_name: 'GATE_PEST_STRANDED_RECOVERY' });
+    const result = await propose({ gate_name: name });
     expect(result.code).toBe('not_a_boolean_gate');
+    expect(result.error).toMatch(/mode or timestamp/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('a known gate only named in a comment (reading unverified) is refused too', async () => {
+    configure();
+    const { knownGateCatalog } = require('../config/feature-gates');
+    const unverified = [...knownGateCatalog().values()].find((e) => e.kind === 'unverified');
+    const result = await propose({ gate_name: unverified.name });
+    expect(result.code).toBe('not_a_boolean_gate');
+    expect(result.error).toMatch(/does not show it is a plain on\/off switch/);
     expect(global.fetch).not.toHaveBeenCalled();
   });
 

@@ -594,8 +594,13 @@ async function setRailwayGate(input) {
     return { error: "value must be exactly 'true' or 'false'.", code: 'invalid_value' };
   }
   if (!entry.boolean) {
+    // Only a gate the portal's own source shows to be a plain on/off switch
+    // can be flipped here; a mode gate (shadow / auto / a timestamp) or one
+    // whose reading cannot be verified is changed in the Railway dashboard.
     return {
-      error: `${entry.name} takes a timestamp or a mode, not on/off — change it in the Railway dashboard.`,
+      error: entry.kind === 'mode'
+        ? `${entry.name} takes a mode or timestamp, not just on/off — change it in the Railway dashboard.`
+        : `${entry.name} is a known gate, but the portal's code does not show it is a plain on/off switch, so it cannot be flipped from here — change it in the Railway dashboard.`,
       code: 'not_a_boolean_gate',
     };
   }

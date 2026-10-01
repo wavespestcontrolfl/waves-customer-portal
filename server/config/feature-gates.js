@@ -4296,12 +4296,19 @@ function logGateStatus() {
 // never create a new variable). Derived from THIS file's own source so a new
 // gate is known the moment it is documented or registered here, with no
 // second list to keep in step: every gate name the file mentions, in code or
-// in its comments. For a name the header block documents, the entry carries
-// that description, and `boolean: false` when the header says the gate takes
-// something other than "true" (a timestamp, "shadow") — the tool refuses to
-// flip those to a bare 'true'/'false'. RETIRED names stay out: the owner
-// ruled they must not be re-enabled. A gate read only by some other module,
-// and never mentioned in this file, is not known here.
+// in its comments. A gate read only by some other module, and never mentioned
+// in this file, is not known here.
+//
+// Each entry says whether the gate is a plain on/off switch (`boolean`), so
+// the tool never writes 'true'/'false' into a gate that takes something else:
+//   - boolean:   the header documents it as `=true`, or the code reads it as
+//                exactly 'true' / gateEnvValue(...) — and nothing in this file
+//                shows it taking a mode or timestamp.
+//   - mode:      a mode value is visible here ('shadow', 'auto', an ISO
+//                timestamp, a *_SINCE / *_AT / *_ALLOWLIST name).
+//   - unverified: only mentioned in a comment; nothing shows how it is read.
+// Only `boolean` gates can be flipped from the bar. RETIRED names stay out
+// entirely: the owner ruled they must not be re-enabled.
 const RETIRED = new Set(['GATE_ONE_TIME_WELCOME_EMAIL']);
 const MAX_DESC = 300;
 let gateCatalogCache = null;
@@ -4309,19 +4316,33 @@ let gateCatalogCache = null;
 function knownGateCatalog() {
   if (gateCatalogCache) return gateCatalogCache;
   const src = require('fs').readFileSync(__filename, 'utf8');
-  const catalog = new Map();
+  const tokenRe = /GATE_[A-Z0-9_]*[A-Z0-9]/g;
   const headerEnd = src.indexOf('*/');
+  const headerDocs = new Map();
   for (const line of src.slice(0, headerEnd).split('\n')) {
     const m = line.match(/^ \*   (GATE_[A-Z0-9_]*[A-Z0-9])=(\S*)\s*(.*)$/);
     if (!m) continue;
     const text = m[3].replace(/^\(/, '').replace(/\)\s*$/, '').trim();
-    catalog.set(m[1], { name: m[1], boolean: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
+    headerDocs.set(m[1], { valueIsTrue: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
   }
-  for (const name of src.match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || []) {
-    // Names that carry a timestamp / list, not an on-off value.
-    if (!catalog.has(name)) catalog.set(name, { name, boolean: !/(_SINCE|_AT|_ALLOWLIST)$/.test(name), description: null });
+  const boolEvidence = new Set();
+  const modeEvidence = new Set();
+  for (const line of src.slice(headerEnd).split('\n')) {
+    for (const name of line.match(tokenRe) || []) {
+      if (/['"](shadow|auto)['"]/.test(line) || /(=|\|)\s*(shadow|auto)\b/.test(line) || /<ISO/.test(line)) modeEvidence.add(name);
+      else if (line.includes(`process.env.${name} === 'true'`) || line.includes(`gateEnvValue('${name}')`)) boolEvidence.add(name);
+    }
   }
-  for (const name of RETIRED) catalog.delete(name);
+  const catalog = new Map();
+  for (const name of new Set(src.match(tokenRe) || [])) {
+    if (RETIRED.has(name)) continue;
+    const doc = headerDocs.get(name);
+    const mode = modeEvidence.has(name) || /(_SINCE|_AT|_ALLOWLIST)$/.test(name) || (doc && !doc.valueIsTrue);
+    let kind = 'unverified';
+    if (mode) kind = 'mode';
+    else if ((doc && doc.valueIsTrue) || boolEvidence.has(name)) kind = 'boolean';
+    catalog.set(name, { name, kind, boolean: kind === 'boolean', description: doc ? doc.description : null });
+  }
   gateCatalogCache = catalog;
   return catalog;
 }

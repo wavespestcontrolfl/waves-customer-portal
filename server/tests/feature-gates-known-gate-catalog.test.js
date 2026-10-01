@@ -31,9 +31,23 @@ describe('knownGateCatalog', () => {
     expect(catalog.has('GATE_ONE_TIME_WELCOME_EMAIL')).toBe(false);
   });
 
-  test('gates that take a timestamp or mode are marked non-boolean', () => {
-    expect(catalog.get('GATE_PEST_STRANDED_RECOVERY').boolean).toBe(false);
-    expect(catalog.get('GATE_EMAIL_TEMPLATE_AUTOMATIONS').boolean).toBe(false);
-    expect(catalog.get('GATE_SMS_OPERATIONAL_ACTIONS_SINCE').boolean).toBe(false);
+  test('gates that take a timestamp or mode are never classified as on/off', () => {
+    for (const name of [
+      'GATE_PEST_STRANDED_RECOVERY', 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE',
+      // off | shadow | auto, and shadow | true — read only through their mode lists in this file.
+      'GATE_REVIEW_AUTO_REPLY', 'GATE_SMS_SPAM_CLASSIFIER',
+    ]) {
+      expect(catalog.get(name).kind).toBe('mode');
+      expect(catalog.get(name).boolean).toBe(false);
+    }
+  });
+
+  test('plain on/off gates are classified boolean; a gate only named in a comment is unverified', () => {
+    for (const name of ['GATE_STAMPED_ZERO_FREE', 'GATE_TWILIO_SMS', 'GATE_PORTAL_ACTIVITY']) {
+      expect(catalog.get(name).kind).toBe('boolean');
+    }
+    const unverified = [...catalog.values()].filter((e) => e.kind === 'unverified');
+    expect(unverified.length).toBeGreaterThan(0);
+    for (const e of unverified) expect(e.boolean).toBe(false);
   });
 });
