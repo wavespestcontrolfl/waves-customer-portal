@@ -57,10 +57,18 @@ describe('accept notification copy (existing customer on the card rail)', () => 
 describe('accept route wiring (source pins)', () => {
   const src = read('routes/estimate-public.js');
 
-  test('the card enrollment records after_visit_card (v12) for a moved existing customer (NOT a paused one: never auto-charged), with prepay_card still winning for in-lane prepay', () => {
+  test('the card enrollment records after_visit_card (v12) for a moved existing customer who captures a card (NOT a paused one: never auto-charged), with prepay_card still winning for in-lane prepay', () => {
     expect(src).toMatch(
-      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: \(recurringCardPolicy\.afterVisitCard === true && recurringCardPolicy\.autopayPaused !== true\s*\? 'after_visit_card' : null\)/,
+      /const recurringCardAfterVisitVariant = recurringCardPolicy\.required === true\s*&& recurringCardPolicy\.afterVisitCard === true\s*&& recurringCardPolicy\.autopayPaused !== true\s*\? 'after_visit_card' : null;/,
     );
+    expect(src).toMatch(
+      /consentVariant: annualPrepaySelected && recurringCardLaneActive\s*&& RecurringCards\.isPrepayCardAndChargeEnabled\(\)\s*\? 'prepay_card'[\s\S]{0,400}: recurringCardAfterVisitVariant,/,
+    );
+  });
+
+  test('the variant is stamped on the estimate with the accepted SetupIntent so webhook recovery records the same text', () => {
+    expect(src).toMatch(/recurringCardVerification\?\.ok && recurringCardVerification\.setupIntentId && recurringCardAfterVisitVariant/);
+    expect(src).toMatch(/'\{acceptedRecurringCardConsentVariant\}', to_jsonb\(\?::text\)\)",\s*\[recurringCardAfterVisitVariant\]/);
   });
 
   test('the accept notification flag requires the sub-gate, the marker and the lane', () => {

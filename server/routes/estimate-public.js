@@ -9923,6 +9923,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       recurringCardPolicy.exemptReason = 'commercial_manual_billing';
     }
     const recurringCardLaneActive = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicy);
+    // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the consent variant the capture UI
+    // rendered for a moved existing customer who must capture a card. Paused
+    // Auto Pay (owner R5) is never auto-charged, so it keeps the base consent.
+    // Stamped on the estimate with the accepted SetupIntent so the webhook
+    // recovery records the SAME variant the customer saw.
+    const recurringCardAfterVisitVariant = recurringCardPolicy.required === true
+      && recurringCardPolicy.afterVisitCard === true
+      && recurringCardPolicy.autopayPaused !== true
+      ? 'after_visit_card' : null;
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
     // contract) is removed — resolveDepositPolicy is permanently
@@ -11060,6 +11069,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           estimate_data: trx.raw(
             "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardSetupIntentId}', to_jsonb(?::text))",
             [recurringCardVerification.setupIntentId],
+          ),
+        });
+      }
+
+      // PR-B: persist the consent variant with the accepted intent so the
+      // setup_intent.succeeded recovery (stripe-webhook.js) records the same
+      // authorization the capture UI rendered (after_visit_card v12).
+      if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && recurringCardAfterVisitVariant) {
+        await trx('estimates').where({ id: estimate.id }).update({
+          estimate_data: trx.raw(
+            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptedRecurringCardConsentVariant}', to_jsonb(?::text))",
+            [recurringCardAfterVisitVariant],
           ),
         });
       }
@@ -12913,8 +12934,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Paused Auto Pay (owner R5) keeps the card but is never charged
             // automatically, so the "charged after your first visit"
             // authorization is NOT what that customer was shown or agreed to.
-            : (recurringCardPolicy.afterVisitCard === true && recurringCardPolicy.autopayPaused !== true
-              ? 'after_visit_card' : null),
+            : recurringCardAfterVisitVariant,
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'

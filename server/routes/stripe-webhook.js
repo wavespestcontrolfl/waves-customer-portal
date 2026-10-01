@@ -5128,6 +5128,13 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
+      // PR-B (GATE_PAF_EXISTING_CUSTOMERS): the accept stamps the consent
+      // variant the capture UI rendered; recovery records that same text
+      // (after_visit_card, v12) rather than the base card consent. Only the
+      // accepted intent carries it, and only a known variant is honored.
+      ...(boundToAccept && estimateData?.acceptedRecurringCardConsentVariant === 'after_visit_card'
+        ? { consentVariant: 'after_visit_card' }
+        : {}),
     });
     // This handler can be the ONLY durable recovery path (crash after the
     // accept commit, browser never returned) — a TRANSIENT failure must
