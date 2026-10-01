@@ -177,7 +177,7 @@ function forwardFinder(lower) {
 }
 
 // Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
-// "-->", script/style at their raw-text close, a template at its matching close (they nest).
+// "-->", script/style at their raw-text close, a template just past its matching close tag (they nest).
 // Comments and script/style bodies inside a template are skipped whole, so a "</template>"
 // written in one never closes it.
 const TEMPLATE_INNER = [['<template', 9], ['</template', 10], ['<!--', 4], ['<script', 7], ['<style', 6]];
@@ -197,7 +197,7 @@ function inertEnd(find, name, lt, gt) {
     if (needle === '<template') { depth += 1; at = hit + len; } else if (needle === '</template') { depth -= 1; at = hit + len; } else if (needle === '<!--') at = find('-->', hit + 4) + 3;
     else at = find(`</${needle.slice(1)}`, hit + len) + 1;
   }
-  return at;
+  return at === Infinity ? at : find('>', at) + 1; // past the whole closing tag
 }
 
 // Text of every <title>/<h1> in one forward pass, so malformed or unclosed tags in a 600 KB
