@@ -366,6 +366,25 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('the switch waives a deferred fee on an ADOPTED appointment\'s parent (the estimate lives on the child)', async () => {
+    const f = await seed();
+    const Obligation = require('../services/setup-fee-obligation');
+    try {
+      // The parent belongs to an older, unlinked series; only the child carries the estimate.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null });
+      const prepay = await require('../services/invoice').create({
+        customerId: f.customerId, title: 'Annual Prepay',
+        lineItems: [{ description: 'Prepay', quantity: 1, unit_price: 400 }],
+      });
+      const parentRow = await mockPg('scheduled_services').where({ id: f.parentId }).first();
+      const waived = await mockPg.transaction((trx) => Obligation.waiveDeferredSetupFeesForSwitch(trx, {
+        anchorId: f.parentId, visit: parentRow, estimateId: null, prepayInvoiceId: prepay.id,
+      }));
+      expect(waived).toEqual([{ parentId: f.parentId, amount: SETUP_FEE }]);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
   test('the prepay waiver ignores an estimate that did not defer its setup fee', async () => {
     const f = await seed({ withDeferredMarker: false });
     const Obligation = require('../services/setup-fee-obligation');

@@ -248,6 +248,27 @@ async function waiveDeferredSetupFeeForPrepay(trx, { estimateId, prepayInvoiceId
   return waived;
 }
 
+// The annual-prepay switch's entry point: every estimate that may have
+// DEFERRED a setup fee onto this series — the switch target's own estimate,
+// the switched visit's, and any child of the anchor that carries one (an
+// accept that adopted an existing appointment leaves its estimate on that
+// CHILD while the fee sits on the parent, which may belong to an older or
+// unlinked series). Runs in the switch's transaction, under its locks.
+async function waiveDeferredSetupFeesForSwitch(trx, { anchorId, visit = null, estimateId = null, prepayInvoiceId }) {
+  const estimateIds = new Set([estimateId, visit?.source_estimate_id].filter(Boolean).map(String));
+  if (anchorId) {
+    for (const child of rows(await trx('scheduled_services').where({ recurring_parent_id: anchorId })
+      .whereNotNull('source_estimate_id').select('source_estimate_id'))) {
+      estimateIds.add(String(child.source_estimate_id));
+    }
+  }
+  const waived = [];
+  for (const id of estimateIds) {
+    waived.push(...await waiveDeferredSetupFeeForPrepay(trx, { estimateId: id, prepayInvoiceId }));
+  }
+  return waived;
+}
+
 // The waiver's history lives on the prepay invoice as an ordered marker list
 // per series: [paf-setup-waived:<series>:<amount>] then, on a reversal,
 // [paf-setup-restored:<series>] — the LAST marker for a series is its state.
@@ -711,6 +732,7 @@ async function findUnmintedSetupFeeObligation({
 module.exports = {
   estimateSetupSeries,
   waiveDeferredSetupFeeForPrepay,
+  waiveDeferredSetupFeesForSwitch,
   restoreWaivedDeferredSetupFeeForPrepay,
   rewaiveDeferredSetupFeeForRevivedPrepay,
   officeParkedSetupFeeSeries,

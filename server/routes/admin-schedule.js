@@ -23072,12 +23072,14 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         // superseded set above. Annual prepay waives that setup, so retire the
         // stamp here; the prepay carries a marker so its void/refund restores
         // it (restoreSwitchSupersededInvoicesForPrepay).
-        if (target.estimateId) {
-          await require('../services/setup-fee-obligation').waiveDeferredSetupFeeForPrepay(trx, {
-            estimateId: target.estimateId,
-            prepayInvoiceId: invoice.id,
-          });
-        }
+        // The owning estimate is resolved from the anchor's children too (an
+        // adopted appointment carries it while the fee sits on the parent).
+        await require('../services/setup-fee-obligation').waiveDeferredSetupFeesForSwitch(trx, {
+          anchorId: anchorRowId,
+          visit: target.visit,
+          estimateId: target.estimateId,
+          prepayInvoiceId: invoice.id,
+        });
 
         // Durable pointer FROM each retired row TO the prepay that replaced
         // it (Codex P0 r7): if this prepay is later voided/refunded through
