@@ -589,7 +589,7 @@ const SENTENCE_STARTERS = new Set(`it's its it i'm i've i'd thanks thank hope gl
   looks looked everything all any mostly when with since after before once if while morning today yesterday let keep
   text feel again really still plenty both each every most not no yes here where what how why who as at for from in on
   of to by over under around inside outside out back front side now then only even plus lawn quarterly monthly
-  activity treated sprayed checked noticed took left`.split(/\s+/));
+  activity treated sprayed checked noticed took left would could can do does is are will have has may should`.split(/\s+/));
 
 function unknownProperNoun(body, { firstName, techName, ownWords }) {
   const allowed = new Set(CAPITAL_ALLOW);
@@ -713,12 +713,19 @@ const EMAIL_SHAPE_CHECKS = [
   ["missing_google_review", (b) => !/google review/i.test(b)],
 ];
 const CLAIM_CHECKS = [
-  ["sensitive_topic", (b) => SENSITIVE_TOPIC_RE.test(b)],
+  // The customer's and tech's own names are not topics (a customer named Bill).
+  ["sensitive_topic", (b, c) => SENSITIVE_TOPIC_RE.test(withoutNames(b, c))],
   ["result_claim", (b) => RESULT_CLAIM_RE.test(b)],
   ["commitment", (b) => COMMITMENT_RE.test(b)],
   ["ungrounded_term", (b, c) => !!ungroundedTerm(b, c.corpus)],
   ["unknown_proper_noun", (b, c) => !!unknownProperNoun(b, c)],
 ];
+function withoutNames(body, { firstName, techName }) {
+  const names = [firstName, ...String(techName || "").split(/\s+/)].filter((n) => n && /^[a-z'-]+$/i.test(n));
+  // Only the capitalized name: "Bill, ..." is the customer, "the bill" is not.
+  const cap = (n) => `${n[0].toUpperCase()}${n.slice(1).toLowerCase()}`;
+  return names.reduce((text, n) => text.replace(new RegExp(`\\b${cap(n)}\\b`, "g"), " "), body);
+}
 const firstFailure = (checks, body, ctx) => (checks.find(([, fails]) => fails(body, ctx)) || [null])[0];
 
 // Every cited detail: its line is in the record, it appears in the body, and

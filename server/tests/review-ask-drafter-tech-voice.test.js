@@ -360,6 +360,13 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     }
   });
 
+  test('terminal pass 1: a question opener is not a name, and a customer named Bill is not a money topic', () => {
+    expect(verify({ body: 'I know you had to get to work. Would you leave a Google review? {review_url}' })).toBeNull();
+    expect(verify({ body: 'Bill, I know you had to get to work. Google review: {review_url}' }, { firstName: 'Bill' })).toBeNull();
+    // An actual bill is still a money topic.
+    expect(verify({ body: 'Bill, I know you had to get to work and the bill is due. Google review: {review_url}' }, { firstName: 'Bill' })).toBe('sensitive_topic');
+  });
+
   test('Codex r2: an email intro must name a Google review too', () => {
     const e = { channel: 'email' };
     expect(verify({ body: 'Marta, I know you had to get to work. A review would help us a lot.' }, e)).toBe('missing_google_review');
