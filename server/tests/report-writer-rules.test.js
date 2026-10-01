@@ -250,6 +250,27 @@ describe('writerRulesRejection', () => {
     ['We found zero signs of pest activity across the property.', 'unscoped_absence'],
     ['Not a single ant was seen today.', 'unscoped_absence'],
     ['We will be back next month.', 'timeframe'],
+    ['We treated 120 LF of foundation.', 'footage'],
+    ['We treated 1,200 SF of beds.', 'footage'],
+    ['You said, “ants are everywhere in the kitchen”.', 'quote'],
+    ["You texted 'roaches again by the sink' last week.", 'quote'],
+    ['Your follow-up is complimentary.', 'price'],
+    ['The recheck is on the house.', 'price'],
+    ['We treated a 120-LF section of foundation.', 'footage'],
+    ["You told the technician, 'roaches again by the sink'.", 'quote'],
+    ['‘Roaches again by the sink,’ you said.', 'quote'],
+    ["'It's back by the sink,' you texted.", 'quote'],
+    [`'${'roaches again by the sink and behind the fridge '.repeat(6)}' you said.`, 'quote'],
+    ["It's on the house.", 'price'],
+    ["The follow-up's on the house.", 'price'],
+    ['We treated twelve square yards around the building.', 'footage'],
+    ['Another treatment is on the house.', 'price'],
+    ['We treated twelve LF along the fence.', 'footage'],
+    ["According to you, 'ants are back by the sink'.", 'quote'],
+    ["Per the customer, 'roaches in the pantry again'.", 'quote'],
+    ['Both follow-ups are on the house.', 'price'],
+    ['The next two treatments are on the house.', 'price'],
+    ['We treated thirteen LF along the fence.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -288,6 +309,13 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Activity was light at 3 stations.')).toBeNull();
     expect(writerRulesRejection('Zero captures were recorded in the attic traps.')).toBeNull();
     expect(writerRulesRejection('The ants were back the next day, you said.')).toBeNull();
+    expect(writerRulesRejection("The customer's kitchen had ghost ants along the counter.")).toBeNull();
+    expect(writerRulesRejection('You told us about the ants by the sink.')).toBeNull();
+    expect(writerRulesRejection('We found a mud tube on the house foundation.')).toBeNull();
+    expect(writerRulesRejection("The customer's kitchen and the tech's truck were checked.")).toBeNull();
+    expect(writerRulesRejection('We treated the two yards.')).toBeNull();
+    expect(writerRulesRejection("We placed the 'no-see-um' trap.")).toBeNull();
+    expect(writerRulesRejection('Mud tubes were on the house siding.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -334,6 +362,17 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We applied 2,4-D to the weeds.', { activeIngredients })).toBe('active_ingredient');
     expect(writerRulesRejection('We treated the weeds by the fence.', { activeIngredients })).toBeNull();
     expect(writerRulesRejection('We applied fipronil at the slab.', { activeIngredients: ['Fipronil 9.1%, Pyriproxyfen'] })).toBe('active_ingredient');
+  });
+
+  test('a long unclosed quote is screened in linear time (no backtracking stall)', () => {
+    const started = Date.now();
+    expect(writerRulesRejection(`"${'ants are back '.repeat(6000)}`)).toBeNull();
+    // Many unclosed curly quotes: each span ends at the next opener.
+    writerRulesRejection('“ants '.repeat(20000));
+    writerRulesRejection(`'${'ants are back '.repeat(6000)}`);
+    // Many apostrophes inside words never open a quote.
+    writerRulesRejection("a'a".repeat(16000));
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   test("the catalog's taxonomic Bti name still screens the Bti alias", () => {
