@@ -95,7 +95,8 @@ describe('markAdminDone', () => {
     const version = 'b'.repeat(32);
     await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });
     expect(db.__q.whereRaw).toHaveBeenCalledWith(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version]);
-    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toMatch(/^md5\(concat_ws\('\|', title, body, link, detail, metadata::text\)\)$/);
+    // A JSON array keeps field boundaries and NULL vs '' distinct (never concat_ws).
+    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toBe('md5(jsonb_build_array(title, body, link, detail, metadata)::text)');
   });
 
   test('an Activity-only row (metadata.feed = activity) can be marked done: the done writer never applies the bell-only exclusion', async () => {

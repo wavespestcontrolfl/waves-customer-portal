@@ -65,7 +65,9 @@ function excludeActivityOnlyFromBell(query) {
 // `version`; a Done click sends it back and markAdminDone only marks the row
 // done while the content is still that version. The ONE definition: every
 // reader and the fence must agree on it. No `updated_at` column exists.
-const NOTIFICATION_VERSION_SQL = "md5(concat_ws('|', title, body, link, detail, metadata::text))";
+// A JSON array, not a joined string: field boundaries and NULL-vs-empty stay
+// distinct, so two different contents never share a version.
+const NOTIFICATION_VERSION_SQL = "md5(jsonb_build_array(title, body, link, detail, metadata)::text)";
 
 // The done state (docs/admin-notifications.md section 4.3, owner ruling
 // 2026-09-30): read is not done. A done admin row leaves the bell whether a
