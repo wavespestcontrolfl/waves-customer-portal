@@ -642,7 +642,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
               ...require('../notification-service').adminBodyColumns('lead', body),
               link,
               metadata: JSON.stringify({ ...bell.meta, ...metadata }),
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
             });
         }
         return true;
@@ -705,7 +705,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
               metadata: JSON.stringify({ ...existingMeta, ...metadata }),
               // The content changed materially — an already-read bell must
               // come back unread or the upgrade is invisible.
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
             });
           return true;
         }

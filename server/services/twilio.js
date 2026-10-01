@@ -589,7 +589,8 @@ const TwilioService = {
   // it skips the per-call lookup without changing the derivation.
   async deriveOutboundNumber({ customerLocationId, customerId, customer } = {}) {
     const TWILIO_NUMBERS = require("../config/twilio-numbers");
-    const { resolveLocation } = require("../config/locations");
+    const { resolveLocation, resolveServiceLocation } = require("../config/locations");
+    const { gateEnvValue } = require("../config/feature-gates");
     let locationId = customerLocationId;
     if (!locationId && (customer || customerId)) {
       try {
@@ -597,7 +598,12 @@ const TwilioService = {
           .where({ id: customerId })
           .first();
         if (row) {
-          const loc = resolveLocation(row.city);
+          // GATE_SMS_LINE_ADDRESS_FALLBACK: a blank/unmapped city falls
+          // through ZIP → geocode instead of straight to the default office.
+          // Mapped cities resolve identically either way.
+          const loc = gateEnvValue("GATE_SMS_LINE_ADDRESS_FALLBACK")
+            ? resolveServiceLocation(row)
+            : resolveLocation(row.city);
           locationId = loc.id;
         }
       } catch {}
