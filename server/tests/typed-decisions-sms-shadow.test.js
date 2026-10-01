@@ -99,3 +99,21 @@ test('an evidence read failure does not stop the record', async () => {
   mockEvidence.mockRejectedValue(new Error('evidence down'));
   expect(await shadowInboundSms(base)).toEqual({ asked: 2, recorded: 2, failed: 0 });
 });
+
+describe('twilio-webhook wiring', () => {
+  // Consumed replies (a reschedule reply, a lead-intake answer) return early;
+  // the shadow must be registered before those returns or they are never
+  // sampled. Source order is the contract here: the webhook harness cannot
+  // reach both consumed paths cheaply.
+  test('the shadow hook is registered before the reschedule-reply and lead-intake returns', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/twilio-webhook.js'), 'utf8');
+    const hook = src.indexOf("require('../services/typed-decisions/sms-shadow').shadowInboundSms(");
+    expect(hook).toBeGreaterThan(-1);
+    expect(src.lastIndexOf('typed-decisions/sms-shadow')).toBe(hook + "require('../services/".length); // registered once
+    expect(hook).toBeLessThan(src.indexOf('RescheduleSMS.handleRescheduleReply('));
+    expect(hook).toBeLessThan(src.indexOf('LeadIntake.handleIntakeReply('));
+    // and after the solicitation stop, which keeps no customer conversation
+    expect(hook).toBeGreaterThan(src.indexOf('if (solicitationEnforced) return res.type('));
+    expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
+  });
+});

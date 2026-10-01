@@ -224,7 +224,9 @@ async function refreshOutcomeEvidence({ olderThanHours = 24, limit = 200, now = 
     .whereIn('question_id', [...CALL_QUESTIONS, ...SMS_QUESTIONS])
     .where(function unread() { this.whereNull('outcome_evidence').orWhereRaw("outcome_evidence->>'value' IS NULL"); })
     .where('created_at', '<=', cutoff).where('created_at', '>=', floor)
-    .orderBy('created_at', 'desc').limit(limit)
+    // A random pick, not newest-first: rows whose evidence can stay unknown
+    // for the whole window must not starve older rows behind a fixed limit.
+    .orderByRaw('random()').limit(limit)
     .select('id', 'subject_type', 'subject_id', 'question_id');
   const cache = new Map();
   for (const row of rows) {
