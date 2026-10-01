@@ -45,7 +45,8 @@ jest.mock('../models/db', () => jest.fn((table) => {
   mockDbTable(table);
   return { insert: mockDbInsert };
 }));
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockLoggerError = jest.fn();
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: (...args) => mockLoggerError(...args) }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
     isTripped: jest.fn(() => false),
@@ -250,6 +251,21 @@ describe('POST /knowledge-gap', () => {
       // A retry with the same key is a no-op at the unique index.
       expect(mockOnConflict).toHaveBeenCalledWith('request_key');
       expect(mockOnConflictIgnore).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('a failed insert never logs or returns the operator text', async () => {
+    const question = 'Jane Roe 12 Palm Ave chinch bugs';
+    mockOnConflictIgnore.mockRejectedValueOnce(Object.assign(
+      new Error(`insert into "knowledge_queries" ("query") values ($1) - ${question}`),
+      { code: '57014' },
+    ));
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postGap(baseUrl, { question, request_key: KEY });
+      expect(status).toBe(500);
+      expect(JSON.stringify(body)).not.toContain('Palm');
+      expect(mockLoggerError).toHaveBeenCalledWith(expect.stringContaining('code=57014'));
+      expect(JSON.stringify(mockLoggerError.mock.calls)).not.toContain('Palm');
     });
   });
 

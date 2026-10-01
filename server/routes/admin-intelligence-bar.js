@@ -3190,7 +3190,7 @@ router.post('/query', runQuery);
 // is saved unless the operator taps the button, so the text is what they
 // chose to keep. Feeds the weekly knowledge-gaps email
 // (services/knowledge/knowledge-gaps-weekly.js).
-router.post('/knowledge-gap', async (req, res, next) => {
+router.post('/knowledge-gap', async (req, res) => {
   if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
   if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
   // One key per prompt box: a retry after a lost response re-sends it and
@@ -3211,7 +3211,14 @@ router.post('/knowledge-gap', async (req, res, next) => {
     }).onConflict('request_key').ignore();
     res.json({ success: true });
   } catch (err) {
-    next(err);
+    // Never pass the error on: knex puts the bindings (the operator's text,
+    // which can still hold customer details) in its message. Code +
+    // constraint are enough to diagnose.
+    logger.error(
+      `[intelligence-bar] knowledge gap save failed (code=${err?.code || 'unknown'}`
+      + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+    );
+    res.status(500).json({ error: 'Could not save the knowledge gap. Try again.' });
   }
 });
 
