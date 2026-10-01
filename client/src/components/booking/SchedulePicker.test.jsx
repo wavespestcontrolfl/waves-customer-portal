@@ -44,6 +44,40 @@ describe('SchedulePicker', () => {
   });
 });
 
+describe('picked time', () => {
+  it('a second tap on the picked time keeps it picked (never un-picks and hides Book)', () => {
+    const onSelectSlot = vi.fn();
+    const picked = { ...DAY.slots[2], date: DAY.date, fullDate: DAY.fullDate };
+    render(
+      <SchedulePicker
+        availability={{ days: [DAY] }}
+        selectedDate={DAY.date}
+        onSelectDay={() => {}}
+        selectedSlot={picked}
+        onSelectSlot={onSelectSlot}
+        pickedAction
+        pickedExtra={() => <button type="button">Book it</button>}
+      />,
+    );
+    const time = screen.getByRole('button', { name: /Choose 1:00 PM/ });
+    expect(time).toHaveAttribute('aria-pressed', 'true');
+    expect(time.querySelector('.wpk-time-check svg')).not.toBeNull();
+    fireEvent.click(time);
+    expect(onSelectSlot).not.toHaveBeenCalled();
+    // A different time still selects.
+    fireEvent.click(screen.getAllByRole('button', { name: /Choose 9:00 AM/ })[0]);
+    expect(onSelectSlot).toHaveBeenCalledWith(expect.objectContaining({ slotId: 'a' }));
+  });
+
+  it('the picked time is a chip, so the Book button is the only gold button', () => {
+    const picked = { ...DAY.slots[2], date: DAY.date, fullDate: DAY.fullDate };
+    render(<SchedulePicker availability={{ days: [DAY] }} selectedDate={DAY.date} onSelectDay={() => {}} selectedSlot={picked} onSelectSlot={() => {}} />);
+    const time = screen.getByRole('button', { name: /Choose 1:00 PM/ });
+    expect(time).toHaveAttribute('data-glass', 'chip');
+    expect(time).not.toHaveAttribute('data-glass-accent');
+  });
+});
+
 describe('empty availability', () => {
   it('still shows the submit error when a refresh comes back with no days', () => {
     render(<SchedulePicker availability={{ days: [] }} selectedDate={null} onSelectDay={() => {}} selectedSlot={null} onSelectSlot={() => {}} submitError="That time was just taken — here are the latest open times." empty={<p>Nothing open.</p>} />);

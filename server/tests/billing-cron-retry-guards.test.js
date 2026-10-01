@@ -23,6 +23,7 @@ let mockCustomer = null;
 let mockCollectedRow = null;
 let mockOrphanRow = null;
 let mockPaymentUpdates = [];
+let mockHoldSkipLogged = null;
 
 jest.mock('../models/db', () => {
   function builder(table) {
@@ -41,6 +42,7 @@ jest.mock('../models/db', () => {
       if (table === 'customers') return Promise.resolve(mockCustomer);
       if (table === 'payments') return Promise.resolve(mockCollectedRow);
       if (table === 'stripe_orphan_charges') return Promise.resolve(mockOrphanRow);
+      if (table === 'autopay_log') return Promise.resolve(mockHoldSkipLogged);
       return Promise.resolve(null);
     };
     b.then = (resolve, reject) => {
@@ -125,6 +127,7 @@ beforeEach(() => {
   mockCollectedRow = null;
   mockOrphanRow = null;
   mockPaymentUpdates = [];
+  mockHoldSkipLogged = null;
   jest.clearAllMocks();
   StripeService.charge.mockReset();
   StripeService.chargeOneTime.mockReset();
@@ -159,6 +162,25 @@ describe('processPaymentRetries — suppression guards', () => {
     expect(disarm).not.toHaveProperty('superseded_by_payment_id');
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_disabled',
       expect.objectContaining({ paymentId: 'pay-failed-1' }));
+  });
+
+  test('B10: a hold-blocked retry leaves the row armed and logs skipped_collection_hold ONCE per payment, not every tick', async () => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    const hold = () => Object.assign(new Error('hold'), { code: 'COLLECTION_HOLD_ACTIVE' });
+    StripeService.charge.mockRejectedValue(hold());
+    StripeService.chargeOneTime.mockRejectedValue(hold());
+    StripeService.chargeMonthly.mockRejectedValue(hold());
+
+    await BillingCron.processPaymentRetries();
+    const first = logAutopay.mock.calls.filter((c) => c[1] === 'skipped_collection_hold');
+    expect(first).toHaveLength(1);
+    expect(mockPaymentUpdates).toHaveLength(0); // armed, no retry_count bump, no supersede
+
+    mockHoldSkipLogged = { id: 'log-1' }; // the next tick sees the earlier event
+    logAutopay.mockClear();
+    await BillingCron.processPaymentRetries();
+    expect(logAutopay.mock.calls.filter((c) => c[1] === 'skipped_collection_hold')).toHaveLength(0);
+    expect(mockPaymentUpdates).toHaveLength(0);
   });
 
   test('autopay paused: skipped WITHOUT disarming — ladder resumes after the pause', async () => {
@@ -306,6 +328,22 @@ describe('processPaymentRetries — suppression guards', () => {
       expect.objectContaining({ type: 'monthly_autopay', billed_month: '2026-06' }),
       'autopay_retry_pay-failed-1_1',
     );
+  });
+
+  test('B10: a retry of a hold-deferred row (ordinary description, or a legacy "— DEFERRED (…)" marker) charges Stripe with the plain monthly description', async () => {
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+    const deferredMeta = JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-06', deferred_reason: 'collection_hold' });
+    for (const description of [
+      'Bronze WaveGuard Monthly — Test Retry', // what the cron writes now
+      'Bronze WaveGuard Monthly — Test Retry — DEFERRED (collections hold)', // a row written with the old marker
+      'Bronze WaveGuard Monthly — Test Retry — DEFERRED (collection lock held elsewhere)',
+    ]) {
+      charge.mockClear();
+      mockFailedPayments = [monthlyFailedPayment({ description, retry_count: 0, metadata: deferredMeta })];
+      await BillingCron.processPaymentRetries();
+      expect(charge).toHaveBeenCalledTimes(1);
+      expect(charge.mock.calls[0][2]).toBe('Bronze WaveGuard Monthly — Test Retry');
+    }
   });
 
   test('webhook-armed async ACH bounce row (retry_count 0, first rung) is picked up and re-charges its month', async () => {

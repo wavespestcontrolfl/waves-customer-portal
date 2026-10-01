@@ -113,35 +113,62 @@ function ymdOrDefaultAwayUntil(until) {
   return ymd(until) || addDays(etDateString(), 180);
 }
 
-async function startAwayMode({ customerId, caseId, until = null }) {
+async function startAwayMode({ customerId, caseId, until = null, holdIds = [] }) {
   const today = etDateString();
   const untilYmd = ymdOrDefaultAwayUntil(until);
   if (untilYmd <= today) throw codedError('away_date_invalid', 'The return date must be in the future');
-  // The prior value is read and replaced under one row lock, so a failed
-  // accept's restore can never put back a value another accept replaced.
-  const existing = await db.transaction(async (trx) => {
+  // The prior value is read, the preference replaced and — for a paired
+  // accept — the recovery record written on its holds, all under ONE row
+  // lock: a failed accept's restore (synchronous or recovery) can never put
+  // back a value another accept replaced in between.
+  const previousUntil = await db.transaction(async (trx) => {
+    // The first row is created conflict-safely (customer_id is unique), so
+    // two accepts racing on a customer with no row both reach the lock below
+    // instead of one failing its insert.
+    await trx('property_preferences').insert({ customer_id: customerId, created_at: new Date(), updated_at: new Date() }).onConflict('customer_id').ignore();
     const row = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', 'away_mode_until');
-    if (row) {
-      await trx('property_preferences').where({ id: row.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
-    } else {
-      await trx('property_preferences').insert({ customer_id: customerId, away_mode_until: untilYmd, created_at: new Date(), updated_at: new Date() });
+    let previous = row.away_mode_until ? dateOnlyString(row.away_mode_until) : null;
+    // A retry of the same accept keeps the value recorded by its first
+    // attempt: by now the preference may already hold `until` (that attempt
+    // wrote it), and re-reading it would make an undo restore `until` over
+    // itself — leaving Away Mode on after the accept failed.
+    const recorded = [];
+    for (const holdId of holdIds || []) {
+      const hold = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
+      if (!hold) continue;
+      const record = readRecord(hold.moved_visits);
+      // A record written before this accept's first write had no prior date
+      // stored its previousUntil as a missing key (no row then): still the
+      // first attempt's value, never the live one.
+      if (record.awayPairing) previous = record.awayPairing.previousUntil ?? null;
+      recorded.push({ holdId, record });
     }
-    return row;
+    await trx('property_preferences').where({ id: row.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
+    for (const { holdId, record } of recorded) {
+      await trx('plan_holds').where({ id: holdId }).update({
+        moved_visits: JSON.stringify({ ...record, awayPairing: { previousUntil: previous, until: untilYmd } }),
+        updated_at: new Date(),
+      });
+    }
+    return previous;
   });
+  // previousUntil lets a paired accept that fails afterwards put the
+  // preference back (restoreAwayMode).
+  return { until: untilYmd, untilDisplay: displayDate(untilYmd), previousUntil };
+}
+
+// The staff timeline note for an Away Mode change, written only once the
+// accept that made it stands — a rolled-back accept leaves no note claiming
+// Away Mode is on.
+async function noteAwayMode({ customerId, caseId, until }) {
   try {
     await db('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'note',
-      subject: `Away Mode until ${untilYmd} (cancel flow)`,
+      subject: `Away Mode until ${until} (cancel flow)`,
       body: `Case ${caseId}. Exterior-only visits while away; reports continue; price and tier unchanged.`,
     });
   } catch (err) { logger.warn(`[holds] away-mode note failed for ${customerId}: ${err.message}`); }
-  // previousUntil (undefined = no preferences row before) lets a paired
-  // accept that fails afterwards put the preference back (restoreAwayMode).
-  return {
-    until: untilYmd, untilDisplay: displayDate(untilYmd),
-    previousUntil: existing ? (existing.away_mode_until ? dateOnlyString(existing.away_mode_until) : null) : undefined,
-  };
 }
 
 // Undo startAwayMode for an accept that failed after it: the preference
@@ -426,39 +453,6 @@ const readRecord = (raw) => {
 };
 
 /**
- * A paired accept records the Away Mode change it is about to make on each
- * of its holds BEFORE making it, so the recovery pass can put the
- * preference back if the accept dies before it is marked.
- */
-async function recordPendingAwayMode(holdIds, { customerId, until }) {
-  if (!holdIds?.length) return undefined;
-  const prefs = await db('property_preferences').where({ customer_id: customerId }).first('away_mode_until');
-  const current = prefs?.away_mode_until ? dateOnlyString(prefs.away_mode_until) : null;
-  // A retry of the same accept keeps the value recorded by its first
-  // attempt: by now the preference may already hold `until` (that attempt
-  // wrote it), and re-reading it would make an undo restore `until` over
-  // itself — leaving Away Mode on after the accept failed.
-  let previousUntil = current;
-  await db.transaction(async (trx) => {
-    for (const holdId of holdIds) {
-      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
-      if (!row) continue;
-      const record = readRecord(row.moved_visits);
-      if (record.awayPairing && 'previousUntil' in record.awayPairing) previousUntil = record.awayPairing.previousUntil;
-    }
-    for (const holdId of holdIds) {
-      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
-      if (!row) continue;
-      await trx('plan_holds').where({ id: holdId }).update({
-        moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), awayPairing: { previousUntil, until } }),
-        updated_at: new Date(),
-      });
-    }
-  });
-  return previousUntil;
-}
-
-/**
  * Mark every hold of an accept as standing — called once ALL of the
  * accept's writes (every family, and a paired Away Mode) committed, and
  * before any skip runs. The lifecycle's recovery pass carries out skips
@@ -514,14 +508,21 @@ async function applyHoldSkips(holdResults) {
           // Still this customer's visit in this family: one reassigned to
           // another customer or service since the plan is not the pause's.
           if (row && hold.customerId && String(row.customer_id) !== String(hold.customerId)) return 'left_pause';
-          if (row && row.service_id) {
+          // A legacy visit with no catalog service is judged on its own
+          // service_type: an admin re-typing it to another family since the
+          // plan leaves it out of the pause too.
+          if (row) {
             const { familyOfServiceRow } = require('../cancellation-processor');
-            const svc = await trx('services').where({ id: row.service_id }).first('service_key', 'name');
+            const svc = row.service_id ? await trx('services').where({ id: row.service_id }).first('service_key', 'name') : null;
             if (familyOfServiceRow({ ...row, service_key: svc?.service_key, service_name: svc?.name }) !== hold.familyKey) return 'left_pause';
           }
           // Idempotent: a recovery pass re-offers visits a crashed accept
           // may already have skipped.
           if (row && row.status === 'skipped') return 'skipped';
+          // Tracking says the work is done even where its best-effort status
+          // sync has not caught up (status still scheduled, en_route or
+          // on_site): ended, not live — nothing to retry, no office bell.
+          if (row && row.track_state === 'complete') return 'gone';
           // Underway is not ended: the office hears, and the plan stays open.
           if (row && ['en_route', 'on_site'].includes(row.status)) return 'live';
           // A visit that has ended (completed, cancelled, …) or become a
@@ -532,7 +533,7 @@ async function applyHoldSkips(holdResults) {
           // starts on the hold's own start date — a recovery pass a day
           // later still skips a paused visit whose date has gone by.
           if (!date || date < (hold.startsOn || etDateString()) || date >= hold.resumeOn) return 'left_pause';
-          if (row.track_state === 'complete' || LIVE_TRACK_STATES.includes(row.track_state)) return 'live';
+          if (LIVE_TRACK_STATES.includes(row.track_state)) return 'live';
           const covered = await findBillingCoveredVisits(trx, [row]);
           if (covered.has(row.id)) return 'prepaid';
           await transitionJobStatus({
@@ -567,12 +568,16 @@ async function applyHoldSkips(holdResults) {
     // ended: a visit still bookable inside the pause (paid for or live in
     // the gap, a transient failure) stays in the plan, and the daily
     // recovery pass retries it (its office bell is deduped per visit).
+    // Read and written under the hold's row lock, so a concurrent run's
+    // reminder claim (or skip record) is merged into, never overwritten.
     try {
-      const row = await db('plan_holds').where({ id: hold.holdId }).first('moved_visits');
-      const record = readRecord(row?.moved_visits);
-      await db('plan_holds').where({ id: hold.holdId }).update({
-        moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], unresolved, skipsFinal: unresolved.length === 0 }),
-        updated_at: new Date(),
+      await db.transaction(async (trx) => {
+        const row = await trx('plan_holds').where({ id: hold.holdId }).forUpdate().first('moved_visits');
+        const record = readRecord(row?.moved_visits);
+        await trx('plan_holds').where({ id: hold.holdId }).update({
+          moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], unresolved, skipsFinal: unresolved.length === 0 }),
+          updated_at: new Date(),
+        });
       });
     } catch (err) { logger.warn(`[holds] skip record failed for hold ${hold.holdId}: ${err.message}`); }
   }
@@ -772,13 +777,14 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
 }
 
 // Render and send the restart text; true only when the provider accepted it.
-// The first visit back is read once more right before the provider call: a
-// dispatch move or cancel since the claim makes this attempt give its claim
-// back, and the next run names the real date.
+// The first visit back is resolved once more right before the provider call:
+// a dispatch move or cancel since the claim — or an EARLIER visit scheduled
+// since — makes this attempt give its claim back, and the next run names the
+// real date.
 async function deliverRestartText(hold, customer, next, nextOn) {
   try {
-    const fresh = await db('scheduled_services').where({ id: next.id }).first('status', 'scheduled_date');
-    if (!fresh || fresh.status !== next.status || dateOnlyString(fresh.scheduled_date) !== nextOn) return 'stale';
+    const fresh = await firstVisitBack(hold);
+    if (!fresh || String(fresh.id) !== String(next.id) || fresh.status !== next.status || dateOnlyString(fresh.scheduled_date) !== nextOn) return 'stale';
     const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { gsmSafeName } = require('../messaging/gsm-normalize');
@@ -834,20 +840,23 @@ async function sendDueRestartTexts(holdIds) {
 
 // An accept that died before all its writes stood: undo this hold rather
 // than skip visits for an accept the customer was never told succeeded.
-async function undoInterruptedAccept(hold, record) {
+async function undoInterruptedAccept(hold) {
   // Claim the undo under the row lock markHoldsAccepted takes: an
   // accept that marked the hold since the bulk read wins, and one
   // marking after this claim is refused (and compensates itself).
   const claimed = await db.transaction(async (trx) => {
     const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'moved_visits');
     const liveRecord = readRecord(live?.moved_visits);
-    if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return false;
+    if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return null;
     await trx('plan_holds').where({ id: hold.id }).update({
       moved_visits: JSON.stringify({ ...liveRecord, compensating: true }), updated_at: new Date(),
     });
-    return true;
+    return liveRecord;
   });
   if (!claimed) return;
+  // The Away Mode pairing is read from the locked row: a same-case retry
+  // that recorded it after the bulk read is undone with its Away Mode.
+  const lockedRecord = claimed;
   // The accept died before all its writes stood: undo this hold
   // (rate restored, prepaid moves reverted) rather than skip visits
   // for an accept the customer was never told succeeded.
@@ -855,9 +864,9 @@ async function undoInterruptedAccept(hold, record) {
   // preference still holds the date this accept wrote. Restored
   // BEFORE the hold is cancelled: a run stopped in between finds the
   // hold still active and retries (the restore is a no-op then).
-  if (record.awayPairing?.until) {
-    await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
-      .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
+  if (lockedRecord.awayPairing?.until) {
+    await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: lockedRecord.awayPairing.until })
+      .update({ away_mode_until: lockedRecord.awayPairing.previousUntil || null, updated_at: new Date() });
   }
   await cancelHold(hold.id, { compensateVisits: true });
   // Nothing of the accept stands once its last hold is undone: release
@@ -887,7 +896,7 @@ async function recoverUnfinishedSkips(out) {
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
       if (record.acceptCommitted !== true) {
         if (hold.status !== 'active') continue;
-        await undoInterruptedAccept(hold, record);
+        await undoInterruptedAccept(hold);
         continue;
       }
       const done = new Set((record.skipped || []).map(String));
@@ -1030,4 +1039,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, ymdOrDefaultAwayUntil, restoreAwayMode, recordPendingAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, noteAwayMode, restoreAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

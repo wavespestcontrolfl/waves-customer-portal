@@ -439,6 +439,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
+          // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
+          // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
+          // read, fail closed). Payer-billed and the explicit operator/customer exemptions skip it.
+          // A trusted exemption skips a plain dispute hold only; a fallback hold still stops it.
+          if (!current.payer_id) {
+            const collectionHold = require('./collections/collection-hold');
+            const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, trx,
+              { ignoreDisputeHold: collectionHold.holdExemptionApplies(options.holdExempt) });
+            if (held.held) {
+              const defer = collectionHold.holdDeferOutcome(held);
+              boundaryRefusal = { code: defer.code, reason: defer.reason, retryable: true, deferred: true, nextAllowedAt: defer.nextAllowedAt };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           if (options.billingDeliveryCategory && !current.payer_id) {
             let freshPrefs;
             try {
@@ -562,6 +577,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
           code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
           ...(refusal.retryable ? { retryable: true } : {}),
+          ...(refusal.deferred ? { deferred: true, nextAllowedAt: refusal.nextAllowedAt } : {}),
           recipient: recipientPayload };
       }
       const evidence = acceptedInvoiceEmailEvidence(result);
@@ -602,6 +618,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
       deliveryOutcome: boundaryRefusal ? 'not_sent' : undefined,
       ...(verdict.retryable ? { retryable: true } : {}),
+      ...(verdict.deferred ? { deferred: true, nextAllowedAt: verdict.nextAllowedAt } : {}),
       recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);

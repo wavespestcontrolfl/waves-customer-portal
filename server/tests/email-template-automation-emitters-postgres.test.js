@@ -255,7 +255,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         entity_id: 'est-pg-stale',
         occurred_at: new Date(Date.now() - emitters.INTENT_MAX_AGE_MS - 60 * 60 * 1000),
         status: 'pending',
-        payload: JSON.stringify({ id: 'est-pg-stale', customer_email: 'sweep-qa@example.com' }),
+        payload: JSON.stringify({ id: 'est-pg-stale', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
       {
         id: freshId,
@@ -264,7 +264,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         entity_id: 'est-pg-fresh-shelf',
         occurred_at: new Date(Date.now() - 10 * 60 * 1000),
         status: 'pending',
-        payload: JSON.stringify({ id: 'est-pg-fresh-shelf', customer_email: 'sweep-qa@example.com' }),
+        payload: JSON.stringify({ id: 'est-pg-fresh-shelf', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
     ]);
 
@@ -355,7 +355,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
       entity_id: 'est-pg-1',
       occurred_at: occurredAt,
       status: 'pending',
-      payload: JSON.stringify({ id: 'est-pg-1', customer_email: 'sweep-qa@example.com' }),
+      payload: JSON.stringify({ id: 'est-pg-1', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
     });
 
     try {
@@ -389,7 +389,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         // unrecoverable; the executor is mocked here so the rejection is
         // simulated directly on it (proven for real against recipientFor's
         // exact error in the mocked emitters unit suite).
-        payload: JSON.stringify({ id: 'est-pg-unresolvable' }),
+        payload: JSON.stringify({ id: 'est-pg-unresolvable', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
       {
         id: resolvableId,
@@ -398,7 +398,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         entity_id: 'est-pg-resolvable',
         occurred_at: new Date(occurredAt.getTime() + 1000), // one second later — still oldest-first ahead of nothing else
         status: 'pending',
-        payload: JSON.stringify({ id: 'est-pg-resolvable', customer_email: 'sweep-qa@example.com' }),
+        payload: JSON.stringify({ id: 'est-pg-resolvable', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
     ]);
     const unrecoverableErr = new Error('recipient email is required for automation execution');
@@ -442,19 +442,19 @@ jest.mock('../services/email-template-automation-executor', () => ({
       occurred_at: new Date(Date.now() - 10 * 60 * 1000),
       status: 'pending',
       attempts: emitters.MAX_INTENT_ATTEMPTS - 2,
-      payload: JSON.stringify({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }),
+      payload: JSON.stringify({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
     });
     AutomationExecutor.processTrigger.mockRejectedValue(new Error(
       'duplicate key value violates unique constraint: Key (recipient_email)=(sweep-qa@example.com)',
     ));
 
     try {
-      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }, markerId);
+      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, markerId);
       const afterFirst = await db('email_template_automation_intents').where({ id: markerId }).first();
       expect(afterFirst.status).toBe('pending');
       expect(afterFirst.attempts).toBe(emitters.MAX_INTENT_ATTEMPTS - 1);
 
-      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }, markerId);
+      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, markerId);
       const afterSecond = await db('email_template_automation_intents').where({ id: markerId }).first();
       expect(afterSecond.status).toBe('unrecoverable');
       expect(afterSecond.attempts).toBe(emitters.MAX_INTENT_ATTEMPTS);
@@ -478,7 +478,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         occurred_at: new Date(base), // OLDER — would lead a pure oldest-first batch
         status: 'pending',
         attempts: 5,
-        payload: JSON.stringify({ id: 'est-pg-stuck', customer_email: 'sweep-qa@example.com' }),
+        payload: JSON.stringify({ id: 'est-pg-stuck', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
       {
         id: freshId,
@@ -487,7 +487,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
         entity_id: 'est-pg-fresh',
         occurred_at: new Date(base + 30 * 60 * 1000),
         status: 'pending',
-        payload: JSON.stringify({ id: 'est-pg-fresh', customer_email: 'sweep-qa@example.com' }),
+        payload: JSON.stringify({ id: 'est-pg-fresh', customer_email: 'sweep-qa@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
     ]);
     AutomationExecutor.processTrigger.mockImplementation(async ({ entityId }) => {

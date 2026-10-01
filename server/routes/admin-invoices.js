@@ -1200,8 +1200,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
           const firstDeliveryOnly = true;
           try {
             entry.sent = existing.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(existing.id, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
             // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
             // held outcome onto the SAME { held: true } shape the thrown
             // form already reports below — the shared classifier again.
@@ -1276,8 +1276,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // invoices keep the existing SMS-only immediate send. Freshly
             // created here — always a first delivery.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null })
-              : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(invoice.id, { firstDeliveryOnly: true, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
             // Codex round-5 audit P1 (#4131 slice 4): converge a RESOLVED
             // held outcome onto the SAME { held: true } shape the thrown
             // form below already reports — the shared classifier again.
@@ -1397,7 +1397,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
       try {
         const row = await db('invoices').where({ id: invoiceId }).first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
         firstDeliveryOnly = isFirstDeliveryRow(row);
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, actorTechnicianId: req.technicianId || null });
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: req.technicianId || null });
         if (result.ok && (result.settled_zero_due || result.covered_by_credit)) {
           // covered_by_credit is the chokepoint's sibling settled flag
           // (credit consumed, nothing sent): bucketing it as "sent" with
@@ -1737,6 +1737,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         firstDeliveryOnly,
         overridesReviewHold,
         operatorInitiated: true,
+        holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
       });
     } catch (err) {
@@ -1911,7 +1912,18 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      { expectedTotal },
+      // Staff ordered this charge explicitly: exempt from the default
+      // collections dispute-hold guard (an operator may override a hold).
+      // The override is recorded at the charge boundary (stripe.js) when a
+      // dispute hold is active, naming this admin.
+      {
+        expectedTotal,
+        operatorOverride: true,
+        overrideTrail: {
+          actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
+          route: 'admin_invoice_charge_card', invoiceId: req.params.id,
+        },
+      },
     );
     res.json({ success: true, ...result });
   } catch (err) {

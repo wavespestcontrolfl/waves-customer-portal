@@ -572,7 +572,13 @@ async function markCardLinkSendOutcome(visitId, stamp) {
  *   action 'skipped'      — reason says why (gate_off, exemption, dedup...).
  * Never throws — every trigger path treats this as fire-and-observe.
  */
-async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null }) {
+// customerInitiated — the card ask answers something the customer just did
+// themselves (today: booking on their own INBOUND call). Owner ruling
+// 2026-09-30: a reply to the customer's own contact is never held to 8 AM.
+// Same trust model as the send-window validator's marker: only a caller that
+// verified the upstream action was the customer's may set it — the call
+// pipeline passes it for inbound calls only, never for outbound dials.
+async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null, customerInitiated = false }) {
   // Owner ruling 2026-09-25 (callback_number_needed / disclaimed caller
   // ID): set below, inside the delivery==='none' branch, when the visit's
   // SMS leg is held for a disclaimed ANI AND an email invitation might
@@ -1180,10 +1186,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         customerId: visit.customer_id,
         identityTrustLevel: 'phone_matches_customer',
         // trigger 'admin' = the schedule page's explicit "request card"
-        // click; every other trigger (previsit sweep, call pipeline,
-        // outbound confirm, booking) is automation and stays fenced by
-        // the send window.
+        // click. customerInitiated = the caller's own inbound-call booking
+        // (owner ruling 2026-09-30). Every other trigger (previsit sweep,
+        // outbound confirm, booking) is automation and stays fenced by the
+        // send window.
         ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
+        ...(customerInitiated === true ? { customerInitiated: true } : {}),
         metadata: {
           scheduled_service_id: visit.id,
           trigger,
@@ -2987,6 +2995,14 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     }
     await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
       .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    // A collections DISPUTE hold (B10) refused the fee before Stripe: claim
+    // reopened, nothing terminal recorded, no customer message; reported as
+    // its own reason (the no-show route: definite no-charge 'held' outcome;
+    // the cancellation rails: unresolved fee for office review).
+    if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
+      logger.warn(`[appt-card-request] no-show fee withheld (collections dispute hold) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: 'collection_hold', error: err.message };
+    }
     logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
     return { charged: false, reason: 'charge_failed', error: err.message };
     }
@@ -3166,7 +3182,7 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     // outcome (charged, payer_billed, revoked, stale refusals — all of
     // which stamped the fee event closed) releases cleanly.
     const unresolvedCharge = chargeResult?.charged !== true
-      && ['charge_review', 'charge_failed'].includes(chargeResult?.reason);
+      && ['charge_review', 'charge_failed', 'collection_hold'].includes(chargeResult?.reason);
     return { ...chargeResult, handled: true, released: !unresolvedCharge };
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
@@ -3571,18 +3587,24 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         requireAutopayForCustomerId: svc.customer_id,
         requireSelfPayScheduledServiceId: scheduledServiceId,
         requireOneTimeLane: true,
+        // The charge primitive refuses an active collections dispute hold BY
+        // DEFAULT (B10) -> collection_hold office review.
       });
     } catch (err) {
-      logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
-      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });
+      // A collections dispute hold (B10) is a pre-charge, office-review
+      // refusal — reported as such, never as a failed/declined charge.
+      const onHold = require('./collections/collection-hold').isCollectionHoldRefusal(err);
+      logger.error(`[appt-card-request] recap completion charge ${onHold ? 'withheld (collections hold)' : 'failed'} for visit ${scheduledServiceId}: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: onHold ? 'collection_hold' : 'charge_failed' });
       // Awaited so a rejected audit write is caught here, never an
       // unhandled rejection (pre-push r2 P1 — floating-promise rule).
       try {
-        await require('./autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+        // A hold refusal is a SKIP, not a failed charge: distinct event type.
+        await require('./autopay-log').logAutopay(svc.customer_id, onHold ? 'skipped_collection_hold' : 'charge_failed', {
           details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId, error: err.message },
         });
       } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
-      return { charged: false, reason: 'charge_failed', error: err.message };
+      return { charged: false, reason: onHold ? 'collection_hold' : 'charge_failed', error: err.message };
     }
     try {
       await require('./autopay-log').logAutopay(svc.customer_id, 'charge_success', {

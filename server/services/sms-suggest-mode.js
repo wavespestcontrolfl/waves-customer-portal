@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null, reserviceLanesSnapshot = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -658,6 +658,17 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // OPEN TIMES without a live re-fetch at publish time — this is
             // just the snapshot, never a probe.
             ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            // Codex round-3 P2: the re-service lane(s) this draft's reply
+            // promises (validateReserviceOffer's own resolution, carried
+            // from sms-shadow-drafter.js) — null/omitted for an ordinary
+            // draft with no re-service promise. Read back at send time by
+            // agentDecisionSendBlockReason / the scheduler's queued-send
+            // recheck (reservicePromiseStillEligible) so a promise already
+            // reviewed can still be blocked if the customer's eligibility
+            // changed before it fired.
+            ...(Array.isArray(reserviceLanesSnapshot) && reserviceLanesSnapshot.length ? { reservice_lanes_snapshot: reserviceLanesSnapshot } : {}),
+            // Codex round-18 P2: the booked re-service callback the reply's already-booked fact described.
+            ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
             // Codex r3 P1: the actions this draft promises (payment link,
             // booking, escalation…) must ride the same snapshot a reviewer's
             // card reads — otherwise a card can promise an action the
@@ -666,6 +677,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
             ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+            // Independent review finding (PR #5334): the visit(s) this
+            // draft's LIVE ETA fact was drawn from, carried through so the
+            // send-time choke point (verifyAgentDecisionForSend /
+            // agent-decision-send-checks.js) can recheck a minutes-away
+            // claim is still current before the reviewer's Send goes out —
+            // never a probe, just the snapshot, exactly like open_times_snapshot.
+            ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+            // Technician first name(s), independent of live entries (round-42 P2): read back at
+            // send time so name-subjected status wording is recognized with no live snapshot.
+            ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

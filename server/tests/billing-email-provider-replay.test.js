@@ -1,10 +1,10 @@
 jest.mock('../services/email-template-library', () => ({ readStoredBillingReplayContext: jest.fn() }));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
-jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
+jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn(), replayHoldRefusal: jest.fn() }));
 
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
-const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+const { billingEmailReplayEligible, replayHoldRefusal } = require('../services/messaging/billing-email-replay-eligibility');
 const {
   isBillingEmailTemplateRetry,
   isBillingEmailProviderReplay,
@@ -41,6 +41,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValue(context);
   billingEmailReplayEligible.mockResolvedValue({ eligible: true });
+  replayHoldRefusal.mockResolvedValue(null);
 });
 
 test('recognizes a stored replay contract only on the canonical billing templates', () => {
@@ -297,6 +298,48 @@ test('a resendable eligibility refusal carries BILLING_REPLAY_RESENDABLE as its 
   });
   await runBillingEmailProviderReplayHandoff(message(), jest.fn());
   expect(verdict).toEqual({ ok: false, code: BILLING_REPLAY_RESENDABLE, reason: 'invoice-send-not-finalized', retryable: false });
+});
+
+test('a collections dispute hold is the schedulable hold code: retryable + deferred, never terminal (owner ruling 2026-09-30)', async () => {
+  billingEmailReplayEligible.mockResolvedValueOnce({
+    eligible: false, reason: 'collection-hold', retryable: true, holdDefer: true, held: { held: true, reason: 'hold' },
+  });
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn() });
+  });
+  await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+  expect(verdict).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+  expect(new Date(verdict.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+});
+
+test('a row with NO stored contract (a pay / update-card notice) still waits on the messaging hold: the schedulable hold code, never terminal (Codex #5424 r14)', async () => {
+  replayHoldRefusal.mockResolvedValueOnce({
+    eligible: false, reason: 'collection-hold', retryable: true, holdDefer: true, held: { held: true, reason: 'hold' },
+  });
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn(), providerBoundary: false });
+  });
+  const row = unregistered({
+    template_key: 'billing.notice',
+    categories: JSON.stringify(['email_template', 'billing', 'payment_issue']),
+  });
+  expect(isBillingEmailProviderReplay(row)).toBe(false);
+  await runBillingEmailProviderReplayHandoff(row, jest.fn());
+  expect(replayHoldRefusal).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1', category: 'payment_issue' }), expect.anything());
+  expect(verdict).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+  expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+});
+
+test('a hold-gate read that throws on an uncontracted row holds it (fail closed), it never passes', async () => {
+  replayHoldRefusal.mockRejectedValueOnce(new Error('db down'));
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn(), providerBoundary: false });
+  });
+  await runBillingEmailProviderReplayHandoff(unregistered({ template_key: 'billing.notice', categories: JSON.stringify(['billing', 'payment_issue']) }), jest.fn());
+  expect(verdict).toMatchObject({ ok: false, retryable: true });
 });
 
 test('propagates a provider error for the retry owner to classify', async () => {

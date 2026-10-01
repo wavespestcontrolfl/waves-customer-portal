@@ -22,6 +22,7 @@ const STRING_FIELDS = Object.freeze({
   customer_id: 160, invoice_id: 160, source_entry_point: 80, notificationEventKey: 240,
   collections_ledger_id: 160, payment_method_id: 160, expiry_stage: 20,
   appointment_id: 160, appointment_service_type: 160, followup_sequence_id: 160, rendered_amount: 40,
+  hold_exempt: 20,
 });
 
 function boundedString(value, max) {
@@ -137,6 +138,10 @@ function sanitizeBillingReplayContext(context) {
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
+  // The trusted dispute-hold exemption is stored for a direct invoice notice only, and only as one
+  // of its two trusted values.
+  if (out.hold_exempt != null && (!INVOICE_SEND_SOURCES.has(out.source_entry_point)
+    || !['operator', 'customer'].includes(out.hold_exempt))) return null;
   out.category = context.category;
   return complete(out) ? out : null;
 }
@@ -176,6 +181,9 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     selected_channels: meta.selected_channels,
     invoice_quotes: meta.invoice_quotes,
     dues_cents: meta.dues_cents,
+    hold_exempt: INVOICE_SEND_SOURCES.has(replaySourceEntryPoint(input))
+      && ['operator', 'customer'].includes(meta.hold_exempt || input?.holdExempt)
+      ? (meta.hold_exempt || input.holdExempt) : undefined,
   });
 }
 

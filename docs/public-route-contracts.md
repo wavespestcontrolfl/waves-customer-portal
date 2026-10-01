@@ -1315,6 +1315,26 @@ accept-active estimate with a contact gap always gets the React view: the
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
 
+Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
+dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:
+true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is on,
+and the policy the accept would resolve puts this customer on the card rail
+(a card is captured at accept, or a consented method is already saved/Auto Pay is
+active). It is OMITTED (never `false`) in every other case, so a gate-off response is
+byte-identical to before. A plan member whose Auto Pay is already active DOES carry it
+(that policy resolves to `autopay_already_active`, an on-rail state: the saved method is
+charged after the visit). Plan members NOT on Auto Pay (`existing_plan_customer`),
+payer-billed, invoice-mode, commercial manual billing, one-time and paused-Auto-Pay
+never carry it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+payment-method data rides it. SCOPE: it describes the PAY-PER-APPLICATION option only.
+`/data` resolves the policy before the viewer picks a payment option
+(`paymentMethodPreference: null`), so it says nothing about annual prepay: a viewer who
+later selects annual prepay is resolved again at accept (with `GATE_PREPAY_CARD_AND_CHARGE`
+off that is the `prepay_annual` exemption and its pay-link path). A client must not show
+the after-first-visit promise on the annual-prepay option on the strength of this field.
+Informational only for now: no client reads it, and it moves no money and sends no
+message.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -1621,11 +1641,38 @@ report showed; a record with no frozen instruction regenerates it. Only the trea
 sentence that depends on the weekly plan ("follow this week's plan", or "that
 counts toward this week's watering" for a water-in shallower than the plan's
 run) is composed on each render from the plan present on that render.
+Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
+label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
+default, no derivation), the banner gains `mowHold`
+`{ days, untilAt, untilDate, untilLabel, line }` for the longest hold: a label
+day is 24 elapsed hours, so `untilAt` is the completion instant plus `days` x 24
+hours rounded UP to the hour (ISO), `untilDate` its Eastern calendar date
+(YYYY-MM-DD), `untilLabel` its Eastern weekday and clock time ("Fri 4 PM";
+"Wed, Jan 6 at 12 PM" six or more days out), `line` one finished sentence
+("Mowing: hold off until Fri 4 PM, 1 day after today's treatment."). The key is
+absent when no product has a value. A visit with a mow hold but no watering
+claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
+expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is
+`null`, and the client then titles the card "Mowing after today's visit".
+`mowHold.line` is never in `lines` (so the lawn watering text and the PDF's one
+watering line are unchanged), it is frozen with a frozen instruction and
+otherwise rebuilt from the frozen product facts (a state-null instruction is
+never frozen), it never changes by the clock (the live banner's "ended" note
+replaces only the watering lines), and `mowHoldDays` never appears on
+`applications[].product`. Facts frozen before the column existed make no mow
+claim. The value is part of the lawn render cache signature.
 `reportV2.aftercare.watering` carries every treatment sentence. A render whose
 watering inputs could not be read (customer preferences or the catalog) omits
 the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
 such a render is served but never cached, and a pinned delivery defers. The gate is
 part of the lawn PDF cache signature.
+`GATE_LAWN_WATERING_SMS` (dark, strict `true`; also requires
+`GATE_LAWN_WATERING_RULE`) adds no public payload field: it sends the frozen
+instruction (`state` hold, water_in or hold_then_water_in, never none) as one
+separate customer text right after the lawn completion text, rendered from the
+`lawn_watering_instruction` SMS template with the instruction's `lines` joined
+by single spaces, at most once per visit
+(`structured_notes.lawnWateringSmsStatus`).
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1867,7 +1914,21 @@ validated against a FIXED allowlist (`server/routes/lead-webhook.js`
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
 were absent). A valid value is stored verbatim in `leads.heard_about`
 (nullable column, migration `20260928020000_leads_heard_about.js`) and
-surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+surfaced on the admin lead detail. Both endpoints also accept an OPTIONAL
+`heard_about_prompt` — the quote form's "What did you ask it?" follow-up,
+shown only when the visitor picked `chatgpt` or `other_ai`. It is read from
+that exact key, must be a string, and is kept ONLY when `heard_about`
+resolves to `chatgpt` or `other_ai`; control characters and whitespace runs
+collapse to single spaces, the result is trimmed and capped at 500
+characters (`sanitizeHeardAboutPrompt`), and a non-string, blank, or
+non-AI-`heard_about` value is SILENTLY DROPPED (request still succeeds).
+Stored as typed — no redaction — in `leads.heard_about_prompt` (nullable
+varchar(500), migration `20260930220000_leads_heard_about_prompt.js`) and
+shown on the admin lead card as `Asked: "…"`; STAFF-ONLY, it never joins
+`message`, the AI triage prose or any customer-facing text. Safe in either
+deploy order: a portal without this change ignores the unknown key, and an
+Astro form without it simply omits the key. `heard_about` itself is
+DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
@@ -2318,6 +2379,26 @@ responses are deliberately cacheable and indexable — they expose only
 modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
 headers do NOT apply to them. `/nearest` is the exception: its answer is
 per visitor, so it stays `private, no-store`).
+`/api/public/yard-calendar` (read-only, no auth, no token, no DB access,
+no LLM call, no PII, no request body — the SWFL yard pressure calendar: a
+monthly lawn / shrubs & trees / weeds guide derived at request time from the
+owner-approved species catalog (`server/data/species-catalog-v1`, via
+`server/services/pest-forecast/landscape-calendar.js`). Query: `month` (1-12,
+default the current ET month) and `grass` (`all|sta|bah|zoy|ber`, default
+`all`); anything else is a 400 (`invalid_month` / `invalid_grass`). The
+payload is items with name, host text, level (0-3) for the month plus the
+12-month `levels`, a trend flag, the homeowner sign and look-alike copy, the
+catalog service line and site link, and the month's plan-ahead notes; no
+customer, pricing or account data. Level comes only from the catalog's
+`active_months` / `peak_months`; a slug that is missing or not
+owner-approved is left out with a warning (never a boot crash), and the
+overlay test fails CI, so a thinner calendar never ships unnoticed. Intentionally CORS-open
+(`Access-Control-Allow-Origin: *`, same app-level preflight handler as
+`/pest-forecast`) so the guide can be embedded on other sites; inherits the
+global `/api/` IP rate limit. Cacheable and indexable: an explicit month is
+`public, max-age=3600, s-maxage=86400`, a defaulted month
+`public, max-age=300, s-maxage=900` (it flips at ET midnight on the 1st).
+No feature gate: it is read-only reference content.)
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
@@ -3426,6 +3507,9 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app).
+`/.well-known/security.txt` (RFC 9116 vulnerability-disclosure contact — static
+plain text, no auth, no PII, not gated; `Expires` is computed per request 180
+days ahead so it never goes stale; cached 1 day).
 `/api/public/track/:token` (read-only live service tracker; the
 `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
 rate limit. In ANY state it returns the customer property block — first name,
