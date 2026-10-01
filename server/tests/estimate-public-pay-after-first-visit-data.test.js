@@ -259,6 +259,36 @@ describe('GET /:token/data — recurringCardPolicy.setupFeeAfterFirstVisit', () 
     }
   });
 
+  // Codex round 2 P0: the promise is ONE shared server predicate (/data, the
+  // legacy page copy and the accept's attestation check all call it). A legacy
+  // estimate whose linked customer is a CURRENT monthly member keeps monthly
+  // billing at accept (the converter preserves the lane), so the accept would
+  // mint a payable setup invoice — the page must not promise first-visit billing.
+  describe('estimateSetupFeePromiseLaneOk (the lane half of the promise)', () => {
+    const { estimateSetupFeePromiseLaneOk } = estimatePublicRouter;
+    beforeEach(() => { dbRows = {}; });
+
+    test('a brand-new contact (no linked customer, no phone) converts per-application: promised', async () => {
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1' })).toBe(true);
+    });
+    test('a linked CURRENT monthly member (legacy estimate, no membership snapshot): NOT promised', async () => {
+      dbRows = { customers: { id: 'c1', pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'monthly_membership', waveguard_tier: 'Bronze' } };
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1', customer_id: 'c1' })).toBe(false);
+      dbRows = { customers: { id: 'c1', pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: null } };
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1', customer_id: 'c1' })).toBe(false);
+    });
+    test('a linked per-application / non-member customer: promised', async () => {
+      dbRows = { customers: { id: 'c1', pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } };
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1', customer_id: 'c1' })).toBe(true);
+      dbRows = { customers: { id: 'c1', pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'per_application' } };
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1', customer_id: 'c1' })).toBe(true);
+    });
+    test('a lookup failure fails CLOSED: not promised', async () => {
+      db.mockImplementationOnce(() => { throw new Error('customers lookup down'); });
+      expect(await estimateSetupFeePromiseLaneOk({ id: 'e1', customer_id: 'c1' })).toBe(false);
+    });
+  });
+
   // The positive composition (gates + card rail + resolvable tier visit counts)
   // is pinned at its seams: the rail predicate is the one payAfterFirstVisit
   // already proves above, and the tier-visit-count rule is this pure helper.

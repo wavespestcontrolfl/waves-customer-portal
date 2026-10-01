@@ -5772,6 +5772,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // resolve-time check needs the live modal state, not its closure snapshot.
   const recurringCardIntentOpenRef = useRef(false);
   const recurringCardSetupIntentIdRef = useRef(null);
+  // GATE_PAF_SETUP_FEE: whether THIS RENDER shows the "setup fee billed with your
+  // first visit" promise (set from the render-time value below); /accept attests
+  // it and the server refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+  const setupFeeAfterVisitShownRef = useRef(false);
+  // A SETUP_FEE_TERMS_REFRESH 409 returns the promise the accept would apply
+  // (it reads the post-conversion lane, which /data cannot always predict);
+  // it wins for THIS selection so the next confirm attests it instead of
+  // refusing again.
+  const [setupFeePromiseOverride, setSetupFeePromiseOverride] = useState(null);
+  const setupFeeSelectionKeyRef = useRef('');
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
   // requirement (flag flipped mid-session, or an exemption changed between
   // /data and /accept) — force the capture branch on the next confirm so the
@@ -7202,6 +7212,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
           recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
+          // Attests the after-first-visit setup-fee promise this tab rendered
+          // (render-bound: sent only while the copy is on screen).
+          setupFeeAfterFirstVisitShown: setupFeeAfterVisitShownRef.current ? true : undefined,
           prepayChargeAcknowledgedTotalCents: prepayChargeAckRef.current?.totalCents ?? undefined,
           // Binds the ack to the method the quote displayed — a default
           // switch server-side re-quotes instead of charging a card the
@@ -7298,6 +7311,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // one more tap.
             await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'The terms were updated — please review the line above Accept and confirm again.');
+          }
+          if (body.code === 'SETUP_FEE_TERMS_REFRESH') {
+            if (typeof body.setupFeePromise === 'boolean') {
+              setSetupFeePromiseOverride({ key: setupFeeSelectionKeyRef.current, value: body.setupFeePromise });
+            }
+            // The first-visit setup-fee terms this tab rendered no longer match
+            // what the accept would bill (a rail, gate or lane difference). The
+            // acceptance rolled back; refetch so the page shows the terms the
+            // server will apply, keep the reservation and selections, and ask
+            // for one more tap.
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your billing terms were updated — please review them and confirm again.');
           }
           if (body.code === 'PREPAY_QUOTE_STALE') {
             // The acknowledged prepay total drifted (credit/deposit change
@@ -8307,8 +8332,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // GATE_PAF_SETUP_FEE: this selection is the setup-only (monthly-tier) shape
   // on the card rail — the accept stamps the setup fee on the first visit and
   // bills it with that visit, so the capture copy and consent text say so.
+  const setupFeeSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
+  setupFeeSelectionKeyRef.current = setupFeeSelectionKey;
+  const setupFeeServerAnswer = setupFeePromiseOverride?.key === setupFeeSelectionKey ? setupFeePromiseOverride.value : null;
   const setupFeeAfterVisitCopy = paymentPreference !== 'prepay_annual' && setupFeeBilledWithFirstVisit({
-    enabled: !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit,
+    enabled: setupFeeServerAnswer ?? !!data?.recurringCardPolicy?.setupFeeAfterFirstVisit,
     serviceMode,
     invoiceMode: !!estimate.billByInvoice,
     siteConfirmationHold: !!estimate.siteConfirmationHold,
@@ -8316,6 +8344,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     extraInvoiceRows: rodentSetupInvoiceRows,
     selectedFrequency: combinedFrequency,
   });
+  setupFeeAfterVisitShownRef.current = !!setupFeeAfterVisitCopy;
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer

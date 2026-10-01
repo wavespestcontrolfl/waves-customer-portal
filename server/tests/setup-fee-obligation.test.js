@@ -526,7 +526,7 @@ describe('fee deferred to the first performed visit (series claim)', () => {
   // A dues-covered lane (monthly membership / annual prepay) never runs the
   // completion mint, so its stamp can never be consumed: that is a stranded
   // claim, not a deferral. The obligation reads owed and the stamp is reported
-  // so the completion can neutralize it before the manual bill goes out.
+  // so the completion can consume it into a draft invoice + claim (never clear it to nothing).
   test.each(['monthly_membership', 'annual_prepay'])('a stamp on a %s customer is NOT a deferral — owed, with the stranded stamp reported', async (lane) => {
     mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: lane } });
     const out = await run();

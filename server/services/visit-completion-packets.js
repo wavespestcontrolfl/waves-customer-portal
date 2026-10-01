@@ -690,6 +690,14 @@ async function runPacketCompletionCredits(packetId, database) {
   }
 }
 
+// The draft setup-fee invoice(s) a held closeout consumed its stamp(s) into (written
+// onto the packet payload by the billing mint): the office review carries its id
+// and amount so the fee is never reduced to a reason string.
+function setupFeeDraftState(packet) {
+  const drafts = packet?.payload ? packetPayload(packet).setupFeeDrafts : null;
+  return Array.isArray(drafts) && drafts.length ? { setupFeeDrafts: drafts } : {};
+}
+
 /**
  * One open office-review alert per packet. `dispatch_alerts` has no unique
  * index for (type, payload->>'packetId'), so the check and the insert are
@@ -701,7 +709,7 @@ async function runPacketCompletionCredits(packetId, database) {
  */
 async function recordOfficeReviewAlert(database, { packet, memberId, state }) {
   const run = async (trx) => {
-    await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first('id');
+    const lockedPacket = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first('id', 'payload');
     const open = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
       .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
     if (open) return false;
@@ -710,7 +718,7 @@ async function recordOfficeReviewAlert(database, { packet, memberId, state }) {
       type: 'visit_closeout_review', severity: 'warn',
       techId: member?.technician_id || null, jobId: member?.id || null,
       trx,
-      payload: { visitId: packet.visit_id, packetId: packet.id, ...state },
+      payload: { visitId: packet.visit_id, packetId: packet.id, ...setupFeeDraftState(lockedPacket), ...state },
     });
     return true;
   };
@@ -801,10 +809,13 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
       return;
     }
     outcome = { payment: derived.payment, delivery: derived.delivery, recovered: false };
-    const state = officeReviewState({
-      payment: derived.payment.state, delivery: derived.delivery.state,
-      reason: derived.payment.reason, payerId: derived.payment.payerId,
-    });
+    const state = {
+      ...officeReviewState({
+        payment: derived.payment.state, delivery: derived.delivery.state,
+        reason: derived.payment.reason, payerId: derived.payment.payerId,
+      }),
+      ...setupFeeDraftState(locked),
+    };
     const closeReview = derived.payment.state === 'office_required' || derived.delivery.state === 'delivery_review';
     // A payment review derived HERE puts the visit on billing hold, exactly as
     // the collection does when it sees the same state before delivery (local

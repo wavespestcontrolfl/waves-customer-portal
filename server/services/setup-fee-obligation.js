@@ -159,9 +159,9 @@ const DUES_COVERED_LANES = new Set(['monthly_membership', 'annual_prepay']);
 //
 // Returns { covers, unconsumableStamps }: live positive stamps this estimate's
 // series carries that NO completion can ever consume (dues-covered lane / a
-// series with no live consumer). When the obligation is then owed the office
-// bills the fee manually, and the completion neutralizes these so they cannot
-// auto-bill on top of that manual bill later.
+// series with no live consumer). When the obligation is then owed the
+// completion consumes these into a draft setup-fee invoice + claim (never
+// clears them to nothing), so the fee is billed once, by the draft.
 async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null, completingParentId = null } = {}) {
   const none = { covers: false, unconsumableStamps: [] };
   const roots = await conn('scheduled_services')
@@ -217,21 +217,82 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
   return { covers: false, unconsumableStamps };
 }
 
-// Clears the unconsumable POSITIVE stamps the detector reported, guarded on the
-// exact value read (compare-and-swap: a stamp that moved since is left alone).
-// Called by the completion when the obligation is OWED, so the manual bill the
-// office is about to cut is the only place the fee gets billed. Returns the
-// stamps actually cleared.
-async function neutralizeUnconsumableSetupFeeStamps(conn, stamps) {
-  const cleared = [];
+// CONSUMES a live POSITIVE setup-fee stamp into a durable record, in the
+// caller's transaction. Nothing may ever clear a stamp into nothing: a stamp
+// that no completion can consume (a dues-covered lane, a closeout the packet
+// hands to the office) is turned into a DRAFT invoice carrying a single
+// "One-time setup fee" line at the stamp amount, plus the immutable
+// setup_fee_claims record pointing at it. Every detector then reads the fee as
+// billed (a claim on a non-void invoice of the series), no later completion can
+// consume it again (the stamp is the normal consumed state, null), and the
+// office reviews and sends the draft. A draft is never sent, never charged and
+// carries no pay link: open-balance excludes drafts, dunning reads
+// sent/viewed/overdue only, and a saved-card charge needs a collectible status.
+//
+// Compare-and-swap on the exact stamp value (a stamp that moved since the read
+// is left alone and null is returned); a negative stamp is a completion
+// mid-mint that bills the fee itself and is never touched here. The notes carry
+// no "accepted estimate #" stamp on purpose: the estimate link is the claim's
+// estimate_id, and a stamped note would route this create through the
+// accepted-estimate coverage/packet-ownership checks.
+async function consumeSetupFeeStampIntoDraftInvoice(trx, { parentId, rawAmount, customerId, estimateId = null, origin = '', alertContext = null } = {}) {
+  if (!parentId || !customerId || !(Number(rawAmount) > 0)) return null;
+  const amount = Math.round(Number(rawAmount) * 100) / 100;
+  const updated = await trx('scheduled_services')
+    .where({ id: parentId, pending_setup_fee: rawAmount })
+    .update({ pending_setup_fee: null, updated_at: new Date() });
+  if (updated !== 1) return null;
+  const { etDateString } = require('../utils/datetime-et');
+  const invoice = await require('./invoice').create({
+    database: trx,
+    customerId,
+    title: 'One-time setup fee',
+    lineItems: [{
+      description: 'One-time setup fee',
+      quantity: 1,
+      unit_price: amount,
+      amount,
+      category: 'Setup fee',
+    }],
+    notes: `Setup fee carried on the series first visit${origin ? ` (${origin})` : ''}. DRAFT for office review: not sent, no pay link, nothing charged.`,
+    dueDate: etDateString(),
+    serviceDate: etDateString(),
+    skipAccrual: true,
+  });
+  if (!invoice?.id) throw new Error('setup-fee draft invoice was not created');
+  await require('./secure-appointment-plans').recordSetupFeeClaimForInvoice(trx, {
+    invoiceId: invoice.id, anchorId: parentId, amount, estimateId,
+  });
+  const draft = { invoiceId: invoice.id, invoiceNumber: invoice.invoice_number || null, amount, parentId, status: invoice.status || 'draft' };
+  // The office alert, in the SAME transaction: the draft, the claim, the
+  // consumed stamp and the alert commit or roll back together.
+  await require('./dispatch-alerts').createAlert({
+    type: 'setup_fee_draft_review', severity: 'warn', jobId: parentId, trx,
+    payload: { ...setupFeeDraftPayload(draft), estimateId, origin, ...(alertContext || {}) },
+  });
+  return draft;
+}
+
+// Consumes every unconsumable positive stamp the detector reported into its
+// own draft invoice + claim (one transaction per stamp, so a failure rolls the
+// stamp back and propagates: the caller fails CLOSED). Returns the drafts made.
+async function consumeUnconsumableSetupFeeStamps(db, stamps, { customerId, estimateId = null, origin = '' } = {}) {
+  const drafts = [];
   for (const stamp of Array.isArray(stamps) ? stamps : []) {
     if (!stamp?.parentId || !(Number(stamp.rawAmount) > 0)) continue;
-    const rows = await conn('scheduled_services')
-      .where({ id: stamp.parentId, pending_setup_fee: stamp.rawAmount })
-      .update({ pending_setup_fee: null, updated_at: new Date() });
-    if (rows === 1) cleared.push({ parentId: stamp.parentId, amount: stamp.amount });
+    const draft = await db.transaction((trx) => consumeSetupFeeStampIntoDraftInvoice(trx, {
+      parentId: stamp.parentId, rawAmount: stamp.rawAmount, customerId, estimateId, origin,
+    }));
+    if (draft) drafts.push(draft);
   }
-  return cleared;
+  return drafts;
+}
+
+function setupFeeDraftPayload(draft) {
+  return {
+    invoiceId: draft.invoiceId, invoiceNumber: draft.invoiceNumber, amount: draft.amount,
+    seriesId: draft.parentId,
+  };
 }
 
 /**
@@ -530,7 +591,7 @@ async function findUnmintedSetupFeeObligation({
     firstVisitAlreadyCompleted: !!priorCompleted,
     billedPriorPlanVisitIds,
     // Live positive stamps no completion can ever consume (dues-covered lane /
-    // no live consumer): the completion neutralizes them when it parks the
+    // no live consumer): the completion consumes them into a draft setup-fee invoice + claim (never clears them to nothing) when it parks the
     // manual bill, so the fee can never bill twice.
     unconsumableStamps: deferral.unconsumableStamps,
     deadInvoice: deadInvoice
@@ -541,7 +602,9 @@ async function findUnmintedSetupFeeObligation({
 
 module.exports = {
   findUnmintedSetupFeeObligation,
-  neutralizeUnconsumableSetupFeeStamps,
+  consumeSetupFeeStampIntoDraftInvoice,
+  consumeUnconsumableSetupFeeStamps,
+  setupFeeDraftPayload,
   _private: {
     SETUP_FEE_RULE_SAFE_CUTOFF, parseEstimateData, isPlanApplicationRow, snapshotShowsSetupFee,
   },

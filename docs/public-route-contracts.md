@@ -1344,13 +1344,22 @@ byte-identical to before. (1) GET `/api/estimates/:token/data`
 (the same predicate as `payAfterFirstVisit`, plus the sub-gate) AND every monthly-billed
 tier row in the quoted pricing carries a positive visit count (the accept defers only
 onto a priced first visit, and a tier row's per-visit price resolves only with a known
-visit count; otherwise the field is omitted and the page keeps today's invoice wording).
-The React page applies
+visit count; otherwise the field is omitted and the page keeps today's invoice wording)
+AND the resolved customer does not keep monthly membership billing (one shared server
+predicate, also used by the legacy page copy and the accept; any lookup failure omits the
+field). The React page applies
 its "setup fee billed with your first visit" copy and the `after_visit_card` consent text
 only when this is true AND its own selection resolves to the setup-only shape (monthly
 tier: a WaveGuard setup row, no first-visit amount, no bait-station setup row). A boolean
 about the viewer's own estimate: no customer, payer or payment-method data. (2) PUT
-`/api/estimates/:token/accept` success payload `setupFeeAfterFirstVisit: true` when this
+`/api/estimates/:token/accept` request body `setupFeeAfterFirstVisitShown: true` ATTESTS the
+tab rendered that promise (render-bound, omitted otherwise); the accept recomputes the
+promise inside its transaction from the same inputs and, on ANY difference between the
+attestation and what it would apply, refuses with `409 { code: 'SETUP_FEE_TERMS_REFRESH' }`
+(whole accept rolls back; the page refetches). The accept persists
+`estimate_data.acceptedRecurringCardConsentVariant: 'after_visit_card'` with the accept, and
+the `setup_intent.succeeded` recovery records that same consent variant. Success payload
+`setupFeeAfterFirstVisit: true` when this
 accept actually STAMPED the setup fee on the first visit's series parent
 (`scheduled_services.pending_setup_fee`) instead of minting a payable unattached invoice:
 the payload then carries `invoiceId: null`, `invoiceMode: false`, no `invoicePayUrl` and

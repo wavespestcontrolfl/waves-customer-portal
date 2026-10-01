@@ -527,35 +527,98 @@ postgres('visit completion packet records on PostgreSQL', () => {
   // stamp, written with every pay-after-first-visit gate OFF and no estimate
   // marker) is consumed only by the single-visit completion mint — the packet
   // mint carries no setup line, so it must route to the office instead of
-  // minting the visit without the fee (and silently deferring it again).
-  test.each([['positive', 99], ['negative in-progress marker', -99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting without the fee (gates off)', async (kind, stamp) => {
+  // minting the visit without the fee. A QUEUED stamp is never cleared into
+  // nothing: it is CONSUMED into a draft "One-time setup fee" invoice plus its
+  // setup_fee_claims record, and the office review carries the draft.
+  const setupDraftsOf = async () => (await mockPg('invoices').where({ customer_id: fixture.customerId }))
+    .filter((inv) => (typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : inv.line_items || [])
+      .some((line) => /one-time setup fee/i.test(String(line.description || ''))));
+
+  test.each([['positive', 99], ['negative in-progress marker', -99]])('a grouped closeout whose series carries a live %s setup-fee stamp goes to the office, never minting the visit without the fee (gates off)', async (kind, stamp) => {
     await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: stamp });
     const saved = await saveVisitCompletionPacket(submission());
     expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
-    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
-    const after = Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee);
+    const after = (await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee;
     if (stamp > 0) {
-      // The office now bills the fee by hand: the QUEUED claim is retired in the
-      // same transaction so a later single-visit completion cannot consume it and
-      // charge the fee a second time on top of that manual bill.
-      expect(after).toBe(0);
-      expect(saved.body.billing).toMatchObject({ setupFeeRetiredAmount: 99 });
-      expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      // Consumed into the durable record, never dropped: one DRAFT setup invoice,
+      // the immutable claim row pointing at it, the stamp in its consumed state.
+      expect(after).toBeNull();
+      const drafts = await setupDraftsOf();
+      expect(drafts).toHaveLength(1);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(drafts[0]).toMatchObject({ status: 'draft', visit_completion_packet_id: null, scheduled_service_id: null });
+      expect(Number(drafts[0].total)).toBe(99);
+      const claims = await mockPg('setup_fee_claims').where({ invoice_id: drafts[0].id });
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({ scheduled_service_id: fixture.serviceIds[0] });
+      expect(Number(claims[0].amount)).toBe(99);
+      // The office sees the draft id + amount: in the billing result, the
+      // setup_fee_draft_review alert, the packet payload and the closeout review.
+      expect(saved.body.billing.setupFeeDrafts[0]).toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
+      const draftAlerts = await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: fixture.serviceIds[0] });
+      expect(draftAlerts).toHaveLength(1);
+      expect(draftAlerts[0].payload).toMatchObject({ invoiceId: drafts[0].id, amount: 99, packetId: saved.body.packetId });
+      const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
+      expect((typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload).setupFeeDrafts[0])
+        .toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
     } else {
-      // A completion mid-mint bills the fee itself — left alone.
-      expect(after).toBe(stamp);
-      expect(saved.body.billing.setupFeeRetiredAmount).toBeUndefined();
+      // A completion mid-mint bills the fee itself — left alone, nothing minted.
+      expect(Number(after)).toBe(stamp);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(saved.body.billing.setupFeeDrafts).toBeUndefined();
     }
   });
 
-  test('grouped closeout -> manual fee invoice -> later child completion: the setup fee is billed exactly once (the retired claim cannot auto-bill on top)', async () => {
+  test('a secure-plan stamp with NO source estimate (gates off) is not lost: the grouped closeout turns it into a draft setup invoice + claim', async () => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99, source_estimate_id: null });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    const drafts = await setupDraftsOf();
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].status).toBe('draft');
+    expect(await mockPg('setup_fee_claims').where({ invoice_id: drafts[0].id })).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    expect(saved.body.billing.setupFeeDrafts[0]).toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
+  });
+
+  test('an EARLIER office-required exit (an existing member invoice) still consumes the queued stamp into the draft, never leaving it armed or dropped', async () => {
+    await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    const drafts = await setupDraftsOf();
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].status).toBe('draft');
+    expect(await mockPg('setup_fee_claims').where({ invoice_id: drafts[0].id })).toHaveLength(1);
+    expect((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    expect(saved.body.billing.setupFeeDrafts[0]).toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
+  });
+
+  test('the closeout review alert carries the draft setup invoice id + amount', async () => {
+    await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
+    const saved = await saveVisitCompletionPacket(submission());
+    const drafts = await setupDraftsOf();
+    expect(drafts).toHaveLength(1);
+    // Drive the packet to its close: the held billing puts it in office review,
+    // and that review carries the draft instead of dropping the fee details.
+    const result = await runVisitCompletionPacketEffects(saved.body.packetId);
+    expect(result.body.state).toBe('office_required');
+    const review = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds);
+    expect(review).toHaveLength(1);
+    expect(review[0].payload.setupFeeDrafts[0]).toMatchObject({ invoiceId: drafts[0].id, amount: 99 });
+  });
+
+  test('grouped closeout -> draft setup invoice -> later child completion: the setup fee is billed exactly once (the consumed claim cannot bill again)', async () => {
     const estimateId = await linkFixtureEstimateWithSetupObligation();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });
     const saved = await saveVisitCompletionPacket(submission());
-    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim', setupFeeRetiredAmount: 99 });
-    // The office bills the fee by hand (stamped so the detector recognizes it).
-    const manual = await createPaidSetupFee(estimateId);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'setup_fee_deferred_claim' });
+    const [draft] = await setupDraftsOf();
+    expect(draft).toMatchObject({ status: 'draft' });
     // A later visit of the same series completes on its own.
     const childId = randomUUID();
     try {
@@ -570,8 +633,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
         .flatMap((inv) => (typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : inv.line_items) || [])
         .filter((line) => /one-time setup fee/i.test(String(line.description || '')));
       expect(feeLines).toHaveLength(1);
-      expect(manual.id).toBeTruthy();
-      expect(await mockPg('setup_fee_claims').where({ scheduled_service_id: fixture.serviceIds[0] })).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').where({ scheduled_service_id: fixture.serviceIds[0] })).toHaveLength(1);
+      expect((await mockPg('invoices').where({ id: draft.id }).first()).status).toBe('draft');
     } finally {
       await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
       await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});

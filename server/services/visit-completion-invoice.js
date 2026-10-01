@@ -139,24 +139,42 @@ async function deferredSetupClaimStillQueued(trx, member) {
   return !!(await liveSetupClaim(trx, member));
 }
 
-// The packet hands this closeout to the office, who bill the visit (and the fee)
-// by hand. A QUEUED claim must not stay armed behind that manual bill — an
-// ordinary invoice never consumes it, so a later single-visit completion would
-// mint and charge the setup fee a second time. Retire it in this transaction
-// (compare-and-swap on the exact value; a rollback restores it) so the manual
-// bill is the ONLY place the fee is billed; the obligation detector keeps the
-// fee visible (a later completion parks for it unless the manual bill landed).
-// A NEGATIVE stamp is a single-visit completion mid-mint that will bill the fee
-// itself — left alone.
-async function retireQueuedSetupClaimForOffice(trx, claim) {
-  if (!claim?.queued) return null;
-  const rows = await trx('scheduled_services')
-    .where({ id: claim.parentId, pending_setup_fee: claim.raw })
-    .update({ pending_setup_fee: null, updated_at: new Date() });
-  return rows === 1 ? claim.amount : null;
+// The packet hands this closeout to the office, who bill the visit by hand. A
+// QUEUED claim is never cleared into nothing (and never left armed: an ordinary
+// invoice does not consume it, so a later single-visit completion would charge
+// the fee a second time): on EVERY office-required exit it is CONSUMED, in this
+// transaction, into a DRAFT "One-time setup fee" invoice plus its
+// setup_fee_claims record, the stamp goes to the consumed state, and a
+// setup_fee_draft_review alert carries the draft's id and amount. A rollback
+// restores the stamp with it. The office reviews and sends the draft. A NEGATIVE
+// stamp is a single-visit completion mid-mint that will bill the fee itself,
+// left alone. Every member's series is scanned (billed or not), once per series.
+async function consumeQueuedSetupClaimsForOffice(trx, members, { packet, visit }) {
+  const drafts = [];
+  const seen = new Set();
+  for (const member of members) {
+    const claim = await liveSetupClaim(trx, member);
+    if (!claim?.queued || seen.has(claim.parentId)) continue;
+    seen.add(claim.parentId);
+    const draft = await require('./setup-fee-obligation').consumeSetupFeeStampIntoDraftInvoice(trx, {
+      parentId: claim.parentId, rawAmount: claim.raw, customerId: member.customer_id,
+      estimateId: member.source_estimate_id || null, origin: 'grouped closeout handed to the office',
+      alertContext: { visitId: visit.id, packetId: packet.id, serviceId: member.id },
+    });
+    if (draft) drafts.push({ invoiceId: draft.invoiceId, invoiceNumber: draft.invoiceNumber, amount: draft.amount });
+  }
+  return drafts;
 }
 
-async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
+// Every office-required exit of the mint hands over the queued claims it found.
+async function mintPacketInvoice(args) {
+  const result = await mintPacketInvoiceInner(args);
+  if (result.state !== 'office_required') return result;
+  const drafts = await consumeQueuedSetupClaimsForOffice(args.trx, args.members, args);
+  return drafts.length ? { ...result, setupFeeDrafts: drafts } : result;
+}
+
+async function mintPacketInvoiceInner({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
   const adoptionMembers = [];
@@ -279,11 +297,9 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
     // mint. This combined-packet mint carries no setup line, so letting it
     // proceed would silently push the fee to a later visit — send the closeout
     // to the office instead, never "deferred, therefore fine".
-    const queuedClaim = await liveSetupClaim(trx, member);
-    if (queuedClaim) {
-      const retired = await retireQueuedSetupClaimForOffice(trx, queuedClaim);
-      return office('setup_fee_deferred_claim', member.id, retired ? { setupFeeRetiredAmount: retired } : null);
-    }
+    // (mintPacketInvoice consumes the queued claim into its draft on this and
+    // every other office-required exit.)
+    if (await liveSetupClaim(trx, member)) return office('setup_fee_deferred_claim', member.id);
     // A canceled fee is treated as covered with completing-visit context only
     // because the billed application's prior-invoice lane parks that case.
     // A zero-price member skips that lane, so its canceled fee remains owed.
@@ -500,7 +516,20 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       }
       return { state: 'invoice_ready', invoiceId: ownInvoice.id, total: Number(ownInvoice.total) };
     }
-    if (visit.billing_hold) return office(packet.error || 'visit_billing_held');
+    if (visit.billing_hold) {
+      // A hold set before this mint ran (the office, a payer withdrawal) still
+      // hands the closeout over: any queued claim on its series is consumed into
+      // its draft here too, never left armed behind the manual bill.
+      const heldMembers = await trx('scheduled_services').whereIn('id', itemIds)
+        .orderBy('id').select('id', 'customer_id', 'source_estimate_id', 'recurring_parent_id');
+      const drafts = await consumeQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
+      if (drafts.length) {
+        await trx('visit_completion_packets').where({ id: packet.id }).update({
+          payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ setupFeeDrafts: drafts })]), updated_at: trx.fn.now(),
+        });
+      }
+      return { ...office(packet.error || 'visit_billing_held'), ...(drafts.length ? { setupFeeDrafts: drafts } : {}) };
+    }
     if (visit.billing_frozen_at) return { state: 'no_charge', invoiceId: null };
     const members = await trx('visit_completion_packet_items as i')
       .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
@@ -520,7 +549,15 @@ async function createVisitCompletionInvoice(packetId, database = db) {
     await trx('service_visits').where({ id: visit.id }).update({
       billing_hold: held, billing_frozen_at: trx.fn.now(), updated_at: trx.fn.now(),
     });
-    if (held) await trx('visit_completion_packets').where({ id: packet.id }).update({ error: result.reason, updated_at: trx.fn.now() });
+    if (held) {
+      await trx('visit_completion_packets').where({ id: packet.id }).update({
+        error: result.reason,
+        // The draft setup invoice the held closeout consumed its stamp into rides
+        // the packet, so the office review alert carries its id and amount.
+        ...(result.setupFeeDrafts ? { payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ setupFeeDrafts: result.setupFeeDrafts })]) } : {}),
+        updated_at: trx.fn.now(),
+      });
+    }
     await trx('visit_effects').insert({
       visit_id: visit.id, effect_type: 'billing_ready', dedupe_key: `${visit.id}:billing_ready`,
       status: held ? 'failed' : 'sent', provider_id: result.invoiceId,

@@ -5128,6 +5128,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
+      // The consent variant the accept rendered and recorded (estimate_data
+      // acceptedRecurringCardConsentVariant): recovery records the SAME text the
+      // customer saw, never the base consent for an after-visit accept.
+      ...(['after_visit_card', 'after_visit_prepay', 'prepay_card'].includes(estimateData?.acceptedRecurringCardConsentVariant)
+        ? { consentVariant: estimateData.acceptedRecurringCardConsentVariant } : {}),
     });
     // This handler can be the ONLY durable recovery path (crash after the
     // accept commit, browser never returned) — a TRANSIENT failure must

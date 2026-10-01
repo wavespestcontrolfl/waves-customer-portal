@@ -7938,6 +7938,18 @@ describe('public estimate one-time breakdown', () => {
       expect(html).not.toContain('No payment is charged on this page. The $99.00 setup fee is billed with your first visit.');
     });
 
+    // Codex round 2 P0: the legacy page promises first-visit billing only while
+    // the shared lane predicate agrees (a current monthly member keeps monthly
+    // billing at accept and would get a payable invoice).
+    test('card rail but the lane predicate says no (current monthly member): today\'s wording, no first-visit promise', () => {
+      process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+      process.env.GATE_PAF_SETUP_FEE = 'true';
+      const html = renderPage('paf-setup-member', tierEstimate, tierData, null, { payAfterFirstVisitCopy: true, setupFeePromiseLaneOk: false });
+      expect(html).toContain('we send the WaveGuard setup invoice for $99.00 so you can pay before service.');
+      expect(html).toContain('const PAY_AFTER_SETUP_FEE_COPY = false;');
+      expect(html).not.toContain('The $99.00 WaveGuard setup fee is billed with your first visit.');
+    });
+
     test('not on the card rail (payAfterFirstVisitCopy false): today\'s wording even with both gates on', () => {
       process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
       process.env.GATE_PAF_SETUP_FEE = 'true';

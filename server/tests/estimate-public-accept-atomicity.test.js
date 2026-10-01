@@ -371,6 +371,10 @@ async function putAccept(token, body = {}) {
   return { status: res.status, data: await res.json() };
 }
 
+// The tab attests it rendered the "setup fee billed with your first visit"
+// promise (the accept refuses on any difference from what it would apply).
+const putAcceptShown = (token, body = {}) => putAccept(token, { ...body, setupFeeAfterFirstVisitShown: true });
+
 beforeEach(() => {
   jest.clearAllMocks();
   InvoiceService.create.mockImplementation(async () => ({
@@ -2469,7 +2473,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   test('gate ON: no invoice minted, nothing delivered, the fee is stamped on the series parent, the customer is told it bills with the first visit', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-on');
-    const response = await putAccept(token);
+    const response = await putAcceptShown(token);
 
     expect(response.status).toBe(200);
     expect(InvoiceService.create).not.toHaveBeenCalled();
@@ -2494,7 +2498,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   test('gate ON: the stamp lands on the SERIES PARENT when the first visit is a follow-up child', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-child', { parentId: 'ss-parent-1' });
-    const response = await putAccept(token);
+    const response = await putAcceptShown(token);
 
     expect(response.status).toBe(200);
     const rows = db.__state.tables.scheduled_services;
@@ -2513,7 +2517,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
     const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
     const token = setupOnlyFixture('paf-consent');
-    const response = await putAccept(token, { recurringCardSetupIntentId: 'seti_paf_1' });
+    const response = await putAcceptShown(token, { recurringCardSetupIntentId: 'seti_paf_1' });
 
     expect(response.status).toBe(200);
     expect(enroll).toHaveBeenCalledTimes(1);
@@ -2537,7 +2541,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     const enroll = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
 
     const noAnchor = setupOnlyFixture('paf-consent-noanchor', { withAnchor: false });
-    const first = await putAccept(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    const first = await putAcceptShown(noAnchor, { recurringCardSetupIntentId: 'seti_paf_fb' });
     expect(first.status).toBe(409);
     expect(first.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
     expect(first.data.error).toMatch(/reload the page/i);
@@ -2547,7 +2551,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
 
     const occupied = setupOnlyFixture('paf-consent-occupied');
     db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
-    const second = await putAccept(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
+    const second = await putAcceptShown(occupied, { recurringCardSetupIntentId: 'seti_paf_fb' });
     expect(second.status).toBe(409);
     expect(second.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
     expect(InvoiceService.create).not.toHaveBeenCalled();
@@ -2616,7 +2620,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
   test('gate ON but no first visit exists to carry the stamp: the accept is refused retryably — a fee is never dropped and no payable invoice contradicts the page', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-noanchor', { withAnchor: false });
-    const response = await putAccept(token);
+    const response = await putAcceptShown(token);
 
     expect(response.status).toBe(409);
     expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
@@ -2652,7 +2656,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     for (const price of [null, 0]) {
       InvoiceService.create.mockClear();
       const token = setupOnlyFixture(`paf-unpriced-known-${price}`, { price });
-      const response = await putAccept(token);
+      const response = await putAcceptShown(token);
 
       expect(response.status).toBe(409);
       expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
@@ -2685,7 +2689,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
 
     InvoiceService.create.mockClear();
     const resolved = setupOnlyFixture('paf-real-known', { price: derive(9) });
-    const second = await putAccept(resolved);
+    const second = await putAcceptShown(resolved);
     expect(second.status).toBe(200);
     expect(second.data.setupFeeAfterFirstVisit).toBe(true);
     expect(InvoiceService.create).not.toHaveBeenCalled();
@@ -2696,7 +2700,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     gateOn();
     const token = setupOnlyFixture('paf-occupied');
     db.__state.tables.scheduled_services[0].pending_setup_fee = 49;
-    const response = await putAccept(token);
+    const response = await putAcceptShown(token);
 
     expect(response.status).toBe(409);
     expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
@@ -2715,10 +2719,47 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
   });
 
+  // Codex round 2 P0: the page promised first-visit billing to a customer the
+  // accept then converts onto a non-per_application lane (a current monthly
+  // member the preview could not see). The tab's attestation and the accept's
+  // recomputation differ, so the accept is REFUSED for a refresh — never a
+  // payable setup invoice after the promise.
+  test.each(['monthly_membership', 'annual_prepay'])('gate ON, the tab attested the first-visit promise but the converted lane is %s: the accept is refused 409 SETUP_FEE_TERMS_REFRESH, nothing committed', async (lane) => {
+    gateOn();
+    const token = setupOnlyFixture(`paf-attested-lane-${lane}`, { billingMode: lane });
+    const response = await putAcceptShown(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    // The answer the accept would apply rides the 409 so the tab stops promising it.
+    expect(response.data.setupFeePromise).toBe(false);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+    expect(storedEstimate().status).not.toBe('accepted');
+  });
+
+  test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-unattested');
+    const response = await putAccept(token);
+    expect(response.status).toBe(409);
+    expect(response.data.code).toBe('SETUP_FEE_TERMS_REFRESH');
+    expect(response.data.setupFeePromise).toBe(true);
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+  });
+
+  test('gate ON, an accept that records the after-visit consent persists acceptedRecurringCardConsentVariant for the setup_intent recovery', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-variant-persist');
+    const response = await putAcceptShown(token);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(storedEstimate().estimate_data).acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+  });
+
   test('retry of the deferred accept says the same thing and never produces a pay link', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-retry');
-    const first = await putAccept(token);
+    const first = await putAcceptShown(token);
     expect(first.status).toBe(200);
     const retry = await putAccept(token);
 
@@ -2750,7 +2791,7 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
         deferredFollowUpReminderRows: [],
       };
     });
-    const response = await putAccept(token);
+    const response = await putAcceptShown(token);
 
     expect(response.status).toBe(200);
     expect(InvoiceService.create).not.toHaveBeenCalled();

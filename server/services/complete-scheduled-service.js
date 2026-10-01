@@ -8855,7 +8855,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && svc.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true')) {
       try {
         const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
-        const obligation = await findUnmintedSetupFeeObligation({
+        const obligationArgs = {
           sourceEstimateId: svc.source_estimate_id,
           customerId: svc.customer_id,
           excludeScheduledServiceId: svc.id,
@@ -8867,21 +8867,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
             is_recurring: svc.is_recurring,
             recurring_parent_id: svc.recurring_parent_id || null,
           },
-        }, db);
+        };
+        let obligation = await findUnmintedSetupFeeObligation(obligationArgs, db);
         // A live stamp on this estimate's series that NO completion can ever
-        // consume (dues-covered lane / no live consumer) is not a deferral:
-        // the obligation reads owed and the office bills the fee manually. The
-        // stamp must not stay armed — a later lane flip or a re-activated
-        // series would auto-bill it on top of that manual bill. Clear it
-        // (guarded on the exact value) and say so in the alert. A failure
-        // here fails the lookup CLOSED (503 + resume) like any other read.
+        // consume (dues-covered lane / no live consumer) is not a deferral, and
+        // it must never be cleared into nothing: it is CONSUMED, in its own
+        // transaction, into a DRAFT "One-time setup fee" invoice plus the
+        // immutable setup_fee_claims record (the same records the normal
+        // consumption writes), the stamp goes to the consumed state (null), and
+        // a setup_fee_draft_review office alert carries the draft's id and
+        // amount. Every detector then reads the fee as billed, so the obligation
+        // is judged again on the new state and the visit is not parked for a
+        // manual bill that would double the draft; the office reviews and sends
+        // the draft (never auto-sent, no pay link, no charge). A failure here
+        // fails the lookup CLOSED (503 + resume) like any other read.
         if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length) {
-          const { neutralizeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
-          const cleared = await neutralizeUnconsumableSetupFeeStamps(db, obligation.unconsumableStamps);
-          if (cleared.length) {
-            const clearedTotal = cleared.reduce((sum, c) => sum + c.amount, 0);
-            obligation.neutralizedStampNote = ` NOTE: a queued setup-fee stamp ($${clearedTotal.toFixed(2)}) on this estimate's series could never auto-bill and was cleared so it cannot charge the fee a second time — bill the fee ONLY manually, once.`;
-            logger.warn(`[dispatch] visit ${svc.id}: cleared ${cleared.length} unconsumable setup-fee stamp(s) on estimate ${obligation.estimateSlug || obligation.estimateId} (${cleared.map((c) => c.parentId).join(', ')}) — the manual bill owns the fee`);
+          const { consumeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
+          const drafts = await consumeUnconsumableSetupFeeStamps(db, obligation.unconsumableStamps, {
+            customerId: svc.customer_id,
+            estimateId: obligation.estimateId || svc.source_estimate_id,
+            origin: `visit ${svc.id}`,
+          });
+          if (drafts.length) {
+            logger.warn(`[dispatch] visit ${svc.id}: consumed ${drafts.length} unconsumable setup-fee stamp(s) on estimate ${obligation.estimateSlug || obligation.estimateId} into draft invoice(s) ${drafts.map((d) => d.invoiceId).join(', ')} — the office reviews and sends the draft`);
+            obligation = await findUnmintedSetupFeeObligation(obligationArgs, db);
+            if (obligation.owed) {
+              obligation.setupFeeDraftNote = ` NOTE: a queued setup-fee stamp ($${drafts.reduce((sum, d) => sum + d.amount, 0).toFixed(2)}) on this estimate's series was converted into DRAFT invoice(s) ${drafts.map((d) => d.invoiceNumber || d.invoiceId).join(', ')} for review — do not bill that fee a second time.`;
+            }
           }
         }
         const setupFeeDedupeKey = `unminted_setup_fee_manual_billing:${svc.source_estimate_id}`;
@@ -8907,7 +8919,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // parking a second one (Codex P0, pre-push round 11).
           // Retain the accepted fee for the terminal alert's locked coverage recheck.
           unmintedSetupFeeObligation = obligation;
-          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.${obligation.neutralizedStampNote || ''}`;
+          terminalSetupFeeNote = ` ALSO: the one-time WaveGuard setup fee ($${Number(obligation.setupFee || 0).toFixed(2)}) for accepted estimate ${obligation.estimateSlug || obligation.estimateId} was never invoiced — bill it beside the visit charge above; verify it is not already on a live invoice before billing.${obligation.setupFeeDraftNote || ''}`;
         } else if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
           // One parked visit per estimate (Codex P0, pre-push round 8):
           // the fee obligation stays owed while a parked visit sits
@@ -8958,7 +8970,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 const created = await require('../services/notification-service').notifyAdmin(
                   'billing',
                   'Setup fee never invoiced — historic first visit billed without it',
-                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.${obligation.neutralizedStampNote || ''}`,
+                  `The first application for accepted estimate ${histRef} was completed and billed WITHOUT its one-time WaveGuard setup fee (${histFee}). Bill ONLY the fee — use the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${obligation.estimateId}" in the invoice notes so the system recognizes it as billed. Do NOT re-bill any application.${obligation.setupFeeDraftNote || ''}`,
                   {
                     link: `/admin/customers?customerId=${svc.customer_id}`,
                     bell: true,
@@ -9704,7 +9716,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } else {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
-          alertBody += unmintedSetupFeeObligation.neutralizedStampNote || '';
+          alertBody += unmintedSetupFeeObligation.setupFeeDraftNote || '';
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
             // resolved round means the obligation REOPENED (coverage
@@ -10389,6 +10401,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Unreadable stamp mints the plain visit invoice — the fee stays
         // stamped for the next completion rather than risking a double line.
         logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
+      }
+    }
+    // The FIRST PERFORMED visit of a series whose own price reads $0 (repriced
+    // to an authoritative $0, or unpriced) bills nothing, so the queued setup
+    // fee has no invoice of this visit to ride — and must neither slide to a
+    // later visit nor be lost. It is CONSUMED, in its own transaction, into a
+    // DRAFT "One-time setup fee" invoice + the immutable claim record (the
+    // same records the normal consumption writes), the stamp goes to its
+    // consumed state, and a setup_fee_draft_review alert carries the draft for
+    // the office. Only a performed, non-callback, non-always-free, live
+    // completion that declined to invoice for want of a price; a failure
+    // leaves the stamp queued (never lost).
+    if (!packetEffects && !shouldInvoice && !hasVisitPrice && visitPerformed && !isBackfillCompletion
+      && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      try {
+        const zeroParentId = svc.recurring_parent_id || svc.id;
+        const zeroParent = await db('scheduled_services').where({ id: zeroParentId }).first('pending_setup_fee');
+        if (Number(zeroParent?.pending_setup_fee) > 0) {
+          const { consumeSetupFeeStampIntoDraftInvoice } = require('../services/setup-fee-obligation');
+          const zeroDraft = await db.transaction((trx) => consumeSetupFeeStampIntoDraftInvoice(trx, {
+            parentId: zeroParentId, rawAmount: zeroParent.pending_setup_fee, customerId: svc.customer_id,
+            estimateId: svc.source_estimate_id || null, origin: `first performed visit ${svc.id} billed nothing`,
+            alertContext: { visitId: svc.id, serviceId: svc.id },
+          }));
+          if (zeroDraft) logger.warn(`[dispatch] visit ${svc.id} billed nothing — its queued setup fee ($${zeroDraft.amount}) was consumed into draft invoice ${zeroDraft.invoiceId} for office review`);
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] zero-price setup-fee draft failed for visit ${svc.id} (the stamp stays queued): ${e.message}`);
       }
     }
     if (shouldInvoice) {

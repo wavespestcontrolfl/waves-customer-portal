@@ -3071,6 +3071,34 @@ function monthlyTierVisitCountsResolvable(frequencies) {
   return monthlyRows.length > 0 && monthlyRows.every((frequency) => Number(frequency.visitsPerYear) > 0);
 }
 
+// GATE_PAF_SETUP_FEE: the LANE half of the one setup-fee "promise" predicate
+// (the preview /data flag, the legacy page copy and the accept's attestation
+// check all call it). The accept defers the fee only onto a customer whose
+// billing lane is per_application AFTER the conversion; the converter
+// preserves an existing monthly member's lane (customerPreservesMonthlyMembership
+// on the resolved customer — linked row, or the phone-matched prospective one,
+// exactly as the accept resolves it), so promising "billed with your first
+// visit" to that customer would be followed by a payable invoice. True when the
+// resolved customer does NOT keep monthly billing, or none resolves (a new
+// contact converts per-application). FAILS CLOSED: any lookup failure answers
+// "no promise", so a page never promises what the accept might not do.
+async function estimateSetupFeePromiseLaneOk(estimate) {
+  try {
+    if (!estimate?.customer_id && !estimate?.customer_phone) return true;
+    let customer = null;
+    if (estimate.customer_id) {
+      customer = await db('customers').where({ id: estimate.customer_id }).first();
+    } else {
+      ({ match: customer } = await matchAcceptCustomerByPhone(estimate));
+    }
+    if (!customer) return true;
+    return !BillingCadence.customerPreservesMonthlyMembership(customer);
+  } catch (e) {
+    logger.warn(`[estimate-public] setup-fee promise lane lookup failed for estimate ${estimate?.id} — not promising: ${e.message}`);
+    return false;
+  }
+}
+
 function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
@@ -5511,6 +5539,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // payAfterFirstVisitCopy (card capture required / enrolled), so the page
   // and the accept (estimate-public accept, setup-fee deferral) agree.
   const payAfterSetupFeeCopy = payAfterFirstVisitCopy
+    && opts.setupFeePromiseLaneOk !== false
     && require('../config/feature-gates').pafSetupFeeLive()
     && setupDueToday > 0
     && rodentSetupDueToday <= 0
@@ -9020,6 +9049,7 @@ async function handleEstimateView(req, res, next) {
     // one-time-only). Short-circuits before any lookup while the gate or the
     // card lane is off, so gate-off pages are byte-identical to today.
     let payAfterFirstVisitCopy = false;
+    let setupFeePromiseLaneOk = true;
     if (require('../config/feature-gates').payAfterFirstVisitLive()
       && RecurringCards.isRecurringCardOnFileEnabled()
       && !effectiveInvoiceMode && !depositStructuralOneTime) {
@@ -9039,6 +9069,11 @@ async function handleEstimateView(req, res, next) {
             paymentMethodPreference: null,
           });
           payAfterFirstVisitCopy = RecurringCards.payAfterFirstVisitCardRail(payAfterPolicy);
+          // The setup-fee promise's lane half (see estimateSetupFeePromiseLaneOk):
+          // only looked up when the page could otherwise promise it.
+          if (payAfterFirstVisitCopy && require('../config/feature-gates').pafSetupFeeLive()) {
+            setupFeePromiseLaneOk = await estimateSetupFeePromiseLaneOk(estimate);
+          }
         }
       } catch (payAfterErr) {
         // Fail toward today's wording: never promise "nothing is charged"
@@ -9105,7 +9140,7 @@ async function handleEstimateView(req, res, next) {
       // record even with the gate off (codex #3338 r15 sibling) — same
       // committed definition the snapshot reconciler uses.
       committed: estimate.status === 'accepted' || !!estimate.price_locked_at,
-    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy });
+    }), { showYourWork, prepayBaseRate, monthlyBilledEstimate, payAfterFirstVisitCopy, setupFeePromiseLaneOk });
   } catch (err) { next(err); }
 }
 
@@ -9447,6 +9482,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // estimate can never be accepted under the gate without its record
     // (pre-push Codex P1). Gate off ⇒ the field is ignored and nothing is
     // recorded: nothing was shown, so nothing is claimed.
+    // GATE_PAF_SETUP_FEE: the tab ATTESTS it rendered the "setup fee billed with
+    // your first visit" promise (render-bound, sent only under the predicate that
+    // renders it). The accept recomputes the promise inside its transaction and
+    // refuses on ANY difference (SETUP_FEE_TERMS_REFRESH), so what the customer
+    // saw and what is billed can never diverge.
+    const setupFeeAfterVisitAttested = req.body?.setupFeeAfterFirstVisitShown === true;
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
@@ -12528,7 +12569,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // silently dropped fee) when there is no series parent to carry the
           // stamp or the parent already carries a different claim.
           let deferSetupFeeStamp = null;
-          if (shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
+          const deferShapeEligible = !!(shouldCreateStandardDraftInvoice && setupFeeApplies && !includesFirstApplicationLine
             && !(acceptedRodentSetupAmount > 0)
             && require('../config/feature-gates').pafSetupFeeLive()
             && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicy)
@@ -12536,17 +12577,41 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // page) applies: a tier whose visit count is unknown shows the
             // BASE text and keeps today's payable invoice, so the accept
             // never even attempts the stamp for it.
-            && monthlyTierVisitCountsResolvable(pricingFrequencies)) {
-            // Only a per-application customer's first visit bills on its own
-            // completion invoice. A monthly-membership / prepay lane is dues-
-            // covered at its first visit (the completion mint never runs the
-            // claim there), so a stamp would sit unbilled forever. Read AFTER
-            // convertEstimate, inside the trx: the converter is what sets (or,
-            // for an existing member, preserves) the billing lane. Such a
-            // customer was never shown the after-visit promise as theirs to
-            // keep, so it keeps today's payable invoice and the base consent.
-            const deferLaneRow = await trx('customers').where({ id: customerId }).first('billing_mode');
-            const deferLaneIsPerApplication = deferLaneRow?.billing_mode === 'per_application';
+            && monthlyTierVisitCountsResolvable(pricingFrequencies));
+          // Only a per-application customer's first visit bills on its own
+          // completion invoice. A monthly-membership / prepay lane is dues-
+          // covered at its first visit (the completion mint never runs the
+          // claim there), so a stamp would sit unbilled forever. Read AFTER
+          // convertEstimate, inside the trx: the converter is what sets (or,
+          // for an existing member, preserves) the billing lane.
+          const deferLaneRow = deferShapeEligible
+            ? await trx('customers').where({ id: customerId }).first('billing_mode')
+            : null;
+          const deferLaneIsPerApplication = deferLaneRow?.billing_mode === 'per_application';
+          // The promise, recomputed from the SAME inputs the preview used. The
+          // tab attested whether it rendered it; ANY difference (the customer
+          // is a monthly member the preview could not resolve, a gate or rail
+          // flipped, a stale tab) refuses retryably — the whole accept rolls
+          // back — so the customer is never billed differently than shown.
+          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication;
+          if (setupFeeAfterVisitAttested !== deferPromisedNow) {
+            logger.warn(`[estimate-accept] setup-fee terms differ for estimate ${estimate.id} (tab rendered the first-visit promise: ${setupFeeAfterVisitAttested}, accept would apply it: ${deferPromisedNow}) — refusing for a refresh`);
+            const termsDiffErr = estimateAcceptError(
+              'We couldn\u2019t finish setting up your first-visit billing just now \u2014 please reload the page and try again, or call us and we\u2019ll book it for you.',
+              409,
+            );
+            termsDiffErr.code = 'SETUP_FEE_TERMS_REFRESH';
+            // The answer the accept WOULD apply, so the reloaded tab renders it
+            // for this selection instead of re-attesting /data's pre-conversion
+            // read (the converter can land a different lane than /data saw, e.g.
+            // a pinned legacy rodent plan) and refusing on every confirm.
+            termsDiffErr.setupFeePromise = deferPromisedNow;
+            throw termsDiffErr;
+          }
+          if (deferShapeEligible) {
+            // (The lane was read above.) A customer who is not per-application
+            // was never shown the after-visit promise (attested false), so it
+            // keeps today's payable invoice and the base consent.
             if (!deferLaneIsPerApplication) {
               logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — customer ${customerId} billing lane is ${deferLaneRow?.billing_mode || 'unset'}, not per_application; minting the payable setup invoice as before`);
             } else {
@@ -12832,6 +12897,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Persisted so an already-accepted retry describes this accept as it
           // was ("setup fee billed with your first visit"), not a missing invoice.
           ...(setupFeeDeferredToFirstVisit ? { setupFeeDeferredToFirstVisit: true } : {}),
+          // The consent variant the capture UI rendered and this accept
+          // recorded (same key and semantics as the sibling accept lanes), so
+          // the setup_intent.succeeded recovery enrolls under the SAME text the
+          // customer saw instead of the base consent.
+          ...(setupFeeAfterVisitConsentShown ? { acceptedRecurringCardConsentVariant: 'after_visit_card' } : {}),
         };
         await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
@@ -14880,7 +14950,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // raced hold (OFF_CUSTOMER_SURFACE) must read exactly like an unknown
       // token (codex #4667 r38 P0).
       if (err.status === 404) return res.status(404).json({ error: 'Estimate not found' });
-      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(typeof err.setupFeePromise === 'boolean' ? { setupFeePromise: err.setupFeePromise } : {}),
+      });
     }
     next(err);
   }
@@ -27721,6 +27795,15 @@ async function composeEstimateDataPayload(estimate, {
     // window with both flags on it must see required:false or the "$0
     // today" story breaks (Codex #2680).
     const recurringCardLaneActiveForData = RecurringCards.payAfterFirstVisitInvoiceRail(recurringCardPolicyForData);
+    // GATE_PAF_SETUP_FEE: the setup-fee "billed with your first visit" promise,
+    // decided by the SAME inputs the accept uses (gate, card rail, every
+    // monthly tier row's visit count, and the resolved customer's lane via
+    // estimateSetupFeePromiseLaneOk). The accept recomputes it inside its
+    // transaction and refuses (409 SETUP_FEE_TERMS_REFRESH) on any difference.
+    const setupFeePromiseForData = require('../config/feature-gates').pafSetupFeeLive()
+      && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData)
+      && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
+      && await estimateSetupFeePromiseLaneOk(estimate);
     if (recurringCardLaneActiveForData && depositPolicy.required) {
       // Prepay accepts sit OUTSIDE the card lane only while the legacy
       // carve-out is in force (the resolver exempts prepay_annual before any
@@ -28277,10 +28360,7 @@ async function composeEstimateDataPayload(estimate, {
         // Also requires every monthly-billed tier row to carry a visit count
         // (the accept defers only onto a priced first visit). Present only
         // when true so every gate-off response stays byte-identical.
-        ...(require('../config/feature-gates').pafSetupFeeLive()
-          && RecurringCards.payAfterFirstVisitCardRail(recurringCardPolicyForData)
-          && monthlyTierVisitCountsResolvable(pricingBundle?.frequencies)
-          ? { setupFeeAfterFirstVisit: true } : {}),
+        ...(setupFeePromiseForData ? { setupFeeAfterFirstVisit: true } : {}),
       },
       estimate: {
         id: estimate.id,
@@ -29003,6 +29083,7 @@ module.exports.optOutResultHasPricingRows = optOutResultHasPricingRows;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.monthlyTierVisitCountsResolvable = monthlyTierVisitCountsResolvable;
+module.exports.estimateSetupFeePromiseLaneOk = estimateSetupFeePromiseLaneOk;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
