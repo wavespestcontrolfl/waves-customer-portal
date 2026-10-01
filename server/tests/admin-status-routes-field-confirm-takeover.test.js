@@ -36,7 +36,9 @@ jest.setTimeout(30000);
 
 // The street-level address-hold lookup (a technician may not confirm or run a hold): none of these fixtures is one.
 const mockIsHold = jest.fn(async () => false);
-jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: (...a) => mockIsHold(...a) }));
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: (...a) => mockIsHold(...a),
+  // The under-lock recheck reads the same answer as the pre-check.
+  assertNotLiveHoldUnderLock: async (...a) => { if (await mockIsHold(...a)) throw Object.assign(new Error('Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.'), { status: 409, code: 'street_level_hold' }); } }));
 let mockRole = 'technician';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {

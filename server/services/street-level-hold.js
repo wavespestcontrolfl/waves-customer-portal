@@ -224,4 +224,17 @@ async function assertExpectedServiceAddress(trx, visitId, expected) {
   }
 }
 
-module.exports = { assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+const HOLD_REFUSAL = 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.';
+
+// The status routes' hold guard, serialized with promotion: take the visit row lock FOR UPDATE (the
+// promoter takes the same lock and re-reads eligibility), then re-read the hold under it. A hold promoted
+// after the route's pre-check but before this transaction took the lock is caught here; one promoted
+// later finds the visit already confirmed and does not promote. Throws the status/code error the routes map.
+async function assertNotLiveHoldUnderLock(trx, visitId) {
+  await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
+  if (await isStreetLevelHoldVisit(visitId, trx)) {
+    throw Object.assign(new Error(HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
+  }
+}
+
+module.exports = { assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

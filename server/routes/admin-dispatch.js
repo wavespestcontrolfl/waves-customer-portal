@@ -2518,8 +2518,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // Only an unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
     const heldAdvance = ['en_route', 'on_site', 'completed', 'no_show'].includes(toStatus)
       && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
-    if (((req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)) || heldAdvance)
-      && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+    const holdGuardApplies = (req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
       return res.status(409).json({
         error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
         code: 'street_level_hold',
@@ -2574,6 +2574,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // live-status resend bypass the 7-day window too.
           allowTerminal: toStatus === fromStatus && ['cancelled', 'skipped'].includes(fromStatus),
         });
+        // The same guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
         // The office confirmed the address the dialog SHOWED (a hold card's "Confirm address & book"):
         // under the row lock it must still be the visit's address. Absent field = today's behavior.
         if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {

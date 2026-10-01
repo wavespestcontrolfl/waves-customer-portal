@@ -452,3 +452,32 @@ describe('r21: the lazy activator of a COMPLETED hold runs in the completion\'s 
     spy.mockRestore();
   });
 });
+
+describe('r22: the status routes recheck the hold UNDER the visit row lock (serialized with promotion)', () => {
+  const { assertNotLiveHoldUnderLock } = require('../services/street-level-hold');
+  const trxFor = (held) => {
+    const calls = { locked: false, order: [] };
+    const t = (table) => {
+      const q = {};
+      ['where', 'whereIn', 'whereRaw', 'whereExists'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.forUpdate = jest.fn(() => { calls.locked = true; calls.order.push('lock'); return q; });
+      q.first = jest.fn(async () => { calls.order.push(table); return table === 'scheduled_services as ss' ? (held ? { id: 'v1' } : undefined) : { id: 'v1' }; });
+      return q;
+    };
+    return { t, calls };
+  };
+  test('locks the row first, then refuses a hold with 409 street_level_hold; a non-hold passes', async () => {
+    const h = trxFor(true);
+    await expect(assertNotLiveHoldUnderLock(h.t, 'v1')).rejects.toMatchObject({ status: 409, code: 'street_level_hold' });
+    expect(h.calls.order[0]).toBe('lock');
+    await expect(assertNotLiveHoldUnderLock(trxFor(false).t, 'v1')).resolves.toBeUndefined();
+  });
+  test('both status routes call it inside their transaction when the guard applies', () => {
+    for (const f of ['../routes/admin-dispatch.js', '../routes/admin-schedule.js']) {
+      const s = fs.readFileSync(require.resolve(f), 'utf8');
+      const at = s.indexOf("if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);");
+      expect(at).toBeGreaterThan(s.indexOf('const holdGuardApplies ='));
+      expect(s.lastIndexOf('db.transaction(async (trx) => {', at)).toBeGreaterThan(s.indexOf('const holdGuardApplies ='));
+    }
+  });
+});

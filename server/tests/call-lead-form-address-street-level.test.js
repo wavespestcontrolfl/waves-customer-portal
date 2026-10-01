@@ -782,15 +782,17 @@ describe('r21: a reused pending voice booking this pass finds to be a street-lev
   const row = (extra = {}) => ({ id: 'v1', source_call_log_id: 'call-1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false, scheduled_date: '2026-10-05', window_start: '13:00:00', ...extra });
   const args = (extra = {}) => ({ hold, callLogId: 'call-1', leadId: 'lead-1', keepOpenForQuote: false, followUpPlan: { scheduledDate: '2026-10-19', windowStart: '09:00' }, extraction: {}, ...extra });
   // A stateful fake: the relay's card (no street_level_address) and the writes made to it.
-  const world = ({ card = { id: 't1', payload: { origin: 'voice_agent', scheduled_service_id: 'v1', lead_id: null } }, existingHoldCard = null } = {}) => {
-    const w = { updates: [], inserts: [], locked: 0 };
+  const world = ({ card = { id: 't1', payload: { origin: 'voice_agent', scheduled_service_id: 'v1', lead_id: null } }, existingHoldCard = null, live = { status: 'pending', customer_confirmed: false } } = {}) => {
+    const w = { updates: [], inserts: [], locked: 0, rowLocked: false };
     const trx = (table) => {
       const q = {
         _statuses: null,
+        forUpdate() { if (table === 'scheduled_services') w.rowLocked = true; return q; },
         where() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { q._count = true; return q; },
         whereIn(c, v) { q._statuses = v; return q; },
         first: async () => {
           if (q._count) return { n: 1 };
+          if (table === 'scheduled_services') return live;
           if (table === 'triage_items' && q._statuses === undefined) return existingHoldCard;
           return table === 'triage_items' && q._statuses ? card : existingHoldCard;
         },
@@ -815,6 +817,16 @@ describe('r21: a reused pending voice booking this pass finds to be a street-lev
       follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' },
     });
     expect(w.locked).toBeGreaterThan(0);
+    expect(w.rowLocked).toBe(true);   // the visit row is locked (the status routes lock it too)
+  });
+
+  test('a confirm that committed first (the row is no longer pending / unconfirmed under the lock) makes it ineligible: no promotion', async () => {
+    for (const live of [{ status: 'confirmed', customer_confirmed: false }, { status: 'pending', customer_confirmed: true }, null]) {
+      const { w, trx } = world({ live });
+      expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(false);
+      expect(w.updates).toHaveLength(0);
+      expect(w.rowLocked).toBe(true);
+    }
   });
 
   test('no card at all: one is filed in the same shape', async () => {

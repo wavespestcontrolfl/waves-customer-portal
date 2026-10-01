@@ -1173,7 +1173,7 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     const idx = src.indexOf('let fieldConfirmVerified = false');
     expect(idx).toBeGreaterThan(-1);
-    const recheck = src.slice(idx, idx + 4000);
+    const recheck = src.slice(idx, idx + 5200);
     // One verification covers the EXPLICIT technician confirm AND the day-of
     // takeover — the confirm path finds the visit by ID with no ownership
     // predicate, so an unowned tech confirm must fall back to OFFICE-confirm

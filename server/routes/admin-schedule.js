@@ -20794,8 +20794,8 @@ router.put('/:id/status', async (req, res, next) => {
     // unconfirmed voice_agent row can be a hold, so nothing else pays for the lookup.
     const heldAdvance = DAY_OF_LIFECYCLE_STATUSES.has(toStatus)
       && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true;
-    if (((isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)) || heldAdvance)
-      && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+    const holdGuardApplies = (isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)) || heldAdvance;
+    if (holdGuardApplies && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
       return res.status(409).json({
         error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
         code: 'street_level_hold',
@@ -20807,6 +20807,9 @@ router.put('/:id/status', async (req, res, next) => {
     let transition = null;
     try {
       await db.transaction(async (trx) => {
+        // The hold guard again UNDER the row lock: a concurrent call pass may promote this booking to a
+        // hold after the pre-check above; the promoter takes the same lock and re-reads eligibility.
+        if (holdGuardApplies) await require('../services/street-level-hold').assertNotLiveHoldUnderLock(trx, svc.id);
         // Re-validate technician ownership INSIDE the transaction, row-
         // locked: the predicate on the pre-transaction SELECT alone leaves
         // a window where dispatch reassigns the visit and the former

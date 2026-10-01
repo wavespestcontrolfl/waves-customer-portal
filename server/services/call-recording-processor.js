@@ -1882,6 +1882,10 @@ function streetLevelProofAddressChanged(snapshot, row) {
 async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, leadId, keepOpenForQuote, followUpPlan, extraction }) {
   if (!hold || row?.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || row.customer_confirmed || row.status !== 'pending') return false;
   const callId = row.source_call_log_id || callLogId;
+  // Serialize with the status routes (which lock this row, then recheck the hold): take the visit lock
+  // and RE-READ eligibility under it — a confirm that committed first makes the row ineligible.
+  const live = await trx('scheduled_services').where({ id: row.id }).forUpdate().first('status', 'customer_confirmed');
+  if (!live || live.customer_confirmed || live.status !== 'pending') return false;
   if (await findStreetLevelHoldCard(trx, { callLogId: callId, visitId: row.id })) return false;
   const fields = {
     street_level_address: true,
