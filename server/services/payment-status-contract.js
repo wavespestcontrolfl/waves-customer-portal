@@ -218,6 +218,8 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const days = rows.map((p) => dateParts(p.payment_date || p.date));
   // an own invoice the renderer cannot describe may carry payments this window does not show: no absence sentence either
   if (hasUnmodeledInvoice(billing) || hiddenRows) return out;
+  // Codex round-46 P2: a future-dated row (a scheduled charge) would put the cutoff in the future - no absence sentence at all
+  if (todayParts && days.some((d) => d && dayKey(d) > dayKey(todayParts))) return out;
   if (rows.length && days.every(Boolean)) {
     const newest = days.reduce((a, b) => (dayKey(b) > dayKey(a) ? b : a));
     out.push({ kind: 'no_payment_since', text: `We don't see a payment on your account since ${dateText(newest)}.` });

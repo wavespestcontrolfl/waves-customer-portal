@@ -498,6 +498,20 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     expect({ d, offer: classify(d), neg: hasNegativeZelleAvailabilityClaim(d), aff: hasAffirmativeZelleMention(d) }).toEqual({ d, offer: null, neg: true, aff: false });
     expect(zelleClauseTexts(d).offerText).toBe('');
   });
+  // Codex round-46 P1: the instruction / invoice reference in a clause that never says Zelle still belongs to the offer
+  test.each([
+    'We take Zelle. Send it to pay@example.com for invoice WPC-2026-0002.',
+    'You can use Zelle. Invoice WPC-2026-0002 is the one to pay.',
+  ])('a cross-clause Zelle offer keeps the invoice its instruction names: %s', (b) => {
+    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
+    expect(zelleClauseTexts(b).offerText).toContain('WPC-2026-0002');
+  });
+  test('a denial clause never lends its invoice to the offer', () => {
+    const { zelleClauseTexts } = require('../services/sms-amount-recheck');
+    const t = zelleClauseTexts("Zelle isn't available for invoice WPC-2026-0001. You can Zelle invoice WPC-2026-0002.");
+    expect(t.offerText).not.toContain('0001');
+    expect(t.denialText).toContain('0001');
+  });
   test.each(['You can use Zelle.', 'Zelle is available for your account.', 'Yes, Zelle is on for this invoice.', 'Zelle is accepted here: pay@example.com'])('and affirmative wording stays an offer: %s', (d) => {
     expect(hasAffirmativeZelleMention(d)).toBe(true);
   });

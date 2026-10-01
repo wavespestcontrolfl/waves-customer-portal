@@ -81,6 +81,13 @@ describe('the renderer: only fully grounded sentences, in one stable format', ()
       .toContain("We don't see a payment on your account since Sep 20, 2026.");
   });
 
+  // Codex round-46 P2: a future-dated scheduled charge would date the absence cutoff in the future
+  test('a future-dated row suppresses the absence sentence (never "since" a future day)', () => {
+    const out = kinds(billing({ recentPayments: [row({ id: 'f', status: 'pending', payment_date: '2026-10-15' }), row()] }));
+    expect(out).not.toContain('no_payment_since');
+    expect(out).toContain('payment_received');
+  });
+
   test('rows whose state is unknown or ambiguous render nothing', () => {
     const none = (r) => c.renderPaymentStatusSentences({ billing: billing({ recentPayments: [r] }) }, { today: TODAY }).filter((s) => /^payment_/.test(s.kind));
     expect(none(row({ status: 'disputed' }))).toEqual([]);

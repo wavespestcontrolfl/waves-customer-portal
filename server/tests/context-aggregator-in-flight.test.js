@@ -202,6 +202,18 @@ describe('invoiceStatuses exclude invoices that LIVE-resolve to a third-party pa
     const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
     expect(replyQuotesUngroundedAmount('You owe $95.', { billing }, { byMeaning: true })).toBe(true);
   });
+  // Codex round-46 P1: the payer-LINKAGE scan failing (or hitting its bound) is unknown ownership too - no invoice money leaks into
+  // balance / flags / summary, which legacy readers (response-drafter) use without checking billing.unavailable
+  test('a payer-linkage scan past its bound exposes no balance, overdue flag or summary amount', async () => {
+    db.__rows = { invoices: [inv('i1', 'WPC-2026-0456', 'sent', 95)], payments: [], payerInvoices: Array.from({ length: 121 }, (_, n) => ({ id: `x${n}` })), failedPayments: [{ id: 'f1', amount: 40, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null }] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const ctx = await aggregator.getContextForCustomer({ id: 'c1', first_name: 'Test', last_name: 'Customer', phone: '+15555550100' });
+    expect(ctx.billing.unavailable).toBe(true);
+    expect(ctx.billing.outstandingBalance).toBe(0);
+    expect(ctx.billing.openInvoice).toBeNull();
+    expect((ctx.flags || []).map((f) => f.type)).not.toContain('overdue_balance');
+    expect(ctx.summary).not.toMatch(/overdue/);
+  });
   test('a collectible invoice buried BEHIND the status-list cap is still judged (alwaysJudge): an old AP-owned open invoice never counts', async () => {
     mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => ({ payerId: scheduledServiceId === 'ss-ap' ? 'payer-9' : null }));
     const many = Array.from({ length: 11 }, (_, n) => inv(`i${(n % 9) + 1}${n}`, `N-${n}`, 'paid', 10, { scheduled_service_id: `own-${n}` }));

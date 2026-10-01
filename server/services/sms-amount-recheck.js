@@ -124,8 +124,14 @@ function zelleClauseTexts(body) {
   const clauses = text.split(CLAUSE_SPLIT_RE);
   const offers = clauses.filter((clause) => classifyZelleClause(clause) === 'offer');
   const denials = clauses.filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
+  // Codex round-46 P1: the transfer instruction or invoice reference can sit in a clause that never says "Zelle" ("We take Zelle.
+  // Send it to pay@x.com for invoice WPC-2026-0002."): every non-denial clause carrying one belongs to the offer, so the retarget
+  // check sees the invoice the instruction names. An unrelated invoice reference makes the target ambiguous: held, never guessed.
+  const { explicitInvoiceReference } = require('./zelle-target-invoice');
+  const attached = clauses.filter((clause) => !ZELLE_WORD_RE.test(clause)
+    && (isTransferInstructionClause(clause) || explicitInvoiceReference(clause)));
   // the cross-clause case (Zelle affirmed in one clause, the transfer instruction in another) has no single offer clause
-  const offerText = offers.length ? offers.join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
+  const offerText = offers.length ? [...offers, ...attached].join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
   return { offerText, denialText: denials.join(' ') };
 }
 function hasAffirmativeZelleMention(body) {

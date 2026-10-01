@@ -1153,7 +1153,9 @@ class ContextAggregator {
     // balance and the recent-payments facts.
     // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
     let billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
-    let invoiceRows = allInvoices || [];
+    // Codex round-46 P1: unknown ownership exposes NO invoice-derived money (balance, flags, summary, open invoice) - the same empty
+    // picture main gives when the invoice read fails - rather than counting a payer's invoice as the homeowner's.
+    let invoiceRows = billingUnavailable ? [] : allInvoices;
     const VISIBLE_INVOICE_STATUSES = new Set([...OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS]); // payer-billed flag: any open payer debt
     // Codex round-39/40 P1 — ONE live ownership verdict for EVERY invoice-derived fact (services/invoice-payer-ownership, the pay
     // page's own verdict). A payer assigned through the scheduled service / customer default AFTER the invoice was minted leaves
@@ -1208,7 +1210,7 @@ class ContextAggregator {
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     // Standalone failed attempts: the canonical shared sum over ALL unsuperseded failures (not the display slice). Payer
     // ownership goes through the same linkage the payments display read uses, plus the invoice-id set above.
-    const failedStandalone = failedFacts
+    const failedStandalone = failedFacts && !billingUnavailable
       ? standaloneFailedTotal(failedFacts, (p) => payerLinkage.isPayerLinked(p) || !!(paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p))))
       : 0;
     const balance = invoiceBalance + failedStandalone;
