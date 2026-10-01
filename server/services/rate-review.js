@@ -315,7 +315,10 @@ function anniversaryInWindow(anniversaryYmd, fromYmd, toYmd) {
 
 // ── cadence → visits per year ───────────────────────────────────────────
 
+// Applications per year: the cadence table, except a seasonal program
+// (mosquito Feb–Oct) whose catalog count is the truth (9, not 12).
 function visitsPerYearFor(cadence, catalogVisitsPerYear) {
+  if (cadence === 'seasonal') return positive(catalogVisitsPerYear) || null;
   return CADENCE_VISITS[cadence] || positive(catalogVisitsPerYear) || null;
 }
 
@@ -769,6 +772,7 @@ const QUALIFYING_KEY_FOR_FAMILY = Object.freeze({
 });
 const PEST_FREQUENCY_FOR_CADENCE = Object.freeze({ quarterly: 'quarterly', bimonthly: 'bimonthly', monthly: 'monthly' });
 const LAWN_TIER_FOR_CADENCE = Object.freeze({ every_6_weeks: 'enhanced', monthly: 'premium', bimonthly: 'standard' });
+const MOSQUITO_TIER_FOR_CADENCE = Object.freeze({ seasonal: 'seasonal', monthly: 'monthly' });
 
 // Quote-time concessions come off so the replay prices TODAY'S LIST for the
 // same property, services and (engine-derived) tier — at the cadence the
@@ -818,19 +822,31 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFami
     clean.services.lawn = { ...clean.services.lawn, tier: LAWN_TIER_FOR_CADENCE[cadence], lawnFreq: CADENCE_VISITS[cadence] };
     delete clean.lawnFreq;
   }
+  if (familyKey === 'mosquito' && clean.services && clean.services.mosquito && MOSQUITO_TIER_FOR_CADENCE[cadence]) {
+    clean.services.mosquito = { ...clean.services.mosquito, tier: MOSQUITO_TIER_FOR_CADENCE[cadence] };
+  }
   return clean;
 }
 
-function listRateFromEngineResult(result, line, cadence, { includeRiders = false } = {}) {
+// Engine items carry their annual application count as visitsPerYear
+// (pest, tree & shrub), frequency (lawn) or visits (mosquito).
+function engineItemVisits(item) {
+  return positive(item.visitsPerYear) ?? positive(item.frequency) ?? positive(item.visits);
+}
+
+// `expectedVisits`: the line's own applications per year (seasonal mosquito
+// = 9, not the 12 its monthly pattern suggests); falls back to the cadence
+// table when the caller has none.
+function listRateFromEngineResult(result, line, cadence, { includeRiders = false, expectedVisits = null } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
   const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
   const item = items.find((i) => keys.includes(i.service));
   if (!item || item.quoteRequired || item.requiresCustomQuote || item.requiresMeasurement) return null;
   const annual = positive(item.annualAfterDiscount ?? item.annual);
-  const visits = positive(item.visitsPerYear) ?? positive(item.frequency);
+  const visits = engineItemVisits(item);
   if (!annual || !visits) return null;
-  const expected = CADENCE_VISITS[cadence];
-  const cadenceMismatch = !!(expected && Math.round(visits) !== expected);
+  const expected = positive(expectedVisits) || CADENCE_VISITS[cadence];
+  const cadenceMismatch = !!(expected && Math.round(visits) !== Math.round(expected));
   // Riders (a palm program beside Tree & Shrub) join the MONTHLY figure only,
   // mirroring the ledger slice the monthly current rate was read from.
   const riderKeys = includeRiders ? (ENGINE_RIDER_KEYS[line] || []) : [];
@@ -889,7 +905,8 @@ const LINE_SQL = `CASE COALESCE(sv.category, s.service_category_snapshot,
   WHEN 'pest_control' THEN 'pest_control' WHEN 'lawn_care' THEN 'lawn_care' WHEN 'tree_shrub' THEN 'tree_shrub'
   WHEN 'mosquito' THEN 'mosquito' WHEN 'termite' THEN 'termite' WHEN 'rodent' THEN 'rodent' ELSE 'other' END`;
 
-const CADENCE_SQL = `CASE WHEN s.recurring_pattern IN ('monthly','monthly_nth_weekday') THEN 'monthly'
+const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_pattern LIKE 'seasonal%' THEN 'seasonal'
+  WHEN s.recurring_pattern IN ('monthly','monthly_nth_weekday') THEN 'monthly'
   WHEN s.recurring_pattern IN ('bimonthly','bi-monthly') THEN 'bimonthly'
   WHEN s.recurring_pattern = 'quarterly' THEN 'quarterly'
   WHEN s.recurring_pattern = 'semiannual' THEN 'semiannual'
@@ -1404,14 +1421,22 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       const cacheKey = `${estimate.id}|${familyKey}|${cadence}|${activeFamilies.join(',')}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps));
       const replay = replayCache.get(cacheKey);
-      const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders: current.unit === 'month' }) : null;
+      const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders: current.unit === 'month', expectedVisits: visitsPerYear }) : null;
       if (!rate) continue;
+      // Hand-picked tier evidence compares the estimate's SAVED tier with a
+      // replay of the mix it was sold with (no reconciliation) — a tier that
+      // moved because the customer later added or dropped a program is the
+      // engine's own doing, not a manual pick.
+      const originalKey = `${estimate.id}|original`;
+      if (!replayCache.has(originalKey)) replayCache.set(originalKey, await replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null }, deps));
+      const original = replayCache.get(originalKey);
+      const originalTier = original && original.result && original.result.waveGuard && original.result.waveGuard.tier ? String(original.result.waveGuard.tier).toLowerCase() : null;
       const estimateTier = estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null;
       if (rate.cadenceMismatch) {
-        list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, estimateTier };
+        list = { cents: null, source: 'none', cadenceMismatch: true, engineTier: rate.tier, originalTier, estimateTier };
         continue;
       }
-      list = { cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, estimateTier };
+      list = { cents: current.unit === 'month' ? rate.monthlyCents : rate.perAppCents, source: 'engine', cadenceMismatch: false, engineTier: rate.tier, originalTier, estimateTier };
       break;
     }
 
@@ -1495,7 +1520,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     // single-line estimate replays at a lower tier than the account now has.
     const tierSource = String(customer.waveguard_tier_source || '').toLowerCase();
     const handPickedTier = tierSource === 'manual'
-      || !!(list.source === 'engine' && list.engineTier && list.estimateTier && list.engineTier !== list.estimateTier);
+      || !!(list.source === 'engine' && list.originalTier && list.estimateTier && list.originalTier !== list.estimateTier);
     const manualAt = facts && facts.manualPriceOverrideAt ? etDay(facts.manualPriceOverrideAt) : null;
     const tierProtected = customer.tier_protected_until && dateColumn(customer.tier_protected_until) >= today;
     const callbackLines = signals ? signals.callbackLines : 'error';

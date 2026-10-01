@@ -577,6 +577,18 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(P.listRateFromEngineResult(result, 'pest_control', 'quarterly')).toMatchObject({ perAppCents: 11700, cadenceMismatch: false });
     expect(P.listRateFromEngineResult(result, 'pest_control', 'bimonthly')).toMatchObject({ cadenceMismatch: true });
   });
+  test('a seasonal mosquito program replays at its 9 applications (the engine\'s `visits` field), not the 12 its monthly pattern suggests', () => {
+    expect(P.visitsPerYearFor('seasonal', 9)).toBe(9);
+    expect(P.visitsPerYearFor('seasonal', null)).toBeNull();
+    expect(P.visitsPerYearFor('monthly', 9)).toBe(12);
+    const result = { lineItems: [{ service: 'mosquito', annualAfterDiscount: 720, visits: 9 }], waveGuard: { tier: 'bronze' } };
+    expect(P.listRateFromEngineResult(result, 'mosquito', 'seasonal', { expectedVisits: 9 })).toMatchObject({ perAppCents: 8000, cadenceMismatch: false });
+    expect(P.listRateFromEngineResult(result, 'mosquito', 'monthly', { expectedVisits: 12 })).toMatchObject({ cadenceMismatch: true });
+    expect(P.listReplayInputs({ lotSqFt: 9000, services: { mosquito: { tier: 'monthly' } } }, { familyKey: 'mosquito', cadence: 'seasonal' }).services.mosquito.tier).toBe('seasonal');
+    // the SQL classifies a seasonal catalog row (or pattern) as 'seasonal' before the monthly pattern rule
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src.indexOf("sv.frequency LIKE 'seasonal%'")).toBeLessThan(src.indexOf("s.recurring_pattern IN ('monthly','monthly_nth_weekday') THEN 'monthly'"));
+  });
   test('a palm rider joins the monthly list figure exactly where the ledger slice sums it, never the per-application one', () => {
     const result = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }, { service: 'palm_injection', annualAfterDiscount: 150, visitsPerYear: 2 }], waveGuard: { tier: 'silver' } };
     const monthly = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true });
@@ -810,6 +822,48 @@ describe('buildBatch over the synthetic December book', () => {
     expect(result.summary.exception).toBe(inserted.filter((r) => r.status === 'exception').length);
     expect(result.summary.green_annual_delta_cents).toBe(green.reduce((s, r) => s + r.annual_delta_cents, 0));
     expect(P.summarizeRows(inserted)).toEqual(result.summary);
+  });
+
+  test('a tier that moved because the customer added a program is not a hand-picked tier; a saved tier the sold mix cannot explain is', async () => {
+    const grew = fixture.customer(13, { member_since: '2025-03-01', waveguard_tier: 'Silver', last_name: 'Grew' });
+    const picked = fixture.customer(14, { member_since: '2025-03-02', waveguard_tier: 'Gold', last_name: 'Picked' });
+    const lines = [
+      ...book.planLines,
+      fixture.planLine(grew.id, 'pest_control', 'quarterly', 110, { source_estimate_ids: [fixture.ESTIMATE(7)], account_lines: 2 }),
+      fixture.planLine(grew.id, 'lawn_care', 'every_6_weeks', 61, { account_lines: 2 }),
+      fixture.planLine(picked.id, 'pest_control', 'quarterly', 110, { source_estimate_ids: [fixture.ESTIMATE(8)] }),
+    ];
+    const scenario = {
+      planLines: lines, customers: [...book.customerRows, grew, picked],
+      firstVisits: [...book.firstVisits,
+        { customer_id: grew.id, line: 'pest_control', first_visit: '2025-12-03', completed_visits: 4 }, { customer_id: grew.id, line: 'lawn_care', first_visit: '2026-06-03', completed_visits: 2 },
+        { customer_id: picked.id, line: 'pest_control', first_visit: '2025-12-04', completed_visits: 4 }],
+      completedVisits: book.completedVisits,
+      estimates: [...book.estimates,
+        // sold as a single pest line at Bronze; lawn added later on another estimate
+        fixture.estimate(7, grew.id, { tier: 'Bronze', acceptedAt: '2025-11-20T16:00:00Z' }),
+        // sold as a single pest line but saved as Gold — the engine would derive Bronze
+        fixture.estimate(8, picked.id, { tier: 'Gold', acceptedAt: '2025-11-21T16:00:00Z' })],
+      terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const db4 = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => db4(table));
+    db.raw.mockImplementation((...args) => db4.raw(...args));
+    db.transaction.mockImplementation((fn) => db4.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    const engine = fixture.fakePricingEngine({ tier: 'derive' });
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: engine } });
+    const grewRow = db4.writes.snapshotInserts.find((r) => r.customer_id === grew.id && r.family_key === 'pest_control');
+    expect(JSON.parse(grewRow.flags)).not.toContain('hand_picked_tier');
+    expect(grewRow.list_rate_source).toBe('engine');
+    // the list replay priced the CURRENT bundle (pest + lawn as a prior) …
+    expect(engine.generateEstimate.mock.calls.some(([inputs]) => Array.isArray(inputs.priorQualifyingServices) && inputs.priorQualifyingServices.includes('lawn_care'))).toBe(true);
+    const pickedRow = db4.writes.snapshotInserts.find((r) => r.customer_id === picked.id);
+    expect(JSON.parse(pickedRow.flags)).toContain('hand_picked_tier');
+    expect(pickedRow.status).toBe('exception');
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
   });
 
   test('a line sold quarterly but now running bimonthly is listed at the bimonthly engine price', async () => {

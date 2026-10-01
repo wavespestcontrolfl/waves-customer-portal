@@ -151,23 +151,32 @@ function facts(overrides = {}) {
 // requested frequency (quarterly 4 / bimonthly 6 / monthly 12 visits) and
 // $65/application lawn at the requested tier (standard 6 / enhanced 9 /
 // premium 12), bronze tier unless `tier` is given.
+// `tier: 'derive'` mimics the engine's own rule: the tier follows the count
+// of qualifying services priced plus priorQualifyingServices (1 bronze, 2
+// silver, 3 gold, 4+ platinum).
 function fakePricingEngine({ tier = 'bronze' } = {}) {
   const PEST_VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
   const LAWN_VISITS = { standard: 6, enhanced: 9, premium: 12 };
+  const MOSQUITO_VISITS = { seasonal: 9, monthly: 12 };
   return {
     needsSync: () => false,
     syncConstantsFromDB: async () => true,
     generateEstimate: jest.fn((inputs) => {
       const pest = inputs.services && inputs.services.pest;
       const lawn = inputs.services && inputs.services.lawn;
+      const mosquito = inputs.services && inputs.services.mosquito;
       const pestVisits = pest ? (PEST_VISITS[pest.frequency] || 4) : 0;
       const lawnVisits = lawn ? (LAWN_VISITS[lawn.tier] || 9) : 0;
+      const mosquitoVisits = mosquito ? (MOSQUITO_VISITS[mosquito.tier] || 12) : 0;
+      const count = [pest, lawn, mosquito].filter(Boolean).length + (Array.isArray(inputs.priorQualifyingServices) ? inputs.priorQualifyingServices.length : 0);
+      const derived = count >= 4 ? 'platinum' : count === 3 ? 'gold' : count === 2 ? 'silver' : 'bronze';
       return {
         lineItems: [
           ...(pest ? [{ service: 'pest_control', annual: 117 * pestVisits, annualAfterDiscount: 117 * pestVisits, visitsPerYear: pestVisits }] : []),
           ...(lawn ? [{ service: 'lawn_care', annual: 65 * lawnVisits, annualAfterDiscount: 65 * lawnVisits, frequency: lawnVisits }] : []),
+          ...(mosquito ? [{ service: 'mosquito', annual: 80 * mosquitoVisits, annualAfterDiscount: 80 * mosquitoVisits, visits: mosquitoVisits }] : []),
         ],
-        waveGuard: { tier },
+        waveGuard: { tier: tier === 'derive' ? derived : tier },
       };
     }),
   };
