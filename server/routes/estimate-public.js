@@ -12658,8 +12658,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // (The lane was read above.) A customer who is not per-application
             // was never shown the after-visit promise (attested false), so it
             // keeps today's payable invoice and the base consent.
-            if (!deferLaneIsPerApplication) {
-              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — customer ${customerId} billing lane is ${deferLaneRow?.billing_mode || 'unset'}, not per_application; minting the payable setup invoice as before`);
+            // The SAME answer the attestation check used: a dues-covered lane OR a
+            // payer-billed customer keeps today's payable setup invoice and the
+            // base consent (never a stamp, never after_visit_card).
+            if (!deferPromisedNow) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — customer ${customerId} billing lane is ${deferLaneRow?.billing_mode || 'unset'}${deferPayerBilled ? ' and payer-billed' : ''}; minting the payable setup invoice as before`);
             } else {
               // The page promised "billed with your first visit" and the
               // capture UI rendered the after_visit_card authorization for

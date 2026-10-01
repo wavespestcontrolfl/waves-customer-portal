@@ -2753,6 +2753,22 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(storedEstimate().status).not.toBe('accepted');
   });
 
+  test('gate ON, payer-billed: the retry WITHOUT the attestation accepts with the payable setup invoice, no stamp and base consent', async () => {
+    gateOn();
+    const token = setupOnlyFixture('paf-payer-retry');
+    const Payer = require('../services/payer');
+    Payer.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    try {
+      const response = await putAccept(token);
+      expect(response.status).toBe(200);
+      expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBeNull();
+      expect(InvoiceService.create).toHaveBeenCalled();
+      expect(response.data.setupFeeAfterFirstVisit).toBeUndefined();
+    } finally {
+      Payer.resolveForInvoice.mockResolvedValue(null);
+    }
+  });
+
   test('gate ON, the accept WOULD defer but the tab did not attest the promise (stale tab / older client): refused 409 for a refresh, nothing stamped or minted', async () => {
     gateOn();
     const token = setupOnlyFixture('paf-unattested');

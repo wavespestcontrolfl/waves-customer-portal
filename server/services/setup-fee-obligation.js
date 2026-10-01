@@ -345,10 +345,24 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
     .where({ id: parentId, pending_setup_fee: rawAmount })
     .update({ pending_setup_fee: null, updated_at: new Date() });
   if (updated !== 1) return null;
+  // Provenance for un-void: a stamp a VOID put back (the voided invoice's
+  // claim is kept on this series) carries that invoice id, so reinstating it
+  // reconciles this handoff (retireRodentSetupObligationForReinstatedInvoice).
+  let sourceInvoiceId = alertContext?.sourceInvoiceId || null;
+  if (!sourceInvoiceId) {
+    const voidedSource = await trx('setup_fee_claims as c')
+      .join('invoices as i', 'i.id', 'c.invoice_id')
+      .where('c.scheduled_service_id', parentId)
+      .where('i.status', 'void')
+      .orderBy('i.updated_at', 'desc')
+      .first('c.invoice_id');
+    sourceInvoiceId = voidedSource?.invoice_id ? String(voidedSource.invoice_id) : null;
+  }
   const alert = await require('./dispatch-alerts').createAlert({
     type: SETUP_FEE_OFFICE_BILLING_ALERT, severity: 'warn', jobId: parentId, trx,
     payload: {
       amount, seriesId: parentId, estimateId, customerId, billToScheduledServiceId, origin, ...(alertContext || {}),
+      ...(sourceInvoiceId ? { sourceInvoiceId } : {}),
     },
   });
   return { parentId, amount, alertId: alert?.id || null };

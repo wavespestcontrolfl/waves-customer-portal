@@ -462,6 +462,26 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  test('void puts the fee back -> a later $0 visit hands it to the office: the handoff carries the voided invoice, so un-void reconciles it', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'void' });
+      const Invoices = require('../services/invoice');
+      await Invoices.restoreRodentSetupObligationForReversedInvoice(mockPg, await mockPg('invoices').where({ id: inv.id }).first());
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+      // The next performed visit bills nothing ($0): the fee is parked for the office.
+      await makeDue(f.childIds[0]);
+      await mockPg('scheduled_services').where({ id: f.childIds[0] }).update({ estimated_price: 0 });
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      const [handoff] = await officeFeeAlerts(f);
+      expect(handoff?.payload).toMatchObject({ sourceInvoiceId: String(inv.id) });
+      await Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true });
+      expect((await mockPg('dispatch_alerts').where({ id: handoff.id }).first('resolved_at')).resolved_at).not.toBeNull();
+    } finally { await cleanup(f); }
+  });
+
   test('a free CALLBACK completing on a dues-covered series never hands the stranded setup fee to the office', async () => {
     const f = await seed();
     try {
