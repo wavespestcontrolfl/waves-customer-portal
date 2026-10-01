@@ -367,12 +367,26 @@ async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
   if (!subscriber || !subscriber.id) return 0;
   const conn = dbh || db;
   const fresh = sanitizeWaitlistTags(rawTags, fields);
-  const existing = Array.isArray(subscriber.tags) ? subscriber.tags : [];
-  const kept = existing.filter((t) => typeof t !== 'string'
-    || (!/^(zip|city):/i.test(t) && t !== WAITLIST_SOURCE));
-  return conn('newsletter_subscribers')
-    .where({ id: subscriber.id, status: 'pending' })
-    .update({ tags: JSON.stringify([...kept, ...fresh]), updated_at: new Date() });
+  // One atomic SQL update against the CURRENT tags (Codex #5454 r1): drop any
+  // earlier zip:/city:/waitlist tags and append the fresh ones, keeping every
+  // other tag in order — a concurrent writer (e.g. recordQuizResponse's atomic
+  // append) is never clobbered by a stale in-memory snapshot. Legacy/null/
+  // non-array tags coerce to []. The new tags bind as one JSON string.
+  const result = await conn.raw(
+    `UPDATE newsletter_subscribers
+        SET tags = (
+          SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb)
+            FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END
+            ) WITH ORDINALITY AS t(e, ord)
+           WHERE jsonb_typeof(e) <> 'string'
+              OR NOT ((e #>> '{}') ~* '^(zip|city):' OR (e #>> '{}') = ?)
+        ) || ?::jsonb,
+            updated_at = NOW()
+      WHERE id = ? AND status = 'pending'`,
+    [WAITLIST_SOURCE, JSON.stringify(fresh), subscriber.id],
+  );
+  return result?.rowCount ?? 0;
 }
 
 /**

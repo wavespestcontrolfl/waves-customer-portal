@@ -21,7 +21,20 @@ jest.mock('../models/db', () => {
     };
     return chain;
   };
-  return jest.fn(handler);
+  const fn = jest.fn(handler);
+  // applyWaitlistTags is one atomic UPDATE (Codex #5454 r1): bindings are
+  // [WAITLIST_SOURCE, freshTagsJson, id]. Recorded in the same shape as the
+  // chain updates so the assertions read { wheres, patch.tags }.
+  fn.raw = jest.fn(async (sql, bindings) => {
+    mockNsUpdates.push({
+      table: 'newsletter_subscribers', sql,
+      wheres: [{ id: bindings[2], status: 'pending' }],
+      patch: { tags: bindings[1] },
+    });
+    const n = mockUpdateImpl ? await mockUpdateImpl() : 1;
+    return { rowCount: n };
+  });
+  return fn;
 });
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
@@ -108,15 +121,19 @@ describe('sanitizeWaitlistTags top-level zip/city', () => {
 });
 
 describe('applyWaitlistTags', () => {
-  test('replaces earlier zip/city tags, keeps unrelated tags, CASes on pending', async () => {
+  test('one atomic UPDATE against the current tags, CASed on pending (Codex r1 P2)', async () => {
     await applyWaitlistTags(
       { id: 7, tags: ['vip', 'zip:33570', 'city:old-town', 'out_of_area_waitlist'] },
       ['zip:33573', 'city:ruskin'],
     );
     expect(mockNsUpdates).toHaveLength(1);
-    expect(mockNsUpdates[0].wheres).toEqual([{ id: 7, status: 'pending' }]);
-    expect(JSON.parse(mockNsUpdates[0].patch.tags))
-      .toEqual(['vip', 'out_of_area_waitlist', 'zip:33573', 'city:ruskin']);
+    const { sql, wheres, patch } = mockNsUpdates[0];
+    expect(wheres).toEqual([{ id: 7, status: 'pending' }]);
+    // Only the fresh tags are bound — the stale in-memory snapshot is never written.
+    expect(JSON.parse(patch.tags)).toEqual(['out_of_area_waitlist', 'zip:33573', 'city:ruskin']);
+    expect(sql).toMatch(/jsonb_array_elements\(/);
+    expect(sql).toMatch(/WHERE id = \? AND status = 'pending'/);
+    expect(sql).toMatch(/\^\(zip\|city\):/);
   });
 
   test('is a no-op without a subscriber row', async () => {
