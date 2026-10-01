@@ -1377,7 +1377,13 @@ transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
 already-accepted estimate (`alreadyAccepted: true`) rebuilds the same
 `setupFeeAfterFirstVisit: true`, never a pay link. The setup fee is billed on the first
 PERFORMED visit's own invoice and charged once to the saved method; a no-show or
-cancelled series bills nothing. The accept notification (customer account feed) says
+cancelled series bills nothing. A fee the first performed visit cannot bill on its own
+completion invoice (the visit billed nothing, a grouped closeout handed to the office, a
+dues-covered billing lane) is PARKED FOR THE OFFICE, never turned into a free-standing
+invoice: the stamp is cleared and one internal `setup_fee_office_billing` dispatch alert
+(amount, series, estimate, customer) is the durable owed-fee record the office bills by
+hand, once. No draft invoice is created outside the normal completion mint, and nothing is
+sent to the customer. The accept notification (customer account feed) says
 nothing is charged today and the fee bills with the first visit. No message is sent
 because of these fields.
 

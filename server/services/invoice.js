@@ -4283,11 +4283,6 @@ const InvoiceService = {
       customerId,
       serviceRecordId,
       scheduledServiceId,
-      // Bill-To context ONLY: the visit whose payer / PO / self-pay override
-      // this invoice bills under, WITHOUT linking the row to that visit (a
-      // setup-fee draft must not read as the visit's own invoice). Ignored
-      // when scheduledServiceId / serviceRecordId already name the visit.
-      billToScheduledServiceId = null,
       title,
       lineItems,
       notes,
@@ -4386,7 +4381,7 @@ const InvoiceService = {
     // savepoints each insert, so the collision retry still works inside the txn.
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
-      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId || billToScheduledServiceId || null, throwOnError: true });
+      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
       if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
         return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
@@ -4543,7 +4538,7 @@ const InvoiceService = {
       database,
       customerId,
       customer,
-      scheduledServiceId: linkedScheduledServiceId || billToScheduledServiceId || null,
+      scheduledServiceId: linkedScheduledServiceId,
       // Fail closed under the statements gate: if payer resolution is uncertain,
       // a NET-terms job must NOT silently fall back to self-pay and create an
       // individually-collectible invoice instead of accruing. (Default fail-soft

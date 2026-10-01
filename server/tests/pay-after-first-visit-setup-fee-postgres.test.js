@@ -14,6 +14,9 @@
  *    "never minted" — while the same visit WITHOUT a stamp still parks;
  *  - a visit that performed nothing (customer_declined) bills nothing and
  *    leaves the stamp for the next performed visit;
+ *  - a fee the first performed visit cannot bill on its own invoice is PARKED
+ *    for the office (stamp cleared, one setup_fee_office_billing alert, no
+ *    invoice, no claim) and no later visit bills it again;
  *  - the second visit never bills the fee again;
  *  - a cancelled series is never billed (the stamp is inert).
  *
@@ -171,9 +174,9 @@ function body(overrides = {}) {
   };
 }
 
-async function complete(f, serviceId, overrides = {}) {
+async function complete(f, serviceId, overrides = {}, idempotencyKey = randomUUID()) {
   const { completeScheduledService } = require('../services/complete-scheduled-service');
-  return completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+  return completeScheduledService({ serviceId, idempotencyKey,
     actor: { techRole: 'admin', technicianId: f.techId, technician: null }, body: body(overrides) });
 }
 
@@ -186,6 +189,9 @@ async function makeDue(id) {
 
 const lines = (inv) => (typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : inv.line_items) || [];
 const setupLines = (inv) => lines(inv).filter((l) => /one-time setup fee/i.test(String(l.description || '')));
+// The durable owed-fee record of a setup fee parked for the office (owner
+// ruling 2026-10-01): one setup_fee_office_billing alert per parked stamp.
+const officeFeeAlerts = (f) => mockPg('dispatch_alerts').where({ type: 'setup_fee_office_billing', job_id: f.parentId });
 const parkAlerts = (f) => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`unminted_setup_fee_manual_billing:${f.estimateId}`]);
 
 postgres('PAF setup fee — the stamped fee rides the first performed visit', () => {
@@ -417,40 +423,40 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
   });
 
   // Codex round 2 P2: a first performed visit repriced to $0 bills nothing, so
-  // its queued fee has no invoice to ride. It is consumed into a draft for the
-  // office instead of sliding to a later visit (or being lost).
-  test('a first performed visit repriced to $0 consumes the queued fee into a draft setup invoice + claim; the next priced visit does not bill it again', async () => {
+  // its queued fee has no invoice to ride. It is PARKED for the office (owner
+  // ruling 2026-10-01) instead of sliding to a later visit (or being lost): no
+  // draft invoice, no claim, one owed-fee alert.
+  test('a first performed visit repriced to $0 parks the queued fee for the office (no invoice); the next priced visit does not bill it again', async () => {
     const f = await seed();
     try {
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ estimated_price: 0 });
       const first = await complete(f, f.parentId);
       expect(first).toMatchObject({ status: 200 });
       expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
-      const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
-      expect(invoices).toHaveLength(1);
-      expect(invoices[0]).toMatchObject({ status: 'draft' });
-      expect(setupLines(invoices[0])).toHaveLength(1);
-      expect(Number(invoices[0].total)).toBe(SETUP_FEE);
-      expect(await mockPg('setup_fee_claims').where({ invoice_id: invoices[0].id, scheduled_service_id: f.parentId })).toHaveLength(1);
-      const alerts = await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: f.parentId });
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(0);
+      const alerts = await officeFeeAlerts(f);
       expect(alerts).toHaveLength(1);
-      expect(alerts[0].payload).toMatchObject({ invoiceId: invoices[0].id, amount: SETUP_FEE, visitId: f.parentId });
+      expect(alerts[0]).toMatchObject({ severity: 'warn', resolved_at: null });
+      expect(alerts[0].payload).toMatchObject({ amount: SETUP_FEE, seriesId: f.parentId, estimateId: f.estimateId, customerId: f.customerId, visitId: f.parentId });
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(await parkAlerts(f)).toHaveLength(0);
 
       await makeDue(f.childIds[0]);
       const next = await complete(f, f.childIds[0]);
       expect(next).toMatchObject({ status: 200 });
-      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(0);
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
+      expect(await parkAlerts(f)).toHaveLength(0);
     } finally { await cleanup(f); }
   });
 
   // Pre-push audit P1: an invoice already on the first visit (Charge Now, an
   // office bill) keeps the completion mint from running, so the mint never
-  // consumes the queued fee. It must become the office's draft, never stay
-  // armed for a later visit (the fallback reads the stamp after the mint, so a
-  // reviewed 100% discount takes the same path).
-  test('a first performed visit that already has a fee-less invoice consumes the queued fee into a draft; the next visit does not bill it again', async () => {
+  // consumes the queued fee. It is parked for the office, never left armed for
+  // a later visit (the fallback reads the stamp after the mint, so a reviewed
+  // 100% discount takes the same path).
+  test('a first performed visit that already has a fee-less invoice parks the queued fee for the office; the next visit does not bill it again', async () => {
     const f = await seed();
     try {
       const existing = await require('../services/invoice').create({
@@ -460,39 +466,48 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       const first = await complete(f, f.parentId);
       expect(first).toMatchObject({ status: 200 });
       expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
-      const drafts = (await mockPg('invoices').where({ customer_id: f.customerId }))
-        .filter((inv) => inv.id !== existing.id && setupLines(inv).length);
-      expect(drafts).toHaveLength(1);
-      expect(drafts[0]).toMatchObject({ status: 'draft' });
-      expect(Number(drafts[0].total)).toBe(SETUP_FEE);
-      expect(await mockPg('setup_fee_claims').where({ invoice_id: drafts[0].id, scheduled_service_id: f.parentId })).toHaveLength(1);
-      expect(await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: f.parentId })).toHaveLength(1);
+      const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoices.map((inv) => inv.id)).toEqual([existing.id]);
+      expect(invoices.flatMap(setupLines)).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(0);
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
 
       await makeDue(f.childIds[0]);
       const next = await complete(f, f.childIds[0]);
       expect(next).toMatchObject({ status: 200 });
-      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(0);
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
     } finally { await cleanup(f); }
   });
 
-  // Pre-push audit: the draft bills under the COMPLETING visit's Bill-To (payer,
-  // PO, self-pay override) without being linked to that visit.
-  test('a setup-fee draft resolves its Bill-To from the completing visit and is not linked to it', async () => {
+  // Owner ruling 2026-10-01 + Codex #5485 round 4 P1: when the park cannot be
+  // persisted the stamp is still armed, so the completion must NOT finalize.
+  // It releases the attempt for resume (503 setup_fee_park_failed) and leaves
+  // the stamp queued; the resume parks it.
+  test('a park failure in the post-mint fallback returns 503 setup_fee_park_failed and leaves the stamp queued; the resume parks it', async () => {
     const f = await seed();
-    const InvoiceService = require('../services/invoice');
-    const createSpy = jest.spyOn(InvoiceService, 'create');
+    const Alerts = require('../services/dispatch-alerts');
+    const realCreateAlert = Alerts.createAlert;
+    let failPark = true;
+    const alertSpy = jest.spyOn(Alerts, 'createAlert').mockImplementation((args) => (
+      failPark && args?.type === 'setup_fee_office_billing'
+        ? Promise.reject(new Error('alert write failed'))
+        : realCreateAlert(args)));
     try {
-      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null, status: 'completed' });
-      await mockPg('scheduled_services').where({ id: f.childIds[0] }).update({ estimated_price: 0 });
-      await makeDue(f.childIds[0]);
-      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
-      const draftCall = createSpy.mock.calls.map((c) => c[0]).find((a) => a?.title === 'One-time setup fee');
-      expect(draftCall).toBeTruthy();
-      expect(draftCall.billToScheduledServiceId).toBe(f.childIds[0]);
-      expect(draftCall.scheduledServiceId).toBeUndefined();
-      const draft = (await mockPg('invoices').where({ customer_id: f.customerId })).find((row) => setupLines(row).length);
-      expect(draft).toMatchObject({ status: 'draft', scheduled_service_id: null });
-    } finally { createSpy.mockRestore(); await cleanup(f); }
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ estimated_price: 0 });
+      const key = randomUUID();
+      const first = await complete(f, f.parentId, {}, key);
+      expect(first).toMatchObject({ status: 503, body: { code: 'setup_fee_park_failed' } });
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(SETUP_FEE);
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+
+      failPark = false;
+      const resumed = await complete(f, f.parentId, {}, key);
+      expect(resumed).toMatchObject({ status: 200 });
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
+    } finally { alertSpy.mockRestore(); await cleanup(f); }
   });
 
   // Codex #5485 r3 P1: the refund path's rodent-setup restoration must never
@@ -548,88 +563,79 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
   // Reviewer P2-B/P2-D: a stamp on a customer whose lane never runs the
   // completion mint (monthly membership: dues cover the visit) can never be
   // consumed. The detector must not call it a deferral (the fee would be
-  // silently lost). And a stamp is never cleared into nothing (audit, 4 rounds
-  // on neutralize/retire): it is CONSUMED into a draft "One-time setup fee"
-  // invoice + the immutable claim row, so every detector reads the fee as billed
-  // and the office reviews and sends the draft.
-  test('a live stamp on a monthly_membership customer is not a deferral: owed, the stamp is reported, and consuming it writes a draft invoice + claim (CAS on the exact value)', async () => {
+  // silently lost). And a stamp is never cleared into nothing: it is PARKED for
+  // the office (owner ruling 2026-10-01): one setup_fee_office_billing alert is
+  // the durable owed-fee record, no invoice and no claim row are written, and
+  // the detector reads the alert as covered.
+  test('a live stamp on a monthly_membership customer is not a deferral: owed, the stamp is reported, and parking it clears the stamp + writes one office alert, no invoice (CAS on the exact value)', async () => {
     const f = await seed();
     try {
       await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 45 });
-      const { findUnmintedSetupFeeObligation, consumeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
+      const { findUnmintedSetupFeeObligation, parkSetupFeeStampForOffice } = require('../services/setup-fee-obligation');
       const args = { sourceEstimateId: f.estimateId, customerId: f.customerId, excludeScheduledServiceId: f.parentId };
       const verdict = await findUnmintedSetupFeeObligation(args, mockPg);
       expect(verdict.owed).toBe(true);
       expect(verdict.deferredToFirstVisit).toBeUndefined();
       expect(verdict.unconsumableStamps).toEqual([{ parentId: f.parentId, rawAmount: expect.anything(), amount: SETUP_FEE }]);
+      const [stamp] = verdict.unconsumableStamps;
+      const ctx = { parentId: stamp.parentId, rawAmount: stamp.rawAmount, customerId: f.customerId, estimateId: f.estimateId, origin: 'test' };
 
-      // A stamp that moved since the read is left alone: no draft, no claim.
+      // A stamp that moved since the read is left alone: no alert, no invoice.
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: 49 });
-      const ctx = { customerId: f.customerId, estimateId: f.estimateId, origin: 'test' };
-      expect(await consumeUnconsumableSetupFeeStamps(mockPg, verdict.unconsumableStamps, ctx)).toEqual([]);
+      expect(await mockPg.transaction((trx) => parkSetupFeeStampForOffice(trx, ctx))).toBeNull();
       expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(49);
-      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(await officeFeeAlerts(f)).toHaveLength(0);
+      // A negative (in-flight) stamp is never touched.
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: -SETUP_FEE });
+      expect(await mockPg.transaction((trx) => parkSetupFeeStampForOffice(trx, { ...ctx, rawAmount: -SETUP_FEE }))).toBeNull();
+      expect(Number((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee)).toBe(-SETUP_FEE);
       await mockPg('scheduled_services').where({ id: f.parentId }).update({ pending_setup_fee: SETUP_FEE });
 
-      const drafts = await consumeUnconsumableSetupFeeStamps(mockPg, verdict.unconsumableStamps, ctx);
-      expect(drafts).toHaveLength(1);
-      expect(drafts[0]).toMatchObject({ amount: SETUP_FEE, parentId: f.parentId, status: 'draft' });
+      const parked = await mockPg.transaction((trx) => parkSetupFeeStampForOffice(trx, ctx));
+      expect(parked).toMatchObject({ parentId: f.parentId, amount: SETUP_FEE, alertId: expect.any(String) });
       expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
-      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
-      expect(inv).toMatchObject({ id: drafts[0].invoiceId, status: 'draft' });
-      expect(setupLines(inv)).toHaveLength(1);
-      expect(Number(inv.total)).toBe(SETUP_FEE);
-      const claims = await mockPg('setup_fee_claims').where({ invoice_id: inv.id });
-      expect(claims).toHaveLength(1);
-      expect(claims[0]).toMatchObject({ scheduled_service_id: f.parentId, estimate_id: f.estimateId });
-      expect(Number(claims[0].amount)).toBe(SETUP_FEE);
-      const alerts = await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: f.parentId });
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').where({ scheduled_service_id: f.parentId })).toHaveLength(0);
+      const alerts = await officeFeeAlerts(f);
       expect(alerts).toHaveLength(1);
-      expect(alerts[0].payload).toMatchObject({ invoiceId: inv.id, amount: SETUP_FEE });
-      // Every detector now reads the fee as billed.
+      expect(alerts[0].payload).toMatchObject({ amount: SETUP_FEE, seriesId: f.parentId, estimateId: f.estimateId, customerId: f.customerId, origin: 'test' });
+      // The detector reads the office-owned fee as covered, open or resolved.
+      expect(await findUnmintedSetupFeeObligation(args, mockPg)).toMatchObject({ owed: false, deferredToFirstVisit: true });
+      await mockPg('dispatch_alerts').where({ id: alerts[0].id }).update({ resolved_at: new Date() });
       expect(await findUnmintedSetupFeeObligation(args, mockPg)).toMatchObject({ owed: false, deferredToFirstVisit: true });
     } finally { await cleanup(f); }
   });
 
-  test('hold -> draft setup invoice -> next completion: a stranded stamp is consumed into a draft at the hold, so the setup fee is billed exactly ONCE (the draft)', async () => {
+  test('hold -> parked for the office -> next completion: a stranded stamp is parked at the hold, so the setup fee is never billed by the system and never parked twice', async () => {
     const f = await seed();
     try {
       // Visit 1 completes on a lane that never runs the completion mint.
       await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', monthly_rate: 45 });
       const first = await complete(f, f.parentId);
       expect(first).toMatchObject({ status: 200 });
-      // The completion's obligation check found the stamp stranded and CONSUMED it:
-      // the stamp is in its consumed state, one draft setup invoice + claim stand,
-      // the office alert carries the draft, and nothing is parked for a manual bill
-      // that would double it.
+      // The completion's obligation check found the stamp stranded and PARKED
+      // it: the stamp is cleared, one owed-fee alert stands, NO invoice and no
+      // claim were created, and nothing is parked for a second manual bill.
       expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
-      const afterFirst = await mockPg('invoices').where({ customer_id: f.customerId });
-      expect(afterFirst).toHaveLength(1);
-      expect(afterFirst[0]).toMatchObject({ status: 'draft' });
-      expect(setupLines(afterFirst[0])).toHaveLength(1);
-      expect(await mockPg('setup_fee_claims').where({ invoice_id: afterFirst[0].id })).toHaveLength(1);
-      const alerts = await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: f.parentId });
+      expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(0);
+      const alerts = await officeFeeAlerts(f);
       expect(alerts).toHaveLength(1);
-      expect(alerts[0].payload).toMatchObject({ invoiceId: afterFirst[0].id, amount: SETUP_FEE });
+      expect(alerts[0].payload).toMatchObject({ amount: SETUP_FEE, seriesId: f.parentId, visitId: f.parentId });
       expect(await parkAlerts(f)).toHaveLength(0);
-      // Drafts never charge and are never swept: the open-balance read (the
-      // completion balance sweep's and dunning's candidate source) excludes them,
-      // the follow-up ladder reads sent/viewed/overdue only, and no saved-card
-      // charge fired.
       expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect(await require('../services/open-balance').openBalanceInvoices(f.customerId)).toEqual([]);
-      expect(await mockPg('invoice_followup_sequences').where({ invoice_id: afterFirst[0].id })).toHaveLength(0);
 
       // The customer's lane flips to per-application; the next completion mints
-      // its own invoice. A still-armed stamp would add a SECOND setup line.
+      // its own invoice. A still-armed stamp would add a setup line.
       await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'per_application' });
       await makeDue(f.childIds[0]);
       const next = await complete(f, f.childIds[0]);
       expect(next).toMatchObject({ status: 200 });
       const invoices = await mockPg('invoices').where({ customer_id: f.customerId });
-      expect(invoices.flatMap(setupLines)).toHaveLength(1);
-      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(1);
-      expect((await mockPg('invoices').where({ id: afterFirst[0].id }).first()).status).toBe('draft');
+      expect(invoices.flatMap(setupLines)).toHaveLength(0);
+      expect(await mockPg('setup_fee_claims').whereIn('scheduled_service_id', [f.parentId, ...f.childIds])).toHaveLength(0);
+      expect(await officeFeeAlerts(f)).toHaveLength(1);
+      expect(await parkAlerts(f)).toHaveLength(0);
     } finally { await cleanup(f); }
   });
 });

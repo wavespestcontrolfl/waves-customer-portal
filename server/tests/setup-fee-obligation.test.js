@@ -526,7 +526,7 @@ describe('fee deferred to the first performed visit (series claim)', () => {
   // A dues-covered lane (monthly membership / annual prepay) never runs the
   // completion mint, so its stamp can never be consumed: that is a stranded
   // claim, not a deferral. The obligation reads owed and the stamp is reported
-  // so the completion can consume it into a draft invoice + claim (never clear it to nothing).
+  // so the completion can park it for the office (never clear it to nothing).
   test.each(['monthly_membership', 'annual_prepay'])('a stamp on a %s customer is NOT a deferral — owed, with the stranded stamp reported', async (lane) => {
     mockTables = baseTables({ scheduled_services: [ROOT({ pending_setup_fee: 99 })], customers: { billing_mode: lane } });
     const out = await run();
@@ -581,6 +581,26 @@ describe('fee deferred to the first performed visit (series claim)', () => {
       invoices: { id: 'inv-9', status: 'refunded', line_items: APP_ONLY_LINE },
     });
     expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  // Owner ruling 2026-10-01: a fee the first visit could not bill is PARKED for
+  // the office (stamp cleared, one setup_fee_office_billing alert). The office
+  // owns it, open or resolved, so no second manual bill is parked and nothing
+  // auto-bills it.
+  test('a parked setup_fee_office_billing alert on the series reads as covered (the office owns the fee) — not owed', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      dispatch_alerts: [{ id: 'alert-1' }],
+    });
+    expect(await run()).toMatchObject({ owed: false, deferredToFirstVisit: true });
+  });
+
+  test('without a parked alert (stamp cleared, no claim) the obligation is still owed', async () => {
+    mockTables = baseTables({
+      scheduled_services: [ROOT({ pending_setup_fee: null })],
+      dispatch_alerts: [],
+    });
+    expect((await run()).owed).toBe(true);
   });
 
   test('a claim record whose invoice was voided is NOT proof of billing — the obligation survives', async () => {

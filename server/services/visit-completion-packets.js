@@ -690,12 +690,13 @@ async function runPacketCompletionCredits(packetId, database) {
   }
 }
 
-// The draft setup-fee invoice(s) a held closeout consumed its stamp(s) into (written
-// onto the packet payload by the billing mint): the office review carries its id
-// and amount so the fee is never reduced to a reason string.
-function setupFeeDraftState(packet) {
-  const drafts = packet?.payload ? packetPayload(packet).setupFeeDrafts : null;
-  return Array.isArray(drafts) && drafts.length ? { setupFeeDrafts: drafts } : {};
+// The setup fee(s) a held closeout parked for the office (written onto the
+// packet payload by the billing mint): the office review carries the amount and
+// series so the fee, handed over to be billed by hand, is never reduced to a
+// reason string.
+function setupFeeParkedState(packet) {
+  const parked = packet?.payload ? packetPayload(packet).setupFeeParked : null;
+  return Array.isArray(parked) && parked.length ? { setupFeeParked: parked } : {};
 }
 
 /**
@@ -718,7 +719,7 @@ async function recordOfficeReviewAlert(database, { packet, memberId, state }) {
       type: 'visit_closeout_review', severity: 'warn',
       techId: member?.technician_id || null, jobId: member?.id || null,
       trx,
-      payload: { visitId: packet.visit_id, packetId: packet.id, ...setupFeeDraftState(lockedPacket), ...state },
+      payload: { visitId: packet.visit_id, packetId: packet.id, ...setupFeeParkedState(lockedPacket), ...state },
     });
     return true;
   };
@@ -814,7 +815,7 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
         payment: derived.payment.state, delivery: derived.delivery.state,
         reason: derived.payment.reason, payerId: derived.payment.payerId,
       }),
-      ...setupFeeDraftState(locked),
+      ...setupFeeParkedState(locked),
     };
     const closeReview = derived.payment.state === 'office_required' || derived.delivery.state === 'delivery_review';
     // A payment review derived HERE puts the visit on billing hold, exactly as
