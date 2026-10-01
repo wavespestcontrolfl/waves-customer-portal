@@ -7887,7 +7887,7 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  test('a price-held visit stays held: the only unstamped canonical row is held, so nothing is refreshed or alerted', async () => {
+  test('a price-held visit stays held: the only unstamped canonical row is held, so nothing is refreshed; the hold alert is (re)filed', async () => {
     // Sold at $100 per visit; v2 was repriced to $125 after the sale.
     const term = termRow('term-h');
     queues({
@@ -7903,7 +7903,10 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
 
     expect(summary).toEqual({ scanned: 1, restamped: 0, held: 1, skipped: 0, failed: 0 });
     expect(refresh).not.toHaveBeenCalled();
-    expect(notifyAdmin).not.toHaveBeenCalled();
+    // The failed stamp pass may never have filed it; the per-visit,
+    // never-expiring dedupe keeps a re-file to one alert.
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][1]).toMatch(/repriced visit left uncovered/i);
   });
 
   test('a term that stopped being paid-backed between the read and the lock is skipped, not refreshed', async () => {

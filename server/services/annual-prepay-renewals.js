@@ -5735,8 +5735,14 @@ async function restampOneTerm(term, conn, refresh) {
     && !rowPrepaidElsewhere(term, row)
     && !rowStampedByTerm(term, row));
   if (!open.length) return 'clean';
-  const { heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
-  if (!open.some((row) => !heldIds.has(String(row.id)))) return 'held';
+  const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
+  if (!open.some((row) => !heldIds.has(String(row.id)))) {
+    // The stamp pass that held these may have thrown before its after-commit
+    // alert filed; the hold's dedupe key is per term+visit and never expires,
+    // so re-filing here is a no-op once the office has been told.
+    await fileHeldPriceDriftAlerts(term, held, conn);
+    return 'held';
+  }
 
   // Paid-backing recheck under a share lock on the prepay invoice (same
   // shape as keepEndAtTermLapseCoverage): a refund / void / dispute reopen
@@ -5790,9 +5796,9 @@ async function restampUnstampedActiveTerms({ today = etDateString(), conn = db, 
             and ss.scheduled_date between t.term_start and t.term_end
             and lower(coalesce(ss.status, '')) not in (${excluded.map(() => '?').join(', ')})
             and not (
-              ss.prepaid_method = ?
+              coalesce(ss.prepaid_method, '') = ?
               and coalesce(ss.prepaid_amount, 0) > 0
-              and ss.annual_prepay_term_id::text = t.id::text
+              and coalesce(ss.annual_prepay_term_id::text, '') = t.id::text
             )
         )`,
         [...excluded, ANNUAL_PREPAY_PREPAID_METHOD],
