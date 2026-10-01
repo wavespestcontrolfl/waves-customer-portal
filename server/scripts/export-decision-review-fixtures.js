@@ -8,7 +8,7 @@
 //     [--out server/fixtures/typed-decisions/call_judge.reviewed.json]
 //
 // The export carries subject ids and labels ONLY: never message text, never a
-// transcript, never a name. The eval re-reads the text from call_log / sms_log
+// transcript, never a name. The eval re-reads the text from the call and text logs
 // by subject id (repo rule: no customer text in fixtures).
 
 const fs = require('fs');
