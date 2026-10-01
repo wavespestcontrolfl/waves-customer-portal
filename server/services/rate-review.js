@@ -1891,12 +1891,14 @@ async function batchRebuildRefusal(dbh, batchKey) {
 // Flags a row carries only because the owner acted on it from the screen.
 const OWNER_DECISION_FLAGS = ['admin_edited', 'admin_skipped', 'exception_included'];
 
-// Whether the owner has decided anything on this batch: an approved row, or a
-// row edited, skipped or included from the screen. Such a batch is never
-// recomputed by the tick's own retry (updateRow / approveBatch own those rows).
+// Whether the owner has decided anything on this batch: an approved (or
+// since sent) row, or a row edited, skipped or included from the screen.
+// Such a batch is never recomputed by the tick's own retry (updateRow /
+// approveBatch own those rows).
+const DECIDED_STATUSES = ['approved', ...SENT_STATUSES];
 async function batchOwnerDecisions(dbh, batchKey) {
   const rows = await dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('status', 'flags');
-  const decided = rows.some((r) => r.status === 'approved' || (parseJson(r.flags) || []).some((flag) => OWNER_DECISION_FLAGS.includes(flag)));
+  const decided = rows.some((r) => DECIDED_STATUSES.includes(r.status) || (parseJson(r.flags) || []).some((flag) => OWNER_DECISION_FLAGS.includes(flag)));
   return { decided, rows: rows.length };
 }
 
@@ -2649,7 +2651,12 @@ function nextRowState(row, { proposed, status, config }) {
   const out = status === 'skipped' || (status == null && row.status === 'skipped');
   const flags = new Set(parseJson(row.flags) || []);
   if (proposed !== Number(row.proposed_rate_cents)) flags.add('admin_edited');
-  if (row.status === 'exception' && !out) flags.add('exception_included');
+  // Included despite a hold: the row the ranking held (status exception), or
+  // one it held that the owner skipped and now includes (status skipped, the
+  // hold flags still on it) — the marker outlives a skip/include cycle, so a
+  // retry's rebuild can never read the inclusion as untouched.
+  const held = row.status === 'exception' || [...flags].some((flag) => EXCEPTION_FLAGS.includes(flag));
+  if (held && !out) flags.add('exception_included');
   if (!priceable) flags.add('no_visits_per_year');
   // An owner's skip is a decision for this cycle, never a carry-forward hold
   // (selectReviewEntries leaves an admin_skipped line out of the next batch).
@@ -2969,11 +2976,16 @@ async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
 // included or approved from the screen, the batch stands and only the
 // delivery is retried — judged before the ranking (its cost is skipped) and
 // again under the commit lock (a decision can land while it runs).
+// A rebuild refused under the commit lock for a decision of the owner's — an
+// edit, skip or inclusion (batch_has_owner_decisions), or an approval or a
+// send that landed while the ranking ran — leaves the batch standing: the
+// tick delivers it as it is.
+const STANDING_REFUSALS = ['batch_has_owner_decisions', 'batch_has_approved_rows', 'batch_has_sent_rows'];
 async function tickBatch(dbh, batchKey, { now, deps }) {
   const standing = await batchOwnerDecisions(dbh, batchKey);
   if (standing.decided) return { ok: true, batchKey, rows: standing.rows, rebuilt: false };
   const built = await buildBatch({ batchKey, windowAnchor: `${batchKey}-01`, now, deps, preserveOwnerDecisions: true });
-  if (built.ok || built.reason !== 'batch_has_owner_decisions') return { ...built, rebuilt: true };
+  if (built.ok || !STANDING_REFUSALS.includes(built.reason)) return { ...built, rebuilt: true };
   const decided = await batchOwnerDecisions(dbh, batchKey);
   return { ok: true, batchKey, rows: decided.rows, rebuilt: false };
 }

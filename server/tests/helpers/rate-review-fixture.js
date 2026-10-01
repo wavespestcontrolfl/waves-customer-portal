@@ -69,7 +69,9 @@ function scriptedDb(scenario) {
             if (selected.includes('flags')) return (scenario.ownerDecisionReads || []).shift() || [];
             return scenario.priorReviews || [];
           },
-          count: () => ({ n: scenario.sentRowCount || 0 }),
+          // the sent / approved counts of the rebuild refusal — scripted as a QUEUE
+          // (one answer per count) when a test lands an approval mid-build
+          count: () => ({ n: scenario.refusalCounts && scenario.refusalCounts.length ? scenario.refusalCounts.shift() : (scenario.sentRowCount || 0) }),
           onInsert: (rows) => writes.snapshotInserts.push(...(Array.isArray(rows) ? rows : [rows])),
           onDelete: () => { writes.snapshotDeletes += 1; },
         });

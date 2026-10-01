@@ -195,6 +195,19 @@ describe('batchDigest', () => {
 // ── row edits ───────────────────────────────────────────────────────────
 
 describe('updateRow', () => {
+  test('an exception skipped and then re-included keeps its owner marker, so a retry never reads the inclusion as untouched', async () => {
+    const db = fakeDb(seed());
+    const skipped = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_C, status: 'skipped', includeException: true, actorId: ADMIN, dbh: db });
+    expect(skipped.row).toMatchObject({ status: 'skipped' });
+    expect(skipped.row.flags).toEqual(expect.arrayContaining(['callback_recent', 'admin_skipped']));
+    // the plain Include tick on the (now skipped) row — no includeException needed any more
+    const included = await rateReview.updateRow({ batchKey: '2027-01', rowId: ROW_C, status: 'green', actorId: ADMIN, dbh: db });
+    expect(included.row).toMatchObject({ status: 'green' });
+    expect(included.row.flags).toEqual(expect.arrayContaining(['callback_recent', 'exception_included']));
+    expect(included.row.flags).not.toContain('admin_skipped');
+    expect(await rateReview._private.batchOwnerDecisions(db, '2027-01')).toMatchObject({ decided: true });
+  });
+
   test('a line with no visit count refuses an amount above its current rate; an include lands at no change, never green', async () => {
     const db = fakeDb(seed());
     // the ranking holds such a line at its current rate (no_visits_per_year)
@@ -580,8 +593,11 @@ describe('rebuild vs decisions', () => {
     expect(fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A)).toMatchObject({ proposed_rate_cents: 11200, flags: JSON.stringify(['admin_edited']) });
     expect(fake.tables.rate_review_batches[0].email_sent_at).toBeTruthy(); // the delivery was retried and stamped
     expect(await rateReview._private.batchOwnerDecisions(fake, '2027-01')).toEqual({ decided: true, rows: 4 });
-    // a batch the ranking alone produced (no owner decision) still rebuilds on a retry
+    // a batch the ranking alone produced (no owner decision) still rebuilds on a retry; a sent row is a decision too
     expect(await rateReview._private.batchOwnerDecisions(fakeDb(seed()), '2027-01')).toEqual({ decided: false, rows: 4 });
+    const sent = seed();
+    sent.rate_review_snapshots[1].status = 'sent';
+    expect(await rateReview._private.batchOwnerDecisions(fakeDb(sent), '2027-01')).toEqual({ decided: true, rows: 4 });
   });
 
   test('a retried monthly tick never recomputes a batch the owner approved (the ranking\u2019s own retry keeps an unsent batch\u2019s window)', async () => {

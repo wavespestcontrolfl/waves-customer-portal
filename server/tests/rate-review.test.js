@@ -1909,6 +1909,31 @@ describe('runMonthlyRateReview', () => {
     expect(scenario.ownerDecisionReads).toHaveLength(0); // the pre-check, the check under the lock, the standing batch's count
   });
 
+  test('an approval that lands while the tick ranks leaves the batch standing too: the refusal under the lock is a decision, the digest goes out without a rebuild', async () => {
+    const book = fixture.decemberBook();
+    const scenario = {
+      planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: book.ledger,
+      batchRow: { batch_key: '2026-11', email_sent_at: null, window_from: '2026-12-06', window_to: '2027-01-05' }, batchStampRows: 1,
+      // the early refusal sees no sent / approved rows; under the commit lock an approval has landed
+      refusalCounts: [0, 0, 0, 1],
+      // the pre-check sees no decision; the standing batch's count afterwards sees the approved row
+      ownerDecisionReads: [[], [{ status: 'approved', flags: '[]' }]],
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const out = await rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    expect(out).toMatchObject({ ok: true, batchKey: '2026-11', rebuilt: false, rows: 1, emailed: true });
+    expect(scripted.writes.snapshotInserts).toHaveLength(0);
+    expect(scripted.writes.snapshotDeletes).toBe(0);
+    expect(scripted.writes.batchUpserts).toHaveLength(0);
+    expect(scenario.refusalCounts).toHaveLength(0);
+    expect(scenario.ownerDecisionReads).toHaveLength(0);
+  });
+
   test('a tick whose digest was not delivered (mailer unconfigured, external recipient) is a FAILED tick, not a healthy one', async () => {
     const book = fixture.decemberBook();
     const make = () => {
