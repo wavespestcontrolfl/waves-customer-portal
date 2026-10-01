@@ -135,10 +135,33 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
       'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
       'services/late-payment-checker.js', // GATED: late_payment_checker / late_payment_checker_microdeposit
+      'services/messaging/billing-text-verdict.js', // NOT A SENDER: the #5440 visit-summary fold's yes/no verdict (policy lookup keys). The text that carries the pay link is visit-completion-summary.js, gated below
       'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
       'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
       'services/workflows/balance-reminder.js', // GATED: balance_reminder_workflow / balance_reminder_late_payment_check
     ]);
+  });
+
+  // The #5440 combined-stop visit summary text may carry the invoice's pay link in place of the
+  // invoice sender's own text (visit-completion-summary.js, decided by billing-text-verdict.js). It is a
+  // completion-time automated pay-link message, so it obeys the same rule as the completion text: no
+  // pay link under any active hold; the summary goes plain and the invoice takes the hold-aware sender.
+  test('the visit summary text carries a pay link only while no collections hold stands, at every decision point', () => {
+    const src = read('services/visit-completion-summary.js');
+    // ONE predicate, asked from the one function every decision point shares (plan, locked handoff,
+    // queued replay, deferred send, recovery recheck), on the caller's connection, never exempted.
+    const sendable = src.slice(src.indexOf('async function summaryLinkSendable'), src.indexOf('async function summaryLinkSendable') + 1200);
+    expect(sendable).toMatch(/kind === 'pay_link' && \(await require\('\.\/collections\/collection-hold'\)\.messagingHeldByCollectionHold\(invoice\.customer_id, database\)\)\.held\) return false/);
+    expect(sendable).not.toMatch(/ignoreDisputeHold|holdExempt/);
+    expect(src).not.toMatch(/customerHasActiveDisputeHold|shouldWithholdPayLink/);
+    const callers = [...src.matchAll(/summaryLinkSendable\(/g)].length;
+    expect(callers).toBe(3); // the definition, the plan, summaryLinkStillValid (handoff / replay / deferred / recovery)
+    expect(src).toMatch(/return summaryLinkSendable\(database, invoice, link\.kind, recipientPhone\)/);
+    expect(src).toMatch(/if \(!\(await summaryLinkSendable\(database, invoice, kind, recipient\.phone\)\)\) return null/);
+    // The invoice sender is the hold-aware owner of an unfolded invoice: the coordinator schedules the
+    // invoice onto it (processScheduledSends defers a held invoice every tick, sends it after release).
+    const packets = read('services/visit-completion-packets.js');
+    expect(packets).toMatch(/foldsPayLink \? SUMMARY_TEXT_PLANNED_ERROR : null/);
   });
 
   test('every entry point the dunning senders use is gated or classified as a non-pay-link notice', () => {
