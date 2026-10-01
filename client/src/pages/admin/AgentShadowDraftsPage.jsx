@@ -212,8 +212,11 @@ function GraduationNote({ g }) {
   // the human's actual reply (owner ruling 2026-10-01, D2).
   const graded = (j.gradedAccepted || 0) + (j.gradedCorrected || 0);
   if (graded > 0) context.push(`${graded} judge-graded (${Math.round((j.gradedAcceptedRate || 0) * 100)}% equivalent-or-better)`);
-  const basis = g.basis || g.autoSendHealth?.basis || null;
-  if (basis === "judge_graded") context.push("earned via judge grading");
+  // Only an EARNED verdict carries a basis worth showing: the server clears
+  // it when the sealed exam blocks, and the health result carries its own.
+  const earnedBasis = g.eligibleFor === "auto_send" ? g.basis
+    : g.autoSendHealth?.sendReady ? g.autoSendHealth.basis : null;
+  if (earnedBasis === "judge_graded") context.push("earned via judge grading");
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-t border-hairline border-zinc-200 pt-2 text-ui-caption text-ink-secondary">

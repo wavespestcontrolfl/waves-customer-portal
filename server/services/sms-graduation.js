@@ -511,6 +511,9 @@ async function computeReadiness({ intents, dbi = db } = {}) {
     if (examBlockers && examBlockers.length && !locked && verdict.nextRung) {
       verdict.blockers = [...verdict.blockers, ...examBlockers];
       verdict.eligible = false;
+      // basis means "earned via": an exam-blocked rung earned nothing, so the
+      // UI must not read a stale judge basis next to the exam blocker (Codex r1).
+      verdict.basis = null;
     }
     // Intents ALREADY at auto_send get the send-time gate's view too, so the
     // UI can't show a no-blocker Auto-send chip while sends are blocked.
