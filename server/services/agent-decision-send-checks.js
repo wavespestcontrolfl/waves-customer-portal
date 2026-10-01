@@ -305,6 +305,28 @@ function openLoopsProviderPreSendCheck({ commitmentIds, customerId = null, statu
   return markRepeatable(check);
 }
 
+// The gratitude lane's fixed thank-you (PR #5499 audit): it sends after a quiet
+// period, so a window can pass, a delay or a miss appear, or a promise be recorded
+// while it waits. At the provider boundary the customer's facts are rebuilt (strict,
+// commitments included); anything that must be answered refuses the courtesy
+// reply. An unreadable rebuild refuses retryably. Gate-off: no check.
+function gratitudeOpenLoopsProviderPreSendCheck({ customerId }) {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') || !customerId) return undefined;
+  const check = async ({ dbi } = {}) => {
+    let fresh;
+    try {
+      fresh = await require('./visit-loops-facts').loadVisitLoops({ customerId, conn: dbi || require('../models/db'), strict: true, withCommitments: true });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] gratitude open-loop recheck failed: ${err.message}; blocking send`);
+      return { ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true };
+    }
+    return require('./sms-shadow-drafter').visitLoopsNeedAnswer({ visitLoops: fresh })
+      ? { ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY', reason: 'open-loop facts need an answer (gratitude refused)' }
+      : { ok: true };
+  };
+  return markRepeatable(check);
+}
+
 // The decision-row form (reviewer composer send, scheduled replay): reads the
 // decision through the handoff's connection, then the same verdicts. Like the
 // LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
@@ -507,4 +529,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };

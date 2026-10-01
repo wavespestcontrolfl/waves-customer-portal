@@ -472,8 +472,9 @@ async function loadCommitments({ conn, customerId, now }) {
  */
 // strict (the send-time rebuild): a failed read throws instead of becoming an
 // empty field, so an outage is a retryable recheck failure, never "the facts changed".
-// Commitments are skipped there (they have their own recheck).
-async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false } = {}) {
+// Commitments are skipped there (they have their own recheck) unless
+// withCommitments (the gratitude boundary needs the whole picture).
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
   const ctx = { conn, now, deriveWindow, customerId, strict };
@@ -485,7 +486,9 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const [lateAlert, missedVisit, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(todayRows, ctx)),
     read('missed visit', null, () => loadMissedVisit(ctx)),
-    strict ? { weOwe: [], customerWaiting: [] } : safely('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
+    strict && !withCommitments
+      ? { weOwe: [], customerWaiting: [] }
+      : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
   out.lateAlert = lateAlert;

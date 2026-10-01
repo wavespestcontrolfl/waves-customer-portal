@@ -714,4 +714,38 @@ describe('open-loop commitments recheck', () => {
     await expect(check({ dbi: () => { throw new Error('down'); } }))
       .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
   });
+
+  describe('gratitude boundary (fixed thank-you after the quiet period)', () => {
+    const facts = require('../services/visit-loops-facts');
+    const drafter = require('../services/sms-shadow-drafter');
+    const { gratitudeOpenLoopsProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    let spy;
+    beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; drafter.visitLoopsNeedAnswer = jest.fn(() => false); });
+    afterEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; if (spy) spy.mockRestore(); delete drafter.visitLoopsNeedAnswer; });
+
+    test('gate off or no customer: no check', () => {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' })).toBeUndefined();
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: null })).toBeUndefined();
+    });
+
+    test('rebuilds strict with commitments; refuses when something must be answered, passes otherwise; repeatable', async () => {
+      const loops = { lateAlert: null, pastWindow: { visitId: 'v1' }, missedVisit: null, weOwe: [], customerWaiting: [] };
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(loops);
+      const check = gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' });
+      expect(check.afterMarker).toBe(check);
+      await expect(check({ dbi: () => null })).resolves.toEqual({ ok: true });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', strict: true, withCommitments: true }));
+      drafter.visitLoopsNeedAnswer.mockReturnValue(true);
+      await expect(check({ dbi: () => null })).resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY' });
+      expect(drafter.visitLoopsNeedAnswer).toHaveBeenCalledWith({ visitLoops: loops });
+    });
+
+    test('an unreadable rebuild refuses retryably', async () => {
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockRejectedValue(new Error('down'));
+      await expect(gratitudeOpenLoopsProviderPreSendCheck({ customerId: 'c1' })({ dbi: () => null }))
+        .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    });
+  });
 });

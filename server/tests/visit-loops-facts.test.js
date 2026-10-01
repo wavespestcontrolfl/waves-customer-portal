@@ -83,6 +83,13 @@ describe('loadVisitLoops basics', () => {
     expect(out).toEqual(emptyVisitLoops());
   });
 
+  test('strict skips commitments unless withCommitments (the gratitude boundary needs them)', async () => {
+    listOpenCommitments.mockResolvedValue([{ id: 'c-1', party: 'waves', kind: 'callback', description: 'x', call_started_at: '2026-09-30T14:00:00Z' }]);
+    const conn = fakeConn({ call_commitments: () => [] });
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true })).weOwe).toEqual([]);
+    expect((await loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true, withCommitments: true })).weOwe).toHaveLength(1);
+  });
+
   test('strict (send-time rebuild): a failed read throws instead of reading as empty', async () => {
     const conn = () => { throw new Error('db down'); };
     await expect(loadVisitLoops({ customerId: 'c1', now: NOW, conn, strict: true })).rejects.toThrow('db down');

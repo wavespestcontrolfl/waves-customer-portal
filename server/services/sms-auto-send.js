@@ -810,13 +810,17 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     // Open-loop commitments (PR #5499) run next: a promise the reply was grounded on
     // can be fulfilled or dismissed while the draft is verified and claimed.
     providerPreSendCheck: (() => {
-      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, openLoopsProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
         // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
         // executor's own recheck cannot let the previous visit's timing through.
         labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
-        openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
+        // gratitude carries no draft snapshot: its fixed reply is refused when the
+        // rebuilt facts hold anything that must be answered (PR #5499)
+        gratitudeLane
+          ? gratitudeOpenLoopsProviderPreSendCheck({ customerId })
+          : openLoopsProviderPreSendCheck({ commitmentIds: claim.visitLoopCommitmentIds, customerId, status: claim.visitLoopStatus, factsGeneratedAt: claim.factsGeneratedAt }),
         laneFields.providerPreSendCheck,
       );
     })(),

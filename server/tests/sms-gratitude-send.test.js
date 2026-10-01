@@ -151,6 +151,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'smsGratitudeReplies' ? mockState.gratitudeGate : gate === 'smsAutoSend' ? mockState.generalGate : false),
   gateEnvTimestamp: jest.fn(() => mockState.activation),
+  // GATE_SMS_REAL_ANSWERS off here: the PR #5499 gratitude open-loop boundary adds no check
+  gateEnvValue: jest.fn(() => false),
 }));
 jest.mock('../services/sms-suggest-mode', () => ({
   suggestionEligible: jest.fn(() => true),
