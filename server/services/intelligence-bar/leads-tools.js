@@ -651,7 +651,15 @@ function normalizeLeadContactField(field, raw) {
   if (field === 'last_name') return { value: text ? text.slice(0, 255) : null };
   if (field === 'phone') {
     if (!text) return { value: null };
-    const e164 = toE164(text);
+    // Strict shape first (pre-push P1): the shared normalizer keeps the LAST
+    // ten digits of a bare number, so a mistyped 12-digit string would be
+    // silently truncated to a different phone. Accept exactly a 10-digit US
+    // number, 11 digits with a leading 1, or a full +country number.
+    const digits = text.replace(/\D/g, '');
+    const wellFormed = text.startsWith('+')
+      ? /^\+\d{8,15}$/.test(`+${digits}`)
+      : (digits.length === 10 || (digits.length === 11 && digits.startsWith('1')));
+    const e164 = wellFormed ? toE164(text) : null;
     if (!e164 || !isLikelyE164(e164)) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
     return { value: e164 };
   }

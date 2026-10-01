@@ -79,8 +79,19 @@ test('invalid inputs are refused before any lookup', async () => {
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1' })).error).toMatch(/Nothing to update/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: '  ' })).error).toMatch(/first_name cannot be blank/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '12' })).error).toMatch(/not a valid phone/);
+  // Too many digits is refused, never truncated to the last ten.
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '941555019912' })).error).toMatch(/not a valid phone/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-01' })).error).toMatch(/not a valid phone/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: 'nope' })).error).toMatch(/not a valid email/);
   expect(db).not.toHaveBeenCalled();
+});
+
+test('phone shapes: 10 digits, 1 + 10 digits, and +country all normalize to E.164', async () => {
+  db.mockReturnValue(chain({ first: LEAD }));
+  for (const [raw, e164] of [['941-555-0199', '+19415550199'], ['1 (941) 555-0199', '+19415550199'], ['+44 20 7946 0958', '+442079460958']]) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: raw });
+    expect(res.changes).toEqual({ phone: { from: '+19415553333', to: e164 } });
+  }
 });
 
 test('blank last_name / phone / email clear the field', async () => {
