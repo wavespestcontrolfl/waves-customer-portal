@@ -133,8 +133,8 @@ function normalizeOccupancy(v) {
 // USPS suffixes addressKey does not expand. Kept OUT of STREET_SUFFIX_CANON:
 // that map feeds the stored, uniquely indexed address_key and the saved
 // service-area key, so widening it would orphan existing keys. Used only by
-// the duplicate check below (ops 2026-10-01: a call re-recorded "16430
-// Woodside Gln" as "16430 Woodside Glen", a second property for one house).
+// the duplicate check below (ops 2026-10-01: a call re-recorded a "... Gln"
+// signup address as "... Glen", a second property for one house).
 const PREMISES_SUFFIX_CANON = {
   gln: 'glen', glen: 'glen', cv: 'cove', cove: 'cove', trce: 'trace', trace: 'trace',
   xing: 'crossing', crossing: 'crossing', lndg: 'landing', landing: 'landing',
