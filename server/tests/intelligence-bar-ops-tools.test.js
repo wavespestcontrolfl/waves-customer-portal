@@ -562,7 +562,7 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
 
   // Codex r1 on #5489: an inverted (…_OFF) gate's 'true' DISABLES the named
   // thing — the card must say so instead of presenting 'true' as "on".
-  test('an inverted _OFF gate: the card says true turns the named thing OFF', async () => {
+  test('an inverted _OFF gate: the card cautions that true may turn something OFF', async () => {
     configure();
     global.fetch
       .mockResolvedValueOnce(ENVIRONMENT())
@@ -570,17 +570,20 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     const result = await propose({ gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' });
     expect(result.preview).toBe(true);
     expect(result.inverted).toBe(true);
-    expect(result.meaning).toMatch(/Inverted gate: 'true' turns the thing it names OFF/);
+    expect(result.meaning).toMatch(/The name suggests 'true' turns something OFF/);
   });
 
-  test('a normal gate: the meaning line says true turns its feature ON', async () => {
+  // Codex r3 on #5489: no synthesized ON/OFF claim — only the literal change.
+  test('a normal gate: the meaning line states the literal change, not "feature ON"', async () => {
     configure();
     global.fetch
       .mockResolvedValueOnce(ENVIRONMENT())
       .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }));
     const result = await propose({});
     expect(result.inverted).toBe(false);
-    expect(result.meaning).toMatch(/'true' turns this gate's feature ON/);
+    expect(result.meaning).toMatch(/Sets the Railway variable GATE_STAMPED_ZERO_FREE to 'true'/);
+    expect(result.meaning).toMatch(/does not by itself mean the feature is on/);
+    expect(result.meaning).not.toMatch(/turns this gate's feature ON/);
   });
 
   test('the value schema describes a raw variable value and names the inverted suffixes', () => {
@@ -669,7 +672,9 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     const result = await propose({ value: 'true' });
     expect(result.preview).toBeUndefined();
     expect(result.code).toBe('already_set');
-    expect(result.error).toMatch(/already set to true/);
+    expect(result.error).toBeUndefined();
+    expect(result.already_set).toBe(true);
+    expect(result.message).toMatch(/already set to true/);
   });
 
   // Codex r2 on #5489: "already set" is judged with the gate's own reader.
@@ -682,7 +687,8 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     const result = await propose({ gate_name: LOOSE_GATE, value: 'true' });
     expect(result.preview).toBeUndefined();
     expect(result.code).toBe('already_set');
-    expect(result.error).toMatch(/already reads as true/);
+    expect(result.error).toBeUndefined();
+    expect(result.message).toMatch(/already reads as true/);
     expect(JSON.stringify(result)).not.toContain(`"${stored}"`);
   });
 

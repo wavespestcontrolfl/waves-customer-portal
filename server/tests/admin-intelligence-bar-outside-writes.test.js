@@ -260,6 +260,56 @@ describe('outside-service write tools are full-access-only in the /query dispatc
     }
   });
 
+  // Codex r3 on #5489: a feature switch already in the requested state is a
+  // plain answer — not an is_error tool result, not a Tool Health failure,
+  // and never a confirmation card.
+  test('an already-set GrowthBook switch is a successful no-op: no error, no failure event, no card', async () => {
+    const savedKey = process.env.GROWTHBOOK_API_KEY;
+    const savedFetch = global.fetch;
+    process.env.GROWTHBOOK_API_KEY = 'secret_test';
+    const feature = {
+      feature: {
+        id: 'pricing-hub', archived: false, valueType: 'boolean', defaultValue: 'false',
+        environments: { production: { enabled: false, defaultValue: 'false', rules: [] } },
+      },
+    };
+    global.fetch = jest.fn((url, opts) => (
+      String(url).includes('api.growthbook.io')
+        ? Promise.resolve({ ok: true, status: 200, json: async () => feature })
+        : savedFetch(url, opts)
+    ));
+    try {
+      await withServer(async (baseUrl) => {
+        mockMessagesCreate
+          .mockResolvedValueOnce(toolUseTurn('set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: false }))
+          .mockResolvedValueOnce(finalTextTurn());
+
+        const res = await fetch(`${baseUrl}/admin/intelligence-bar/query`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ context: 'customers', prompt: 'disable pricing-hub in production' }),
+        });
+        expect(res.status).toBe(200);
+        const secondCall = mockMessagesCreate.mock.calls[1][0];
+        const toolResult = secondCall.messages[secondCall.messages.length - 1].content[0];
+        expect(toolResult.is_error).not.toBe(true);
+        const parsed = JSON.parse(toolResult.content);
+        expect(parsed.already_set).toBe(true);
+        expect(parsed.message).toMatch(/already disabled in production/);
+        expect(mockRecordToolEvent).toHaveBeenCalledWith(expect.objectContaining({
+          toolName: 'set_growthbook_feature_environment',
+          success: true,
+        }));
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect((await res.json()).pendingActions || []).toHaveLength(0);
+      });
+    } finally {
+      global.fetch = savedFetch;
+      if (savedKey === undefined) delete process.env.GROWTHBOOK_API_KEY;
+      else process.env.GROWTHBOOK_API_KEY = savedKey;
+    }
+  });
+
   test('the owner-only refusal also covers every other outside-write tool name', async () => {
     await withServer(async (baseUrl) => {
       for (const name of ['purge_cloudflare_cache', 'redeploy_railway_service', 'rerun_failed_github_checks', 'set_railway_gate', 'set_growthbook_feature_environment']) {

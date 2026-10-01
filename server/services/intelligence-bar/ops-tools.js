@@ -630,10 +630,11 @@ async function setRailwayGate(input) {
   const readsOn = gateReadsOn(entry.reader, raw);
   if (currentKind !== 'unset' && readsOn !== null && String(readsOn) === input.value) {
     return {
-      error: currentKind === 'boolean'
+      already_set: true,
+      code: 'already_set',
+      message: currentKind === 'boolean'
         ? `${entry.name} is already set to ${priorValue} in production — nothing to change.`
         : `${entry.name} already reads as ${input.value} in production (the portal's own parsing of its current value) — nothing to change.`,
-      code: 'already_set',
     };
   }
   const currentLabel = currentKind === 'boolean' ? priorValue
@@ -646,11 +647,11 @@ async function setRailwayGate(input) {
     current_value: currentLabel,
     new_value: input.value,
     change: `${entry.name}: ${currentLabel} → ${input.value}`,
-    // Plain-English meaning of the NEW value, polarity-aware: for an
-    // inverted gate (…_OFF) 'true' turns the named thing off.
-    meaning: entry.inverted
-      ? `Inverted gate: ${input.value === 'true' ? "'true' turns the thing it names OFF" : "'false' lets the thing it names run again (its normal on state)"}.`
-      : `${input.value === 'true' ? "'true' turns this gate's feature ON" : "'false' turns this gate's feature OFF"}.`,
+    // Only the literal variable change — never a synthesized ON/OFF claim
+    // (Codex r3 on #5489): a gate can have prerequisites or a shadow mode, so
+    // what a value does is whatever the code reading it does (see `controls`).
+    // An inverted-looking name (…_OFF) gets a caution, not a claim.
+    meaning: `Sets the Railway variable ${entry.name} to '${input.value}'. What that does is decided by the code that reads it — see "controls" above; it does not by itself mean the feature is ${input.value === 'true' ? 'on' : 'off'}.${entry.inverted ? " The name suggests 'true' turns something OFF." : ''}`,
     inverted: entry.inverted === true,
     redeploy_notice: 'Railway redeploys the portal when a variable changes, so the portal restarts briefly.',
     // The pinned target and prior state (compare-and-swap inputs for the

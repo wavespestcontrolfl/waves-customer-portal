@@ -1008,6 +1008,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
     }
+    // A feature switch already in the requested state is a plain answer, not
+    // a failure and not a card (Codex r3 on #5489): no is_error result, no
+    // Tool Health failure, nothing to confirm.
+    if (preview?.already_set === true) {
+      return { modelResult: preview };
+    }
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };

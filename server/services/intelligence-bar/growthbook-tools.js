@@ -314,8 +314,9 @@ async function setGrowthbookFeatureEnvironment(input) {
   const priorEnabled = Boolean(envCfg.enabled);
   if (priorEnabled === input.enabled) {
     return {
-      error: `Feature "${feature.id || featureId}" is already ${priorEnabled ? 'enabled' : 'disabled'} in ${environment} — nothing to change. (Enabled is not the same as serving true: it serves its default value and rules.)`,
+      already_set: true,
       code: 'already_set',
+      message: `Feature "${feature.id || featureId}" is already ${priorEnabled ? 'enabled' : 'disabled'} in ${environment} — nothing to change. (Enabled is not the same as serving true: it serves its default value and rules.)`,
     };
   }
   const word = (b) => (b ? `enabled in ${environment}` : `disabled in ${environment}`);

@@ -109,7 +109,9 @@ describe('set_growthbook_feature_environment (preview only)', () => {
     const result = await propose({ enabled: false });
     expect(result.preview).toBeUndefined();
     expect(result.code).toBe('already_set');
-    expect(result.error).toMatch(/already disabled in production/);
+    expect(result.error).toBeUndefined();
+    expect(result.already_set).toBe(true);
+    expect(result.message).toMatch(/already disabled in production/);
   });
 
   test('an unknown environment is refused with the real environment names', async () => {
