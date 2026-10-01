@@ -736,14 +736,20 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
  * books from that estimate (codex #5477 r5): it must convert as WON through the
  * estimate tier, not close as 'handled'. Returns the estimate id when the
  * booking's VERIFIED handoff estimate carries an open preferred-time lead
- * (leads.estimate_id), else null. The caller verifies the handoff token; this
- * only answers whether the estimate tier has a request to convert, so a booking
- * with no such request keeps main's conversion behavior byte for byte.
+ * (leads.estimate_id), else null. The caller verifies the handoff token; a
+ * valid token proves the estimate id, not who owns it, so the estimate must also
+ * belong to the booking customer's account (codex #5477 r6): a forwarded handoff
+ * never converts another account's request. This only answers whether the
+ * estimate tier has a request to convert, so a booking with no such request
+ * keeps main's conversion behavior byte for byte.
  * Best-effort; a failed read answers null.
  */
-async function estimateIdWithOpenPreferredLead(db, estimateId) {
-  if (!estimateId) return null;
+async function estimateIdWithOpenPreferredLead(db, estimateId, { customerId = null } = {}) {
+  if (!estimateId || !customerId) return null;
   try {
+    const estimate = await db('estimates').where({ id: estimateId }).first('id', 'customer_id');
+    const { estimateBelongsToCustomerAccount } = require('./customer-account-ownership');
+    if (!estimate || !(await estimateBelongsToCustomerAccount(db, estimate, customerId))) return null;
     const row = await db('leads')
       .where({ estimate_id: estimateId, lead_type: LEAD_TYPE })
       .whereNull('deleted_at')

@@ -1050,13 +1050,13 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(replaySrc).toMatch(/if \(!callbackVisit\) \{[\s\S]*?await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing, convertedLeadIds: replayConvertedLeadIds \}\);/);
     // codex #5477 r5: a request staff worked into the booking's VERIFIED estimate converts as won through the
     // estimate tier, on both paths, BEFORE the close (so the close finds it no longer open).
-    expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id\)/);
+    expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id, \{ customerId: custId \}\)/);
     expect(replaySrc).toMatch(/estimateId: replayPreferredEstimateId,/);
     expect(replaySrc.indexOf('estimateId: replayPreferredEstimateId')).toBeLessThan(replaySrc.indexOf('await closeBookedPreferredLeads('));
     const normal = src.slice(replayEnd);
     // both conversions carry the booking id: the lineage is persisted on the won lead AT the conversion
     expect(normal).toMatch(/bookingId: booking\?\.id \|\| null,/);
-    expect(normal).toMatch(/preferredEstimateId = await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id\);/);
+    expect(normal).toMatch(/preferredEstimateId = await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id, \{ customerId: custId \}\);/);
     expect(normal).toMatch(/if \(followUpRows\.length > 0 \|\| leadTrigger \|\| preferredEstimateId\)/);
     expect(normal).toMatch(/\.\.\.\(preferredEstimateId \? \{ estimateId: preferredEstimateId \} : \{\}\),/);
     expect(normal.indexOf('estimateId: preferredEstimateId')).toBeLessThan(normal.indexOf('await closeBookedPreferredLeads('));
@@ -1091,22 +1091,43 @@ describe('recordPreferredTimeRequest (service)', () => {
 });
 
 describe('estimateIdWithOpenPreferredLead (codex #5477 r5: a request worked into the booked estimate is a sale, not handled)', () => {
+  // tables: { estimates, leads, customers: { [id]: row } } — what each table's first() resolves to
+  const fakeDb = (tables, calls = []) => jest.fn((table) => {
+    const b = {
+      _where: null,
+      where: (w) => { b._where = w; calls.push({ table, where: w }); return b; },
+      whereNull: () => b,
+      whereIn: () => b,
+      first: async () => (table === 'customers' ? (tables.customers || {})[b._where.id] : tables[table]),
+    };
+    return b;
+  });
+
   test('answers the estimate id only when an open, live preferred-time request carries it', async () => {
     const calls = [];
-    const fakeDb = (row) => jest.fn((table) => {
-      const b = {
-        where: (w) => { calls.push({ table, where: w }); return b; },
-        whereNull: () => b,
-        whereIn: () => b,
-        first: async () => row,
-      };
-      return b;
-    });
-    expect(await estimateIdWithOpenPreferredLead(fakeDb({ id: 'lead-9' }), 'est-1')).toBe('est-1');
-    expect(calls[0]).toEqual({ table: 'leads', where: { estimate_id: 'est-1', lead_type: 'book_preferred_time' } });
-    expect(await estimateIdWithOpenPreferredLead(fakeDb(undefined), 'est-1')).toBeNull();
-    expect(await estimateIdWithOpenPreferredLead(fakeDb({ id: 'x' }), null)).toBeNull();
+    const est = { id: 'est-1', customer_id: 'cust-1' };
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads: { id: 'lead-9' } }, calls), 'est-1', { customerId: 'cust-1' })).toBe('est-1');
+    expect(calls).toContainEqual({ table: 'leads', where: { estimate_id: 'est-1', lead_type: 'book_preferred_time' } });
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads: undefined }), 'est-1', { customerId: 'cust-1' })).toBeNull();
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads: { id: 'x' } }), null, { customerId: 'cust-1' })).toBeNull();
     const throwing = jest.fn(() => { throw new Error('db down'); });
-    expect(await estimateIdWithOpenPreferredLead(throwing, 'est-1')).toBeNull();
+    expect(await estimateIdWithOpenPreferredLead(throwing, 'est-1', { customerId: 'cust-1' })).toBeNull();
+  });
+
+  test('a verified handoff for an estimate another account owns never converts its request (codex #5477 r6)', async () => {
+    const leads = { id: 'lead-9' };
+    const est = { id: 'est-1', customer_id: 'cust-owner' };
+    // different account: refused, and the leads table is never consulted
+    const calls = [];
+    const other = { 'cust-owner': { id: 'cust-owner', account_id: 'acct-a' }, 'cust-2': { id: 'cust-2', account_id: 'acct-b' } };
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads, customers: other }, calls), 'est-1', { customerId: 'cust-2' })).toBeNull();
+    expect(calls.some((c) => c.table === 'leads')).toBe(false);
+    // same household account: allowed
+    const shared = { 'cust-owner': { id: 'cust-owner', account_id: 'acct-a' }, 'cust-2': { id: 'cust-2', account_id: 'acct-a' } };
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads, customers: shared }), 'est-1', { customerId: 'cust-2' })).toBe('est-1');
+    // ownerless estimate, missing estimate, or no booking customer: refused
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: { id: 'est-1', customer_id: null }, leads }), 'est-1', { customerId: 'cust-2' })).toBeNull();
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: undefined, leads }), 'est-1', { customerId: 'cust-2' })).toBeNull();
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ estimates: est, leads }), 'est-1')).toBeNull();
   });
 });

@@ -6066,7 +6066,7 @@ async function createSelfBooking(payload = {}) {
           try {
             const { verifyEstimateHandoffToken: verifyPreferredHandoff } = require('../utils/estimate-handoff-token');
             const replayPreferredEstimateId = verifyPreferredHandoff(pricing_estimate_id, estimate_token)
-              ? await estimateIdWithOpenPreferredLead(db, pricing_estimate_id)
+              ? await estimateIdWithOpenPreferredLead(db, pricing_estimate_id, { customerId: custId })
               : null;
             if (replayPreferredEstimateId) {
               const { convertLeadFromEvent } = require('../services/lead-estimate-link');
@@ -6476,7 +6476,7 @@ async function createSelfBooking(payload = {}) {
       try {
         const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
         if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-          preferredEstimateId = await estimateIdWithOpenPreferredLead(db, pricing_estimate_id);
+          preferredEstimateId = await estimateIdWithOpenPreferredLead(db, pricing_estimate_id, { customerId: custId });
         }
       } catch (err) {
         logger.warn(`[lead-trigger] estimate-linked request check failed for customer=${custId}: ${err.message}`);
