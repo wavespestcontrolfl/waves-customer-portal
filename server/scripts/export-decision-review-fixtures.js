@@ -16,7 +16,10 @@ const path = require('path');
 
 const DEFAULT_STATUSES = ['confirmed_error', 'confirmed_correct'];
 const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
-const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
+// jev_answer is the NORMALISED answer ({ p, yes, confident } or { choice, … }),
+// never text: a jev_right label confirms it, so without it two confirmed cases
+// with opposite answers would export identically (pre-push audit, 0d1f917627).
+const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'jev_answer', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
 // The same contract the schema enforces (migrations 20261001130000 +
 // 20261001140000), repeated here so the export stays honest against rows older
 // than the CHECKs: a real sha256 hex hash, and for confirmed rows a label of the
@@ -28,6 +31,20 @@ const EVIDENCE_PREDICATE = `package_hash ~ '^[0-9a-f]{64}$' AND (label_status NO
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
+function structuredLabel(label) {
+  if (!label || typeof label !== 'object') return null;
+  const out = { verdict: label.verdict ?? null };
+  if (label.correct_value !== undefined) out.correct_value = label.correct_value;
+  return out;
+}
+
+function expectedFor(row) {
+  const verdict = row.label && typeof row.label === 'object' ? row.label.verdict : null;
+  if (verdict === 'jev_right') return row.jev_answer ?? null;
+  if (verdict === 'jev_wrong') return row.label.correct_value === undefined ? null : row.label.correct_value;
+  return null;
+}
+
 function rowToCase(row) {
   return {
     subject_type: row.subject_type,
@@ -35,7 +52,13 @@ function rowToCase(row) {
     package_id: row.package_id,
     package_hash: row.package_hash,
     question_id: row.question_id,
-    label: row.label ?? null,
+    jev_answer: row.jev_answer ?? null,
+    // The human-confirmed answer, materialised: jev_right confirms jev_answer;
+    // jev_wrong supplies correct_value; unclear has none.
+    expected: expectedFor(row),
+    // Structured label fields only: the free-text `note` can carry a customer
+    // name or quoted text and must never reach a committed fixture (AGENTS.md).
+    label: structuredLabel(row.label),
     label_status: row.label_status,
     baseline_answers: row.baseline_answers ?? null,
     outcome_evidence: row.outcome_evidence ?? null,

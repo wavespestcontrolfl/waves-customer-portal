@@ -13,7 +13,7 @@ const ROW = {
   baseline_answers: { rules: false, production: true },
   outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
   sampled_for: 'disagreement',
-  label: { is_lead: true },
+  label: { verdict: 'jev_wrong', correct_value: false, note: 'Customer Jane Doe at 123 Main St said no' },
   label_status: 'confirmed_error',
   labeled_by: 'someone@example.com',
   labeled_at: '2026-09-30T00:00:00.000Z',
@@ -29,19 +29,36 @@ describe('rowToCase', () => {
       package_id: 'call_judge.v1',
       package_hash: 'h',
       question_id: 'is_lead',
-      label: { is_lead: true },
+      jev_answer: { p: 0.9, yes: true, confident: true },
+      expected: false,
+      label: { verdict: 'jev_wrong', correct_value: false },
       label_status: 'confirmed_error',
       baseline_answers: { rules: false, production: true },
       outcome_evidence: { source: 'lead_created', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
     const json = JSON.stringify(rowToCase(ROW));
-    expect(json).not.toMatch(/transcript|someone@example|jev_answer|labeled_by/);
+    expect(json).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
   });
   test('absent label / evidence become null', () => {
     expect(rowToCase({ ...ROW, label: undefined, baseline_answers: undefined, outcome_evidence: undefined })).toMatchObject({ label: null, baseline_answers: null, outcome_evidence: null });
   });
   test('never selects a text column', () => {
     expect(COLUMNS).not.toEqual(expect.arrayContaining(['transcript', 'body', 'message']));
+  });
+});
+
+describe('expected answer', () => {
+  test('jev_right preserves the confirmed jev_answer for both boolean outcomes', () => {
+    const yes = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, jev_answer: { p: 0.9, yes: true, confident: true } });
+    const no = rowToCase({ ...ROW, label: { verdict: 'jev_right' }, jev_answer: { p: 0.1, yes: false, confident: true } });
+    expect(yes.expected).toEqual({ p: 0.9, yes: true, confident: true });
+    expect(no.expected).toEqual({ p: 0.1, yes: false, confident: true });
+    expect(JSON.stringify(yes)).not.toEqual(JSON.stringify(no));
+  });
+  test('jev_wrong exports the reviewer\'s correct_value; unclear exports no expectation', () => {
+    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong', correct_value: false } }).expected).toBe(false);
+    expect(rowToCase({ ...ROW, label: { verdict: 'jev_wrong' } }).expected).toBeNull();
+    expect(rowToCase({ ...ROW, label: { verdict: 'unclear' } }).expected).toBeNull();
   });
 });
 
