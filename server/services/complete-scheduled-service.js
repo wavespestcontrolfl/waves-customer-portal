@@ -13148,8 +13148,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           completionSmsProviderAccepted = smsResult.sent === true;
           // GATE_SMS_LINK_WRAP can swap the report link for a fresh /l/ short
           // link inside sendCustomerMessage. The fixed text stores (and shows
-          // the tech) the body the provider was actually handed.
-          if (reserviceFixedBody && smsResult.sent === true
+          // the tech) the body the provider was actually handed, or, for a
+          // send-window hold, the transformed body the queued row replays.
+          const fixedBodyFinal = smsResult.sent === true
+            || (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred === true);
+          if (reserviceFixedBody && fixedBodyFinal
             && typeof smsResult.sentBody === 'string' && smsResult.sentBody) {
             sentSmsBody = smsResult.sentBody;
             smsNotesDelta.completionSmsBody = sentSmsBody;

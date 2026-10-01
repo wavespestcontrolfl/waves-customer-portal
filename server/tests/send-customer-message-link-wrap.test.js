@@ -17,6 +17,10 @@ jest.mock('../services/short-url', () => ({
   createShortCode: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/messaging/validators/send-window', () => {
+  const actual = jest.requireActual('../services/messaging/validators/send-window');
+  return { ...actual, checkSendWindow: jest.fn(actual.checkSendWindow) };
+});
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn(actual.isEnabled) };
@@ -158,6 +162,16 @@ test('accepted but the audit insert throws: the error carries the provider-hande
   expect(err).toBeInstanceOf(Error);
   expect(err.providerOutcome).toMatchObject({ sent: true });
   expect(err.sentBody).toBe(WRAPPED_BODY);
+});
+
+test('a deferred send-window hold hands back the wrapped body for the queued row', async () => {
+  const { checkSendWindow } = require('../services/messaging/validators/send-window');
+  checkSendWindow.mockReturnValueOnce({
+    ok: false, code: 'QUIET_HOURS_HOLD', reason: 'quiet hours', deferred: true, nextAllowedAt: '2026-10-02T12:00:00Z',
+  });
+  const result = await sendCustomerMessage(BASE_INPUT);
+  expect(result).toMatchObject({ sent: false, code: 'QUIET_HOURS_HOLD', deferred: true });
+  expect(result.sentBody).toBe(WRAPPED_BODY);
 });
 
 test('an accepted send stamps the minted code with the sms_log row (after the send, off the send path)', async () => {

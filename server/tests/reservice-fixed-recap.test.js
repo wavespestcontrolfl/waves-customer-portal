@@ -348,7 +348,7 @@ describe('review fixes (#5363 r2)', () => {
     const at = src.indexOf('completionSmsProviderAccepted = smsResult.sent === true;');
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, at + 900);
-    expect(block).toMatch(/if \(reserviceFixedBody && smsResult\.sent === true\s*&& typeof smsResult\.sentBody === 'string' && smsResult\.sentBody\) \{/);
+    expect(block).toMatch(/const fixedBodyFinal = smsResult\.sent === true\s*\|\| \(smsResult\.code === 'QUIET_HOURS_HOLD' && smsResult\.deferred === true\);\s*if \(reserviceFixedBody && fixedBodyFinal\s*&& typeof smsResult\.sentBody === 'string' && smsResult\.sentBody\) \{/);
     expect(block).toContain('smsNotesDelta.completionSmsBody = sentSmsBody;');
     expect(block).toContain('completionSmsAcceptedSnapshot.body = sentSmsBody;');
   });

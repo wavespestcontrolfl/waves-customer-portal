@@ -846,6 +846,9 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      // A deferred hold is requeued by its caller: hand back the transformed
+      // body (link wrap included) so the queued row is the text that goes out.
+      ...(blockedBy.deferred ? { sentBody: sendInput.body } : {}),
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
