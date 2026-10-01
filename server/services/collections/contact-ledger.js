@@ -187,4 +187,36 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt };
+/**
+ * A dispute-hold suppression is a WAIT, not a failed send (owner ruling 2026-09-30): the customer-
+ * message boundary or the email authority refused BEFORE the provider, so nothing reached the
+ * customer and nothing failed. The reservation this attempt just took is released (deleted) so it
+ * neither counts as a contact in a spacing window nor stands as a failed row; the next tick after
+ * the hold is released reserves the leg afresh. Only a reservation that is neither delivered nor
+ * resolved is released. Best-effort and never throws. If the row cannot be deleted it falls back
+ * to the retryable send_failed stamp (the safe direction: over-suppression) and returns whether
+ * either settled it. Call it only for a hold suppression (collection-hold isHoldSuppression).
+ */
+async function releaseHeldReservation(entry, { database = db } = {}) {
+  if (!entry || !entry.id) return false;
+  const released = await deleteUnsettledReservation(entry, database);
+  return released || markSendFailed(entry, { code: 'COLLECTION_HOLD_DEFER' }, { database });
+}
+
+async function deleteUnsettledReservation(entry, database) {
+  try {
+    const release = async (conn) => {
+      const removed = await conn('collections_contact_ledger').where({ id: entry.id })
+        .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+          JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+        ]).del();
+      return Number(removed) === 1;
+    };
+    return database.isTransaction ? await database.transaction(release) : await release(database);
+  } catch (err) {
+    logger.warn(`[collections-ledger] hold release failed for ledger row ${entry.id}: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, releaseHeldReservation };

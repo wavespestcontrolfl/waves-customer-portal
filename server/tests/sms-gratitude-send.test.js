@@ -165,6 +165,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
   PROMPT_VERSION: 'house_voice_v11',
   REAL_ANSWERS_VERSION_FAMILY: 'house_voice_v12_real_answers',
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),

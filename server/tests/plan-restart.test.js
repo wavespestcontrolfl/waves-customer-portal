@@ -245,7 +245,7 @@ function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
     db: fakeDb,
-    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date('2026-10-01T00:00:00Z') },
+    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date(Date.now() + 30 * 24 * 3600 * 1000) },
     pricingAi: {
       variantsForService: pricingAi.variantsForService,
       optionServices: pricingAi.optionServices,

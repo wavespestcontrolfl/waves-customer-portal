@@ -4007,6 +4007,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
     } finally { dispatch.mockRestore(); }
   });
 
+  test('an active dispute hold does not change the closeout: the invoice is scheduled as usual and the invoice SENDER (not the closeout) holds it', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    const [flag] = await mockPg('collections_flags').insert({ customer_id: fixture.customerId, flag: 'collection_hold',
+      reason: 'dispute on call: synthetic billing question', created_by: 'test' }).returning('id');
+    try {
+      // Owner ruling 2026-09-30: the sender is the one chokepoint for a held pay link, so the
+      // closeout no longer reads the hold at all - no lookup to fail, nothing to park.
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+      const queued = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, scheduled_send_error: null });
+      expect(queued.scheduled_send_at).not.toBeNull();
+    } finally { await mockPg('collections_flags').where({ id: flag.id }).del(); }
+  });
+
   test('a caller-owned transaction is rejected before any packet query or upload', async () => {
     const outer = await mockPg.transaction();
     const query = jest.fn();

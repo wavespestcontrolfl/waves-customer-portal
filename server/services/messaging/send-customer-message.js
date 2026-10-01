@@ -288,6 +288,55 @@ function classifyDeliveryCertainty(outcome) {
   return 'unknown';
 }
 
+// Purposes whose SMS/App notices are billing follow-up (pay / update-card link or a
+// charge announcement) and so wait out an active collections dispute hold.
+const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
+
+// The machine-initiated dunning senders (Day 3-90 invoice follow-up ladder, late-payment checker,
+// balance reminder workflow, previsit balance reminder) send under the shared purposes
+// 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
+// the price-change notice also use - so they are recognised by their entry point
+// (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+// A queued replay (every deferred row replays under entry point scheduled_sms_cron) of a dunning
+// text whose purpose is the shared 'payment_link': the follow-up ladder's quiet-hours requeue. Its
+// registry recheck reads the hold before dispatch; this is the boundary read for a hold that commits
+// after it (Codex #5424 r14). The other gated queued rows replay under a gated purpose already.
+const HOLD_GATED_REPLAY_ORIGINS = Object.freeze(['invoice_followup_deferred']);
+function isHoldGatedBillingMessage(input = {}) {
+  if (input.audience !== 'customer' || !input.customerId) return false;
+  if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  if (input.entryPoint === 'scheduled_sms_cron'
+    && HOLD_GATED_REPLAY_ORIGINS.includes(String(input.metadata?.original_entry_point || ''))) return true;
+  return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
+}
+
+// The ONE gated hold predicate (round-11 P1, structural): run at step 1.5 AND again inside
+// providerPreparationCheck, the last pre-provider callback, so a dispute committed during the
+// policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
+// send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
+// customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+// (holdExempt 'operator') skip a plain dispute hold only - a fallback hold still waits; a lookup
+// failure answers held (fail closed).
+// `database` is the provider handoff's held transaction when the final-boundary re-check runs inside
+// one (providerPreparationCheck's `handoffDb`): the read MUST reuse that connection (a savepoint read),
+// never open a root-pool one - at DB_POOL_MAX=2 a second connection waiting on the locks the handoff
+// holds would deadlock the send against its own pool (Codex #5424 r13 P1). Undefined = the root pool.
+// The exemptions skip a plain DISPUTE hold only: a wrong-number / wrong-party fallback hold (an
+// all-channel outreach block) still stops the notice.
+async function billingHoldBlock(input = {}, database = undefined) {
+  const collectionHold = require('../collections/collection-hold');
+  if (!isHoldGatedBillingMessage(input)) return null;
+  const ignoreDisputeHold = input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt);
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
+  if (!held.held) return null;
+  logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  // ONE hold outcome everywhere (Codex #5424 r14): the retryable, deferred COLLECTION_HOLD_DEFER
+  // shape with nextAllowedAt. A queued replay (scheduler, registry, email retry rails) treats it as
+  // a wait and refunds the attempt; a caller that must not retry (the immediate completion text)
+  // reads it through collectionHold.isHoldSuppression and decides itself.
+  return { ok: false, ...collectionHold.holdDeferOutcome(held) };
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -367,6 +416,33 @@ async function sendCustomerMessageCore(input) {
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+  }
+
+  // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
+  // a pay / update-card link and is billing follow-up the customer was told is on hold. The
+  // billing-cron attempts, the Stripe webhook notices and every other live payment_failure
+  // sender reach the provider through here, so the live hold check sits at this one boundary
+  // (the accepted millisecond window of collection-hold.js: no cross-writer locking). Suppress
+  // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
+  // closed on an unverifiable hold. A notice for a payment the customer just made themselves
+  // (customerInitiated) is not follow-up and is exempt.
+  // The machine-initiated 'autopay' purpose is the same follow-up: the card-expiry sweeps
+  // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
+  // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
+  // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
+  // The machine-initiated DUNNING senders (isHoldGatedBillingMessage: the follow-up ladder, the
+  // late-payment and balance reminders, the previsit balance reminder) are the same follow-up:
+  // their preflight consulted the hold minutes earlier, but they await credit application, link
+  // shortening, ledger writes and rendering before reaching here, so a hold placed in between
+  // stops the send at this boundary. The suppression is a WAIT: every caller keeps the touch due
+  // (no failed row, nothing paused) and it goes out after the release. Exempt: a customer's own
+  // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+  // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
+  // these senders (they pause or skip before sending).
+  const heldBlock = await billingHoldBlock(input);
+  if (heldBlock) {
+    const { ok: _heldOk, ...heldOutcome } = heldBlock;
+    return { sent: false, blocked: true, ...heldOutcome };
   }
 
   // 2. Resolve policy
@@ -1071,6 +1147,11 @@ async function sendCustomerMessageCore(input) {
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
     const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
+    // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
+    // suppression, consent and caller checks; a hold committed since must still stop a gated
+    // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
+    const holdBlock = await billingHoldBlock(sendInput, handoffDb);
+    if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
