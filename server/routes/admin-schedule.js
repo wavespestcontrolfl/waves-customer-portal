@@ -995,33 +995,18 @@ async function seriesCandidateDateClashes(conn, template, date) {
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
   if (!clash.length) return false;
-  // The customer's own visit that this date would GROUP with (a pest visit on
-  // its own lawn day) is a stop partner, never a clash. Anything else —
-  // another customer, a hold, a different property, a service that cannot
-  // group, another technician — still counts.
+  // The customer's own visits this new row would GROUP with (a pest visit on
+  // its own lawn day) are stop partners, never a clash — decided by the same
+  // eligibility automatic grouping applies (visit-groups.partnersForProposedRow:
+  // gate, autopay, property, family, window, status, technician). Anything
+  // else still counts, and nothing is exempt when grouping is unavailable.
   const own = clash.filter((row) => template.customer_id && String(row.customer_id) === String(template.customer_id));
   if (own.length < clash.length) return true;
-  return !(await allGroupingPartners(conn, template, own.map((row) => row.id)));
-}
-
-// The same eligibility visit-groups.groupRowOn applies to a partner: both
-// sides at one stamped property, both services groupable in one group family,
-// a placed window, a joinable status, and no technician conflict.
-async function allGroupingPartners(conn, template, rowIds) {
-  if (!template.property_id || !template.service_id) return false;
-  const { JOIN_INELIGIBLE_STATUSES } = require('../services/visit-context/statuses');
-  const subject = await conn('services').where({ id: template.service_id }).first('groupable', 'group_family');
-  if (!subject?.groupable || !subject.group_family) return false;
-  const rows = await conn('scheduled_services as ss')
-    .leftJoin('services as svc', 'ss.service_id', 'svc.id')
-    .whereIn('ss.id', rowIds)
-    .select('ss.property_id', 'ss.technician_id', 'ss.window_start', 'ss.status', 'svc.groupable', 'svc.group_family');
-  return rows.length === rowIds.length && rows.every((row) => row.property_id
-    && String(row.property_id) === String(template.property_id)
-    && row.groupable && row.group_family === subject.group_family
-    && row.window_start
-    && !JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))
-    && (!row.technician_id || !template.technician_id || String(row.technician_id) === String(template.technician_id)));
+  const partners = new Set((await require('../services/visit-groups').partnersForProposedRow({
+    customer_id: template.customer_id, property_id: template.property_id, service_id: template.service_id,
+    scheduled_date: date, window_start: block.start, window_end: block.end, technician_id: template.technician_id || null,
+  }, { database: conn })).map(String));
+  return !own.every((row) => partners.has(String(row.id)));
 }
 
 // In-trx half of the plan: a destination the pre-trx peek did not predict
@@ -19044,6 +19029,22 @@ async function riderExtensionDates(conn, parent, cols, latestStr, { skipWeekends
   }
 }
 
+// The rider's window at a lawn occurrence: the lawn's start, the rider's own
+// length (its duration, else its template window's length) — never the lawn's
+// end, which can understate the rider's occupancy.
+function riderStopWindow(host, parent) {
+  const own = occupancyBlockFor(parent);
+  const ownMinutes = parseInt(parent.estimated_duration_minutes, 10)
+    || (own ? (toMinutesHHMM(own.end) - toMinutesHHMM(own.start)) : 0) || 60;
+  const block = occupancyBlockFor({ window_start: host.window_start, window_end: null, estimated_duration_minutes: ownMinutes });
+  return block ? { window_start: block.start, window_end: block.end } : { window_start: host.window_start, window_end: host.window_end };
+}
+
+function toMinutesHHMM(hhmm) {
+  const [h, m] = String(hhmm || '').split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -19132,7 +19133,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     const riderProbeTemplate = (date) => {
       const host = riderDates && riderDates.hostByDate.get(date);
       return host
-        ? { ...clashProbeTemplate, window_start: host.window_start, window_end: host.window_end, technician_id: host.technician_id }
+        ? { ...clashProbeTemplate, ...riderStopWindow(host, parent), technician_id: host.technician_id }
         : clashProbeTemplate;
     };
     while (attempt <= 12) {
@@ -19189,8 +19190,9 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     // its current window and technician — so the two group.
     const riderHost = nextStr && riderDates ? riderDates.hostByDate.get(nextStr) : null;
     if (riderHost) {
-      nextWindowStart = riderHost.window_start;
-      nextWindowEnd = riderHost.window_end;
+      const stop = riderStopWindow(riderHost, parent);
+      nextWindowStart = stop.window_start;
+      nextWindowEnd = stop.window_end;
     }
     // Re-check the ongoing flag immediately before inserting: it was
     // read once at the top of this block, and a cancellation (the

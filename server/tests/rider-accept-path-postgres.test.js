@@ -423,10 +423,12 @@ postgres('pest rides the lawn from accept', () => {
         const hostDate = addDays(f.first, 84);
         await trx('scheduled_services')
           .where({ recurring_parent_id: f.lawnParent.id, scheduled_date: hostDate })
-          .update({ window_start: '14:00', window_end: '15:00' });
+          .update({ window_start: '14:00', window_end: '14:30', estimated_duration_minutes: 30 });
         const child = await extendPest(trx, f.pestParent);
         expect(dateOf(child.scheduled_date)).toBe(hostDate);
         expect(String(child.window_start).slice(0, 5)).toBe('14:00');
+        // The rider's own 60 minutes, not the lawn's 30.
+        expect(String(child.window_end).slice(0, 5)).toBe('15:00');
         const lawnRow = await trx('scheduled_services')
           .where({ recurring_parent_id: f.lawnParent.id, scheduled_date: hostDate }).first();
         expect(child.visit_id).not.toBeNull();
