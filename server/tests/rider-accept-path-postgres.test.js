@@ -279,6 +279,23 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
+  test('gate on: a failing host pre-check leaves the accept transaction usable and the rider unlinked', async () => {
+    process.env[GATE] = 'true';
+    const seeder = require('../services/recurring-appointment-seeder');
+    const spy = jest.spyOn(seeder, 'findActiveRecurringSeries')
+      .mockImplementationOnce((conn) => conn.raw('select * from rider_precheck_no_such_table'));
+    const trx = await mockPg.transaction();
+    try {
+      const f = await reservedAccept(trx, [LAWN_LINE, TERMITE_BAIT_QUARTERLY]);
+      // The accept finished on the same transaction (no 25P02) and seeded.
+      const rows = await trx('scheduled_services').where({ source_estimate_id: f.estimateId });
+      const baitParent = rows.find((r) => !r.recurring_parent_id && /termite/i.test(r.service_type));
+      expect(baitParent).toBeDefined();
+      expect(baitParent.rides_parent_id).toBeNull();
+      expect(rows.some((r) => r.recurring_parent_id === f.reserved.id)).toBe(true);
+    } finally { spy.mockRestore(); await trx.rollback(); }
+  });
+
   test('gate on, no reservation (auto-schedule), pest listed before lawn: lawn seeds first and pest rides it', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();

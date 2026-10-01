@@ -6346,13 +6346,16 @@ const EstimateConverter = {
           let reservedSeeds = false;
           if (reservedPlan) {
             try {
-              const existingLawn = await RecurringAppointmentSeeder.findActiveRecurringSeries(database, {
+              // Savepoint on a caller transaction: a failed optional read must
+              // not abort the accept (25P02).
+              const lookup = (conn) => RecurringAppointmentSeeder.findActiveRecurringSeries(conn, {
                 customerId,
                 serviceId: reservedStart.service_id || null,
                 serviceType: guardServiceTypeFor(reservedStart.service_type) || null,
                 excludeParentId: reservedStart.id,
                 serviceAddressScope: seriesAddressScope,
               });
+              const existingLawn = database.isTransaction ? await database.transaction(lookup) : await lookup(database);
               reservedSeeds = !(existingLawn && existingLawn.length);
             } catch (guardErr) {
               logger.warn(`[estimate-converter] rider host pre-check failed (riders walk their own cadence): ${guardErr.message}`);
