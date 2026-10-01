@@ -33,6 +33,23 @@ async function invoiceSendRefusal(meta, database) {
   if (String(invoice.customer_id) !== String(meta.customer_id)) return refused('invoice-customer-changed');
   const collectible = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
   if (collectible.eligible !== true) return refused(collectible.reason, collectible.retryable === true);
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the ONE live hold check
+  // for every delayed invoice pay-link delivery - this function is the shared
+  // locked provider-boundary eligibility for the queued replay's Text/App/Email
+  // legs and for the billing Email provider retry. Placed after the
+  // collectibility check, which already refuses a payer-billed invoice, so a
+  // third-party payer's AP delivery is exempt. A hold - or a lookup that cannot
+  // answer - keeps the leg retryable and DEFERRED (holdDefer), never terminal:
+  // it sends after the release. Read on the caller's held handle (savepoint).
+  // A trusted exemption the immediate send carried (an operator's send, the customer's own estimate
+  // accept) rides on the queued row / stored replay context as hold_exempt and skips a plain DISPUTE
+  // hold only (Codex #5424 r14); a wrong-number / wrong-party fallback hold still waits.
+  const collectionHold = require('../collections/collection-hold');
+  const held = await collectionHold.messagingHeldByCollectionHold(invoice.customer_id, database,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(meta.hold_exempt) });
+  if (held.held) {
+    return { eligible: false, reason: held.reason === 'lookup_failed' ? 'collection-hold-lookup-failed' : 'collection-hold', retryable: true, holdDefer: true, held };
+  }
   const { SEND_FINALIZABLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../invoice-helpers');
   if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return refused(`invoice-status:${invoice.status}`);
   // A live send claim: the send that queued this Email, or a newer one, still

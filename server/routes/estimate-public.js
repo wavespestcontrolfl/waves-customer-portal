@@ -14221,6 +14221,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       try {
         const InvoiceService = require('../services/invoice');
         const runDelivery = () => InvoiceService.sendViaSMSAndEmail(invoiceId, {
+          // The customer's own accept: dispute-hold exempt.
+          holdExempt: 'customer',
           payUrlParams: estimateInvoicePayUrlParams({
             billingTerm,
             saveCard: !treatAsOneTime,
@@ -24536,7 +24538,7 @@ function normalizeBreakdownItemLabel(item = {}) {
 // result.lineItems / engineResult.lineItems don't read as an empty mix here
 // (which would strip a setup fee the converter is going to invoice).
 function estimateDataRecurringServices(estData = {}) {
-  // Fall back to estData ITSELF like estimateRecurringKeysForDetails and the
+  // Fall back to estData ITSELF like estimateServiceDetailsScope and the
   // accept/read paths — some estimates store `recurring.services` at the
   // top level of estimate_data rather than under result/engineResult.
   const result = estData?.result && typeof estData.result === 'object'
@@ -24796,6 +24798,51 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
       ...(withContract.renderFlags?.manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
     },
   };
+}
+
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
+  const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  // Narrow low-confidence commercial recurring estimate (the population whose
+  // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+  // its accept, whatever the billing mode — invoice-mode holds the first-
+  // invoice mint, non-invoice bills per application after the confirmed visit,
+  // and annual prepay is rejected/hidden until the price is confirmed. Drives
+  // /data's payment copy + deposit overrides AND the no-slot accept mode
+  // (slots return the empty commercial-manual list for every commercial auto
+  // estimate). Matches the accept-handler hold predicate.
+  const siteConfirmationHold = defaultServiceMode !== 'one_time'
+    && (() => {
+      const lc = commercialLowConfidenceRange(estData);
+      return lc.hasLowConfidence && !lc.forceSiteQuote;
+    })();
+  const commercialNoSlotAccept = siteConfirmationHold;
+  // Guarantee-only renewals accept with NO appointment: the acceptance
+  // contract tells the React view to skip the slot picker and offer the
+  // payment-only (invoice) accept. An existing linked appointment keeps
+  // precedence inside the contract — accepting against it works as-is.
+  const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  // Accept + deposit-intent reject an invoice-mode estimate with no linked
+  // customer and no customer phone (nothing to bill / deliver the invoice
+  // to) — an email-only renewal must not advertise an accept the server
+  // refuses. Contact-required renewals get the call-office contract.
+  const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+  const acceptance = buildEstimateAcceptanceContract({
+    quoteRequirement,
+    existingAppointment: linkedAppointment,
+    invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+    invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+    commercialNoSlotAccept,
+  });
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
 
 function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
@@ -26508,13 +26555,53 @@ const serviceDetailsSendLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// The packet only exists for services actually ON this estimate.
-function estimateRecurringKeysForDetails(estimate) {
+// One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
+// carry the lawn prep & service guide too, so an estimate whose only lawn work
+// is one of these rows can fetch/send the 'lawn_care' packet — in its
+// one-time variant (no visit count, re-service, or program promises). Keep in
+// step with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+// Mechanical/material lawn work that applies no product (prep-guide-sender.js).
+const MECHANICAL_LAWN_GUIDE_SERVICES = new Set(['plugging', 'dethatching', 'top_dressing']);
+
+// The packet only exists for services actually ON this estimate: the
+// recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
+// line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
+// its (recurring-program) packet. One-time rows are read from the SAME
+// replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
+// stored breakdown as the fallback), so an engine-inputs-only estimate whose
+// page shows the guide row can also fetch it.
+// `preferOneTime` (the one-time card's `scope=one_time` hint): an estimate
+// that carries BOTH a recurring lawn line and a one-time lawn row (lawn
+// toggle estimate, one-time mode) serves the one-time variant. The hint only
+// picks the variant when a one-time lawn row is actually present — it never
+// widens `keys`, and recurring stays the default.
+// Returns { keys, lawnScope, mechanicalOnly } — lawnScope is 'recurring',
+// 'one_time', or null; mechanicalOnly = every one-time lawn row applies no
+// product (the guide then omits the product sections).
+async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
-  return new Set(
+  const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
+  const recurringLawn = keys.has('lawn_care');
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring', mechanicalOnly: false };
+  let lawnRows = [];
+  try {
+    let breakdown = null;
+    try {
+      breakdown = (await buildPricingBundle(estimate))?.oneTimeBreakdown || null;
+    } catch { /* replay failed: fall back to the stored breakdown */ }
+    if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
+    const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+    lawnRows = items.filter((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
+  } catch { /* malformed one-time data: no widening (fail closed) */ }
+  if (lawnRows.length) {
+    keys.add('lawn_care');
+    return { keys, lawnScope: 'one_time', mechanicalOnly: lawnRows.every((item) => MECHANICAL_LAWN_GUIDE_SERVICES.has(item.service)) };
+  }
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null, mechanicalOnly: false };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26539,10 +26626,13 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.query?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
     const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
     const buffer = await renderServiceDetailsPdf(content);
     res.set('Content-Type', 'application/pdf');
@@ -26644,7 +26734,10 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.body?.scope === 'one_time' })
+      : null;
+    if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -26668,11 +26761,15 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
-    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+    // A one-time guide keeps its variant through the texted link.
+    // Only the lawn guide has a one-time variant; every other guide keeps one
+    // URL and one idempotency key regardless of the estimate's lawn scope.
+    const oneTimeLawnGuide = serviceKey === 'lawn_care' && detailsScope.lawnScope === 'one_time';
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf${oneTimeLawnGuide ? '?scope=one_time' : ''}`;
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
-      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const content = await buildServiceDetailsContent(serviceKey, estimate, { lawnScope: detailsScope.lawnScope, mechanicalOnly: detailsScope.mechanicalOnly });
       const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
       const buffer = await renderServiceDetailsPdf(content);
       if (!(await stillOnCustomerSurface())) return res.status(404).json({ error: 'Estimate not found' });
@@ -26692,7 +26789,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
           // One send per estimate+service+day — the button is customer-initiated
           // but a retap shouldn't stack identical emails.
-          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${etDateString()}`,
           categories: ['estimate_service_details'],
           // Codex round 1 on #4608 (P1): content derivation would catch the
           // estimate_url in the payload anyway, but the explicit id is
@@ -26745,7 +26842,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // per estimate+service, underscore-safe; never a different packet)
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
-    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    // The lawn guide's one-time variant is a different packet (its own link):
+    // it gets its own claim so neither variant dedups the other.
+    const dedupKey = `${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${tenDigits}`;
     const claimKey = dedupKey;
     // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
     // a concurrent loser's poll can read the SAME refusal — best-effort,
@@ -26804,18 +26903,26 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // form. The bare URL is a substring of the scheme-ful one, so matching on
     // it also still finds rows logged before this send moved onto the chokepoint.
     const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
-    const recentPacketSend = async () => db('sms_log')
-      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
-      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
-      // so a row matches on the raw URL OR on a code minted for that exact URL.
-      .where(function packetLinkInBody() {
-        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
-          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
-      })
-      .whereRaw("created_at >= NOW() - interval '10 minutes'")
-      .first();
+    const recentPacketSend = async () => {
+      let q = db('sms_log')
+        .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+        .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+        // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+        // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+        // so a row matches on the raw URL OR on a code minted for that exact URL.
+        .where(function packetLinkInBody() {
+          this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
+            .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+        })
+        .whereRaw("created_at >= NOW() - interval '10 minutes'");
+      // The recurring lawn URL is a prefix of the one-time one, so a one-time
+      // text must not dedup a recurring request. (A wrapped body carries only
+      // /l/<code>, never the raw URL, so this never excludes a short-link row.)
+      if (serviceKey === 'lawn_care' && !oneTimeLawnGuide) {
+        q = q.whereRaw('strpos(COALESCE(message_body, \'\'), ?) = 0', [`${pdfUrlBare}?scope=one_time`]);
+      }
+      return q.first();
+    };
     const sendPromise = (async () => {
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure
@@ -27200,27 +27307,11 @@ async function composeEstimateDataPayload(estimate, {
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
-    const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
-    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const {
+      defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
+    } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
-      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
-    });
-    // Narrow low-confidence commercial recurring estimate (the population whose
-    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
-    // its accept, whatever the billing mode — invoice-mode holds the first-
-    // invoice mint, non-invoice bills per application after the confirmed visit,
-    // and annual prepay is rejected/hidden until the price is confirmed. Drives
-    // the payment copy + deposit overrides below AND the no-slot accept mode
-    // (slots return the empty commercial-manual list for every commercial auto
-    // estimate). Matches the accept-handler hold predicate.
-    const siteConfirmationHold = defaultServiceMode !== 'one_time'
-      && (() => {
-        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
-        return lc.hasLowConfidence && !lc.forceSiteQuote;
-      })();
-    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -27253,24 +27344,7 @@ async function composeEstimateDataPayload(estimate, {
     // authored-proposal estimate): no line covering the whole estimate, on
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
-    // Guarantee-only renewals accept with NO appointment: the acceptance
-    // contract tells the React view to skip the slot picker and offer the
-    // payment-only (invoice) accept. An existing linked appointment keeps
-    // precedence inside the contract — accepting against it works as-is.
-    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
-    // Accept + deposit-intent reject an invoice-mode estimate with no linked
-    // customer and no customer phone (nothing to bill / deliver the invoice
-    // to) — an email-only renewal must not advertise an accept the server
-    // refuses. Contact-required renewals get the call-office contract.
-    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
-    const acceptance = buildEstimateAcceptanceContract({
-      quoteRequirement,
-      existingAppointment: linkedAppointment,
-      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
-      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
-      commercialNoSlotAccept,
-    });
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -28543,6 +28617,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;
@@ -28704,6 +28779,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
+module.exports.estimateServiceDetailsScope = estimateServiceDetailsScope;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;

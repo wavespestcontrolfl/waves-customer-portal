@@ -95,6 +95,9 @@ const REPLAY_HOLD_CODES = Object.freeze([
   'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
   'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED', 'BILLING_EMAIL_PREPARATION_HOLD',
   'BILLING_TEXT_DEDUPE_UNAVAILABLE', 'BILLING_TEXT_LEG_IN_FLIGHT',
+  // An active collections dispute hold (or an unverifiable one) on a delayed
+  // pay-link leg: wait, never fail (collections/collection-hold.js).
+  'COLLECTION_HOLD_DEFER',
 ]);
 
 function isReplayHold(result) {

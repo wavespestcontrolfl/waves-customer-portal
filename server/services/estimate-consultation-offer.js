@@ -275,6 +275,9 @@ module.exports = {
   buildEstimateConsultationOffer,
   estimateConsultationLead,
   reconfirmConsultationLead,
+  // The one rule for "the lead this estimate belongs to" (also read by the
+  // email division's payload builders).
+  linkedLeadIdFor,
   PROBE_BUDGET_MS,
   FINAL_CHECK_SNAPSHOT,
   _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },

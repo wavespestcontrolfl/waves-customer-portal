@@ -960,7 +960,7 @@ router.post(
           // is absent (rare authorize-only fail). Each Stripe event has a
           // distinct id, so this preserves per-attempt dedupe granularity
           // even in the no-charge case.
-          await handlePaymentIntentFailed(event.data.object, event.id);
+          await handlePaymentIntentFailed(event.data.object, event.id, event.created);
           break;
 
         case 'charge.refunded':
@@ -2798,6 +2798,8 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
     priorAttempts = Number((await db('payments')
       .where({ customer_id: processingRow.customer_id, status: 'failed' })
       .whereNot({ id: processingRow.id })
+      // A collections-hold placeholder never reached Stripe: not an attempt.
+      .modify((q) => require('../services/collections/collection-hold').excludeNeverAttemptedHoldDeferrals(q))
       .where(function () {
         this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
           .orWhere(function () {
@@ -2852,7 +2854,7 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
 /**
  * payment_intent.payment_failed — Update to failed, log failure reason
  */
-async function handlePaymentIntentFailed(paymentIntent, eventId) {
+async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = null) {
   const piId = paymentIntent.id;
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'failed');
@@ -3110,6 +3112,10 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       await PaymentLifecycleEmail.sendPaymentFailed({
         paymentIntentId: piId,
         attemptId,
+        // GATE_BILLING_EMAIL_DETAILS: the card and the moment of the failure
+        // (Stripe's event time, so a late redelivery names the real day).
+        paymentIntent,
+        failedAt: eventCreated ? new Date(eventCreated * 1000) : null,
         customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
         ...(failedCombinedAlloc ? {
           invoiceId: paymentIntent.metadata?.waves_invoice_id || failedCombinedAlloc[0].invoiceId,

@@ -30,7 +30,9 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
-const { resolveLocation } = require('../config/locations');
+const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
+const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -111,7 +113,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
@@ -875,6 +877,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
+  service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
@@ -1276,6 +1279,90 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     // superseded worker's marker never lands.
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
   }
+}
+
+// Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
+// enforce gate already vetoes out_of_service_area, but with
+// CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
+// CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
+// auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
+// 2026-09-30). This survives every routing mode. Callers pass only a VALID
+// V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
+// object is untrusted and must not suppress a valid V1 booking. Evidence:
+//   1. any DeSoto locality evidence — a DeSoto city, a DeSoto ZIP, or an
+//      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
+//      positive AV verdict (which may describe a different, V2 address) and
+//      of any served-town exemption (Riverview + 34266 cannot launder it).
+//   2. a positive Address Validation verdict (inServiceArea === true) then
+//      clears the rest, including a model-stated county NAME of DeSoto.
+//   3. an AV out_of_service_area / inServiceArea false verdict, or a county
+//      outside the served set, vetoes — except a Hillsborough county whose
+//      city is a served south-Hillsborough town (config/locations.js), which
+//      stays bookable exactly as before.
+//   4. the on-file address (city, ZIP, and stored coordinates in the DeSoto
+//      rectangle with no served ZIP) is ALWAYS checked for DeSoto evidence —
+//      the booking keeps a populated stored address even when the call names
+//      a served town. When the call states NO locality at all, the on-file
+//      city/ZIP also stand in for the stated ones. If that
+//      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
+//      review (reason on_file_address_unavailable) instead of passing on no
+//      evidence.
+function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
+  const av = addressValidation || null;
+  const svc = v2Extraction?.property?.service_address || null;
+  const lower = (v) => String(v || '').toLowerCase().trim();
+  const zip5 = (v) => String(v || '').trim().slice(0, 5);
+  const statedCities = [extracted?.city, svc?.city, av?.normalized?.city].map(lower).filter(Boolean);
+  const statedZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].map(zip5).filter(Boolean);
+  const statedCounty = av?.county || svc?.county || extracted?.county || null;
+  const statedNothing = !statedCities.length && !statedZips.length && !statedCounty;
+  if (statedNothing && onFile?.lookupFailed) {
+    return { reason: 'on_file_address_unavailable', county: null };
+  }
+  // The on-file address is ALWAYS checked for DeSoto evidence, stated
+  // locality or not: backfillCustomerFromAppointmentContact keeps a
+  // populated stored address, so a returning Arcadia customer who mentions
+  // a served town is still booked at the stored DeSoto address. A customer
+  // who genuinely moved is held for review, never auto-booked. When the call
+  // stated nothing, the on-file city also drives the checks below.
+  const onFileCities = onFile && !onFile.lookupFailed ? [lower(onFile.city)].filter(Boolean) : [];
+  const onFileZips = onFile && !onFile.lookupFailed ? [zip5(onFile.zip)].filter(Boolean) : [];
+  const cities = statedNothing ? onFileCities : statedCities;
+  const zips = statedNothing ? onFileZips : statedZips;
+  let coordsInDesoto = false;
+  if (onFile && !onFile.lookupFailed) {
+    const lat = Number(onFile.latitude);
+    const lng = Number(onFile.longitude);
+    coordsInDesoto = Number.isFinite(lat) && Number.isFinite(lng)
+      && isInDesotoExclusion(lat, lng) && !onFileZips.some((z) => zipToCity(z));
+  }
+  const onFileDesoto = onFileCities.some(isDesotoLocality) || onFileZips.some(isDesotoZip) || coordsInDesoto;
+  // A DeSoto city / ZIP / on-file pin vetoes BEFORE a positive AV verdict:
+  // in V2 shadow the AV may describe V2's served address while the legacy
+  // branch books V1's DeSoto one (the bridge refuses a disagreeing V2
+  // street), so an AV "in area" cannot clear locality evidence it may not
+  // describe. It still outranks a model-stated county NAME below.
+  const countyKey = normalizeCounty(statedCounty);
+  if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || onFileDesoto) {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  if (av && av.inServiceArea === true) return null;
+  if (countyKey === 'desoto') {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  // A served south-Hillsborough town named by city OR by a served ZIP (AV
+  // can return a ZIP with no locality), as the inspection route checks it.
+  const servedHillsboroughTown = [...cities, ...zips.map((z) => lower(zipToCity(z)))]
+    .some((c) => c && SOUTH_HILLSBOROUGH_CITIES.includes(c));
+  if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
+    return { reason: 'address_validation_out_of_service_area', county: av.county || null };
+  }
+  if (statedCounty && !isInServiceAreaCounty(statedCounty)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
+    return { reason: 'county_out_of_service_area', county: String(statedCounty) };
+  }
+  return null;
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
@@ -5895,6 +5982,69 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   return { ok: true, reason: null, service };
 }
 
+// The service fields the V2-approved booking will actually book from: the same
+// overrides the approved-extraction merge applies to `extracted` further down
+// (matched_service under its adoption rule, requested_service, and
+// specific_service_name INCLUDING a null clear). The waiver is judged on this
+// view as well as on the fields as they stand at the gate, so a V1 pick that
+// V2 replaces at booking cannot carry a waiver onto a different service.
+function v2BookingServiceView(extracted = {}, v2Extraction = null) {
+  if (!v2Extraction || !isV2Extraction(v2Extraction)) return null;
+  const v2Flat = flatView(v2Extraction);
+  const view = { ...extracted };
+  const v2Category = v2Flat.primary_service_category
+    || v2Extraction?.service_request?.primary_service_category || null;
+  const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+  if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+    view.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
+  }
+  if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
+  view.specific_service_name = v2Flat.specific_service_name || null;
+  return view;
+}
+
+// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
+// caller checks the gate). Resolves the call's service the way the booking
+// resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
+// The service must resolve to a bookable CATALOG row on the allowlist — a
+// coarse label alone never waives, since that booking would carry no service_id.
+// Every view of the call's service must qualify: the V1 extraction as it stood
+// BEFORE V2-primary adoption (`preAdoptionExtracted`), the merged fields at the
+// gate, and the V2-overridden view the approved booking will book. Returns the
+// SAME verdict object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  // Both gates on and the call carries the unclear-service signal: routing may
+  // force the Waves Assessment row, which is not a whole-structure service.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
+  const prop = property || v2Extraction?.property || {};
+  const views = [];
+  if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+  views.push(extracted);
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  const results = views.map((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyWholeStructureUnitWaiver(addressValidation, {
+      enabled: true,
+      serviceKey: row?.service_key || null,
+      propertyType: prop.property_type,
+      commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+      text: [transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '),
+    });
+    return { waived, service: row?.service_key || null };
+  });
+  if (results.some((r) => r.waived === addressValidation)) return addressValidation;
+  const out = results[results.length - 1].waived;
+  out.wholeStructureUnitWaived.service = results[results.length - 1].service;
+  return out;
+}
+
 async function resolveDefaultCallBookingTechnician(conn = db) {
   const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
   if (configuredId) {
@@ -9349,6 +9499,10 @@ const CallRecordingProcessor = {
     // requires the enforce gate's approval and SMS still requires consent.
     // The merged object stays legacy-flat, so canonical ai_extraction keeps
     // the reader-compatible shape.
+    // The V1 extraction as it stood BEFORE V2-primary adoption: the whole-
+    // structure unit waiver must agree with it too (a V1 pick V2 overwrites
+    // is a service disagreement, not a WDO).
+    const preAdoptionExtracted = { ...extracted };
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -10010,6 +10164,57 @@ const CallRecordingProcessor = {
       extracted = held.extracted;
       dictationEmailPayload = held.dictationEmailPayload;
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
+    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
+    // held for a missing unit number. The verdict is rewritten HERE, once,
+    // after the shadow row persisted the ORIGINAL — so the enforce gate, the
+    // shadow bridge and the audit path all read the same waived verdict. The
+    // service is resolved the way the booking below resolves it (catalog row
+    // first, coarse label only when no catalog row matched). Gate off, or any
+    // non-qualifying call, returns the verdict object untouched.
+    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+      try {
+        // A reprocess of a call an earlier pass parked on the unit ask: the
+        // open missing_unit_number card (and its clarify draft and merged
+        // needs_confirmation reason) is a human-verdict-only artifact that
+        // nothing auto-resolves (AGENTS.md; triage-auto-resolve.js), so the
+        // hold stands until the office settles it. A dismissed/resolved card is
+        // that verdict and does not block.
+        const openUnitCard = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (openUnitCard) {
+          logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
+        } else {
+          const wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
+          if (wsAv !== v2AddressValidation) {
+            // Stamp the pass's waiver on the PERSISTED verdict (status stays
+            // the original) so the offline audits can rebuild the verdict the
+            // gate saw. Fenced like the write above; pass-scoped, since the
+            // next pass rewrites ai_address_validation without the marker.
+            await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+              ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
+              updated_at: new Date(),
+            });
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            v2AddressValidation = wsAv;
+          }
+        }
+      } catch (wsErr) {
+        logger.warn(`[call-proc] whole-structure unit waiver failed open (hold stands) for ${maskSid(callSid)}: ${wsErr.message}`);
+      }
     }
 
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
@@ -14881,6 +15086,12 @@ const CallRecordingProcessor = {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
               smsOutcome = { sent: false, skipped: 'callback_number_needed' };
+            } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
+              // The caller said no to texts on THIS call (owner 2026-09-30).
+              // Read from the live extraction: the row may not carry it yet.
+              // genuineNewProspect already requires a valid V2 result; the
+              // sender checks every earlier call with this number itself.
+              smsOutcome = { sent: false, skipped: 'said_no_texts' };
             } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
@@ -15737,6 +15948,27 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
+    // Geographic hard veto inputs, resolved only when the legacy booking would
+    // otherwise create a visit. The on-file customer row is read here (before
+    // the booking branch loads it) so a known caller who confirms a time
+    // without repeating the address is judged on the address the visit will
+    // use. Only a VALID V2 extraction counts (v2CanonicalExtraction).
+    let legacyGeoVeto = null;
+    if (!v2RoutingBlocked && extracted.appointment_confirmed && extracted.preferred_date_time
+        && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      let onFileGeo = null;
+      try {
+        onFileGeo = await db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude');
+      } catch (geoErr) {
+        logger.warn(`[call-proc] on-file address read for geographic veto failed for ${maskSid(callSid)}: ${geoErr.message}`);
+        // Fail closed: with no stated locality, an unread on-file address
+        // must hold the booking for review, not pass as "no evidence".
+        onFileGeo = { lookupFailed: true };
+      }
+      legacyGeoVeto = legacyGeographicVeto({
+        addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
+      });
+    }
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -15746,6 +15978,34 @@ const CallRecordingProcessor = {
         skippedReason: 'v2_routing_blocked',
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
+    } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall
+      && legacyGeoVeto) {
+      // Geographic hard veto (owner ruling 2026-09-30, DeSoto is not served):
+      // survives V2-off and V2-shadow routing, where nothing else stops a
+      // confirmed booking on an out-of-area address. The customer + lead are
+      // kept; only the visit is withheld, and the call is left for human review.
+      // An unreadable on-file address is held under its own reason, not
+      // mislabelled as out of area.
+      const geoSkipReason = legacyGeoVeto.reason === 'on_file_address_unavailable'
+        ? 'service_area_unverified'
+        : 'out_of_service_area';
+      appointmentResult = {
+        service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: geoSkipReason,
+      };
+      logger.warn(`[call-proc] Skipping appointment auto-create for ${maskSid(callSid)}: ${geoSkipReason} (${legacyGeoVeto.reason}, county=${legacyGeoVeto.county || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes(geoSkipReason)) bridgeNeedsConfirmation.push(geoSkipReason);
+      if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+        await fileSkippedBookingCard({
+          call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+          skippedReason: geoSkipReason,
+          preferredDateTime: extracted.preferred_date_time,
+          serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
+        });
+      }
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -16298,6 +16558,21 @@ const CallRecordingProcessor = {
                   // (codex #4991 r2).
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
+                  }
+                  // Geographic veto re-runs on the fenced row (Codex #5403
+                  // r6): when the call stated no locality, the pre-fence
+                  // on-file read was the only service-area check, and an
+                  // address edit since then must not book a DeSoto visit.
+                  const fencedGeoVeto = legacyGeographicVeto({
+                    addressValidation: effectiveAddressValidation,
+                    v2Extraction: v2CanonicalExtraction,
+                    extracted,
+                    onFile: freshCallCustomer,
+                  });
+                  if (fencedGeoVeto) {
+                    const geoErr = new Error(`service-area check failed on the fenced customer row (${fencedGeoVeto.reason}) — booking held for office review`);
+                    geoErr.fencedGeoVeto = fencedGeoVeto;
+                    throw geoErr;
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
@@ -18117,6 +18392,25 @@ const CallRecordingProcessor = {
           } catch (schedErr) {
             logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
+            // A fenced geographic veto (Codex #5403 r7) is a HOLD, not a
+            // failure: surface it exactly like the pre-fence veto — skip
+            // reason, confirm reason, and in legacy/shadow routing the
+            // skipped-booking card (enforce mode files its own card).
+            if (schedErr.fencedGeoVeto) {
+              const fencedSkipReason = schedErr.fencedGeoVeto.reason === 'on_file_address_unavailable'
+                ? 'service_area_unverified'
+                : 'out_of_service_area';
+              appointmentResult = { ...appointmentResult, scheduleCreated: false, skippedReason: fencedSkipReason };
+              if (!bridgeNeedsConfirmation.includes(fencedSkipReason)) bridgeNeedsConfirmation.push(fencedSkipReason);
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: fencedSkipReason,
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
+            }
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
@@ -21102,6 +21396,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,
@@ -21149,6 +21444,7 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  wholeStructureUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,

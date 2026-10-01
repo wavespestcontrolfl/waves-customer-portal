@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral } = require('../services/collections/collection-hold');
 const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
@@ -86,7 +87,7 @@ async function evaluateBadges(customerId) {
   const totalVisits = services.length;
   const totalReferrals = referrals.length;
   const paidPayments = payments.filter(p => p.status === 'paid');
-  const failedPayments = payments.filter(p => p.status === 'failed' && !p.superseded_by_payment_id);
+  const failedPayments = payments.filter(p => p.status === 'failed' && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p));
 
   // Service type detection
   const svcTypes = services.map(s => s.service_type.toLowerCase());

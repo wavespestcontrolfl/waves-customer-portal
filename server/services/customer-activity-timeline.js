@@ -7,6 +7,7 @@
  *   texts    sms_log (sent / delivered / failed, inbound replies)
  *   links    short_code_clicks via short_codes (customer or lead linkage)
  *   emails   email_messages, automation_step_sends, newsletter_send_deliveries
+ *   outside  outbound_link_clicks (prep-guide links to Chewy, Amazon, ...)
  *   pages    customer_page_views, estimate_views, prep_guide_views,
  *            service_records / projects.report_viewed_at,
  *            customer_contracts.viewed_at, price_change_notices
@@ -18,19 +19,23 @@
  *
  *   short_code_clicks     human/bot-filtered at /l/
  *   customer_page_views   filtered by its recorder (incl. a push:open row: a
- *                         server-verified open of that customer's own notification)
+ *                         server-verified open of that customer's own notification,
+ *                         and the portal tab views)
  *   inbound sms replies   non-recruiting
  *
  * Everything else is shown in the feed and NEVER engaged: SendGrid opens AND
  * clicks (a scanner or Apple Mail Privacy Protection fires both with no human),
  * the raw token-page stamps (estimate / prep guide / report / contract /
- * price-change views, written unfiltered) and calls. Provider clicks are
+ * price-change views, written unfiltered), outside-link clicks and calls. An
+ * outside-link click (/go, bot + staff filtered) cannot say WHO clicked: a prep
+ * email can go to the account's service contact and is still attributed to the
+ * customer, and the prep page is shared by token, so it is listed and never
+ * engaged. Provider clicks are
  * labelled as such and the raw stamps "(unfiltered)". The summary reports the
  * newest open (`lastEmailOpenAt`) and newest provider click
  * (`lastProviderClickAt`) as separate informational fields. One tap that
  * produced both a provider click and a short-link click shows once, as the
- * short-link click. Portal-visit and outside-link sources join in a follow-up
- * PR once the PRs that create them have merged. A click on a link delivered to a
+ * short-link click (or, for a prep email, as the outside-link click). A click on a link delivered to a
  * third party (a bill-to payer's AP inbox or an operator-named one-off
  * invoice recipient; the code is minted under the homeowner's customer_id)
  * reads "Link clicked by invoice recipient" and is never engaged.
@@ -55,7 +60,9 @@
  * accepted, cosmetic edge for a read-only feed.
  *
  * The summary is computed from per-source MAX() queries, not from the visible
- * page, and only on the first page.
+ * page, and only on the first page. It also carries `lastSeenAt`
+ * (customers.last_seen_at, written only by the portal / app foreground
+ * beacons): informational, never an event and never part of `lastEngagedAt`.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -118,6 +125,14 @@ const PAGE_LABELS = {
 const PUSH_OPEN_PAGE = 'push:open';
 const NOTIFICATION_SUBJECT_RE = /^notification:([0-9a-f-]{36})$/i;
 const PUSH_PLATFORMS = new Set(['web', 'ios', 'android']);
+
+function outlinkHost(url) {
+  try {
+    return new URL(String(url)).hostname.replace(/^www\./i, '') || null;
+  } catch {
+    return null;
+  }
+}
 
 function pageViewTitle(page) {
   const p = String(page || '');
@@ -189,16 +204,23 @@ const payerCodeSql = (alias) => `(COALESCE(${alias}.purpose, '') = 'payer_invoic
 // readily as a person. When the same tap also produced a human short-link click
 // (email links are short-wrapped), that click is the engaged event and the
 // provider click is not listed a second time: a short_code_clicks row for this
-// customer (or their lead) within two minutes of it. It is SQL so the ranking
+// customer (or their lead) within two minutes of it. A prep email's outside
+// links go through /go instead, so an email-surface outbound_link_clicks row in
+// the same window collapses it too (that row is listed, never engaged). The
+// whole predicate is parenthesized: callers negate it. It is SQL so the ranking
 // times below stay exactly the times that become events.
 function nearShortClick(tsExpr, ctx) {
   return {
-    sql: `EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
+    sql: `(EXISTS (SELECT 1 FROM short_code_clicks scx JOIN short_codes scy ON scy.id = scx.short_code_id
       WHERE scx.is_bot = false
         AND (scy.customer_id = ? OR scy.lead_id IN (SELECT ld.id FROM leads ld WHERE ld.customer_id = ?))
         AND NOT ${payerCodeSql('scy')}
-        AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')`,
-    bindings: [ctx.customerId, ctx.customerId],
+        AND scx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes')
+      OR EXISTS (SELECT 1 FROM outbound_link_clicks olx
+      WHERE olx.customer_id = ?
+        AND olx.surface = 'email'
+        AND olx.clicked_at BETWEEN ${tsExpr} - INTERVAL '2 minutes' AND ${tsExpr} + INTERVAL '2 minutes'))`,
+    bindings: [ctx.customerId, ctx.customerId, ctx.customerId],
   };
 }
 // The provider click's ranking time (null once collapsed) and its collapse flag.
@@ -411,6 +433,31 @@ const SOURCES = [
       sent: r.sent_at, delivered: r.delivered_at, opened: r.opened_at, provider_clicked: r.clicked_collapsed ? null : r.clicked_at,
       bounced: r.bounced_at, complained: r.complained_at,
     }, 'newsletter_send_deliveries'),
+  },
+  {
+    // Bot + staff filtered at /go (shouldRecord; rows from before that filter,
+    // 09-29 evening on, may include a staff click). Listed, NEVER engaged: the
+    // customer_id is the account the link was rendered for, not who clicked
+    // (a prep email can go to the service contact; the page is shared by token).
+    name: 'outside link clicks',
+    from: (dbh, ctx) => dbh('outbound_link_clicks as olc')
+      .join('outbound_links as ol', 'ol.id', 'olc.outbound_link_id')
+      .where('olc.customer_id', ctx.customerId),
+    select: ['olc.id', 'olc.clicked_at', 'olc.surface', 'olc.template_key', 'ol.target_url'],
+    ts: ['olc.clicked_at'],
+    toEvents: (r) => {
+      // Hostname only: the full URL (path, query, affiliate tags) never reaches the feed.
+      const host = outlinkHost(r.target_url);
+      const template = r.template_key ? String(r.template_key).replace(/[._]/g, ' ') : null;
+      return compact([mk('outlink', r.id, { type: 'outbound_link_click', id: r.id }, {
+        at: r.clicked_at,
+        channel: r.surface === 'email' ? 'email' : 'page',
+        kind: 'outlink_clicked',
+        title: 'Outside link clicked (may be a service contact, not counted)',
+        detail: [host, template].filter(Boolean).join(' · ') || null,
+        engaged: false,
+      })]);
+    },
   },
   {
     // customer_page_views is recorded by a bot/staff-filtering recorder: engaged.
@@ -672,7 +719,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     if (!beforeIso) throw Object.assign(new Error('before must be a valid date'), { status: 400 });
   }
 
-  const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
+  const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email', 'last_seen_at');
   if (!customer) return null;
   const emails = [...new Set([String(customer.email || '').trim().toLowerCase()].filter(Boolean))];
   const ctx = {
@@ -701,6 +748,9 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     try {
       const out = await computeSummary(SOURCES.filter((s) => !unavailableSources.includes(s.name)), ctx);
       summary = out.summary;
+      // Informational only (portal / app foreground beacons): not an event,
+      // and never folded into lastEngagedAt.
+      if (summary) summary.lastSeenAt = iso(customer.last_seen_at);
       for (const name of out.failed) if (!unavailableSources.includes(name)) unavailableSources.push(name);
     } catch (err) {
       logFailure('summary', customer.id, err);

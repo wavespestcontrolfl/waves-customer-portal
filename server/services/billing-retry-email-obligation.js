@@ -179,6 +179,11 @@ async function replayPaymentRetryNotice(meta = {}, database = db) {
   }
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer) return { sent: false, blocked: true, code: 'CUSTOMER_NOT_FOUND', deliveryOutcome: 'not_sent' };
+  // The retry notice carries the invoice pay link: while a collections dispute
+  // hold stands (or cannot be verified) it waits - the scheduled rail refunds
+  // the attempt and it sends after the release.
+  const hold = await require('./collections/collection-hold').messagingHeldByCollectionHold(meta.customer_id, database);
+  if (hold.held) return { sent: false, blocked: true, ...require('./collections/collection-hold').holdDeferOutcome(hold) };
   try {
     // Eligibility on the date the notice names, not today: a pause that
     // ends before the retry date does not cancel the promised notice, and
@@ -260,6 +265,11 @@ async function replayPaymentRetryNotice(meta = {}, database = db) {
   if (result?.deliveryOutcome === 'not_sent') {
     if (providerStarted && await clearProviderMarker(database, meta.scheduled_sms_log_id) !== 1) {
       return { sent: false, blocked: true, code: 'BILLING_EMAIL_MARKER_CLEAR_FAILED', deliveryOutcome: 'uncertain' };
+    }
+    // A hold that committed at the lifecycle handoff is a WAIT, exactly like the early check
+    // above: the coded outcome keeps the obligation pending and refunds the rail's attempt.
+    if (result.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+      return { sent: false, blocked: true, ...require('./collections/collection-hold').holdDeferOutcome({ reason: 'hold' }) };
     }
     return result.retryable === true
       ? { sent: false, retryable: true, code: 'BILLING_EMAIL_RETRY', deliveryOutcome: 'not_sent', reason: result.reason }

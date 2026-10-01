@@ -25,7 +25,7 @@ const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
-const SCHEDULED_SMS_MAX_ATTEMPTS = 3;
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
@@ -1151,6 +1151,31 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Property-enrich backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
+  // one stop that qualify for a visit group but were never grouped (written
+  // before the gates, while autopay customers were excluded, or by a writer
+  // that never calls maybeGroupRow: moves, series extension) are folded into
+  // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
+  // Only loose pairs more than 76h out (no reminder due or in flight), so a
+  // tech's near days never change under them.
+  // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
+  // writes no customer message. runExclusive: read-then-act; a deploy overlap
+  // must not run two sweeps over the same rows.
+  // =========================================================================
+  cron.schedule('25 2 * * *', async () => {
+    if (!isEnabled('visitGroups')) return;
+    try {
+      const res = await runExclusive('visit-regroup-same-stop', () =>
+        require('./visit-regroup').regroupUngroupedSameStopRows({ dryRun: false }));
+      if (res && !res.skipped && (res.groups.length || res.left.length)) {
+        logger.info(`[visit-regroup] grouped ${res.groups.length} stop(s); left ${res.left.length} row(s) alone (${res.candidates} candidates)`);
+      }
+    } catch (err) {
+      logger.error(`[visit-regroup] nightly same-stop regroup failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3509,6 +3534,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — resume bounce recoveries parked behind a collections dispute hold: the corrected
+  // address stays staged, and the re-send goes out on the first tick after the hold is released.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('email-bounce-recovery-held', async () => {
+        await require('./email-bounce-recovery').retryHeldRecoveries();
+      });
+    } catch (err) {
+      logger.error(`[bounce-recovery] held-recovery tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
   // runs created by trigger-mapped email template automations. Runs in
@@ -4237,23 +4274,31 @@ function initScheduledJobs() {
                 // terminal path an ordinary eligible:false recheck refusal
                 // takes above: blocked status, claim release, review
                 // fallback armed via onTerminal.
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                  status: 'blocked',
-                  updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                // A dispute-hold suppression is this invoice's only pay-link
+                // delivery: queue it onto the scheduled-invoice sender FIRST
+                // (owner ruling 2026-09-30). A queue failure throws into this
+                // row's bounded retry ladder instead of blocking it unqueued.
+                // The hand-over, the ownership marker and the terminal sms_log write are ONE
+                // transaction (blockPayLinkOnlyReplay): a crash between them can never leave the
+                // sender owning the link while this original text is replayed.
+                await require('./dispatch-completion-deferred').blockPayLinkOnlyReplay({
+                  msgId: msg.id,
+                  blockedReason: `stale_replay:${recheck.reason || 'pay-link-only-body'}`,
+                  terminalPending: requiresTerminalHook(claimMeta.entry_point),
+                  invoiceId: claimMeta.invoice_id || null,
+                  serviceRecordId: claimMeta.service_record_id || null,
+                  handOver: recheck.reason === 'collections-dispute-hold' && Boolean(claimMeta.invoice_id),
                 });
                 logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
                 await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
                 continue;
               }
               const stampedAt = new Date();
-              const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                message_body: strippedBody,
-                metadata: db.raw(
-                  "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
-                  [stampedAt, recheck.reason || null],
-                ),
-                updated_at: stampedAt,
+              // A dispute-hold strip also queues the invoice onto the
+              // scheduled-invoice sender, atomically with the strip (see
+              // persistStrippedPayLink).
+              const changed = await require('./dispatch-completion-deferred').persistStrippedPayLink({
+                msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, serviceRecordId: claimMeta.service_record_id || null, stampedAt,
               });
               if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
               msg.message_body = strippedBody;
@@ -4261,6 +4306,20 @@ function initScheduledJobs() {
               claimMeta.pay_link_stripped_at = stampedAt.toISOString();
               claimMeta.pay_link_stripped_reason = recheck.reason || null;
               logger.info(`[scheduled-sms] deferred completion ${msg.id} pay link stripped at delivery (${recheck.reason || 'invoice-not-collectible'})`);
+            }
+            // A recheck that names a replacement body (the queued visit summary whose invoice
+            // link is no longer right to send: the plain summary goes instead) and the metadata
+            // keys that go with the old body. Persisted under the same claimed-row guard.
+            if (recheck && typeof recheck.replaceBody === 'string' && recheck.replaceBody) {
+              const dropKeys = Array.isArray(recheck.dropMeta) ? recheck.dropMeta : [];
+              const swapped = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                message_body: recheck.replaceBody,
+                metadata: dropKeys.reduce((expr, key) => db.raw('(?) - ?::text', [expr, key]), db.raw("COALESCE(metadata, '{}'::jsonb)")),
+                updated_at: new Date(),
+              });
+              if (!swapped) throw new Error('Scheduled message claim lost before replacing its body');
+              msg.message_body = recheck.replaceBody;
+              for (const key of dropKeys) delete claimMeta[key];
             }
           }
           // replay_purpose: an enqueue whose message_type has no useful
@@ -4406,6 +4465,10 @@ function initScheduledJobs() {
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
                       ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
+                      // Which picker minted the offer, and what it needs to be asked again
+                      // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+                      ...(openTimesSnapshot.lookup?.source ? { source: openTimesSnapshot.lookup.source } : {}),
+                      ...(openTimesSnapshot.lookup?.serviceKey ? { serviceKey: openTimesSnapshot.lookup.serviceKey } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
@@ -4448,14 +4511,39 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+            // Re-service promise revalidation (Codex round-3 P2): the same
+            // "reviewed wording can go stale before it fires" gap as the
+            // checks above, for a free re-service promise — the customer's
+            // eligibility (their plan, an already-used re-service) can
+            // change between review/scheduling and this fire. Reuses the
+            // SAME live lane check + promised-lane snapshot the immediate
+            // send path's agentDecisionSendBlockReason runs
+            // (reservicePromiseStillEligible, sms-shadow-drafter.js) — no
+            // separate mechanism. Fail-closed on any lookup error.
+            let reserviceStale = false;
+            let reserviceReason = null;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              // Shared with the immediate send path (agent-decision-send-checks): a plain
+              // non-promise message is never blocked by this recheck's own plumbing.
+              const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
+              const reason = await scheduledReserviceBlockReason({
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+              });
+              if (reason) {
+                reserviceStale = true;
+                reserviceReason = reason;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
-                    : 'stale_sla_agent_decision';
+                    : slaStale
+                      ? 'stale_sla_agent_decision'
+                      : 'stale_reservice_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4485,7 +4573,9 @@ function initScheduledJobs() {
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
-                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
+                        : slaStale
+                          ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
+                          : `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4710,6 +4800,10 @@ function initScheduledJobs() {
               // and the lane stamped at enqueue ride along in metadata for
               // the owner autopay digest to classify the send.
               ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              // The queued invoice notice's trusted dispute-hold exemption (an operator's send, the
+              // customer's own accept) rides into the replay's stored Email context.
+              ...(claimMeta.entry_point === 'invoice_send_deferred' && ['operator', 'customer'].includes(claimMeta.hold_exempt)
+                ? { hold_exempt: claimMeta.hold_exempt } : {}),
               ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
                 ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
                 : {}),
@@ -4838,7 +4932,10 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] lawn notification ${msg.id} waiting after a concurrent pipeline claim — rescheduled for ${lawnPipelineRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
+          } else if (['QUIET_HOURS_HOLD', 'COLLECTION_HOLD_DEFER'].includes(smsResult.code) && smsResult.nextAllowedAt) {
+            // COLLECTION_HOLD_DEFER shares this branch: an active collections
+            // dispute hold on a delayed pay-link leg waits and sends after
+            // the release, never spending an attempt.
             // Send-window hold: a validator deferral, not a delivery
             // attempt — no provider send was tried. Handled BEFORE the
             // bounded-attempt branch and with the claimed attempt REFUNDED
@@ -4854,7 +4951,7 @@ function initScheduledJobs() {
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'quiet_hours_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -4865,7 +4962,7 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {

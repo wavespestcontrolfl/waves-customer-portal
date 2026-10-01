@@ -367,6 +367,8 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
       return q;
     };
     trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
+    trx.fn = { now: () => new Date() };
+    trx.transaction = async callback => callback(trx);
     trx.schema = { hasColumn: async () => true };
     trx._updates = updates;
     return trx;
@@ -422,6 +424,82 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     const mirror = u.find((x) => x.table === 'customers');
     expect(mirror.patch).toMatchObject({ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', latitude: 27.5 });
     expect(mirror.patch.nearest_location_id).toBeTruthy();
+  });
+
+  test.each([
+    ['reviewed', 4200, true, 4200],
+    ['reviewed zero', 0, true, 0],
+    ['unreviewed', 4200, false, null],
+    ['missing', undefined, false, null],
+    ['stale address', 4200, true, null],
+    ['dark with saved measurement', 4200, true, 4200],
+  ])('primary promotion replaces the former lawn mirror: %s', async (scenario, sqft, reviewed, expected) => {
+    const previousGate = process.env.GATE_PROPERTY_SERVICE_AREAS;
+    process.env.GATE_PROPERTY_SERVICE_AREAS = scenario === 'dark with saved measurement' ? 'false' : 'true';
+    try {
+      const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+      const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1' };
+      neu.property_sqft = sqft;
+      neu.service_area_measurements = {
+        addressKey: scenario === 'stale address' ? 'former-address' : require('../services/customer-properties').addressKey(neu),
+        areas: { lawn: { sqft, source: 'field', reviewedAt: reviewed ? '2026-09-27T12:00:00Z' : null, reviewedBy: reviewed ? 'tech-1' : null } },
+      };
+      const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+      const result = await applyPropertyRoleProposals(trx, {
+        customerId: 'cust-1',
+        proposals: [{ kind: 'primary_flip', new_primary_property_id: neu.id, old_primary_property_id: old.id }],
+      });
+      expect(result.applied).toBe(1);
+      expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual([
+        expect.objectContaining({ upsert: true, patch: { lawn_sqft: expected, updated_at: expect.any(Date) } }),
+      ]);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+      else process.env.GATE_PROPERTY_SERVICE_AREAS = previousGate;
+    }
+  });
+
+  test('primary promotion leaves the turf row alone before the property-areas migration', async () => {
+    const { _resetAreaColumnCache } = require('../services/property-service-areas');
+    _resetAreaColumnCache();
+    const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    trx.schema = { hasColumn: async () => false };
+    const result = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: neu.id, old_primary_property_id: old.id }],
+    });
+    expect(result.applied).toBe(1);
+    expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual([]);
+  });
+
+  test.each([
+    ['unreviewed keeps the lawn it already describes', false, []],
+    ['reviewed still replaces it', true, [expect.objectContaining({ upsert: true, patch: { lawn_sqft: 3900, updated_at: expect.any(Date) } })]],
+  ])('a same-address primary flip: %s', async (scenario, reviewed, expected) => {
+    const previousGate = process.env.GATE_PROPERTY_SERVICE_AREAS;
+    delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+    try {
+      const old = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+      const neu = { ...NEW_HOME, active: true, customer_id: 'cust-1', property_sqft: 3900 };
+      if (reviewed) {
+        neu.service_area_measurements = {
+          addressKey: require('../services/customer-properties').addressKey(neu),
+          areas: { lawn: { sqft: 3900, source: 'field', reviewedAt: '2026-09-27T12:00:00Z', reviewedBy: 'tech-1' } },
+        };
+      }
+      const customer = { id: 'cust-1', address_line1: neu.address_line1, address_line2: neu.address_line2 || null, city: neu.city, state: neu.state || 'FL', zip: neu.zip };
+      const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [customer], scheduled_services: [] } });
+      const result = await applyPropertyRoleProposals(trx, {
+        customerId: 'cust-1',
+        proposals: [{ kind: 'primary_flip', new_primary_property_id: neu.id, old_primary_property_id: old.id }],
+      });
+      expect(result.applied).toBe(1);
+      expect(trx._updates.filter(update => update.table === 'customer_turf_profiles')).toEqual(expected);
+    } finally {
+      if (previousGate !== undefined) process.env.GATE_PROPERTY_SERVICE_AREAS = previousGate;
+    }
   });
 
   test('canonical premise match repairs equivalent-spelling stamps: coords + missing locality (codex r6→r26)', async () => {

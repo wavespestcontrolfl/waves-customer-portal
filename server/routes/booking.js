@@ -16,6 +16,15 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const {
+  validatePreferredTimeRequest,
+  recordPreferredTimeRequest,
+  hasRecentPreferredTimeRequest,
+  noteBookingOnPreferredLeads,
+} = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
@@ -961,6 +970,10 @@ router.get('/config', async (req, res, next) => {
       multi_service: isEnabled('multiServiceBooking'),
       // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
       van_scene: isEnabled('vanScene'),
+      // "Can't find a time?" block + preferred day/time request form
+      // (GATE_BOOK_PREFERRED_TIME) — fail-closed dark-ship flag; the POST
+      // route also answers 404 while off.
+      preferred_time: bookPreferredTimeLive(),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -2119,6 +2132,71 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   };
 }
 
+// The /book funnel's default offer window — anchored to ET calendar days so it
+// doesn't shift by a day between 8 PM ET and midnight UTC — and the 90-day
+// horizon a caller-supplied range is clamped to.
+function bookingOfferWindow(config, today) {
+  return {
+    minDate: etDateString(addETDays(today, config.advance_days_min ?? 1)),
+    maxDate: etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS)),
+    defaultTo: etDateString(addETDays(today, config.advance_days_max ?? 14)),
+  };
+}
+
+// The /book funnel's offer builder — GET /availability, POST /find-slots and
+// the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
+// through it, so an offer and its later createSelfBooking commit come from
+// one finder. Self-serve surface: the notice window is enforced (owner ruling
+// 2026-09-23). /confirm's commit for this funnel is createSelfBooking, which
+// (while bookInsertionOffersLive() is live) re-verifies with traffic and
+// persists the certified route order — see the comment on capacityPlacement
+// inside buildBookingAvailability. The minted offer carries a signed policy
+// tag either way, so a gate flip between this mint and /confirm can't be
+// redeemed under the wrong policy.
+function buildFunnelAvailability(args) {
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+}
+
+// What the /book funnel would offer an EXISTING customer for one funnel
+// service (GET /availability with no date range: the customer's own booking
+// pin, the service's catalog duration, the default window) — null when there
+// is nothing to commit against: /book off, no funnel service (createSelfBooking
+// refuses an empty serviceKey), the customer gone, or no resolvable pin (no
+// coordinates and no geocodable address, or a staff review holding it), or
+// an inactive account.
+async function availabilityForExistingCustomer({ customerId, serviceKey }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  if (!customerId || !funnelKey) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) return null;
+  // active: true — the bearer resolver's own rule (middleware/auth.js
+  // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
+  // /book, so the texting AI must not offer them times it could not commit.
+  const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
+    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  // createSelfBooking's own rule: under bookingCustomersOnly a row still in a
+  // pre-customer pipeline stage is not a verified customer and cannot book, so
+  // it is offered nothing either.
+  if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
+  const location = customer ? await customerBookingLocation(customer) : null;
+  if (!location) return null;
+  const config = await loadBookingConfig();
+  const today = new Date();
+  const { minDate, defaultTo } = bookingOfferWindow(config, today);
+  return buildFunnelAvailability({
+    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+    // The /book page's own first request always sends expand=open
+    // (PublicBookingPage.jsx), so an open route day offers its full block of
+    // hourly windows there — and here.
+    expandOpenDays: true,
+    // Same online-booking arrival grace as /availability + /find-slots (a
+    // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
+    // exactly what /book would show this customer, graced slots included.
+    bookArrivalGrace: true,
+  });
+}
+
 // GET /api/booking/availability
 //   query: lat, lng, address, city, state, zip, unit, estimate_id,
 //          service_type, duration_minutes, date_from, date_to
@@ -2156,14 +2234,10 @@ router.get('/availability', async (req, res, next) => {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
-    // Default date window from config — anchored to ET calendar days so the
-    // window doesn't shift by a day between 8 PM ET and midnight UTC. A
-    // caller-supplied range is honored but clamped to the 90-day horizon so a
+    // A caller-supplied range is honored but clamped to the 90-day horizon so a
     // "Find more dates" / specific-date request can reach further out.
     const today = new Date();
-    const minDate = etDateString(addETDays(today, config.advance_days_min ?? 1));
-    const maxDate = etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS));
-    const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+    const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
     const clamp = (d, fallback) => {
       if (!d) return fallback;
       if (d < minDate) return minDate;
@@ -2181,22 +2255,12 @@ router.get('/availability', async (req, res, next) => {
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // /confirm's own commit for this funnel is createSelfBooking, which
-      // (while bookInsertionOffersLive() is live) re-verifies with traffic
-      // and persists the certified route order — see the comment on
-      // capacityPlacement inside buildBookingAvailability. The minted offer
-      // carries a signed policy tag either way (below), so a gate flip
-      // between this mint and /confirm can't be redeemed under the wrong
-      // policy.
-      capacityPlacement: bookInsertionOffersLive(),
       // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
       // the gate is off): this offer's own commit is createSelfBooking, which
       // applies the matching waiver + grace bound.
@@ -2299,17 +2363,12 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // Same /confirm commit (createSelfBooking) as /availability — see the
-      // comment there and on capacityPlacement inside buildBookingAvailability.
-      capacityPlacement: bookInsertionOffersLive(),
       // Same online-booking arrival grace as /availability (see there).
       bookArrivalGrace: true,
     });
@@ -5987,6 +6046,12 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
+      // A first attempt that committed but died before its post-commit note
+      // step leaves the customer's preferred-time request without its "customer
+      // booked" note: write it (idempotent per lead + visit; never converts).
+      if (!callbackVisit) {
+        await noteBookingOnPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -6375,6 +6440,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
+    // customer is moot once they have booked, but a booking never closes it
+    // (owner ruling 2026-09-30): the customer's open request(s) get one system
+    // note naming this visit, and staff close them. No lead is won, no funnel
+    // row touched. Best-effort; runs whatever the gate reads (a request already
+    // filed still gets the note). The replay branch does the same.
+    if (!callbackVisit) {
+      await noteBookingOnPreferredLeads(db, { customerId: custId, booking });
+    }
+
     // Persist an ad-tracked self-booking's click id onto a won lead so the
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
@@ -6626,6 +6701,22 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
     const ten = phoneDigits.slice(-10);
 
+    // A visitor who filed a "can't find a time" request asked the office to
+    // reach out — never stage an abandoned-booking recovery row (an automated
+    // text/email) for the same phone afterwards. Gate-off: untouched.
+    if (bookPreferredTimeLive()) {
+      try {
+        // Session too: a visitor who filed under one phone and then retyped another
+        // in the same funnel session is still the person who asked for a call back.
+        const captureSession = String(b.session_id == null ? '' : b.session_id).trim().slice(0, 80) || null;
+        if (await hasRecentPreferredTimeRequest(db, ten, { sessionId: captureSession })) return accepted('preferred_time_request');
+      } catch (ptErr) {
+        // Fail closed: a lookup error must not risk an automated send.
+        logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);
+        return accepted('lookup_failed');
+      }
+    }
+
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
     const sessionId = str(b.session_id, 80);
@@ -6746,23 +6837,19 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const serviceKey = normalizeBookingServiceKey(b.service_id)
         || normalizeBookingServiceKey(b.service_type)
         || normalizeBookingServiceKey(b.quoted_service_label);
-      const avail = await buildBookingAvailability({
+      // The /book funnel's own builder (buildFunnelAvailability): a slot the
+      // notice window would now refuse must not be treated as still offered,
+      // and this re-checks a slot /availability or /find-slots already
+      // offered, so it must use the SAME capacityPlacement value those used
+      // (offer/commit parity). This route never redeems a slot_sig itself
+      // (capture-intent only stages a recovery row), so the mismatch protection
+      // here is offer/commit parity, not the signed policy tag.
+      const avail = await buildFunnelAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
         serviceKey,
-        // Self-serve surface — a slot the notice window would now refuse
-        // must not be treated as still offered (offer/commit parity).
-        selfServeNotice: true,
-        // This re-checks a slot /availability or /find-slots already
-        // offered, so it must use the SAME capacityPlacement value those
-        // used, or a genuinely still-offered inserted slot would revalidate
-        // as unavailable (offer/commit parity). This route never redeems a
-        // slot_sig itself (capture-intent only stages a recovery row), so
-        // the mismatch protection here is offer/commit parity, not the
-        // signed policy tag below.
-        capacityPlacement: bookInsertionOffersLive(),
         // Same online-booking arrival grace as /availability + /find-slots —
         // or a genuinely still-offered graced slot would revalidate as gone.
         bookArrivalGrace: true,
@@ -6905,6 +6992,72 @@ router.get('/embed-snippet', (req, res) => {
   res.json({ source, url: iframeSrc, snippet });
 });
 
+// Dark gate + token-route privacy headers for POST /api/booking/preferred-time.
+// server/index.js mounts this ABOVE the global cors(), the global /api/ limiter
+// and the shared body parsers (like the other dark public routes), so while the
+// gate is off every method gets the generic unknown-route 404 — no CORS 204, no
+// limiter 429, no body parse 400/413 — and every response (404, 429, 400,
+// success) carries no-store / noindex / no-referrer. The route below re-runs it
+// as its own first layer.
+const preferredTimePreParserGuard = [
+  noStore,
+  (req, res, next) => {
+    if (!bookPreferredTimeLive()) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    return next();
+  },
+];
+
+// Per-IP limiters for the preferred-time request (an internal lead + one
+// admin bell per new phone). Generous for a real visitor, tight against bulk
+// office-inbox spam. Same shape as capture-intent's.
+const preferredTimeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+const preferredTimeHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// POST /api/booking/preferred-time — the /book "Can't find a time?" form
+// (GATE_BOOK_PREFERRED_TIME, dark). Files ONE internal lead the office answers
+// by hand and rings the admin bell; it sends NOTHING to the customer (no SMS,
+// no email) and retires any open abandoned-booking intent for the phone so the
+// recovery worker can't text them either. Gate off = the generic 404 before
+// the limiter. Proof-of-funnel: the same IP-bound token /availability mints
+// for capture-intent (the funnel always fetches availability first).
+router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const parsed = validatePreferredTimeRequest(b);
+    // Honeypot: pretend success, store nothing.
+    if (parsed.honeypot) return res.json({ ok: true });
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.status(400).json({ error: 'session_expired' });
+    }
+    const serviceKey = normalizeBookingServiceKey(b.service_id)
+      || normalizeBookingServiceKey(b.service_type)
+      || null;
+    const serviceLabel = canonicalBookingServiceLabel(b.service_id)
+      || canonicalBookingServiceLabel(b.service_type)
+      || null;
+    await recordPreferredTimeRequest(db, parsed.value, { serviceLabel, serviceKey });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[booking:preferred-time] failed: ${err.message}`);
+    return res.status(500).json({ error: 'We could not save that. Please text us instead.' });
+  }
+});
+
 // GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
 router.get('/sources', async (req, res, next) => {
   try {
@@ -6957,6 +7110,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
@@ -6985,6 +7139,7 @@ module.exports._internals = {
   resolveOfferCoords,
   customerBookingLocation,
   buildBookingAvailability,
+  availabilityForExistingCustomer,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,
