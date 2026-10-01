@@ -116,6 +116,9 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.boolean('has_attachments').notNullable().defaultTo(false);
       for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
+    // The billing email authority reads the collections hold at the provider boundary (any active
+    // collection_hold waits): the real table's shape.
+    await mockPg.raw('CREATE TABLE collections_flags (LIKE public.collections_flags INCLUDING ALL)');
     await ownershipMigration.up(mockPg);
     await mockPg.raw('CREATE TABLE retry_commit_guard (message_id uuid REFERENCES email_messages(id) DEFERRABLE INITIALLY DEFERRED)');
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
