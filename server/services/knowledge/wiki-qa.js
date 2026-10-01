@@ -3,6 +3,13 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString } = require('../../utils/datetime-et');
 const { dispatchWithFallback } = require('../llm/call');
+const { isEnabled, kbSpeciesQaLive } = require('../../config/feature-gates');
+
+// Callers whose answer goes to staff, never to a customer. Every other
+// source (ai_assistant, lead_agent, content_agent, unknown) is treated as
+// customer-facing and never sees species tech notes.
+const STAFF_SOURCES = new Set(['tech_field', 'admin_manual']);
+const MAX_SPECIES = 3;
 
 // Structured-output contract for the routing step (llm/call.js jsonSchema).
 // The path list is still capped to 8 and resolved against knowledge_base.
@@ -14,6 +21,10 @@ const ROUTING_SCHEMA = {
     paths: { type: 'array', items: { type: 'string', description: 'wiki article file path from the index' } },
   },
 };
+
+// Appended to the answer prompt only when species entries were supplied, so
+// with GATE_KB_SPECIES_QA off the prompt is byte-identical to before.
+const SPECIES_RULE = ' Articles titled "SPECIES CATALOG" are the owner-approved species catalog: where they disagree with another article about what an organism is, how serious it is, or its safety, the catalog wins.';
 
 // NOTE: WikiQA.query stays on FLAGSHIP, not DEEP — it serves interactive
 // surfaces (tech field lookup, admin Q&A, assistant tools) where a
@@ -48,6 +59,10 @@ class WikiQA {
       // Fallback: keyword search
       return this.keywordSearch(question, context);
     }
+
+    // Owner-approved species-catalog entries for this question
+    // (GATE_KB_SPECIES_QA; [] when off).
+    const species = await this.speciesContext(question, context.source);
 
     // Step 1: Route to relevant articles (FLAGSHIP first, Sol on a miss)
     const knownPaths = new Set(indexRows.map((r) => r.path));
@@ -93,22 +108,25 @@ ${liveIndex}`,
       paths = fallbackArticles.map(a => a.path);
     }
 
-    if (paths.length === 0) {
+    if (paths.length === 0 && species.length === 0) {
       const answer = "I couldn't find relevant articles in the knowledge base for this question. The topic may not be documented yet.";
       await this.logQuery(question, answer, [], context.source);
       return { answer, articlesUsed: [] };
     }
 
-    // Step 2: Load articles
-    const articles = await db('knowledge_base')
-      .whereIn('path', paths)
-      .select('path', 'title', 'content');
+    // Step 2: Load articles. Knowledge-base paths stay first in the refs so
+    // fileBack (which appends to refs[0]) never targets a species entry.
+    const kbArticles = paths.length
+      ? await db('knowledge_base').whereIn('path', paths).select('path', 'title', 'content')
+      : [];
+    const articles = [...kbArticles, ...species];
+    const refs = [...paths, ...species.map((a) => a.path)];
 
     // Step 3: Answer with full context (FLAGSHIP first, Sol on a miss; a
     // two-leg miss throws like the SDK path did)
     const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
       laneId: 'wiki_qa',
-      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.`,
+      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}`,
       text: `Question: ${question}
 
 Wiki articles:
@@ -119,9 +137,52 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
     const answer = answered.text;
-    await this.logQuery(question, answer, paths, context.source);
+    await this.logQuery(question, answer, refs, context.source);
 
-    return { answer, articlesUsed: paths, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };
+    return { answer, articlesUsed: refs, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };
+  }
+
+  /**
+   * Species-catalog entries relevant to the question, as answer articles
+   * (`path: species:<slug>`). Approved entries only. Customer-facing callers
+   * get the customer copy; staff callers also get the tech notes. Hybrid
+   * search (species sources only) when GATE_HYBRID_KNOWLEDGE is on, else the
+   * catalog's own name match. Never throws: a failure is no species context.
+   */
+  async speciesContext(question, source) {
+    if (!kbSpeciesQaLive()) return [];
+    try {
+      const catalog = require('../species-catalog');
+      const { isApproved } = require('../species-catalog-approval');
+      const { speciesTitle, renderSpeciesCustomer, renderSpeciesTech } = require('../knowledge-index/connectors');
+      const staff = STAFF_SOURCES.has(source || 'admin_manual');
+
+      let slugs = [];
+      if (isEnabled('hybridKnowledge')) {
+        const { hybridKnowledgeSearch } = require('../knowledge-index/hybrid-search');
+        const hits = await hybridKnowledgeSearch(question, { limit: 8, sources: staff ? ['species', 'species_tech'] : ['species'] });
+        slugs = (hits?.results || []).map((r) => r.sourceId);
+      }
+      if (!slugs.length) {
+        const resolved = catalog.resolveName(question);
+        if (resolved?.node?.slug) slugs = [resolved.node.slug];
+      }
+
+      const entries = [...new Set(slugs)]
+        .map((slug) => catalog.getEntry(slug))
+        .filter((e) => e && isApproved(e))
+        .slice(0, MAX_SPECIES);
+      return entries.map((e) => ({
+        path: `species:${e.slug}`,
+        title: `${speciesTitle(e)} — SPECIES CATALOG`,
+        content: staff && String(e.tech_notes || '').trim()
+          ? `${renderSpeciesCustomer(e)}\n\n${renderSpeciesTech(e)}`
+          : renderSpeciesCustomer(e),
+      }));
+    } catch (err) {
+      logger.warn(`[wiki-qa] species context skipped: ${err.message}`);
+      return [];
+    }
   }
 
   /**
