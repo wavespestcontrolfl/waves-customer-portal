@@ -2,6 +2,7 @@
 // unknown (missing linkage or window not elapsed), never a negative.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+const { smsDeliveredSql } = require('../services/staff-contact');
 const { LOGGED_MOVE_SQL } = require('../utils/reschedule-log-sql');
 const mockCallEndFor = jest.fn();
 const mockResolveLead = jest.fn();
@@ -222,13 +223,17 @@ describe('smsEvidence', () => {
     expect(out.is_courtesy_only.value).toBeNull();
   });
 
-  test('courtesy: an outbound row counts only once it went out (queued/sent/delivered)', async () => {
+  test('courtesy: an outbound text counts only once delivered; one still in flight keeps it unknown', async () => {
     const conn = fakeConn();
     await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn });
-    const [outbound, inbound] = conn.log.filter((q) => q.table === 'sms_log');
-    expect(outbound.calls).toContainEqual(['whereIn', ['status', ['queued', 'sent', 'delivered']]]);
+    const [delivered, inbound, inFlight] = conn.log.filter((q) => q.table === 'sms_log');
+    expect(delivered.calls).toContainEqual(['whereRaw', [smsDeliveredSql('sms_log')]]);
     expect(inbound.calls).toContainEqual(['whereNotIn', ['status', ['failed', 'undelivered', 'blocked']]]);
+    expect(inFlight.calls).toContainEqual(['whereIn', ['status', ['queued', 'sending', 'sent']]]);
+    const out = await smsEvidence(sms({ created_at: ago(30) }), { now: NOW, conn: fakeConn({ first: { sms_log: [undefined, undefined, { id: 'queued-1' }] } }) });
+    expect(out.is_courtesy_only.value).toBeNull();
   });
+
 
   test('visit change: a logged move, cancel or skip within 7d is true', async () => {
     const out = await smsEvidence(sms({ created_at: ago(5) }), { now: NOW, conn: fakeConn({ first: { job_status_history: [{ id: 'h1' }] } }) });

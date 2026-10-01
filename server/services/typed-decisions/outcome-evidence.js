@@ -49,6 +49,7 @@ const isOutbound = (row) => String(row?.direction || '').startsWith('outbound');
 const lazyBooking = () => require('../call-booking-link-text');
 const { OUTCOME_SOURCES } = require('./packages');
 const { LOGGED_MOVE_SQL } = require('../../utils/reschedule-log-sql');
+const { smsDeliveredSql } = require('../staff-contact');
 
 // Every source is registered in OUTCOME_SOURCES with its one window: the fixture
 // exporter keeps only registered pairs, so an unregistered one is a code bug.
@@ -221,13 +222,18 @@ async function courtesyEvidence(conn, sms, at, now) {
       .where('created_at', '>', at).where('created_at', '<=', until)
       .whereRaw("COALESCE(message_type, '') <> 'internal_alert'")
       .modify(excludeUnresolvedSendReservations);
-    // An outbound row counts only once it actually went out ('scheduled' and
-    // other pre-send rows are not contact); an inbound row is a received text.
-    if (direction === 'outbound') q.whereIn('status', ['queued', 'sent', 'delivered']);
-    else q.whereNotIn('status', ['failed', 'undelivered', 'blocked']);
+    // An inbound row is a received text. Outbound statuses are chosen by the
+    // caller: only a delivered text is contact (staff-contact.js
+    // smsDeliveredSql, the same test the promise checker uses), while a text
+    // still in flight keeps the reading unknown.
+    if (direction === 'inbound') q.whereNotIn('status', ['failed', 'undelivered', 'blocked']);
     return sms.id ? q.whereNot('id', sms.id) : q;
   };
-  let found = await seen(texts('outbound')) || await seen(texts('inbound'));
+  let found = await seen(texts('outbound').whereRaw(smsDeliveredSql('sms_log'))) || await seen(texts('inbound'));
+  // A later Waves text still in flight (queued / sending / sent, not yet
+  // delivered) may yet fail: settling now would freeze a guess the refresh
+  // never revisits.
+  if (!found && await seen(texts('outbound').whereIn('status', ['queued', 'sending', 'sent']))) return unknown(source, window, now);
   if (!found) {
     // Only a call that reached the customer. Outbound calls are staff bridge
     // calls (call-bridge.js); bridged_at is stamped when staff press 1, BEFORE
