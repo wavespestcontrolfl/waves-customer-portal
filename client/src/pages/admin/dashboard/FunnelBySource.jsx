@@ -125,7 +125,7 @@ export default function FunnelBySource({ data, loading, error }) {
                 <span className="ml-auto whitespace-nowrap u-nums text-ui-caption text-ink-secondary">
                   {fmtInt(s.leads)} lead{s.leads === 1 ? "" : "s"}
                   {s.lost > 0 && <span className="ml-1.5">· {fmtInt(s.lost)} lost</span>}
-                  {s.revenue > 0 && <span className="ml-1.5">· {fmtMoneyCompact(s.revenue)} won</span>}
+                  {(s.completed > 0 || s.revenue > 0) && <span className="ml-1.5">· {fmtMoneyCompact(s.revenue)} won</span>}
                 </span>
               </div>
               <StageBars s={s} stages={stages} />

@@ -37,6 +37,12 @@ describeDb('lead funnel breakdown keys', () => {
     expect((await keysFor({ extracted: { attribution: { landingUrl: '' } }, landing: 'https://www.wavespestcontrol.com/quote/?gclid=abc' })).page)
       .toBe('wavespestcontrol.com/quote');
     expect((await keysFor({ extracted: 'not an object', landing: 'wavespestcontrol.com' })).page).toBe('wavespestcontrol.com');
+    // quote wizard (top-level) and lawn assessment (nested) store snake_case,
+    // and both win over the customer's first page
+    expect((await keysFor({ extracted: { landing_url: 'https://wavespestcontrol.com/quote/?x=1' }, landing: 'https://wavespestcontrol.com/old' })).page)
+      .toBe('wavespestcontrol.com/quote');
+    expect((await keysFor({ extracted: { attribution: { landing_url: 'https://www.wavespestcontrol.com/lawn-assessment/' } } })).page)
+      .toBe('wavespestcontrol.com/lawn-assessment');
     expect(await keysFor({})).toEqual({ page: '(unknown)', service: '(unknown)', city: '(unknown)', heard: '(unknown)' });
   });
 
