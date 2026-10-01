@@ -156,74 +156,71 @@ function visibleText(html) {
 // the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;).
 const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
 const HEADING_TAGS = new Set(['title', 'h1']);
-const NON_RENDERED_TAGS = new Set(['script', 'style', 'template']);
-const TAG_NAME_RE = /<\/?([a-z][a-z0-9-]*)/y;
+const INERT_TAGS = new Set(['!--', 'script', 'style', 'template']);
+const TAG_RE = /<(\/?)(!--|[a-z][a-z0-9-]*)/y;
 const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
-// One forward pass (every indexOf resumes past the last), so malformed or unclosed tags in a
-// 600 KB fetched page cannot make this quadratic. Comments and script/style/template bodies
-// (templates nest) are skipped both between and inside headings, so inert markup never
-// contributes heading text.
+
+// indexOf that never searches the same stretch twice: each needle's last hit (Infinity once it
+// is exhausted) is reused until the caller moves past it, so a whole scan stays linear.
+function forwardFinder(lower) {
+  const last = new Map();
+  return (needle, from) => {
+    const hit = last.get(needle);
+    if (hit !== undefined && (hit === Infinity || hit >= from)) return hit;
+    const at = lower.indexOf(needle, from);
+    last.set(needle, at === -1 ? Infinity : at);
+    return at === -1 ? Infinity : at;
+  };
+}
+
+// Where an inert region opened at `lt` ends (Infinity = runs to end of document): a comment at
+// "-->", script/style at their raw-text close, a template at its matching close (they nest).
+function inertEnd(find, name, lt, gt) {
+  if (name === '!--') return find('-->', lt + 4) + 3;
+  if (name !== 'template') return find(`</${name}`, gt + 1);
+  let depth = 1;
+  let at = gt + 1;
+  while (depth > 0 && at !== Infinity) {
+    const close = find('</template', at);
+    const nested = find('<template', at);
+    if (nested < close) { depth += 1; at = nested + 9; } else { depth -= 1; at = close + 10; }
+  }
+  return at;
+}
+
+// Text of every <title>/<h1> in one forward pass, so malformed or unclosed tags in a 600 KB
+// fetched page cannot make it quadratic. Inert regions are skipped both between and inside
+// headings; a heading left open runs to the end of the document, as it renders.
 function headingTexts(html) {
   const src = String(html || '');
   const lower = src.toLowerCase();
+  const find = forwardFinder(lower);
   const out = [];
+  let open = null; // { name, parts, from } of the heading being read
   let i = 0;
-  let nextGt = -1;
-  let open = null; // { name, parts, from } of the <title>/<h1> being read
-  const nextAt = { '<template': -1, '</template': -1 };
-  const find = (needle, from) => {
-    if (nextAt[needle] < from) nextAt[needle] = lower.indexOf(needle, from);
-    return nextAt[needle];
-  };
-  const skipTo = (lt, end) => {
-    if (open) open.parts.push(src.slice(open.from, lt));
-    i = end;
-    if (open) open.from = end;
-  };
   while (i < lower.length) {
-    const lt = lower.indexOf('<', i);
-    if (lt === -1) break;
-    if (lower.startsWith('<!--', lt)) {
-      const close = lower.indexOf('-->', lt + 4);
-      if (close === -1) break;
-      skipTo(lt, close + 3);
-      continue;
-    }
-    TAG_NAME_RE.lastIndex = lt;
-    const m = TAG_NAME_RE.exec(lower);
-    if (!m) { i = lt + 1; continue; }
-    if (nextGt < lt) nextGt = lower.indexOf('>', lt);
-    if (nextGt === -1) break;
-    const name = m[1];
-    const closing = lower[lt + 1] === '/';
-    if (!closing && name === 'template') {
-      let depth = 1;
-      let at = nextGt + 1;
-      while (depth > 0) {
-        const close = find('</template', at);
-        if (close === -1) break;
-        const inner = find('<template', at);
-        if (inner !== -1 && inner < close) { depth += 1; at = inner + 9; } else { depth -= 1; at = close + 10; }
-      }
-      if (depth > 0) break;
-      skipTo(lt, at);
-      continue;
-    }
-    if (!closing && NON_RENDERED_TAGS.has(name)) {
-      const close = lower.indexOf(`</${name}`, nextGt + 1);
-      if (close === -1) break;
-      skipTo(lt, close);
-      continue;
-    }
-    i = nextGt + 1;
-    if (!closing && HEADING_TAGS.has(name) && !open) {
-      open = { name, parts: [], from: i };
+    const lt = find('<', i);
+    TAG_RE.lastIndex = lt;
+    const tag = lt === Infinity ? null : TAG_RE.exec(lower);
+    if (!tag) { i = lt + 1; continue; }
+    const [, closing, name] = tag;
+    const gt = name === '!--' ? lt + 3 : find('>', lt);
+    if (!closing && INERT_TAGS.has(name)) {
+      const end = inertEnd(find, name, lt, gt);
+      if (open) { open.parts.push(src.slice(open.from, lt)); open.from = end; }
+      i = end;
+    } else if (!closing && !open && HEADING_TAGS.has(name)) {
+      open = { name, parts: [], from: gt + 1 };
+      i = gt + 1;
     } else if (closing && open && name === open.name) {
-      open.parts.push(src.slice(open.from, lt));
-      out.push(open.parts.join(' '));
+      out.push([...open.parts, src.slice(open.from, lt)].join(' '));
       open = null;
+      i = gt + 1;
+    } else {
+      i = gt + 1;
     }
   }
+  if (open) out.push([...open.parts, src.slice(open.from)].join(' '));
   return out.map(headingText);
 }
 function notFoundHeading(html) {

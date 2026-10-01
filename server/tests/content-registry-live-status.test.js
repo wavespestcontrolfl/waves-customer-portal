@@ -582,11 +582,23 @@ describe('soft-404 heading detector (shared with the citation auditor)', () => {
     expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
   });
   test('stays linear on malformed or unclosed tags (600 KB fetch cap)', () => {
-    for (const junk of ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>', '<template></template>', '<h1><template></template>', '<template><template></template>']) {
+    const junks = ['<template>', '<h1>', '<h1 class="x"', '<a <b <c', '<!-- ', '</h1><title>', '<template></template>',
+      '<h1><template></template>', '<template><template></template>', '<div>', '<li><ul>', '<b><i>', '<table><td>',
+      '<script>', '<style>', '</template>', '<h1><!--', '<title><script></script>', '<<<<', '<!---->', '<p><h1>'];
+    for (const junk of junks) {
       const started = Date.now();
       notFoundHeading(junk.repeat(Math.ceil(600000 / junk.length)));
       expect(Date.now() - started).toBeLessThan(500);
     }
+    // deep nesting, then the matching closes (the exhausted-search case)
+    const started = Date.now();
+    notFoundHeading(`${'<template>'.repeat(30000)}${'</template>'.repeat(30000)}`);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+  test('a heading left open runs to the end of the document', () => {
+    expect(notFoundHeading('<html><body><h1>Page not found')).toBe(true);
+    expect(notFoundHeading('<h1>Page <!-- x --> not found')).toBe(true);
+    expect(notFoundHeading('<h1>Waves Pest Control')).toBe(false);
   });
   test('inert markup inside a heading, and nested templates, contribute no heading text', () => {
     expect(notFoundHeading('<h1>Waves Pest Control<template>Not found</template></h1>')).toBe(false);

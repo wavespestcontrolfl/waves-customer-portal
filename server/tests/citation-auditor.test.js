@@ -411,6 +411,7 @@ describe('classifyListing', () => {
       expect(text('<p>99 Palm Terrace, Atlanta, Georgia 30303</p>').status).toBe('unverified'); // full state name
       expect(text('<p>Raleigh NORTH CAROLINA 27601</p>').status).toBe('unverified');
       expect(text('<p>Brooklyn, new york 11201</p>').status).toBe('unverified');
+      expect(text('<p>99 Palm Terrace Tampa florida 33601</p>').status).toBe('unverified'); // lowercase Florida, no comma
       expect(text('<p>99 Palm Terrace Boise ID 83702</p>').status).toBe('unverified'); // house number gives context
       expect(text('<p>123 North Martin Luther King Junior Drive Boise ID 83702</p>').status).toBe('unverified');
       expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');

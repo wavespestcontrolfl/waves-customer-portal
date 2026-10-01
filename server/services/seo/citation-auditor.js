@@ -317,7 +317,7 @@ const US_STATE_NAMES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California'
   'Oklahoma', 'Oregon', 'Pennsylvania', 'Puerto Rico', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee',
   'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'];
 const STATE_NAME_ALTS = US_STATE_NAMES.flatMap((n) => [n, n.toUpperCase()]).map((n) => n.replace(/ /g, '\\s+')).join('|');
-const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|${STATE_NAME_ALTS})${ZIP_TAIL}`);
+const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|${STATE_NAME_ALTS})${ZIP_TAIL}`); // our own state in any case
 const AMBIGUOUS_ALTS = [...AMBIGUOUS_STATE_CODES].flatMap((c) => [c, c[0] + c[1].toLowerCase()]).join('|');
 // Within 120 characters, not a word count, so long street and city names still count.
 const NUMBERED_STATE_ZIP_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s[^;!?]{1,120}?\\s(?:${AMBIGUOUS_ALTS})${ZIP_TAIL}`);
