@@ -667,12 +667,17 @@ function reportServiceDate(day) {
 }
 
 // What the report is written from. A change after it was written marks it
-// stale. The tip prints as its own card on the report (the writer never
-// repeats it) and photos only add, so neither is part of it.
+// stale, including a way or rate the tech picked for a product. The tip
+// prints as its own card on the report (the writer never repeats it) and
+// photos only add, so neither is part of it. Nor is the trace: it comes after
+// the report, and turning the sprays that follow it into perimeter sprays is
+// that step's own record (the note already says where the tech sprayed).
 function writerSignature(form, rows, promiseMarks) {
   return JSON.stringify({
     note: form.note.trim(),
-    products: rows.filter((row) => row.active).map((row) => String(row.productId)).sort(),
+    products: rows.filter((row) => row.active)
+      .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null])
+      .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
     rating: form.rating,
     promiseMarks,
@@ -1092,12 +1097,17 @@ function ReportFlowForm({
       </div>
       <StepFooter
         reason={draft && !stale ? '' : generateMissing.reason}
+        warn={!!generateMissing.stockRow}
         label={draft && !stale ? 'Back to the report' : (draft ? 'Write it again' : 'Generate AI report')}
         busy={writing}
         disabled={writing}
         onAction={draft && !stale ? () => setStep('report') : () => write({ fresh: !!draft })}
         coverProps={picker.coverProps}
-      />
+      >
+        {generateMissing.stockRow && !locked && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+        )}
+      </StepFooter>
       {picker.sheet}
     </div>
   );

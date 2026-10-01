@@ -374,12 +374,13 @@ export function ReportCard({
 }
 
 // A footer for a step that is not the completion itself: the reason it is
-// held, then one full-width action.
-export function StepFooter({ reason, label, onAction, busy, disabled, coverProps }) {
+// held, then one full-width action (`children` go first, e.g. "Check stock").
+export function StepFooter({ reason, warn, label, onAction, busy, disabled, coverProps, children }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
-      {reason && <p className="tech-visit-muted" role="status">{reason}</p>}
+      {reason && <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{reason}</p>}
       <div className="tech-visit-actions">
+        {children}
         <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={onAction} loading={busy} disabled={disabled || !!reason}>
           {label}
         </Button>

@@ -54,13 +54,13 @@ const FACTS = { available: true, status: 'read', areas: ['Inside', 'Outside'], p
 
 function makeRequest({
   service = REGULAR, rating = { allowed: true, firstVisit: false, scaleLabels: null }, report = REPORT, facts = FACTS,
-  trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [],
+  trace = { enabled: true, treatmentZone: null }, complete = [{ success: true }], photos = [], products = CATALOG,
 } = {}) {
   const calls = [];
   const completes = [...complete];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, service, products: typeof products === 'function' ? products() : products };
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/promises')) return { available: false, promises: [] };
@@ -90,7 +90,7 @@ const SERVICE = {
 
 async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
-  await screen.findByText(/Taurus SC/);
+  await screen.findByText(/Taurus SC 4 fl oz/);
 }
 
 async function generate({ note = NOTE, rating = '3, moderate' } = {}) {
@@ -146,6 +146,22 @@ describe('the visit step', () => {
     const [body] = request.bodies('/complete');
     expect(body.clientPestRating).toBe(5);
     expect(body.clientPestRatingPrefilled).toBe(true);
+  });
+
+  test('a stock at zero holds the report, and Check stock on the visit step re-reads it', async () => {
+    let stock = '0.0000';
+    const products = () => CATALOG.map((p) => (p.id === 'taurus' ? { ...p, inventory_unit: 'fl_oz', inventory_on_hand: stock } : p));
+    await openSheet(makeRequest({ products }));
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    expect(screen.getByText('Taurus SC shows 0 in stock. Update inventory or remove it.')).toBeTruthy();
+    const generateButton = screen.getByRole('button', { name: 'Generate AI report' });
+    expect(generateButton.disabled).toBe(true);
+    // The office restocks it: the sheet holds until the tech checks.
+    stock = '64.0000';
+    fireEvent.click(screen.getByRole('button', { name: 'Check stock' }));
+    await waitFor(() => expect(generateButton.disabled).toBe(false));
+    expect(screen.queryByRole('button', { name: 'Check stock' })).toBeNull();
   });
 
   test('the tracker reads the server\'s scale labels', async () => {
@@ -229,6 +245,18 @@ describe('generate and read', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: `${NOTE} Also the garage.` } });
     // The visit step offers to write again rather than go back to the old report.
+    expect(screen.getByRole('button', { name: 'Write it again' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
+  });
+
+  test('a rate the tech changes after the report makes it stale', async () => {
+    await openSheet(makeRequest());
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    expect(screen.getByRole('button', { name: 'Back to the report' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    fireEvent.change(screen.getByLabelText('Taurus SC rate'), { target: { value: '0.5' } });
     expect(screen.getByRole('button', { name: 'Write it again' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
   });
