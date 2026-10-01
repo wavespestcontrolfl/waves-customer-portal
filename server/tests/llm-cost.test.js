@@ -483,6 +483,13 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res).toMatchObject({ raised: true, dedupeKey: 'llm-cost-spike:2026-10-01' });
     expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'superseded', expect.any(Object));
 
+    // call_extraction's baseline week holds an unpriced call: its spike check is skipped, so its item cannot close either
+    mockCloseKeys.mockClear();
+    await app('llm_dispatch_log').insert(row({ created_at: atET('2026-09-28'), lane_id: 'call_extraction', served_model: 'claude-unlisted' }));
+    await expect(llmCost.runLlmCostCheck({ now: NEXT, conn: app, fetchImpl })).resolves.toMatchObject({ raised: false, spikes: 0 });
+    expect(mockCloseKeys).not.toHaveBeenCalled();
+    await app('llm_dispatch_log').where({ served_model: 'claude-unlisted', lane_id: 'call_extraction' }).del();
+
     // the category silenced: the raise is suppressed, so nothing is superseded
     mockCloseKeys.mockClear();
     mockRaise.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'preference_disabled' });

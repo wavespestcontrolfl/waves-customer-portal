@@ -397,11 +397,12 @@ function findSpikes(dayByLane, baselineByLane, { minUsd = alertMinUsd(), multipl
   return spikes.sort((a, b) => b.usd - a.usd);
 }
 
-// Standing spike items that must stay open: those naming a lane with
-// unpriced calls on the day just checked (its spend cannot be judged). null
-// = the items could not be read, so none may be closed.
-async function heldSpikeKeys(conn, dayByLane) {
-  const unjudged = new Set([...dayByLane].filter(([, c]) => c.unpricedCalls > 0).map(([id]) => id));
+// Standing spike items that must stay open: those naming a lane whose spend
+// cannot be judged (unpriced calls on the day just checked, or in the
+// baseline week findSpikes then skips). null = the items could not be read,
+// so none may be closed.
+async function heldSpikeKeys(conn, ...windows) {
+  const unjudged = new Set(windows.flatMap((byLane) => [...byLane].filter(([, c]) => c.unpricedCalls > 0).map(([id]) => id)));
   if (!unjudged.size) return new Set();
   try {
     const rows = await require('./admin-alert-episodes').openAdminAlertMetadata(conn, KEY_PREFIX);
@@ -457,9 +458,9 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
   // standing items are left as they are
   if (!day.byLane.size) return { ran: true, raised: false, reason: 'no_ledger_rows', prices };
   const spikes = findSpikes(day.byLane, baseline.byLane);
-  // a standing item naming a lane with unpriced calls yesterday stays open on
-  // either path: that lane's spend cannot be judged normal, or superseded
-  const held = await heldSpikeKeys(conn, day.byLane);
+  // a standing item naming a lane with unpriced calls (yesterday or in the
+  // baseline) stays open on either path: its spend cannot be judged normal
+  const held = await heldSpikeKeys(conn, day.byLane, baseline.byLane);
   if (!spikes.length) {
     await closeSpikeItems(conn, now, 'spend_normal', held).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
     return { ran: true, raised: false, spikes: 0, held: held ? held.size : null, prices };
