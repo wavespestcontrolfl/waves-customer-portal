@@ -136,8 +136,11 @@ async function draftFollowUps({ batchSize, dryRun, client, profile }) {
 
 // Pick the office location whose city the prospect targets (so the sign-off phone
 // matches the market); else the default location.
-function pickLocation(prospect, profile) {
-  const hay = `${prospect.target_page || ''} ${prospect.notes || ''} ${prospect.target_domain || ''}`.toLowerCase();
+// A cited-page pitch signs off for the market of the list being pitched: the
+// cities of the questions that cited it come first.
+function pickLocation(prospect, profile, cited = null) {
+  const citedCities = cited ? (cited.questions || []).map((q) => q.city).filter(Boolean).join(' ') : '';
+  const hay = `${citedCities} ${prospect.target_page || ''} ${prospect.notes || ''} ${prospect.target_domain || ''}`.toLowerCase();
   const locs = profile.locations || [];
   const byCity = locs.find((l) => {
     const city = String(l.name || '').toLowerCase().replace(/,.*$/, '').trim();
@@ -291,8 +294,10 @@ function readableArticle(page) {
 }
 
 function citedPageVerdict(page, cited) {
+  // moved first: a removed article redirected to a short homepage is gone,
+  // not unreadable, so it is skipped rather than retried every night
+  if (page && page.finalUrl && pageKey(page.finalUrl) !== cited.key) return { skip: `cited page ${cited.url} now redirects to ${page.finalUrl}` };
   if (!readableArticle(page)) return { fail: `cited page could not be read in full: ${cited.url}` };
-  if (page.finalUrl && pageKey(page.finalUrl) !== cited.key) return { skip: `cited page ${cited.url} now redirects to ${page.finalUrl}` };
   if (WAVES_LISTED_RE.test(page.text)) return { skip: `Waves already on the cited page ${cited.url}` };
   return null;
 }
@@ -313,7 +318,7 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
   } else {
     try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
   }
-  const loc = pickLocation(prospect, profile);
+  const loc = pickLocation(prospect, profile, cited);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
     max_tokens: 1200,

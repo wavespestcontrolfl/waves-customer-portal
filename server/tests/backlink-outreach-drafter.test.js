@@ -71,6 +71,10 @@ describe('parseDraft', () => {
 
 describe('pickLocation', () => {
   const profile = worker.businessProfile();
+  test('a cited-page pitch signs off for the market of the list being pitched', () => {
+    const cited = { questions: [{ city: 'Sarasota', provider: true }] };
+    expect(pickLocation({ notes: 'generic' }, profile, cited).id).toBe('sarasota');
+  });
   test('picks the market hinted in the prospect, else the default location', () => {
     expect(pickLocation({ target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/' }, profile).id).toBe('sarasota');
     expect(pickLocation({ notes: 'generic' }, profile).id).toBe('bradenton'); // default
@@ -304,6 +308,8 @@ describe('cited-page pitches', () => {
     expect(citedPageVerdict({ title: 'Best Pest Control in Sarasota', text: 'Best Pest Control in Sarasota' }, c)).toEqual(unread);
     expect(citedPageVerdict({ title: 'Just a moment...', text: `Just a moment... Verify you are human. ${ARTICLE}` }, c)).toEqual(unread);
     expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
+    // a removed article redirected to a SHORT homepage is moved (skip), not unreadable (retry)
+    expect(citedPageVerdict({ text: 'Home', finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects/) });
     expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
     expect(citedPageVerdict({ text: ARTICLE }, c)).toBeNull();
     // a full article that mentions JavaScript somewhere is still the article

@@ -368,7 +368,9 @@ function tallyAnswers(rows, cites) {
 const RECHECK_VERDICTS = Object.freeze([
   ['too_early', ({ daysLive, current }) => daysLive < RECHECK_SETTLE_DAYS || current.answers === 0],
   ['named_when_cited', ({ current }) => current.namedWhenCiting > 0],
-  ['page_not_cited_now', ({ current }) => current.citingPage === 0],
+  // only when every current engine answered: a failed or unresolved current
+  // probe may still cite the page, so loss is never declared over it
+  ['page_not_cited_now', ({ current, unresolved }) => current.citingPage === 0 && unresolved === 0],
   ['not_named_yet', () => true],
 ]);
 
@@ -408,9 +410,10 @@ function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces
       after: tallyAnswers(since.filter((r) => r.measured), cites),
       current: tallyAnswers(since.filter((r) => r.measured && currentIds.has(r.id)), cites),
     };
+    const unresolved = since.filter((r) => !r.measured && currentIds.has(r.id)).length;
     const daysLive = daysBetween(liveOn, today);
-    const [verdict] = RECHECK_VERDICTS.find(([, test]) => test({ daysLive, current: tallies.current }));
-    out.push({ prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(), ...tallies, verdict });
+    const [verdict] = RECHECK_VERDICTS.find(([, test]) => test({ daysLive, current: tallies.current, unresolved }));
+    out.push({ prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(), ...tallies, unresolved, verdict });
   }
   return out.sort((a, b) => compareStrings(b.liveOn, a.liveOn) || compareStrings(a.host, b.host));
 }
