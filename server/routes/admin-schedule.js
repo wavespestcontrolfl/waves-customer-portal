@@ -18685,6 +18685,16 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
+    // An in-term reseed lands off-cadence: stamp it as a one-off exception
+    // holding the replaced occurrence's slot (rebooker.dateExceptionStamp's
+    // shape), so the extend anchor, the series sweep and a later replacement
+    // all read its cadence position, never the off-cadence day.
+    if (pickedAddonDate && cols.date_exception && cols.date_exception_cadence_date) {
+      data.date_exception = true;
+      data.date_exception_cadence_date = pickedAddonDate;
+      if (cols.date_exception_source) data.date_exception_source = 'cancel_reseed';
+      if (cols.date_exception_at) data.date_exception_at = new Date();
+    }
     if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
@@ -20181,16 +20191,10 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
     .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
     .select('metadata');
   const termOverrides = new Map();
-  // An in-term replacement sits off-cadence; the occurrence it stood in for
-  // (stamped as replaced_occurrence_date) is what a replacement of IT must
-  // carry the add-ons of, so a second cancel never drops them.
-  const replacedOccurrence = new Map();
   for (const stamp of stamps) {
     const meta = typeof stamp.metadata === 'string' ? JSON.parse(stamp.metadata) : (stamp.metadata || {});
-    for (const id of meta.added_service_ids || []) {
-      if (Number.isInteger(meta.term_index)) termOverrides.set(String(id), meta.term_index);
-      if (meta.replaced_occurrence_date) replacedOccurrence.set(String(id), String(meta.replaced_occurrence_date));
-    }
+    if (!Number.isInteger(meta.term_index)) continue;
+    for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
   }
   // recurring_dispatch_due_date is the cadence position of an auto-dispatched
   // row whose scheduled_date moved up to three days (Codex r8 P2) — part of
@@ -20237,7 +20241,10 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
     anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds),
     seriesRows,
     todayET,
-    replacedOccurrenceDate: replacedOccurrence.get(String(cancelled.id)) || planPositionDate(cancelled),
+    // The occurrence an in-term replacement stands in for: its plan position
+    // (an earlier in-term replacement carries the slot it replaced as its
+    // date_exception_cadence_date).
+    replacedOccurrenceDate: planPositionDate(cancelled),
   };
 }
 
@@ -20270,7 +20277,6 @@ async function probeReseedOverlaps(trx, { parent, parentId, added }) {
 function stampReseed(trx, {
   parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates, placement = 'series_end',
 }) {
-  const replaced = placement === 'in_term' ? { replaced_occurrence_date: term.replacedOccurrenceDate || null } : {};
   return trx('activity_log').insert({
     customer_id: parent.customer_id,
     action: 'recurring_cancel_reseed',
@@ -20280,7 +20286,7 @@ function stampReseed(trx, {
       recurring_parent_id: String(parentId),
       added_service_ids: added.map((c) => String(c.id)),
       term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
-      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement, ...replaced,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates, placement,
     }),
   });
 }

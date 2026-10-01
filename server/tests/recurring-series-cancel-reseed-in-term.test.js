@@ -154,12 +154,12 @@ describe('wiring (source guards)', () => {
     expect(schedule).toMatch(/placementAddonDate: placementPicker \? term\.replacedOccurrenceDate : null,/);
   });
 
-  test('a replacement of a replacement still carries the ORIGINAL occurrence', () => {
-    // The stamp records the occurrence an in-term visit stood in for, and
-    // the term read maps it back when that visit is itself cancelled.
-    expect(schedule).toMatch(/const replaced = placement === 'in_term' \? \{ replaced_occurrence_date: term\.replacedOccurrenceDate \|\| null \} : \{\};/);
-    expect(schedule).toMatch(/if \(meta\.replaced_occurrence_date\) replacedOccurrence\.set\(String\(id\), String\(meta\.replaced_occurrence_date\)\);/);
-    expect(schedule).toMatch(/replacedOccurrenceDate: replacedOccurrence\.get\(String\(cancelled\.id\)\) \|\| planPositionDate\(cancelled\),/);
+  test('the in-term row is stamped as a one-off exception holding the replaced slot', () => {
+    // So the extend anchor (seriesExtendAnchor), the series sweep and a
+    // replacement of THIS visit read the replaced occurrence, never its day.
+    expect(schedule).toMatch(/if \(pickedAddonDate && cols\.date_exception && cols\.date_exception_cadence_date\) \{\n\s+data\.date_exception = true;\n\s+data\.date_exception_cadence_date = pickedAddonDate;/);
+    expect(schedule).toMatch(/data\.date_exception_source = 'cancel_reseed';/);
+    expect(schedule).toMatch(/replacedOccurrenceDate: planPositionDate\(cancelled\),/);
   });
 
   test('the stamp records where the visit went', () => {
@@ -196,5 +196,28 @@ describe('spacing audit skips in-term replacements', () => {
     // No bare `?` in the new clause (knex.raw would read it as a binding).
     const clause = sql.slice(sql.indexOf('AND NOT EXISTS'), sql.indexOf('active_series AS'));
     expect(clause).not.toMatch(/\?/);
+  });
+});
+
+describe('cadence position of an in-term replacement', () => {
+  const { planPositionDate } = require('../services/recurring-series-cancel-reseed');
+
+  test('reads the replaced slot, not the off-cadence day', () => {
+    const replacement = {
+      scheduled_date: '2026-10-07', date_exception: true, date_exception_cadence_date: '2026-10-01',
+    };
+    expect(planPositionDate(replacement)).toBe('2026-10-01');
+  });
+});
+
+describe('later extensions after an in-term replacement', () => {
+  const { seriesExtendAnchor } = require('../routes/admin-schedule')._test;
+
+  test('the completion / top-up anchor projects from the replaced slot, so the cadence never shifts', () => {
+    // A quarterly plan whose only upcoming visit is the in-term replacement.
+    const stamped = { scheduled_date: '2026-10-07', date_exception: true, date_exception_cadence_date: '2026-10-01' };
+    const unstamped = { scheduled_date: '2026-10-07' };
+    expect(seriesExtendAnchor(stamped, 'quarterly', {})).toBe(seriesExtendAnchor({ scheduled_date: '2026-10-01' }, 'quarterly', {}));
+    expect(seriesExtendAnchor(stamped, 'quarterly', {})).not.toBe(seriesExtendAnchor(unstamped, 'quarterly', {}));
   });
 });
