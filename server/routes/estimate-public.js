@@ -9944,22 +9944,45 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // TERMS_VERSION_STALE) and record nothing. Only checked when a consent
     // row is actually recorded (a captured card); an absent attestation is
     // fine unless the after-visit text is what would be recorded.
-    if (recurringCardPolicy.required === true && !annualPrepaySelected) {
-      const attestedConsentVariant = typeof req.body?.recurringCardConsentVariant === 'string'
-        ? req.body.recurringCardConsentVariant.trim().slice(0, 40) : '';
-      const attestedConsentVersion = typeof req.body?.recurringCardConsentVersion === 'string'
-        ? req.body.recurringCardConsentVersion.trim().slice(0, 40) : '';
+    // GitHub Codex #5481 r2 P0: the bind must hold from BOTH sides. Whenever
+    // the request carries a captured SetupIntent or a consent attestation it
+    // is validated against the LIVE policy, whatever shape that policy now
+    // has — the rollout gate turning off, a saved method landing from another
+    // tab, or a commercial/payer exemption flips `required` to false, and
+    // skipping the check there would commit the accept WITHOUT stamping the
+    // intent (the setup_intent.succeeded recovery then treats it as an
+    // unbound legacy capture and enrolls it with the base consent). A
+    // capture the live policy no longer expects is refused with the same
+    // reloadable 409 and nothing is recorded; the orphaned SetupIntent stays
+    // unstamped (webhook: unaccepted estimate -> retried / dropped, never
+    // enrolled).
+    const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
+      ? req.body.recurringCardSetupIntentId.trim() : '';
+    const attestedConsentVariant = typeof req.body?.recurringCardConsentVariant === 'string'
+      ? req.body.recurringCardConsentVariant.trim().slice(0, 40) : '';
+    const attestedConsentVersion = typeof req.body?.recurringCardConsentVersion === 'string'
+      ? req.body.recurringCardConsentVersion.trim().slice(0, 40) : '';
+    const requestCarriesCapture = recurringCardSetupIntentId !== '' || attestedConsentVariant !== '';
+    let consentMismatch = false;
+    if (recurringCardPolicy.required !== true) {
+      // Live policy expects no capture, yet the tab captured / attested one.
+      // One-time and invoice-mode accepts are the permanent webhook skips
+      // (stripe-webhook.js estimate_recurring_card returns for both): a card
+      // left over from toggling the plan mode can never be enrolled, so
+      // those keep ignoring it instead of bouncing the customer.
+      consentMismatch = requestCarriesCapture && !treatAsOneTime && !billByInvoice;
+    } else if (!annualPrepaySelected) {
       const attestedAfterVisit = attestedConsentVariant === 'after_visit_card'
         && attestedConsentVersion === require('../services/payment-method-consent-text').AFTER_VISIT_CONSENT_VERSION;
-      const consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'
+      consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'
         ? !attestedAfterVisit
         : attestedConsentVariant !== '';
-      if (consentMismatch) {
-        return res.status(409).json({
-          error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
-          code: 'CONSENT_VARIANT_STALE',
-        });
-      }
+    }
+    if (consentMismatch) {
+      return res.status(409).json({
+        error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
+        code: 'CONSENT_VARIANT_STALE',
+      });
     }
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit
     // accept-gate (ensureDepositSatisfied + the 402 DEPOSIT_REQUIRED
@@ -10055,8 +10078,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // never trusted from the client. Enrollment runs post-commit — see
     // completeRecurringCardEnrollment below the accept transaction.
     // ─────────────────────────────────────────────
-    const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-      ? req.body.recurringCardSetupIntentId.trim() : '';
     let recurringCardVerification = null;
     if (recurringCardPolicy.required) {
       recurringCardVerification = await RecurringCards.verifyRecurringCardIntent({
@@ -13012,7 +13033,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // card (skip + office alert instead).
       try {
         const savedMethodRow = await db('payment_methods').where({ id: recurringCardPolicy.savedMethodRowId }).first('id', 'customer_id');
-        if (!savedMethodRow || String(savedMethodRow.customer_id) !== String(customerId)) {
+        // r2 P1: also pin to the customer the RESOLVER judged — a method
+        // that belongs to the in-trx customer but not the previewed one was
+        // quoted/consented against someone else's state.
+        if (!savedMethodRow || String(savedMethodRow.customer_id) !== String(customerId)
+          || (recurringCardPolicy.customerId && String(recurringCardPolicy.customerId) !== String(customerId))) {
           logger.warn(`[estimate-public] saved-method auto-enroll skipped: method ${recurringCardPolicy.savedMethodRowId} does not belong to resolved customer ${customerId} (estimate ${estimate.id})`);
           await require('../services/notification-service').notifyAdmin(
             'billing',

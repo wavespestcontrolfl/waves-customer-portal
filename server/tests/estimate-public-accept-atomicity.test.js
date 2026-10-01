@@ -2356,3 +2356,94 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });
+
+// GitHub Codex #5481 r2 — the accept must bind to exactly what /data showed.
+describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  const TOKEN = 'tok-pafb-r2-x0123456789';
+  let resolverSpy;
+
+  function seed() {
+    resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
+  }
+  function livePolicy(policy) {
+    resolverSpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue(policy);
+  }
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+  const CAPTURED = {
+    recurringCardSetupIntentId: 'seti_captured_1',
+    recurringCardConsentVariant: 'after_visit_card',
+    recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+  };
+
+  afterEach(() => {
+    if (resolverSpy) resolverSpy.mockRestore();
+    resolverSpy = null;
+  });
+
+  test('P0: rollout gate turned off mid-flight (policy no longer enforced) — captured intent + attestation 409, nothing committed', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: a captured intent alone (no attestation) is refused the same way', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: another tab saved a consented method (saved_method_consented) after this tab captured — 409, intent stays unbound', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('control: a not-required policy with NO intent / attestation still accepts', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'resolver-customer-not-the-trx-one', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});

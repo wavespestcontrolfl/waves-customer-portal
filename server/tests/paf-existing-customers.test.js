@@ -97,11 +97,31 @@ describe('accept route wiring (source pins)', () => {
 
   test('render attestation: the accept 409s CONSENT_VARIANT_STALE when the recorded variant differs from the one the page rendered (never records unseen text)', () => {
     // Checked only when a card is captured (a consent row is recorded) and not for prepay.
-    expect(src).toMatch(/if \(recurringCardPolicy\.required === true && !annualPrepaySelected\) \{[\s\S]{0,1400}code: 'CONSENT_VARIANT_STALE'/);
+    expect(src).toMatch(/\} else if \(!annualPrepaySelected\) \{[\s\S]{0,1400}code: 'CONSENT_VARIANT_STALE'/);
     // Version is verified against the server's own constant, variant against the live-recomputed one.
     expect(src).toMatch(/attestedConsentVersion === require\('\.\.\/services\/payment-method-consent-text'\)\.AFTER_VISIT_CONSENT_VERSION/);
-    expect(src).toMatch(/const consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'\s*\? !attestedAfterVisit\s*: attestedConsentVariant !== '';/);
+    expect(src).toMatch(/consentMismatch = recurringCardAfterVisitVariant === 'after_visit_card'\s*\? !attestedAfterVisit\s*: attestedConsentVariant !== '';/);
     expect(src).toMatch(/return res\.status\(409\)\.json\(\{[^}]*code: 'CONSENT_VARIANT_STALE'/);
+  });
+
+  // GitHub Codex #5481 r2 P0: a captured SetupIntent / attestation is validated
+  // against the LIVE policy even when it no longer requires a capture.
+  test('r2 P0: a request carrying a captured intent or attestation 409s CONSENT_VARIANT_STALE when the live policy no longer requires a capture (gate off, other tab saved a method)', () => {
+    const block = src.slice(src.indexOf('const requestCarriesCapture'), src.indexOf('Acceptance deposits RETIRED (owner ruling 2026-08-10)'));
+    expect(block).toMatch(/const requestCarriesCapture = recurringCardSetupIntentId !== '' \|\| attestedConsentVariant !== '';/);
+    expect(block).toMatch(/if \(recurringCardPolicy\.required !== true\) \{[\s\S]{0,700}consentMismatch = requestCarriesCapture && !treatAsOneTime && !billByInvoice;/);
+    expect(block).toMatch(/code: 'CONSENT_VARIANT_STALE'/);
+    // The intent id is read ONCE, before the check (no later re-declaration).
+    expect(src.match(/const recurringCardSetupIntentId = /g)).toHaveLength(1);
+    expect(src.indexOf('const recurringCardSetupIntentId =')).toBeLessThan(src.indexOf('let recurringCardVerification = null;'));
+  });
+
+  test('r2 P1: the locked drift check compares the in-trx customer to the resolver customer (policy.customerId) and saved-method auto-enroll pins to it too', () => {
+    const svc = read('services/recurring-card-on-file.js');
+    expect(svc).toMatch(/if \(!policy\.customerId \|\| String\(policy\.customerId\) !== String\(customerId\)\) return true;/);
+    expect(svc).toMatch(/afterVisitCard: true,\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*customerId: resolvedCustomerId,/);
+    expect(svc).toMatch(/savedMethodRowId: savedCard\.id,\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*customerId: resolvedCustomerId,/);
+    expect(src).toMatch(/recurringCardPolicy\.customerId && String\(recurringCardPolicy\.customerId\) !== String\(customerId\)/);
   });
 
   test('locked-customer drift aborts the accept with a reloadable 409 BEFORE any conversion / enrollment (inside the accept transaction)', () => {

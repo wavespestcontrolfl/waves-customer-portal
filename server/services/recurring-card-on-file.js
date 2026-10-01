@@ -287,6 +287,13 @@ function afterVisitHeld(policy) {
 async function pafExistingDriftUnderLock(trx, { customerId, policy }) {
   if (!policy || policy.afterVisitCard !== true) return false;
   if (!customerId) return true;
+  // GitHub Codex #5481 r2 P1: the preflight resolver judged ONE customer
+  // (phone-matched / grouped-sibling). The accept transaction re-resolves
+  // authoritatively under its own lock and can land on a different profile,
+  // whose eligibility / pause / opt-out the booleans below would then be
+  // compared against the WRONG policy. The resolver stamps policy.customerId
+  // on every after-visit policy; a missing stamp or any mismatch is drift.
+  if (!policy.customerId || String(policy.customerId) !== String(customerId)) return true;
   try {
     const row = await trx('customers').where({ id: customerId }).forUpdate().first();
     if (!row) return true;
@@ -314,6 +321,7 @@ function applyCommercialManualBillingExemption(policy, { commercialManualBilling
   policy.required = false;
   policy.exemptReason = 'commercial_manual_billing';
   delete policy.savedMethodRowId;
+  delete policy.customerId;
   delete policy.afterVisitCard;
   delete policy.autopayPaused;
   delete policy.autopayDisabled;
@@ -523,6 +531,9 @@ async function resolveRecurringCardPolicyForEstimate({
   const convertedMarker = convertedExisting
     ? {
       afterVisitCard: true,
+      // The customer these eligibility booleans were judged against — the
+      // accept transaction's locked recheck must land on the SAME profile.
+      customerId: resolvedCustomerId,
       ...(pausedKept ? { autopayPaused: true } : {}),
       ...(disabledKept ? { autopayDisabled: true } : {}),
     }
@@ -543,6 +554,9 @@ async function resolveRecurringCardPolicyForEstimate({
           required: false,
           exemptReason: 'saved_method_consented',
           savedMethodRowId: savedCard.id,
+          // The method belongs to THIS customer; the accept honors it only
+          // when its own resolved customer is the same one.
+          customerId: resolvedCustomerId,
           ...convertedMarker,
         };
       }

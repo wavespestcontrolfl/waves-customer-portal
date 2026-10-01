@@ -605,7 +605,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       mockCustomerOnAutopay.mockResolvedValue(false);
       mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
       const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-      expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+      expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, customerId: 'cust-1' });
       // The shared lane predicate (accept suppression, /data, renderer pick)
       // and the copy rail both see this customer as on the rail.
       expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
@@ -617,7 +617,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_enabled: false };
       mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
       const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-      expect(p).toEqual({ enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', afterVisitCard: true });
+      expect(p).toEqual({ enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', afterVisitCard: true, customerId: 'cust-1' });
       expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
     });
 
@@ -643,13 +643,13 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       mockDbFixtures.customers = { ...PER_APP_CUSTOMER, autopay_paused_until: '2099-01-01' };
       mockIsPaused.mockReturnValue(true);
       const noCard = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-      expect(noCard).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true });
+      expect(noCard).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, customerId: 'cust-1', autopayPaused: true });
       expect(payAfterFirstVisitInvoiceRail(noCard)).toBe(true);
       // A consented saved card is kept (auto-satisfy), still marked paused.
       mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
       const withCard = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
       expect(withCard).toEqual({
-        enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', afterVisitCard: true, autopayPaused: true,
+        enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pmrow-7', customerId: 'cust-1', afterVisitCard: true, autopayPaused: true,
       });
       // The pause is never lifted by the policy: no autopay write happens in
       // the resolver, and customerOnAutopay (which would be false anyway
@@ -773,7 +773,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         mockDbFixtures.customers = OFF_CUSTOMER;
         mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
         const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayDisabled: true });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, customerId: 'cust-1', autopayDisabled: true });
         expect(afterVisitHeld(p)).toBe(true);
         expect(payAfterFirstVisitInvoiceRail(p)).toBe(true);
         expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
@@ -785,7 +785,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         mockIsPaused.mockReturnValue(true);
         mockDbFixtures.autopay_log = { event_type: 'autopay_disabled' };
         const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, autopayPaused: true, autopayDisabled: true });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, customerId: 'cust-1', autopayPaused: true, autopayDisabled: true });
         // A paused non-member with an opt-out too.
         mockDbFixtures.customers = { id: 'cust-1', pipeline_stage: 'lead', billing_mode: null, monthly_rate: null, autopay_paused_until: '2099-01-01' };
         const nonMember = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
@@ -798,7 +798,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         mockDbFixtures.customers = OFF_CUSTOMER;
         mockDbFixtures.autopay_log = { event_type: 'autopay_enabled' };
         const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, membership: MEMBER });
-        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true });
+        expect(p).toEqual({ enforced: true, required: true, exemptReason: null, afterVisitCard: true, customerId: 'cust-1' });
         expect(afterVisitHeld(p)).toBe(false);
       });
 
@@ -848,7 +848,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         };
         return jest.fn((table) => chain(table === 'autopay_log' ? logRow : customersRow));
       };
-      const MOVED = { afterVisitCard: true };
+      const MOVED = { afterVisitCard: true, customerId: 'cust-1' };
 
       it('no drift when the locked row still matches the preflight cohort', async () => {
         expect(await pafExistingDriftUnderLock(trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }), { customerId: 'cust-1', policy: MOVED })).toBe(false);
@@ -872,6 +872,22 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
         const pausedOptedOut = trxFor({ ...PER_APP_CUSTOMER, autopay_enabled: false }, { event_type: 'autopay_disabled' });
         expect(await pafExistingDriftUnderLock(pausedOptedOut, { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true, autopayDisabled: true } })).toBe(false);
         expect(await pafExistingDriftUnderLock(pausedOptedOut, { customerId: 'cust-1', policy: { ...MOVED, autopayPaused: true } })).toBe(true);
+      });
+
+      // GitHub Codex #5481 r2 P1: the locked recheck must run against the SAME
+      // customer the preflight resolver judged (phone-matched / grouped sibling).
+      it('drift: the accept transaction landed on a DIFFERENT customer than the resolver judged (or the policy carries no customer)', async () => {
+        const row = { ...PER_APP_CUSTOMER, autopay_enabled: false };
+        expect(await pafExistingDriftUnderLock(trxFor(row), { customerId: 'cust-2', policy: MOVED })).toBe(true);
+        expect(await pafExistingDriftUnderLock(trxFor(row), { customerId: 'cust-1', policy: { afterVisitCard: true } })).toBe(true);
+        // numeric vs string ids compare equal (same row)
+        expect(await pafExistingDriftUnderLock(trxFor(row), { customerId: 7, policy: { afterVisitCard: true, customerId: '7' } })).toBe(false);
+      });
+
+      it('mismatch is judged BEFORE the locked read (never locks the wrong profile)', async () => {
+        const trx = trxFor(PER_APP_CUSTOMER);
+        expect(await pafExistingDriftUnderLock(trx, { customerId: 'cust-2', policy: MOVED })).toBe(true);
+        expect(trx).not.toHaveBeenCalled();
       });
 
       it('fails closed: no customer, missing row, lookup error', async () => {
