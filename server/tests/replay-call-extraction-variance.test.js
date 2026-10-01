@@ -940,3 +940,13 @@ describe('replay extraction grounds relative dates on the real call start (codex
     expect(src.slice(at, at + 600)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(call\)/);
   });
 });
+
+describe('shadow verification grounds relative dates on the real call start (codex #5377 r16)', () => {
+  test('verify-v2-shadow-path passes callStartedAt(r) to extractCallDataV2, not the row insert time', () => {
+    const src = require('fs').readFileSync(require.resolve('../scripts/verify-v2-shadow-path'), 'utf8');
+    const at = src.indexOf('CRP._test.extractCallDataV2(');
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at, at + 700)).toMatch(/callStartedAt: require\('\.\.\/utils\/call-timeline'\)\.callStartedAt\(r\) \|\| new Date\(\)/);
+    expect(src.slice(at, at + 700)).not.toContain('new Date(r.created_at)');
+  });
+});

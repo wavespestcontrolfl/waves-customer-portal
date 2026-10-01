@@ -101,7 +101,9 @@ async function main() {
       callId: r.id,
       // JSON round-trip turns the Date into a string; rehydrate it (in prod
       // this is a real Date from Knex). Guard against any unparseable value.
-      callStartedAt: r.created_at && !isNaN(new Date(r.created_at)) ? new Date(r.created_at) : new Date(),
+      // The real call start, as the fail-open routing context derives it (a post-call fallback row's
+      // insert time can cross ET midnight and shift "tomorrow") — codex #5377 r16 P2.
+      callStartedAt: require('../utils/call-timeline').callStartedAt(r) || new Date(),
     });
     const ms = Date.now() - t0;
     if (res.status === 'valid') {
