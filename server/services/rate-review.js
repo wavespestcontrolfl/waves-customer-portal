@@ -910,13 +910,26 @@ async function loadLedgerSlices(dbh, customerIds) {
   return map;
 }
 
-async function loadPriorReviews(dbh, customerIds, { sinceYmd, excludeBatchKey }) {
+// 'YYYY-MM' minus N months.
+function monthKeyMinus(batchKey, months) {
+  const [y, m] = batchKey.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1 - months, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+// "Reviewed within 12 months" is judged on BATCH MONTHS, exclusive at the
+// boundary: a line reviewed in the 2026-12 batch is held out of 2027-01 …
+// 2027-11 and eligible again in 2027-12 — one review per 12 months at the
+// anniversary, never a lifetime hold because last year's batch sits exactly
+// 12 months back. Rebuilds of the same batch never count against it.
+async function loadPriorReviews(dbh, customerIds, { batchKey }) {
   if (!customerIds.length) return new Set();
+  const cutoffKey = monthKeyMinus(batchKey, 12);
   const rows = await dbh(SNAPSHOTS)
     .whereIn('customer_id', customerIds)
     .whereIn('status', REVIEWED_STATUSES)
-    .whereNot('batch_key', excludeBatchKey)
-    .whereRaw("(computed_at AT TIME ZONE 'America/New_York')::date >= ?", [sinceYmd])
+    .whereNot('batch_key', batchKey)
+    .where('batch_key', '>', cutoffKey)
     .select('customer_id', 'family_key');
   return new Set(rows.map((r) => `${r.customer_id}|${r.family_key}`));
 }
@@ -1000,10 +1013,12 @@ function matchPrepayTerm(terms, planLine, familyKey) {
   const byFamily = live.filter((t) => familyOfCoverage(t.coverage_service_type) === familyKey);
   if (byFamily.length === 1) return { term: byFamily[0], ambiguous: false };
   if (byFamily.length > 1) return { term: null, ambiguous: true };
-  // One live term and nothing says which family it covers: a single-line
-  // account can only mean this line; anything else stays unresolved.
-  if (live.length === 1 && !familyOfCoverage(live[0].coverage_service_type) && planLine.account_lines === 1) return { term: live[0], ambiguous: false };
-  return { term: null, ambiguous: live.length > 0 };
+  // Terms whose coverage names no family: on a single-line account one such
+  // term can only mean this line; otherwise they are unresolved and hold
+  // the line. Terms clearly labeled for ANOTHER family never do.
+  const unlabeled = live.filter((t) => !familyOfCoverage(t.coverage_service_type));
+  if (unlabeled.length === 1 && planLine.account_lines === 1) return { term: unlabeled[0], ambiguous: false };
+  return { term: null, ambiguous: unlabeled.length > 0 };
 }
 
 function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
@@ -1017,15 +1032,21 @@ function resolveCurrentRate({ customer, planLine, liveTerms, ledgerSlice }) {
     return { cents: 0, source: 'none', unit: 'application' };
   };
 
-  if (lane === 'annual_prepay' || prepayLinked) {
-    // The term authority wins over the scalar (facts.js posture): a live
-    // term means the line is prepaid mid-term and reprices at renewal only.
-    const { term, ambiguous } = matchPrepayTerm(liveTerms, planLine, planLine.family_key);
-    if (term) {
-      const visits = positive(term.coverage_visit_count) || visitsPerYearFor(planLine.cadence, planLine.catalog_vpy);
-      const cents = visits ? Math.round((Number(term.prepay_amount) / visits) * 100) : null;
-      if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true, prepayTermId: term.id };
-    }
+  // The term authority wins over the scalar (facts.js posture): a live term
+  // covering this line means it is prepaid mid-term and reprices at renewal
+  // only — whatever billing_mode says and whether or not the open visits
+  // carry the term id. Resolved BEFORE the lane branch.
+  const { term, ambiguous } = matchPrepayTerm(liveTerms, planLine, planLine.family_key);
+  if (term) {
+    const visits = positive(term.coverage_visit_count) || visitsPerYearFor(planLine.cadence, planLine.catalog_vpy);
+    const cents = visits ? Math.round((Number(term.prepay_amount) / visits) * 100) : null;
+    if (cents) return { cents, source: 'prepay_term', unit: 'application', prepayMidTerm: true, prepayTermId: term.id };
+    return { ...fromVisits(), prepayMidTerm: true, prepayTermId: term.id };
+  }
+  if (lane === 'annual_prepay' || prepayLinked || ambiguous) {
+    // Prepay by scalar or visit link but no resolvable live term — or live
+    // terms that could belong to more than one line: held, priced off the
+    // visits so the owner still sees numbers.
     const fallback = fromVisits();
     return { ...fallback, prepayTermMissing: lane === 'annual_prepay' || prepayLinked, prepayTermAmbiguous: ambiguous };
   }
@@ -1224,7 +1245,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     if (!anniversary.date || entry.reviewDate) inWindow.push(entry);
   }
   const windowCustomerIds = [...new Set(inWindow.map((e) => e.customer.id))];
-  const priorReviews = await loadPriorReviews(dbh, windowCustomerIds, { sinceYmd: monthsAgoYmd(now, 12), excludeBatchKey: batchKey });
+  const priorReviews = await loadPriorReviews(dbh, windowCustomerIds, { batchKey });
   const factsByCustomer = new Map();
   const signalsByCustomer = new Map();
   for (const customerId of windowCustomerIds) {
@@ -1549,7 +1570,7 @@ module.exports = {
   sendBatchEmail,
   composeBatchEmail,
   _private: {
-    trimmedMedian, median, quartiles, modeCents, monthsBetween, anniversaryInWindow, dateColumn, etDay,
+    trimmedMedian, median, quartiles, modeCents, monthsBetween, monthKeyMinus, anniversaryInWindow, dateColumn, etDay,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,

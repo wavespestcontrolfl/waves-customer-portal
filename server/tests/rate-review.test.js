@@ -377,6 +377,25 @@ describe('current rate per billing lane', () => {
     expect(P.familyOfCoverage('Tree & Shrub Program')).toBe('tree_shrub');
     expect(P.familyOfCoverage(null)).toBeNull();
   });
+  test('a live term covering the line is prepay mid-term whatever the scalar or the visit links say', () => {
+    const pest = { id: 't-pest', prepay_amount: 404, coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control' };
+    // per_application scalar, open visits not linked to the term → still the term's line
+    const perApp = fixture.planLine('c', 'pest_control', 'quarterly', 117, { prepay_linked: false, prepay_term_ids: [], account_lines: 2 });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: perApp, liveTerms: [pest] })).toMatchObject({ cents: 10100, source: 'prepay_term', prepayMidTerm: true, prepayTermId: 't-pest' });
+    // monthly scalar on a single-line account with a live term → prepay, not dues
+    const monthly = fixture.planLine('c', 'pest_control', 'quarterly', null, { account_lines: 1 });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'monthly_membership', monthly_rate: 55 }), planLine: monthly, liveTerms: [pest] })).toMatchObject({ source: 'prepay_term', prepayMidTerm: true });
+    // the OTHER line of that account is not covered by the pest term
+    const lawn = fixture.planLine('c', 'lawn_care', 'every_6_weeks', 61, { account_lines: 2 });
+    const lawnOut = P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: lawn, liveTerms: [pest] });
+    expect(lawnOut).toMatchObject({ cents: 6100, source: 'visit_median' });
+    expect(lawnOut.prepayMidTerm).toBeFalsy();
+    expect(lawnOut.prepayTermAmbiguous).toBeFalsy();
+    // two unlabeled live terms on a per_application account → ambiguous, held
+    const blankA = { id: 'a', prepay_amount: 404, coverage_visit_count: 4, coverage_service_type: null };
+    const blankB = { id: 'b', prepay_amount: 500, coverage_visit_count: 4, coverage_service_type: null };
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: perApp, liveTerms: [blankA, blankB] })).toMatchObject({ cents: 11700, source: 'visit_median', prepayTermAmbiguous: true, prepayTermMissing: false });
+  });
   test('per_visit and NULL lanes read the visit stamp (the exception rule flags lane_cleanup)', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_visit' }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: null }), planLine })).toMatchObject({ cents: 10530, source: 'visit_median' });
@@ -453,6 +472,16 @@ describe('anniversary and tenure', () => {
       const out = JSON.parse(execFileSync(process.execPath, ['-e', script, path.resolve(__dirname, '../services/rate-review.js')], { env: { ...process.env, TZ, GATE_RATE_REVIEW: 'true' }, encoding: 'utf8' }));
       expect(out).toMatchObject({ date: '2026-06-15', str: '2026-06-15', nul: null, instant: '2026-06-15', anniversary: { date: '2025-12-05', source: 'first_visit' } });
     }
+  });
+  test('"reviewed within 12 months" is judged on batch months with an exclusive boundary', () => {
+    expect(P.monthKeyMinus('2027-11', 12)).toBe('2026-11');
+    expect(P.monthKeyMinus('2027-01', 12)).toBe('2026-01');
+    expect(P.monthKeyMinus('2026-12', 1)).toBe('2026-11');
+    // the query: batch_key > (batch − 12 months) AND batch_key <> batch → 2026-11 does NOT block 2027-11; 2027-03 does
+    const cutoff = P.monthKeyMinus('2027-11', 12);
+    expect('2026-11' > cutoff).toBe(false);
+    expect('2026-12' > cutoff).toBe(true);
+    expect('2027-03' > cutoff).toBe(true);
   });
   test('tenure in whole ET months', () => {
     expect(P.monthsBetween('2025-12-05', '2026-11-01')).toBe(10);
@@ -685,6 +714,32 @@ describe('buildBatch over the synthetic December book', () => {
     db.mockImplementation((table) => scripted(table));
     db.raw.mockImplementation((...args) => scripted.raw(...args));
     db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+  });
+
+  test('the prior-review lookup excludes this batch and anything 12+ months back, by batch month', () => {
+    const reviewed = fixture.scriptedDb({
+      planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits,
+      estimates: book.estimates, terms: book.terms, ledger: [], sentRowCount: 0, signals: {},
+      // the scripted snapshots table answers the prior-review read with belowList's pest line
+      priorReviews: [{ customer_id: book.customers.belowList.id, family_key: 'pest_control' }],
+    });
+    db.mockImplementation((table) => reviewed(table));
+    db.raw.mockImplementation((...args) => reviewed.raw(...args));
+    db.transaction.mockImplementation((fn) => reviewed.transaction(fn));
+    return rateReview.buildBatch({ batchKey: '2027-12', anniversaryFrom: '2027-12-01', anniversaryTo: '2027-12-31', now: new Date('2027-11-01T11:20:00Z'), deps: { pricingEngine: fixture.fakePricingEngine() } }).then(() => {
+      const row = reviewed.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id);
+      expect(row.status).toBe('exception');
+      expect(JSON.parse(row.flags)).toContain('reviewed_within_12mo');
+      // the read itself is keyed on batch months, exclusive at 12 back
+      const snapshotReads = db.mock.calls.filter(([t]) => t === 'rate_review_snapshots');
+      expect(snapshotReads.length).toBeGreaterThan(0);
+      const priorCall = reviewed.mock.results.map((r) => r.value).find((q) => q && q.calls && q.calls.some(([name, args]) => name === 'where' && args[0] === 'batch_key' && args[1] === '>'));
+      expect(priorCall).toBeDefined();
+      expect(priorCall.calls).toEqual(expect.arrayContaining([['whereNot', ['batch_key', '2027-12']], ['where', ['batch_key', '>', '2026-12']]]));
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    });
   });
 
   test('the facts loader ran once per customer in the window, never for the other months', () => {
