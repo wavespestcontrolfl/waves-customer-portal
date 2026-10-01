@@ -35,6 +35,8 @@ async function main() {
       // rather than the staff cell that dialed out — buildFailOpenRoutingContext
       // now derives identity through that resolver (Codex #4933 r1 P2).
       .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'ai_validation',
+        // callStartedAt() backs out a post-call fallback row's own length (codex #5377 r12 P2)
+        'duration_seconds', 'recording_duration_seconds',
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
@@ -69,6 +71,11 @@ async function main() {
         ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
         : null;
     }
+    // The bookable catalog rides in the dump (Phase B has no DB access): the
+    // commercial dictated-booking quote check resolves the catalog row the way the
+    // booking does (GATE_CALL_COMMERCIAL_DICTATED_BOOKING; codex #5377 r9 P1).
+    const bookableServices = await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => []);
+    for (const row of rows) row.bookable_services = bookableServices;
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -94,7 +101,9 @@ async function main() {
       callId: r.id,
       // JSON round-trip turns the Date into a string; rehydrate it (in prod
       // this is a real Date from Knex). Guard against any unparseable value.
-      callStartedAt: r.created_at && !isNaN(new Date(r.created_at)) ? new Date(r.created_at) : new Date(),
+      // The real call start, as the fail-open routing context derives it (a post-call fallback row's
+      // insert time can cross ET midnight and shift "tomorrow") — codex #5377 r16 P2.
+      callStartedAt: require('../utils/call-timeline').callStartedAt(r) || new Date(),
     });
     const ms = Date.now() - t0;
     if (res.status === 'valid') {
@@ -139,6 +148,8 @@ async function main() {
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
         // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
         unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+        // the catalog the dump carried (commercial quote check; absent = held)
+        bookableServices: Array.isArray(r.bookable_services) ? r.bookable_services : null,
       });
       const route = CRP.applyUnclearServiceTranscriptVeto(
         CRP.demoteFailOpenOnV1AddressConflict(

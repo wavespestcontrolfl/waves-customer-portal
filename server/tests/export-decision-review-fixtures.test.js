@@ -29,6 +29,7 @@ describe('rowToCase', () => {
     expect(c).toEqual({
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
+      subject_version: null,
       package_id: 'call_judge.v2',
       package_hash: CALL_JUDGE_HASH,
       question_id: 'is_lead',
@@ -41,6 +42,11 @@ describe('rowToCase', () => {
       outcome_evidence: { source: 'leads_customers', window: '7d', value: true, observed_at: '2026-09-30T00:00:00.000Z' },
     });
     expect(JSON.stringify(c)).not.toMatch(/transcript|someone@example|labeled_by|Jane Doe|123 Main|note/);
+  });
+  test('carries the stored subject version so the eval can drop a reprocessed subject; never a non-digest', () => {
+    expect(rowToCase({ ...ROW, subject_hash: 'b'.repeat(64) }).subject_version).toBe('b'.repeat(64));
+    expect(rowToCase({ ...ROW, subject_hash: 'Caller: hi' }).subject_version).toBeNull();
+    expect(COLUMNS).toContain('subject_hash');
   });
   test('never selects a text column', () => {
     expect(COLUMNS).not.toEqual(expect.arrayContaining(['transcript', 'body', 'message']));

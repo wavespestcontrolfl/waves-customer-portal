@@ -4,6 +4,8 @@
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
  *                            or the Control center once features.ledger is enabled
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
+ *   - "Typed"             — TypedDecisionsReviewPage (label typed-decision
+ *                            shadow rows)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
  *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
@@ -34,7 +36,7 @@
  */
 import React, { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers, Binary } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -44,6 +46,7 @@ import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
 import AgentModelsTab from "./AgentModelsTab";
 import AgentControlCenterTab from "./agents/AgentControlCenterTab";
+import TypedDecisionsReviewPage from "./TypedDecisionsReviewPage";
 import AgentQueueTab from "./AgentQueueTab";
 import AutoDispatchPage from "./AutoDispatchPage";
 import { getAdminUser } from "../../lib/adminAuth";
@@ -57,6 +60,7 @@ const TABS = {
   ACTIVITY: "activity",
   DISPATCH: "dispatch",
   DECISIONS: "decisions",
+  TYPED: "typed",
   DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
@@ -80,6 +84,13 @@ const TAB_LIST = [
 // GATE_ADMIN_OPS_QUEUE: the Queue tab exists only when the server says the
 // gate is on (hub probe), so a dark gate renders nothing new.
 const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
+// GATE_TYPED_DECISIONS: the Typed tab (owner labels typed-decision shadow rows;
+// the daily admin alert links to ?tab=typed) exists only when the hub probe
+// says the lane is live. Fails closed: a dark gate shows no tab and
+// ?tab=typed falls back to Overview.
+const TYPED_TAB = { key: TABS.TYPED, label: "Typed", Icon: Binary };
+// Literal classes so Tailwind keeps them: one column per visible tab.
+const XL_COLS = { 7: "xl:grid-cols-7", 8: "xl:grid-cols-8", 9: "xl:grid-cols-9" };
 // Tabs that read ?area= get the product-area strip under the tab row
 // (AdminCommandHeader's secondary row). Overview joins while it renders the
 // Control center (the old Overview does not read the area).
@@ -127,7 +138,11 @@ export default function AgentsHubPage() {
   // Auto-Dispatch is autonomous. Its diagnostic deep links remain admin-only,
   // but it is no longer a section in the everyday navigation.
   const controlCenter = hub.features.ledger === true;
-  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
+  const typedAvailable = hub.features.typed === true;
+  const tabList = [
+    ...TAB_LIST.flatMap((t) => (t.key === TABS.DECISIONS && typedAvailable ? [t, TYPED_TAB] : [t])),
+    ...(queueAvailable ? [QUEUE_TAB] : []),
+  ];
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
   const diagnosticDispatch = paramTab === TABS.DISPATCH && getAdminUser()?.role === "admin";
@@ -168,7 +183,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"}
+        navGridClassName={`grid-cols-2 md:grid-cols-4 ${XL_COLS[tabList.length] || "xl:grid-cols-9"}`}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
@@ -184,6 +199,8 @@ export default function AgentsHubPage() {
           <AutoDispatchPage embedded />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
+        ) : tab === TABS.TYPED ? (
+          <TypedDecisionsReviewPage embedded />
         ) : tab === TABS.DRAFTS ? (
           <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (

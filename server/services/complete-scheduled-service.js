@@ -2234,8 +2234,11 @@ function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
   reportToken,
+  // The fixed re-service text is only a pointer to the report, so it needs a
+  // real report token on any template version (never the portal home link).
+  reserviceFixedRecap = false,
 }) {
-  if (!serviceReportV1Delivery) return false;
+  if (!serviceReportV1Delivery && !reserviceFixedRecap) return false;
   if (typedDeliveryMode === 'disabled') return false;
   return !reportToken;
 }
@@ -2617,7 +2620,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       thatchMeasurement,
       soilPh,
       soilMoisture,
-      sendCompletionSms,
+      sendCompletionSms: sendCompletionSmsRequested,
+      // Fast Complete's fixed re-service text (GATE_FAST_COMPLETE_RECAP): the
+      // sheet names the mode, the server builds the text — see
+      // services/reservice-fixed-recap.js. Honored only below, once the live
+      // completion profile and both dark gates are known.
+      customerRecapMode,
       requestReview,
       reviewTiming,
       reviewScheduledFor,
@@ -3190,6 +3198,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
         code: 'completion_profile_lookup_failed',
       } });
     }
+    // Fast Complete's fixed re-service text. Asked for by the sheet, honored
+    // only while both dark gates are on and the visit is (still) a pest
+    // re-service. A request that is NOT honored sends no completion text at
+    // all — never the templated one — so a stale sheet cannot cause a second
+    // kind of text; gate off is byte-identical to today.
+    const ReserviceFixedRecap = require('./reservice-fixed-recap');
+    const reserviceFixedRecapRequested = customerRecapMode === ReserviceFixedRecap.MODE;
+    const reserviceFixedRecap = ReserviceFixedRecap.reserviceFixedRecapHonored({
+      requestedMode: customerRecapMode,
+      fastCompleteGate: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      recapGate: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
+      serviceKey: completionProfile?.serviceKey,
+      visitOutcome,
+    });
+    const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
+      ? false
+      : sendCompletionSmsRequested;
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -6004,6 +6029,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
+            // Frozen with the record itself, so no reader (recap-delivery's
+            // video-recap refusal) can ever see this visit's record without
+            // the fixed-text marker: the record and the marker commit together.
+            ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -10294,7 +10323,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // operator-reachable "today's visit" text days after the fact — so this
     // rail is gated like the other customer-contact rails. Recap delivery also
     // refuses the structured_notes.backfill marker as defense in depth.
-    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    // The fixed re-service text is the visit's ONE customer text: no video
+    // recap is queued behind it (an approved recap would text a second,
+    // differently worded completion message). recap-delivery.js also refuses
+    // the completionSmsRecapMode marker, for a row queued before completion.
+    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id && !reserviceFixedRecap) {
       if (isBackfillCompletion) {
         logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
       } else {
@@ -11837,7 +11870,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
-      && !suppressTypedCustomerComms;
+      && !suppressTypedCustomerComms
+      // The fixed re-service text is the ONE text: no review ask rides it or
+      // follows it (scope: "leave it off on re-services").
+      && !reserviceFixedRecap;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -12753,7 +12789,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (handOverExit) return handOverExit;
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
-      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken, reserviceFixedRecap })) {
       // Report-v1 visit with no public report token (mint failed above): the
       // report-lane template would render "your report is ready" around
       // reportUrl, which is the portal HOME on this path (delivery.js only
@@ -12967,7 +13003,52 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && serviceReportV1SmsContext.smsType === 'service_report_v1_with_invoice'
           && require('../config/feature-gates').isEnabled('reportV1InvoiceSms')
           && await isOptInSmsTemplateEnabled('service_report_v1_with_invoice');
-        if (completionUsesReportLane({
+        // Fast Complete's fixed re-service text replaces the whole template
+        // chain below: exactly one text, built from the saved facts.
+        let reserviceFixedBody = null;
+        if (reserviceFixedRecap) {
+          let reserviceFixedFacts;
+          try {
+            // Shortened here (the same tracked report code the report lane
+            // mints), so the body is final before the send: GATE_SMS_LINK_WRAP
+            // leaves an /l/ link alone, and a send-window replay goes out
+            // with exactly the text stored and shown now.
+            const fixedReportLink = reportSmsUrl && reportSmsUrl !== reportUrl
+              ? reportSmsUrl
+              : await shortenOrPassthrough(reportUrl, {
+                kind: 'service_report',
+                entityType: 'service_records',
+                entityId: record.id,
+                customerId: svc.customer_id,
+                codePrefix: 'report',
+              });
+            reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
+              svc,
+              recordId: record.id,
+              reportUrl: fixedReportLink,
+            });
+          } catch (factsErr) {
+            // A read outage before any send: nothing went out and no send
+            // fence is written yet, so the closeout stays open and the tech's
+            // retry composes and sends the text (finalizing here would replay
+            // a stored result with no text, for good).
+            logger.warn(`[dispatch] fixed re-service text facts read failed for ${record.id}; closeout left open for retry: ${factsErr.message}`);
+            return exitForCompletionSmsResume(factsErr);
+          }
+          reserviceFixedBody = ReserviceFixedRecap.buildReserviceFixedRecap(reserviceFixedFacts);
+          if (!reserviceFixedBody) throw new Error('Re-service completion text has no report link');
+        }
+        if (reserviceFixedBody) {
+          // Message type stays the completion family's (channel routing and
+          // the customer's completion-text preference are the same); the
+          // template key and notes name the fixed text.
+          sentSmsType = 'service_complete';
+          // The body the provider is handed (scheme stripped, GSM punctuation
+          // normalized, as sendCustomerMessage does), so what is audited, stored
+          // and shown to the tech is what the customer gets.
+          sentSmsBody = ReserviceFixedRecap.providerBody(reserviceFixedBody);
+          completionSmsWasTruncated = false;
+        } else if (completionUsesReportLane({
           reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
           invoiceCreated,
           usePaidCompletionTemplate,
@@ -13176,6 +13257,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // resume still cannot replay a message that may have gone out.
             completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
+            ...(reserviceFixedBody ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
@@ -13187,6 +13269,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
+          // The fixed re-service text is not a DB template: name it, so the
+          // sms_log row and the office read what it really is.
+          if (reserviceFixedBody) smsMetadata.templateKey = ReserviceFixedRecap.TEMPLATE_KEY;
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -13230,6 +13315,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // The fixed text adopts the provider-handed body (link wrap) even
+            // when the send was accepted but its audit insert threw.
+            fixedRecap: !!reserviceFixedBody,
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
@@ -13278,6 +13366,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
             : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
+          // GATE_SMS_LINK_WRAP can swap the report link for a fresh /l/ short
+          // link inside sendCustomerMessage. The fixed text stores (and shows
+          // the tech) the body the provider was actually handed, or, for a
+          // send-window hold, the transformed body the queued row replays.
+          const fixedBodyFinal = smsResult.sent === true
+            || (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred === true);
+          if (reserviceFixedBody && fixedBodyFinal
+            && typeof smsResult.sentBody === 'string' && smsResult.sentBody) {
+            sentSmsBody = smsResult.sentBody;
+            smsNotesDelta.completionSmsBody = sentSmsBody;
+            sendingNotes.completionSmsBody = sentSmsBody;
+            completionSmsAcceptedSnapshot.body = sentSmsBody;
+          }
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -13336,7 +13437,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   replay_purpose: 'service_completion',
                   // The frozen body above came from this template row; the
                   // morning replay records it on the sent sms_log row.
-                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
+                  ...(reserviceFixedBody
+                    ? { template_key: ReserviceFixedRecap.TEMPLATE_KEY }
+                    : (sentSmsType ? { template_key: sentSmsType } : {})),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
@@ -13562,7 +13665,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
+          if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
+          // The normal result never arrived to switch the snapshot to push:
+          // the accepted outcome itself names the provider.
+          if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
           const acceptedDelta = {
+            ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',
             completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
@@ -14134,6 +14242,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       completionSmsError: finalRecordNotes.completionSmsError || null,
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
+      // Fast Complete's fixed re-service text: what the tech sees after
+      // Complete — the exact text, or why none went. Only when the sheet
+      // asked, so every other response is unchanged.
+      ...(reserviceFixedRecapRequested ? {
+        customerText: ReserviceFixedRecap.customerTextOutcome({
+          honored: reserviceFixedRecap,
+          status: completionSmsStatus,
+          body: finalRecordNotes.completionSmsBody || finalRecordNotes.sentSmsBody || null,
+          channel: finalRecordNotes.sentSmsChannel || null,
+          error: finalRecordNotes.completionSmsError || null,
+          deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,
+        }),
+      } : {}),
       completionPhotoUpload: completionPhotoUploadResult,
       completionAdvisories: completionAdvisoryMessages({
         blackout: waveguardBlackoutApproval,

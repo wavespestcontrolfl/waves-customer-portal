@@ -4557,6 +4557,27 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
+            // LABEL FACTS revalidation: a scheduled reply that copies a label
+            // sentence (rainfast / re-entry) must still be backed by the
+            // customer's CURRENT latest performed visit - a newer visit, a
+            // visit today, or a changed label blocks it. Same fail-closed
+            // block+retire path, no new mechanism.
+            let labelStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const labelDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                // The reply guard runs on the final body of every real-answers
+                // decision (an edit may not add label timing); the visit recheck
+                // only for a body that still copies a snapshotted sentence.
+                // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
+                labelStale = Boolean(await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body }));
+              } catch (err) {
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                labelStale = true;
+              }
+            }
             // Re-service promise revalidation (Codex round-3 P2): the same
             // "reviewed wording can go stale before it fires" gap as the
             // checks above, for a free re-service promise — the customer's
@@ -4588,7 +4609,7 @@ function initScheduledJobs() {
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
             const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
-            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale;
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale || labelStale || reserviceStale;
             const rawEtaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
             // An unreadable recheck (Codex round-42 P2) says nothing about the message: do NOT
             // retire the decision as stale here. The send proceeds to the provider-boundary
@@ -4607,9 +4628,11 @@ function initScheduledJobs() {
                     ? 'stale_open_times_agent_decision'
                     : slaStale
                       ? 'stale_sla_agent_decision'
-                      : reserviceStale
-                        ? 'stale_reservice_agent_decision'
-                        : 'stale_eta_agent_decision';
+                      : labelStale
+                        ? 'stale_label_facts_agent_decision'
+                        : reserviceStale
+                          ? 'stale_reservice_agent_decision'
+                          : 'stale_eta_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4641,9 +4664,11 @@ function initScheduledJobs() {
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : slaStale
                           ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
-                          : reserviceStale
-                            ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
-                            : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
+                          : labelStale
+                            ? 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.'
+                            : reserviceStale
+                              ? `This scheduled reply promises a free re-service that could not be revalidated (${reserviceReason}) — review the thread.`
+                              : `This scheduled reply quotes a live ETA that is no longer current (${etaReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });
@@ -4907,10 +4932,12 @@ function initScheduledJobs() {
           // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
           // its request), composed AFTER any predicate the entry point registered.
           if (claimMeta.agent_decision_id) {
-            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            const { etaProviderPreSendCheck, labelFactsProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
             replayInput.providerPreSendCheck = composeProviderPreSendChecks(
               replayInput.providerPreSendCheck,
               etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+              // LABEL FACTS (Codex #5416 P1): same window, same boundary re-read of the latest visit.
+              labelFactsProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
             );
           }
           return require('./messaging/deferred-replay-registry')
@@ -7055,6 +7082,23 @@ function initScheduledJobs() {
         const result = await runSelfAudit();
         if (!result.skipped) logger.info(`[self-audit] nightly run: ${JSON.stringify({ audited: result.audited, breaches: result.breaches })}`);
       } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
+    });
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
+  // Refreshes unknown outcome evidence, then raises ONE admin item for
+  // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline
+  // disagreements + 2 spot checks). Gated GATE_TYPED_DECISIONS (checked
+  // inside the service); nothing acts on a Jev answer.
+  // =========================================================================
+  cron.schedule('5 8 * * *', async () => {
+    await runExclusive('typed-decisions-daily-review', async () => {
+      try {
+        const { runDailyReviewItem } = require('./typed-decisions/daily-review-item');
+        const result = await runDailyReviewItem();
+        if (result.raised) logger.info(`[typed-decisions] daily review item raised: ${result.disagreements} disagreements, ${result.spotChecks} spot checks`);
+      } catch (e) { logger.error(`Typed-decisions daily review failed: ${e.message}`); }
     });
   }, { timezone: 'America/New_York' });
 

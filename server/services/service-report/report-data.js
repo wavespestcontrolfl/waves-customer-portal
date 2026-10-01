@@ -2685,6 +2685,12 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // those rules ride the stamp: an owner correcting a product's rule re-keys the
   // cached PDF. A frozen visit replays its snapshot and keeps the constant.
   if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
+  // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
+  // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
+  // cached before a flip must never be served after it, nor the reverse. The
+  // stamp rides only while the gate is live: gate off leaves every signature,
+  // and so every cached PDF key, byte-identical to before.
+  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled

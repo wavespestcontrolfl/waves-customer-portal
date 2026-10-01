@@ -49,6 +49,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
   isCustomAmountPreset,
@@ -690,9 +691,6 @@ const CUSTOMER_INTERACTION_ALIASES = {
   not_home_partial: "not_home_partial_access",
   concern: "customer_specific_concern",
 };
-const COMPLETION_PHOTO_MAX_BYTES = 1.5 * 1024 * 1024;
-const COMPLETION_PHOTO_MAX_DIMENSION = 1600;
-const COMPLETION_PHOTO_QUALITY_STEPS = [0.82, 0.72, 0.62, 0.54];
 
 function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[value] || value || "";
@@ -700,61 +698,6 @@ function normalizeCustomerInteractionValue(value) {
 
 function isCustomerConcernInteraction(value) {
   return normalizeCustomerInteractionValue(value) === "customer_specific_concern";
-}
-
-function dataUrlApproxBytes(dataUrl) {
-  const encoded = String(dataUrl || "").split(",")[1] || "";
-  return Math.ceil((encoded.length * 3) / 4);
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read photo"));
-    };
-    img.src = url;
-  });
-}
-
-async function prepareCompletionPhoto(file) {
-  if (!file?.type?.startsWith("image/")) {
-    throw new Error("Only image files can be attached.");
-  }
-  const image = await loadImageFromFile(file);
-  const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height);
-  let scale = largestSide > COMPLETION_PHOTO_MAX_DIMENSION
-    ? COMPLETION_PHOTO_MAX_DIMENSION / largestSide
-    : 1;
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(image, 0, 0, width, height);
-
-    for (const quality of COMPLETION_PHOTO_QUALITY_STEPS) {
-      const data = canvas.toDataURL("image/jpeg", quality);
-      if (dataUrlApproxBytes(data) <= COMPLETION_PHOTO_MAX_BYTES) {
-        return {
-          data,
-          name: file.name?.replace(/\.[^.]+$/, ".jpg") || "service-photo.jpg",
-          capturedAt: new Date().toISOString(),
-        };
-      }
-    }
-    scale *= 0.75;
-  }
-  throw new Error("Photo is too large to attach to completion.");
 }
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;

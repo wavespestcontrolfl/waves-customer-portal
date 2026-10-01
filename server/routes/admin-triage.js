@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, leftJoinRouteFeedback, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION, ROUTE_DECISION_XMIN_TEXT, isListedRouteDecision, routeDecisionsListedScope } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -2297,10 +2297,13 @@ router.post('/:id/verdict', async (req, res) => {
 router.get('/auto-routed', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-    const rows = await db('route_decisions')
+    const rows = await leftJoinRouteFeedback(db('route_decisions')
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
-      .leftJoin('customers', 'call_log.customer_id', 'customers.id')
-      .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
+      .leftJoin('customers', 'call_log.customer_id', 'customers.id'))
+      // A verdict shows against the decision it judged (leftJoinRouteFeedback,
+      // the ONE join every reader uses): only the row it points at, or a legacy
+      // verdict with no link. A newer pass's row is a new decision nobody has
+      // judged, so it reads unreviewed.
       // One row per call: a reprocessed call carries BOTH decision versions;
       // only its NEWEST supported enforce decision represents current state.
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the

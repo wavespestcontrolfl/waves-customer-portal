@@ -3021,3 +3021,10 @@ describe('full run', () => {
     expect(db._tables.seo_link_domains[0].best_path_id).toBeNull();
   });
 });
+
+describe('SYSTEM_PROMPT — AI-cited roundups (cited-page outreach 2026-10-01)', () => {
+  test('a cited best-of page with a reachable editor is an editorial_outreach path, not a dead end', () => {
+    expect(_internals.SYSTEM_PROMPT).toMatch(/provenance "ai_citation"/);
+    expect(_internals.SYSTEM_PROMPT).toMatch(/"editorial_outreach" path if the pages show a way to reach them/);
+  });
+});
