@@ -9308,6 +9308,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: `Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}`, keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
               });
             }

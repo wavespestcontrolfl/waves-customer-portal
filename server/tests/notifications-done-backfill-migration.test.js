@@ -166,3 +166,37 @@ test('20261001005000 is a no-op when the done columns are missing', async () => 
   await systemRetires.down(fake);
   expect(calls).toEqual([]);
 });
+
+describeOrSkip('20261001007000 resolved-covered backfill + done index (DB-backed)', () => {
+  const migration007 = require('../models/migrations/20261001007000_notifications_done_resolved_covered_and_done_idx');
+  let knex;
+  beforeAll(() => {
+    knex = require('knex')(knexConfig[process.env.NODE_ENV === 'production' ? 'production' : 'development']);
+  });
+  afterAll(async () => { await knex.destroy(); });
+
+  test('an unread or read RESOLVED billing alert becomes done; down() reverses exactly those (and un-reads only what it read)', async () => {
+    await expect(knex.transaction(async (trx) => {
+      const readAt = '2026-09-20T10:00:00.000Z';
+      const insert = async (fields) => {
+        const [row] = await trx('notifications').insert({ recipient_type: 'admin', category: 'billing', title: 'Resolved fixture', ...fields,
+          metadata: JSON.stringify(fields.metadata || {}) }).returning('id');
+        return row.id || row;
+      };
+      const unread = await insert({ metadata: { resolvedCovered: true } });
+      const read = await insert({ read_at: readAt, metadata: { resolvedCovered: true } });
+      const live = await insert({ metadata: { resolvedCovered: false } });
+      await migration007.up(trx);
+      const get = (id) => trx('notifications').where({ id }).first();
+      const u = await get(unread);
+      expect(u.done_by).toBe('backfill');
+      expect(u.read_at).not.toBeNull();
+      expect((await get(read)).done_at.toISOString()).toBe(readAt);
+      expect((await get(live)).done_at).toBeNull();
+      await migration007.down(trx);
+      expect(await get(unread)).toMatchObject({ done_at: null, read_at: null });
+      expect((await get(read)).read_at.toISOString()).toBe(readAt);
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+  });
+});
