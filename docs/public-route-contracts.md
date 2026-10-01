@@ -2876,11 +2876,34 @@ server-rendered page applies the same rule to its plan-terms card.
 The annual rate review disclosure (owner ruling 2026-09-30; shared
 `RATE_REVIEW_TERMS_LINE`, "Rate reviewed yearly after 12 months, 30 days’
 notice") follows the plan-terms scope the same way: the proposal document's
-terms line (browser and pdfkit renderers, `proposalRateReviewTermsEligible`)
-and the legacy plan-terms card ("Rate reviewed once a year") print it only
-when every row carries the recurring residential plan terms ('all') and at
-least one line recurs — never on a termite-only, rodent, commercial,
-authored-terms, programs or one-time-only estimate.
+terms line (browser and pdfkit renderers) and the legacy plan-terms card
+("Rate reviewed once a year") print it only when every row carries the
+recurring residential plan terms ('all') and at least one line recurs —
+never on a termite-only, rodent, commercial, authored-terms, programs or
+one-time-only estimate. The document's decision is the server's alone:
+`/data` projects the explicit boolean `proposal.rateReviewTermsEligible`
+(`proposalRateReviewTermsEligible`, the pdfkit fallback's own decision)
+beside `proposal.noGuaranteeClaims`, and the browser document prints by it
+rather than re-classifying row descriptions with its own narrower service
+taxonomy (a row the server classifies as lawn or tree & shrub work may carry
+no "lawn"/"tree" word).
+The acceptance terms (`acceptanceTerms`, GATE_ESTIMATE_ACCEPTANCE_TERMS)
+carry the same rule as a SCOPE on one version: `scope: 'plan'` — the
+Services drawer line ends with the rate review sentence ("Rates are reviewed
+once a year after your first 12 months, with at least 30 days’ written
+notice before any change.") — is served only when the estimate is a
+recurring residential plan (every service carries the plan terms, the
+`noEstimateWideGuarantee` decision above, and the estimate is not
+one-time-only); every other cancel-anytime estimate (rodent, one-time-only)
+is served `scope: 'base'`, whose drawer is byte-identical to v2026-09. A
+'plan' payload also carries `oneTimeTerms` (the 'base' lines) for the
+customer's one-time toggle, which has no rate to review. The page attests
+the scope it rendered (`termsScope` beside `termsVersion`) and the accept
+route re-derives the scope from the estimate and the accept's own one-time
+mode, recording the verbatim snapshot for that scope or refusing a
+mismatch — or a current version with no scope — with the same reloadable
+409 `TERMS_VERSION_STALE` as a stale version, so no acceptance is ever
+recorded under a Services line the tab did not render.
 When `/data` includes a `proposal` for document rendering or an enabled
 public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
 the normalized rows that the document actually prints. React document mode

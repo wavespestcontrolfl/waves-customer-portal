@@ -1492,7 +1492,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       // IP: the record takes req.ip (proxy-validated under index.js's
       // trust-proxy setting; the loopback here, where nothing is trusted).
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '198.51.100.77' },
-      body: JSON.stringify({ termsVersion: CURRENT }),
+      // A recurring pest plan: the tab rendered the 'plan' scope (the
+      // Services line with the annual rate review sentence) and attests it.
+      body: JSON.stringify({ termsVersion: CURRENT, termsScope: 'plan' }),
     });
     expect(res.status).toBe(200);
 
@@ -1507,9 +1509,10 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       customer_id: customerId,
       method: 'public_estimate',
       terms_version: CURRENT,
-      terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+      terms_text: acceptanceTerms.acceptanceTermsSnapshot('plan'),
       user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
     });
+    expect(records[0].terms_text).toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
     expect(records[0].ip).toMatch(/127\.0\.0\.1|::1/);
     expect(records[0].ip).not.toContain('198.51.100.77');
     expect(records[0].accepted_at).toBeTruthy();
@@ -1525,7 +1528,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     seed({ id: 'est-terms-2', token: 'tok-terms-2-x0123456789' });
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
 
-    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT });
+    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(failed.status).toBeGreaterThanOrEqual(500);
     expect(storedEstimate().status).toBe('sent');
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
@@ -1537,12 +1540,98 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-3', token: 'tok-terms-3-x0123456789' });
 
-    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01' });
+    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01', termsScope: 'plan' });
     expect(stale.status).toBe(409);
     expect(stale.data.code).toBe('TERMS_VERSION_STALE');
     expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  // Scope attestation (codex #5434 r1 P0): the record carries the Services
+  // line the tab rendered — the server re-derives the estimate's scope and
+  // refuses the other one (or none) with the same reloadable 409.
+  test.each([
+    ['the other scope', { termsVersion: null, termsScope: 'base' }],
+    ['no scope beside a current version (a bundle that predates scopes)', { termsVersion: null }],
+    ['an unknown scope', { termsVersion: null, termsScope: 'all' }],
+  ])('a recurring plan accept attesting %s → 409 TERMS_VERSION_STALE before any mutation', async (_name, body) => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-s', token: 'tok-terms-s-x0123456789' });
+    const res = await putAccept('tok-terms-s-x0123456789', { ...body, termsVersion: CURRENT });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test("a rodent-only estimate serves and records the 'base' scope — no rate review sentence — and refuses 'plan'", async () => {
+    mockGateState.acceptanceTerms = true;
+    const rodent = {
+      id: 'est-terms-r',
+      token: 'tok-terms-r-x0123456789',
+      monthly_total: 40,
+      annual_total: 480,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }] },
+          oneTime: { items: [], membershipFee: 0 },
+        },
+      }),
+    };
+    seed(rodent);
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    expect(acceptanceTermsScopeFor(storedEstimate(), JSON.parse(rodent.estimate_data), {})).toBe('base');
+
+    const wrong = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
+    expect(wrong.status).toBe(409);
+    expect(wrong.data.code).toBe('TERMS_VERSION_STALE');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    conversionOk();
+    const res = await putAccept('tok-terms-r-x0123456789', { termsVersion: CURRENT, termsScope: 'base' });
+    expect(res.status).toBe(200);
+    const records = db.__state.tables.estimate_acceptances;
+    expect(records).toHaveLength(1);
+    expect(records[0].terms_version).toBe(CURRENT);
+    expect(records[0].terms_text).toBe(acceptanceTerms.acceptanceTermsSnapshot('base'));
+    expect(records[0].terms_text).not.toContain(acceptanceTerms.RATE_REVIEW_SENTENCE);
+  });
+
+  test("the customer's one-time toggle on a plan estimate is a 'base' accept: 'plan' is refused", async () => {
+    mockGateState.acceptanceTerms = true;
+    // A pest plan the customer may take as a single visit (show_one_time_option + a resolvable one-time price).
+    seed({ id: 'est-terms-o', token: 'tok-terms-o-x0123456789', show_one_time_option: true, onetime_total: 150 });
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const estData = JSON.parse(storedEstimate().estimate_data);
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(storedEstimate(), estData, {}, { oneTime: true })).toBe('base');
+
+    const res = await putAccept('tok-terms-o-x0123456789', { termsVersion: CURRENT, termsScope: 'plan', serviceMode: 'one_time' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test("acceptanceTermsScopeFor: 'plan' only for a recurring residential plan; one-time-only, rodent, termite/unclassifiable and malformed data are 'base'", () => {
+    const { acceptanceTermsScopeFor } = require('../routes/estimate-public');
+    const est = (extra = {}) => ({ id: 'e', monthly_total: 60, annual_total: 720, onetime_total: 0, ...extra });
+    const data = (services, oneTime = []) => ({ result: { recurring: { services }, oneTime: { items: oneTime, membershipFee: 0 } } });
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Lawn Care', service: 'lawn_care', mo: 85 }]), {})).toBe('plan');
+    // Rodent anywhere: no estimate-wide plan terms.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }, { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 40 }]), {})).toBe('base');
+    // One-time-only: no rate to review.
+    expect(acceptanceTermsScopeFor(est({ monthly_total: 0, annual_total: 0, onetime_total: 150 }), data([], [{ name: 'One-Time Pest Control', service: 'pest_one_time', price: 150 }]), {})).toBe('base');
+    // Termite / unclassifiable rows, commercial marks, malformed data: fail closed.
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60 }], [{ name: 'WDO Inspection', service: 'wdo_inspection', price: 125 }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), data([{ name: 'Pest Control', service: 'pest_control', mo: 60, isCommercial: true }]), {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), null, {})).toBe('base');
+    expect(acceptanceTermsScopeFor(est(), 'not an object', {})).toBe('base');
   });
 
   test('a termite/WDO estimate (own signed agreement) never gets a record, even when a version is sent', async () => {
@@ -1558,7 +1647,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       }),
     });
     conversionOk();
-    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT });
+    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(res.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
@@ -1654,7 +1743,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
     conversionOk();
-    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
+    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT, termsScope: 'plan' });
     expect(gateOff.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);

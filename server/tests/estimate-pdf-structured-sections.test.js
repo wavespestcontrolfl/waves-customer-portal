@@ -256,6 +256,25 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
   });
 
+  test('a tree & shrub row the browser document cannot classify by name still prints the disclosure here — the one server decision both renderers read (codex #5434 r1 P1)', async () => {
+    const ornamental = {
+      id: 'ordinary-current-ornamental',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Ornamental Care Program', monthlyPrice: 85 }],
+        result: { recurringServices: [{ service: 'tree_shrub', name: 'Ornamental Care Program' }] },
+      },
+    };
+
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(ornamental, { billsPerApplication: false }));
+    expect(text).toContain('Ornamental Care Program');
+    expect(text).toContain('Rate reviewed yearly after 12 months, 30 days');
+  });
+
   test('a one-time-only pest proposal has no scheduled visits: no canned callback guarantee', async () => {
     const oneTime = {
       id: 'synthesized-one-time-pest',

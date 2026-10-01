@@ -3719,20 +3719,39 @@ function SoftExitLink({ onOpen }) {
 }
 
 /**
+ * The acceptance-terms SCOPE this tab renders — and attests on accept — for
+ * the served payload and the current service mode (owner ruling
+ * 2026-09-30, codex #5434 r1 P0): a 'plan' payload (the Services line
+ * carries the annual rate review sentence) swaps in its 'base' lines when
+ * the customer toggles the plan to a one-time visit, which has no rate to
+ * review; the server re-derives the same scope at accept and refuses a
+ * mismatch. Returns null when no terms are served.
+ */
+export function renderedAcceptanceTermsScope(terms, serviceMode) {
+  if (!terms || !terms.line) return null;
+  if (terms.scope === 'plan' && serviceMode === 'one_time' && Array.isArray(terms.oneTimeTerms)) return 'base';
+  return terms.scope === 'plan' ? 'plan' : 'base';
+}
+
+/**
  * Acceptance line + inline "View terms" drawer (GATE_ESTIMATE_ACCEPTANCE_TERMS,
  * owner ruling 2026-08-28: same steps, least words, no extra page). Renders
  * the copy the SERVER served (data.acceptanceTerms) — never a client constant —
  * so what the customer reads is what the accept route records. The Accept
  * tap itself is the acceptance; there is deliberately no checkbox. The
  * drawer is a toggle (same pattern as InlineAutoPayCapture's "View full
- * terms"), never a link off the estimate.
+ * terms"), never a link off the estimate. The drawer lines follow the
+ * rendered scope (renderedAcceptanceTermsScope): a one-time accept of a
+ * plan estimate shows the served `oneTimeTerms` instead of the plan lines.
  */
-function AcceptanceTermsLine({ terms }) {
+function AcceptanceTermsLine({ terms, serviceMode = 'recurring' }) {
   const [open, setOpen] = useState(false);
   if (!terms || !terms.line) return null;
+  const scope = renderedAcceptanceTermsScope(terms, serviceMode);
+  const lines = scope === 'base' && terms.scope === 'plan' ? terms.oneTimeTerms : (terms.terms || []);
   const toggleId = 'estimate-acceptance-terms';
   return (
-    <div data-testid="acceptance-terms" style={{ marginTop: 14, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
+    <div data-testid="acceptance-terms" data-terms-scope={scope} style={{ marginTop: 14, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
       <span>{terms.line} </span>
       <button
         type="button"
@@ -3749,7 +3768,7 @@ function AcceptanceTermsLine({ terms }) {
       {open ? (
         <div id={toggleId} style={{ ...estimateInnerBox({ padding: '12px 14px', marginTop: 10 }), display: 'grid', gap: 8, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
           <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600 }}>Terms · {terms.version}</div>
-          {(terms.terms || []).map((t) => (
+          {lines.map((t) => (
             <div key={t.label}><strong style={{ color: ESTIMATE_TEXT }}>{t.label}</strong> — {t.text}</div>
           ))}
         </div>
@@ -7155,6 +7174,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
+          // …and which SCOPE of that version it rendered — 'plan' (the
+          // Services line carried the annual rate review sentence) or
+          // 'base' — under the same predicate. The server re-derives the
+          // scope from the estimate and this accept's service mode and
+          // 409s TERMS_VERSION_STALE on a mismatch (codex #5434 r1 P0).
+          termsScope: (paymentPreference !== 'prepay_annual' && renderedAcceptanceTermsScope(data?.acceptanceTerms, serviceMode)) || undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -9167,7 +9192,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
-              <AcceptanceTermsLine terms={data.acceptanceTerms} />
+              <AcceptanceTermsLine terms={data.acceptanceTerms} serviceMode={serviceMode} />
             ) : null}
             contactSlot={data?.contactGaps ? (
               <ContactGapFields

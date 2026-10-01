@@ -145,6 +145,8 @@ describe('GET /:token/data — proposal line projection', () => {
       // rows it renders.
       expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
       expect(body.proposal.noGuaranteeClaims).toBe(true);
+      // Termite work: no rate-review disclosure either (explicit boolean).
+      expect(body.proposal.rateReviewTermsEligible).toBe(false);
       expect(body.proposal.enabled).toBe(false);
       expect(body.proposal.synthesized).toBe(false);
       expect(body.proposal.buildings[0]).toMatchObject({
@@ -155,6 +157,77 @@ describe('GET /:token/data — proposal line projection', () => {
         expect.objectContaining({ description: 'Termite trenching', unitPrice: 1200, amount: 1200 }),
       ]);
       expect(body.documentRender).toBe(true);
+    });
+  });
+
+  // codex #5434 r1 P1: the document's rate-review decision is the SERVER's
+  // (proposalRateReviewTermsEligible), projected explicitly so the browser
+  // renderer never re-classifies a row description with its own taxonomy —
+  // "Ornamental Care Program" is tree & shrub work here and nothing to the
+  // client's glassServiceSlug.
+  test.each([
+    ['an ornamental (tree & shrub) program the client cannot classify by name', 'Ornamental Care Program', 'tree_shrub', true],
+    ['a rodent program', 'Rodent Bait Stations', 'rodent_bait', false],
+  ])('document mode projects rateReviewTermsEligible for %s', async (_name, description, service, eligible) => {
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: `est-rate-review-${eligible}`,
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: description, monthlyPrice: 85 }],
+        result: { recurring: { services: [{ service, name: description, mo: 85 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{
+            name: 'Service location',
+            lineItems: [{ description, unitPrice: 85, frequency: 'monthly', taxable: false }],
+          }],
+        },
+      },
+    };
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.documentRender).toBe(true);
+      expect(body.proposal.rateReviewTermsEligible).toBe(eligible);
+      expect(body.proposal.buildings[0].lineItems[0]).toMatchObject({
+        description,
+        termsScope: eligible ? 'all' : 'satisfaction',
+      });
+    });
+  });
+
+  test('a one-time-only document never carries the rate-review decision as true', async () => {
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-rate-review-one-time',
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 150,
+      estimate_data: {
+        result: {
+          recurring: { services: [] },
+          oneTime: { items: [{ service: 'pest_one_time', name: 'One-Time Pest Control', price: 150 }], membershipFee: 0 },
+        },
+        proposal: {
+          enabled: false,
+          buildings: [{
+            name: 'Service location',
+            lineItems: [{ description: 'One-Time Pest Control', unitPrice: 150, frequency: 'one_time', taxable: false }],
+          }],
+        },
+      },
+    };
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.proposal.rateReviewTermsEligible).toBe(false);
     });
   });
 });

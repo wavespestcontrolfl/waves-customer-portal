@@ -424,6 +424,29 @@ function acceptanceTermsApplyTo(estimate) {
   });
 }
 
+/**
+ * The acceptance terms' SCOPE for one accept (owner ruling 2026-09-30, the
+ * annual rate review disclosed up front; codex #5434 r1 P0): 'plan' when
+ * the accept is a recurring residential plan — every service carries the
+ * plan terms (estimateCarriesPlanTerms: the page's own plan-terms scope,
+ * the one the money-back guarantee and the proposal document's rate-review
+ * line key on; never rodent, commercial, termite or unclassifiable work)
+ * and the estimate is not one-time-only — and 'base' for every other
+ * cancel-anytime accept. A one-time accept (a structurally one-time-only
+ * estimate, or the customer's one-time toggle on a plan estimate) has no
+ * rate to review. FAIL CLOSED: a classification error is 'base' (the
+ * v2026-09 text — never a rate term the estimate may not carry).
+ */
+function acceptanceTermsScopeFor(estimate, estData, pricingBundle = {}, { oneTime = false } = {}) {
+  try {
+    if (oneTime || isStructuralOneTimeOnlyEstimate(estData, estimate)) return 'base';
+    return estimateCarriesPlanTerms(estData, pricingBundle) ? 'plan' : 'base';
+  } catch (err) {
+    logger.warn(`[estimate-public] acceptance terms scope fell back to base for estimate ${estimate?.id || 'unknown'}: ${err.message}`);
+    return 'base';
+  }
+}
+
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
     .toString().split(',')[0].trim().slice(0, 64);
@@ -9342,6 +9365,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
+    // The SCOPE the tab rendered ('plan' = the Services line carried the
+    // rate review sentence, 'base' = it did not), attested beside the
+    // version. Compared below, once the accept's one-time/recurring mode is
+    // known, against the scope this estimate serves — a tab that rendered
+    // the other variant (an older bundle, or the estimate's services moved
+    // under it) reloads rather than being recorded under a line it never
+    // showed (codex #5434 r1 P0).
+    const acceptedTermsScope = acceptanceTerms.normalizeAcceptanceTermsScope(req.body?.termsScope);
     // Annual prepay is paid up front, so the "due when each service is
     // completed" line does not describe that transaction: the page hides the
     // line and sends no attestation for a prepay accept, and the route
@@ -9680,6 +9711,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+
+    // Acceptance terms scope (codex #5434 r1 P0): the record must carry the
+    // Services line this tab rendered. Re-derived here from the SAME rule
+    // /data served it with (acceptanceTermsScopeFor — the page's plan-terms
+    // scope, one-time-only, and this accept's one-time toggle) and compared
+    // with the attestation before any write: a mismatch (or an absent scope
+    // beside a current version — a bundle that predates scopes) is the same
+    // reloadable 409 as a stale version. Still read-only here; the
+    // transaction opens below.
+    const recordedTermsScope = recordAcceptanceTerms
+      ? acceptanceTermsScopeFor(estimate, rawEstData, pricingBundle, { oneTime: treatAsOneTime })
+      : null;
+    if (recordAcceptanceTerms && acceptedTermsScope !== recordedTermsScope) {
+      return res.status(409).json({
+        error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
+        code: 'TERMS_VERSION_STALE',
+      });
+    }
 
     // Fail closed (booking-audit P1): an accept that must bind a booked
     // appointment (slot / existing appointment) or convert a recurring
@@ -11371,7 +11420,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           customer_id: customerId || null,
           method: 'public_estimate',
           terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
-          terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+          terms_text: acceptanceTerms.acceptanceTermsSnapshot(recordedTermsScope),
           accepted_at: acceptAuthorizedAt,
           // Proxy-validated client (trust proxy = 1 hop in index.js), never
           // the raw X-Forwarded-For head a requester can supply (GH Codex P1).
@@ -27523,7 +27572,8 @@ async function composeEstimateDataPayload(estimate, {
       try {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
         const {
-          proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRowTermsScope, resolveProposalBillingContext,
+          proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, proposalRowTermsScope,
+          resolveProposalBillingContext,
         } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
         const proposalForView = normalizeProposal(estimate, {
@@ -27536,6 +27586,14 @@ async function composeEstimateDataPayload(estimate, {
           synthesized: proposalForView.synthesized === true,
           noGuaranteeClaims: proposalNoGuaranteeClaims,
           ...(proposalCarriesPlanTerms(proposalForView, estimate.id) ? {} : { noEstimateWideGuarantee: true }),
+          // Whether the document prints the annual rate review disclosure
+          // beside its terms line (owner ruling 2026-09-30): the SERVER's
+          // decision, the one the pdfkit fallback prints by, projected so
+          // the browser document never re-classifies descriptions with its
+          // own narrower taxonomy (codex #5434 r1 P1 — a "Weed Control"
+          // row is lawn here and was unclassifiable there). Explicit
+          // boolean, like noGuaranteeClaims.
+          rateReviewTermsEligible: proposalRateReviewTermsEligible(proposalForView, estimate.id),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
@@ -27645,6 +27703,15 @@ async function composeEstimateDataPayload(estimate, {
     // telemetry on a PDF.
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
+    // The scope the served drawer carries (codex #5434 r1 P0): 'plan' only
+    // when this estimate is a recurring residential plan — the same
+    // noEstimateWideGuarantee decision above (estimateCarriesPlanTerms) plus
+    // not one-time-only — so a rodent or one-time-only estimate never
+    // shows, or is recorded under, the rate review sentence. The accept
+    // route re-derives it with the accept's own one-time mode.
+    const acceptanceTermsScope = acceptanceTermsServed
+      ? acceptanceTermsScopeFor(estimate, estimateDataForIntelligence, pricingBundle)
+      : null;
     // Strict on the headless document pass: the rendered PDF must carry the
     // record or fail the render (which then fails the pdfkit fallback too).
     const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
@@ -27847,7 +27914,7 @@ async function composeEstimateDataPayload(estimate, {
       // the page renders above Accept, served by the SERVER so the copy the
       // customer sees is the copy the accept route records. Absent when the
       // gate is off ⇒ response byte-identical to today.
-      ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload() } : {}),
+      ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload(acceptanceTermsScope) } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
@@ -28736,6 +28803,7 @@ module.exports.attachMeasuredBasis = attachMeasuredBasis;
 // Test hook (acceptance-terms lane 2026-08-28): which estimates get the
 // cancel-anytime acceptance line at all.
 module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;
+module.exports.acceptanceTermsScopeFor = acceptanceTermsScopeFor;
 // Test hooks (T&S palm-care bullet lane 2026-09-24, restructured to a single
 // evidence + stamping chokepoint in Codex round 4 — see treeShrubPalmCountForEstData
 // and stampTreeShrubPalmCount's own comments): the per-service-treatment row
