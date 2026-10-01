@@ -2353,11 +2353,12 @@ function CitationRow({ c, canEdit, editing, onToggle }) {
   );
 }
 
-// `edit` lives in BacklinksTab so an unsaved draft survives switching sub-tabs.
-function CitationsPanel({ data, canRunSeoActions, reload, edit, setEdit }) {
+// The citation editor's draft, pending save and error live in BacklinksTab (via this hook),
+// so switching sub-tabs mid-edit or mid-save loses none of them.
+function useCitationEditor(reload) {
+  const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const stats = data.citationStats || {};
   const save = async (id, body) => {
     setSaving(true);
     setError("");
@@ -2379,6 +2380,12 @@ function CitationsPanel({ data, canRunSeoActions, reload, edit, setEdit }) {
         : { id: c.id, listing_url: c.listing_url || "", location_id: c.location_id || "" }
     );
   };
+  return { edit, setEdit, saving, error, save, toggle };
+}
+
+function CitationsPanel({ data, canRunSeoActions, editor }) {
+  const { edit, setEdit, saving, error, save, toggle } = editor;
+  const stats = data.citationStats || {};
   return (
     <UiCard className="p-6">
       <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
@@ -2425,10 +2432,10 @@ function BacklinksTab() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
-  const [citationEdit, setCitationEdit] = useState(null);
   const [llmDash, setLlmDash] = useState(null);
   const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
+  const citationEditor = useCitationEditor(() => adminFetch("/admin/seo/backlinks").then(setData));
   const canRunSeoActions = isAdminUser();
   useEffect(() => {
     adminFetch("/admin/seo/backlinks")
@@ -2547,9 +2554,7 @@ function BacklinksTab() {
         <CitationsPanel
           data={data}
           canRunSeoActions={canRunSeoActions}
-          reload={() => adminFetch("/admin/seo/backlinks").then(setData)}
-          edit={citationEdit}
-          setEdit={setCitationEdit}
+          editor={citationEditor}
         />
       )}
       {subTab === "gaps" && <BacklinkGapsPanel data={data} />}

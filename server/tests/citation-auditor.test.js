@@ -390,6 +390,15 @@ describe('classifyListing', () => {
       expect(text('<p>Order id 12345 shipped in 2 days</p>').status).toBe('verified'); // prose word, no comma
     });
 
+    test('a state code that is also a word or ID label needs a comma to read as an address', () => {
+      expect(text('<p>Order ID 12345 confirmed</p>').status).toBe('verified');
+      expect(text('<p>Listing ID 98765</p>').status).toBe('verified');
+      expect(text('<p>Hi 12345 visitors this month</p>').status).toBe('verified');
+      expect(text('<p>Boise, ID 83702</p>').status).toBe('unverified');
+      expect(text('<p>Portland, or 97201</p>').status).toBe('unverified');
+      expect(text('<p>Atlanta GA 30303</p>').status).toBe('unverified'); // unambiguous code, no comma needed
+    });
+
     test('a page with no state + ZIP and no street-like string is still judged on name + phone', () => {
       expect(text('<p>Serving Manatee County since 2019. Call 24/7.</p>').status).toBe('verified');
       expect(text('<p>Order id 12345 shipped in 2 days</p>').status).toBe('verified'); // lowercase words are not states
@@ -439,6 +448,8 @@ describe('classifyListing', () => {
       expect(titled('404-555-0100 | Directory').status).toBe('verified');
       expect(titled('404 - Page Not Found').detail.reason).toBe('soft_404');
       expect(titled('Error 404 | Directory').detail.reason).toBe('soft_404');
+      expect(titled('Page&nbsp;Not&nbsp;Found').detail.reason).toBe('soft_404');
+      expect(titled('Page&#160;not&#xA0;found | Directory').detail.reason).toBe('soft_404');
     });
 
     test('an unused error template in a script, template or comment is not a soft-404', () => {

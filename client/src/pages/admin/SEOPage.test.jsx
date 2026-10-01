@@ -271,6 +271,43 @@ describe("SEOPage workspace navigation", () => {
     expect(await screen.findByPlaceholderText(/Public listing URL/)).toHaveValue("https://dir.example/draft");
   });
 
+  it("keeps a pending citation save and its error across a sub-tab switch", async () => {
+    const put = deferred();
+    let putCount = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/seo/backlinks")) {
+        return jsonResponse({
+          citations: [{ id: "c1", directory_name: "Sample Directory", status: "unverified", listing_url: "https://dir.example/waves", location_id: "" }],
+          citationStats: { total: 1, unverified: 1 },
+          citationLocations: [{ id: "venice", name: "Venice" }],
+        });
+      }
+      if (route.endsWith("/admin/seo/citations/c1") && options.method === "PUT") {
+        putCount += 1;
+        return put.promise;
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Citations" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByPlaceholderText(/Public listing URL/), {
+      target: { value: "https://dir.example/new" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(putCount).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Gaps" }));
+    fireEvent.click(screen.getByRole("button", { name: "Citations" }));
+    expect(await screen.findByRole("button", { name: /Sav/ })).toBeDisabled();
+
+    put.resolve({ ok: false, status: 400, statusText: "Bad Request", headers: new Headers(), json: async () => ({ error: "Listing URL rejected" }), clone() { return this; } });
+    expect(await screen.findByText(/Listing URL rejected/)).toBeInTheDocument();
+    expect(putCount).toBe(1);
+  });
+
   it("does not restore a skipped backlink from an older automatic refresh", async () => {
     const staleQueue = deferred();
     let queueReads = 0;

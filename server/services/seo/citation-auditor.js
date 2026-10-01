@@ -297,13 +297,15 @@ function extractNap(html, candidates = []) {
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
 // Any US state + ZIP on the page means an address is shown, whatever its street looks like
 // ("99 Palm Terrace, Atlanta, GA 30303"): a USPS state code (or Florida) followed by a ZIP. Only
-// real codes count, so "PO 12345" or "NO 12345" is not an address. Upper or title case anywhere
-// ("GA 30303", "Ga 30303"); any case right after a comma ("Atlanta, ga 30303"), so a lowercase
-// word in prose ("order id 12345") is not read as a state.
+// real codes count, so "PO 12345" or "NO 12345" is not an address. Any case right after a comma
+// ("Atlanta, ga 30303"). Without a comma, upper or title case ("GA 30303", "Ga 30303"), except
+// codes that are also words or ID labels ("Order ID 12345", "Hi 12345"): those need the comma.
 const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY';
 const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
-const TITLE_STATE_CODES = US_STATE_CODES.split('|').map((c) => c[0] + c[1].toLowerCase()).join('|');
-const STATE_ZIP_RE = new RegExp(`\\b(?:${US_STATE_CODES}|${TITLE_STATE_CODES}|[Ff][Ll]|[Ff]lorida|FLORIDA)${ZIP_TAIL}`);
+const AMBIGUOUS_STATE_CODES = new Set(['ID', 'IN', 'OR', 'OK', 'ME', 'HI', 'OH', 'AL', 'LA', 'MS', 'CO', 'DE', 'PA']);
+const BARE_STATE_CODES = US_STATE_CODES.split('|').filter((c) => !AMBIGUOUS_STATE_CODES.has(c));
+const BARE_STATE_ALTS = [...BARE_STATE_CODES, ...BARE_STATE_CODES.map((c) => c[0] + c[1].toLowerCase())].join('|');
+const STATE_ZIP_RE = new RegExp(`\\b(?:${BARE_STATE_ALTS}|[Ff][Ll]|[Ff]lorida|FLORIDA)${ZIP_TAIL}`);
 const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|Florida)${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
@@ -392,7 +394,7 @@ const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404
 const NON_RENDERED_RE = /<!--[\s\S]*?-->|<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
 function notFoundHeading(html) {
   return [...String(html).replace(NON_RENDERED_RE, ' ').matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
-    .some((m) => NOT_FOUND_HEADING_RE.test(decodeHTML(visibleText(m[2]))));
+    .some((m) => NOT_FOUND_HEADING_RE.test(decodeHtmlText(visibleText(m[2])))); // &nbsp; decodes to a space
 }
 
 // Why a fetched page cannot be judged at all (null = readable): a non-2xx, a bot challenge, a
