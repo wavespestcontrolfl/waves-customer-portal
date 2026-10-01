@@ -2450,6 +2450,17 @@ function shouldAutoInvoiceCompletion({
  * Returns an HTTP-independent { status, body } result; unexpected failures throw.
  * actor comes from authenticated staff middleware, never from the submitted body.
  */
+// An incomplete or customer-declined closeout of a street-level hold settles it exactly like cancel / skip
+// (owner ruling): the review card closes with a note, the address is NOT approved (no field stamp, no
+// office-confirm activation, no inspection credit). No-op (null) for every other visit; false when the
+// settlement FAILED, so the caller keeps the closeout resumable (503) and a retry settles it.
+async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
+  if (svc?.source_action !== 'voice_agent' || svc.customer_confirmed === true) return null;
+  return require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
+    note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
+  });
+}
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -2691,6 +2702,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    // A closeout that did not reach the property's work (incomplete, declined) never confirms its address.
+    const addressConfirmingOutcome = visitOutcome !== 'incomplete' && visitOutcome !== 'customer_declined';
     // A visit the tech never performed at all (incomplete, customer
     // declined) discards its station payload entirely — the post-commit
     // sync below skips it, so the pre-commit station preflights (cap,
@@ -5097,6 +5110,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       durableCompletionCommitted = true;
+      // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+      // its address — released only now that the completion is durably committed (a rejected
+      // completion never approves the address) and before any customer delivery below, so the
+      // recap is no longer a held message. A no-op for every other visit; best-effort.
+      const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+      // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+      // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+      if (holdRelease === false) {
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+        return ({ status: 503, body: {
+          error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+          code: 'street_level_hold_release_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        } });
+      }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -7324,6 +7352,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
+        // Owner ruling 2026-10-01: completing a street-level hold's visit AT THE PROPERTY confirms its
+        // address. The durable field stamp commits with the 'completed' status (before any post-commit
+        // activator runs), is the evidence the lazy activation requires, and keeps the card funnel off
+        // (the technician collects in person). An incomplete or declined closeout confirms nothing.
+        if (addressConfirmingOutcome && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true
+          && await require('./street-level-hold').isStreetLevelHoldVisit(svc.id, trx)) {
+          scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
+        }
         // The closeout stamp follows the same program-attribution predicate
         // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
@@ -7376,6 +7412,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           fromStatus,
           toStatus: 'completed',
           transitionedBy: completionInput.actor.technicianId,
+          holdCompletionOutcome: addressConfirmingOutcome ? 'performed' : String(visitOutcome),
           trx,
         });
 
@@ -7456,6 +7493,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
+        // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+        // its address — released only now that the completion is durably committed (a rejected
+        // completion never approves the address) and before any customer delivery below, so the
+        // recap is no longer a held message. A no-op for every other visit; best-effort.
+        const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+        // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+        // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+        if (holdRelease === false) {
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+          return ({ status: 503, body: {
+            error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+            code: 'street_level_hold_release_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          } });
+        }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion

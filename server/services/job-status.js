@@ -318,13 +318,20 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       success). This writer then skips its
  *                                       own lazy activation instead of
  *                                       running a second, concurrent one.
+ * @param {string} [args.holdCompletionOutcome] the closeout outcome of a 'completed' transition:
+ *                                       'performed' (the default — every engine that completes a visit
+ *                                       through this writer) or 'incomplete' / 'customer_declined'.
+ *                                       A performed completion of a street-level address hold counts as
+ *                                       confirming its address (owner ruling 2026-10-01): the field stamp
+ *                                       commits WITH the transition and the post-commit lazy activation
+ *                                       then releases the hold. An unsuccessful outcome stamps nothing.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
-  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false,
+  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false, holdCompletionOutcome = 'performed',
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
@@ -397,7 +404,7 @@ async function transitionJobStatus({
       const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
-        .first('source_action', 'status', 'customer_confirmed', 'customer_id');
+        .first('source_action', 'status', 'customer_confirmed', 'customer_id', 'field_confirmed_at');
       legacyOutboundActivationNeeded = legacyOutboundActivation !== 'caller'
         && !!legacyRow
         && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)
@@ -418,7 +425,24 @@ async function transitionJobStatus({
       // same posture every at-booking redemption surface carries.
       // Best-effort: an evidence hiccup never blocks the completion; the
       // hook's own idempotent marker call is the belt.
-      if (legacyOutboundActivationNeeded && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
+      // THE shared seam for a performed completion of a street-level hold (completeScheduledService,
+      // pest-recap, project-completion all pass through here): the field-confirmation stamp commits in
+      // this transaction, so the lazy activation below approves the address and releases the hold.
+      // Atomic with the status flip (a lost CAS rolls it back). Unsuccessful outcomes stamp nothing.
+      if (String(toStatus || '') === 'completed' && legacyOutboundActivationNeeded && legacyRow.source_action === 'voice_agent'
+        && !legacyRow.field_confirmed_at && !['incomplete', 'customer_declined'].includes(String(holdCompletionOutcome))
+        && await require('./street-level-hold').isStreetLevelHoldVisit(jobId, t)) {
+        const stampedAt = new Date();
+        await t('scheduled_services').where({ id: jobId }).whereNull('field_confirmed_at').update({ field_confirmed_at: stampedAt });
+        legacyRow.field_confirmed_at = stampedAt;
+      }
+      // A street-level address hold completed WITHOUT the field-confirmation stamp (an incomplete or declined
+      // closeout, which still sets status completed) earns no credit evidence: its address was never approved
+      // and no work was performed. The completion engine commits the stamp in this same transaction before
+      // this transition, for performed closeouts only.
+      const unapprovedHold = legacyOutboundActivationNeeded && legacyRow.source_action === 'voice_agent' && !legacyRow.field_confirmed_at
+        && await require('./street-level-hold').isStreetLevelHoldVisit(jobId, t);
+      if (legacyOutboundActivationNeeded && !unapprovedHold && String(toStatus || '') === 'completed' && legacyRow.customer_id) {
         // Frozen ONCE and threaded through the post-commit retry (Codex
         // #3361 r16 P1): a failed marker queues its outbox with this same
         // instant, and the hook's belt retry passes it too, so whichever
@@ -944,6 +968,14 @@ async function transitionJobStatus({
       void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
       });
+      // A street-level address hold's review card closes with its visit
+      // (cancelled / skipped): the office no longer has an address to confirm.
+      // Gated on the card signal inside the helper; a no-op for every other visit.
+      if (['cancelled', 'skipped'].includes(String(toStatus))) {
+        void require('./street-level-hold').closeHoldCardForEndedVisit(jobId, toStatus).catch((e) => {
+          logger.warn(`[job-status] street-level hold close failed for ${jobId}: ${e.code || e.name || 'error'}`);
+        });
+      }
       // Invoice void + inspection-credit reversal seam for every non-live
       // transition (Codex #3178 r25 P1): 'skipped' reached no route branch
       // that ran it, leaving a skipped visit's redeemed credit spendable
@@ -976,6 +1008,14 @@ async function transitionJobStatus({
       void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
       });
+      // A cancelled / skipped street-level hold restored to a live status (a compensated
+      // cancellation) gets its review card back — the close-on-cancel may have run first.
+      // Gated on the card signal inside the helper; a no-op for every other visit.
+      if (['cancelled', 'skipped'].includes(String(fromStatus || ''))) {
+        void require('./street-level-hold').reopenHoldCardForRestoredVisit(jobId).catch((e) => {
+          logger.warn(`[job-status] street-level hold reopen failed for ${jobId}: ${e.code || e.name || 'error'}`);
+        });
+      }
       // Visit-group seam, reverse direction (codex #3590 r6, narrowed
       // r7): ONLY a compensated terminal reversal regroups — the terminal
       // hook may have detached the row (and dissolved its visit), so

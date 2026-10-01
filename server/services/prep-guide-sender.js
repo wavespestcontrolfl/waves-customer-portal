@@ -35,6 +35,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-customer-message');
+const { isStreetLevelHoldVisit } = require('./street-level-hold');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
@@ -686,7 +687,14 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       // Provider rejections can echo the recipient address; keep the raw
       // SendGrid body out of the logs (email addresses in logs are a P1).
       suppressProviderErrorLog: true,
-      onQueued: () => { dispatched = true; },
+      // Owner ruling 2026-10-01: no customer message about a live street-level address hold until the
+      // office confirms. Re-read right before the provider call (onQueued false aborts pre-dispatch);
+      // the predicate fails closed.
+      onQueued: async () => {
+        if (visit?.id && await isStreetLevelHoldVisit(visit.id)) return false;
+        dispatched = true;
+        return true;
+      },
       payload: {
         first_name: firstName,
         customer_name: [customer.first_name, customer.last_name].map((v) => String(v || '').trim()).filter(Boolean).join(' '),
@@ -719,7 +727,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
 // carrying the provider outcome on the error. Acceptance is a send; a
 // provider failure can include a timeout after acceptance, so standalone
 // guides retain their claim until provider reconciliation proves absence.
-async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', consentBasis = null, pestType, actorId }) {
+async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', consentBasis = null, pestType, actorId, visitId = null }) {
   let body;
   try {
     body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
@@ -749,6 +757,8 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       // exempt from the send window (allowlisted entry point).
       entryPoint: 'admin_prep_guide_send',
       metadata: {
+        // The visit the guide is for: the shared send step holds a live street-level address hold.
+        ...(visitId ? { scheduled_service_id: visitId } : {}),
         original_message_type: 'prep_info',
         pest_type: pestType,
         prep_variant: variant,
@@ -855,7 +865,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   }
   if (contacts.wantSms && smsPlan) {
     const sms = await sendPrepSms({
-      customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
+      customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, visitId: visit?.id || null, ...smsPlan,
     });
     result.smsSent = sms.sent;
     result.smsUncertain = !!sms.uncertain;
