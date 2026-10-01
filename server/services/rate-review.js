@@ -111,6 +111,18 @@ const ENGINE_SERVICE_KEYS = Object.freeze({
   termite: ['termite_bait'],
   rodent: ['rodent_bait'],
 });
+// customer_plan_rates.family_key vocabulary per ranking line (plan-rate-
+// ledger.js: rodent bait is `rodent_bait`, termite bait `termite_bait`, a palm
+// rider `palm_injection` beside `tree_shrub`). A line's slice is the SUM of
+// the ledger rows that belong to it.
+const LEDGER_FAMILIES_FOR_LINE = Object.freeze({
+  pest_control: ['pest_control'],
+  lawn_care: ['lawn_care'],
+  tree_shrub: ['tree_shrub', 'palm_injection'],
+  mosquito: ['mosquito'],
+  termite: ['termite_bait', 'termite'],
+  rodent: ['rodent_bait', 'rodent'],
+});
 const MAX_USABLE_MINUTES = 240;
 // A home visit's wall clock minus the allowance never reads below this —
 // an allowance is a line average, not this visit's conversation.
@@ -965,6 +977,16 @@ async function loadLedgerSlices(dbh, customerIds) {
   return map;
 }
 
+// The ledger slice for a ranking line: the sum of the customer's rows under
+// that line's ledger family keys (null when none).
+function ledgerSliceForLine(ledger, customerId, familyKey) {
+  const keys = LEDGER_FAMILIES_FOR_LINE[familyKey] || [familyKey];
+  const rows = keys.map((k) => ledger.get(`${customerId}|${k}`)).filter(Boolean);
+  if (!rows.length) return null;
+  const monthly = rows.reduce((sum, r) => sum + (finite(r.monthly_rate) || 0), 0);
+  return { monthly_rate: Math.round(monthly * 100) / 100, family_keys: rows.map((r) => r.family_key) };
+}
+
 // 'YYYY-MM' minus N months.
 function monthKeyMinus(batchKey, months) {
   const [y, m] = batchKey.split('-').map(Number);
@@ -1233,7 +1255,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     if (!customer) continue;
     const familyKey = planLine.family_key;
     const cadence = planLine.cadence;
-    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice: ledger.get(`${customer.id}|${familyKey}`) });
+    const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice: ledgerSliceForLine(ledger, customer.id, familyKey) });
     const stats = lineDurationStats(visitsByLine.get(`${customer.id}|${familyKey}`) || [], { config, allowanceMinutes: allowanceFor(allowances, familyKey) });
     const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
 
@@ -1645,7 +1667,8 @@ module.exports = {
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
     gapPct, classifyBand, nudgeBand, evaluateExceptions, computeSnapshot, summarizeRows,
     resolveAnniversary, resolveCurrentRate, matchPrepayTerm, familyOfCoverage, consolidatePlanLines, hasSizeInput, listReplayInputs, listRateFromEngineResult, isCommercialCustomer, engineInputsFromEstimate,
-    loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, loadEstimates, loadCustomers,
+    loadActivePlanLines, loadFirstCompletedVisits, loadCompletedVisitRows, loadExceptionSignals, loadPriorReviews, loadLedgerSlices, ledgerSliceForLine, loadEstimates, loadCustomers,
+    LEDGER_FAMILIES_FOR_LINE,
     MAX_USABLE_MINUTES, MIN_TREATMENT_MINUTES, MAX_ALLOWANCE_MINUTES, MIN_LINE_RPH_SAMPLE, CADENCE_VISITS, CONVERSATION_MINUTES_KEYS, INTERACTION_HOME, INTERACTION_NOT_HOME,
   },
 };

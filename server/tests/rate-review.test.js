@@ -8,6 +8,9 @@
  * helpers/rate-review-fixture.js (every number there is invented).
  */
 process.env.GATE_RATE_REVIEW = 'true';
+// The plan-rate ledger is ON in prod (pre-read 2026-09-30); the monthly lane
+// reads family slices through it, so the suite pins that posture.
+process.env.GATE_PLAN_RATE_LEDGER = 'true';
 
 const mockFacts = jest.fn();
 const mockCoveredTerms = jest.fn();
@@ -341,12 +344,9 @@ describe('current rate per billing lane', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { per_application_fee: 98 }), planLine: noVisitPrice })).toMatchObject({ cents: 9800, source: 'per_application_fee' });
     expect(P.resolveCurrentRate({ customer: fixture.customer(1), planLine: noVisitPrice })).toMatchObject({ cents: 0, source: 'none' });
   });
-  test('monthly_membership: the ledger family slice when the ledger gate is on, else monthly_rate', () => {
+  test('monthly_membership: the ledger family slice (ledger gate on), else monthly_rate on a single-line account', () => {
     const customer = fixture.customer(1, { billing_mode: 'monthly_membership', monthly_rate: 55 });
-    const { isEnabled } = require('../config/feature-gates');
-    const slice = { monthly_rate: 40 };
-    const expected = isEnabled('planRateLedger') ? { cents: 4000, source: 'ledger_slice' } : { cents: 5500, source: 'monthly_rate' };
-    expect(P.resolveCurrentRate({ customer, planLine, ledgerSlice: slice })).toMatchObject({ ...expected, unit: 'month' });
+    expect(P.resolveCurrentRate({ customer, planLine, ledgerSlice: { monthly_rate: 40 } })).toMatchObject({ cents: 4000, source: 'ledger_slice', unit: 'month' });
     expect(P.resolveCurrentRate({ customer, planLine })).toMatchObject({ cents: 5500, source: 'monthly_rate', unit: 'month' });
   });
   test('annual_prepay: the live term per covered visit, flagged mid-term', () => {
@@ -359,6 +359,26 @@ describe('current rate per billing lane', () => {
     // annual_prepay scalar with no live term → visit fallback, flagged for cleanup
     expect(P.resolveCurrentRate({ customer, planLine, liveTerms: [] })).toMatchObject({ cents: 10530, source: 'visit_median', prepayTermMissing: true });
   });
+  test('ledger slices are looked up under the ledger\'s own family keys and summed per line', () => {
+    const ledger = new Map([
+      ['c|pest_control', { family_key: 'pest_control', monthly_rate: 40 }],
+      ['c|rodent_bait', { family_key: 'rodent_bait', monthly_rate: 25 }],
+      ['c|tree_shrub', { family_key: 'tree_shrub', monthly_rate: 30 }],
+      ['c|palm_injection', { family_key: 'palm_injection', monthly_rate: 12.5 }],
+      ['c|termite_bait', { family_key: 'termite_bait', monthly_rate: 20 }],
+    ]);
+    expect(P.ledgerSliceForLine(ledger, 'c', 'rodent')).toMatchObject({ monthly_rate: 25, family_keys: ['rodent_bait'] });
+    expect(P.ledgerSliceForLine(ledger, 'c', 'tree_shrub')).toMatchObject({ monthly_rate: 42.5, family_keys: ['tree_shrub', 'palm_injection'] });
+    expect(P.ledgerSliceForLine(ledger, 'c', 'termite')).toMatchObject({ monthly_rate: 20 });
+    expect(P.ledgerSliceForLine(ledger, 'c', 'pest_control')).toMatchObject({ monthly_rate: 40 });
+    expect(P.ledgerSliceForLine(ledger, 'c', 'mosquito')).toBeNull();
+    expect(P.ledgerSliceForLine(ledger, 'other', 'pest_control')).toBeNull();
+    // a monthly pest + rodent account prices its rodent line off the rodent_bait slice, not the whole-account scalar
+    const customer = fixture.customer(1, { billing_mode: 'monthly_membership', monthly_rate: 65 });
+    const rodent = fixture.planLine('c', 'rodent', 'quarterly', null, { account_lines: 2 });
+    expect(P.resolveCurrentRate({ customer, planLine: rodent, ledgerSlice: P.ledgerSliceForLine(ledger, 'c', 'rodent') })).toMatchObject({ cents: 2500, source: 'ledger_slice', unit: 'month' });
+    expect(P.resolveCurrentRate({ customer, planLine: fixture.planLine('c', 'tree_shrub', 'bimonthly', null, { account_lines: 2 }), ledgerSlice: P.ledgerSliceForLine(ledger, 'c', 'tree_shrub') })).toMatchObject({ cents: 4250, source: 'ledger_slice' });
+  });
   test('monthly_membership: the whole-account scalar never stands in for a slice on a multi-line account', () => {
     const customer = fixture.customer(1, { billing_mode: 'monthly_membership', monthly_rate: 95 });
     const multi = fixture.planLine('c', 'pest_control', 'quarterly', null, { account_lines: 2 });
@@ -368,10 +388,7 @@ describe('current rate per billing lane', () => {
     expect(row.status).toBe('skipped');
     expect(row.flags).toEqual(expect.arrayContaining(['rate_unattributed', 'no_current_rate']));
     // a ledger slice prices the line even on a multi-line account
-    const { isEnabled } = require('../config/feature-gates');
-    if (isEnabled('planRateLedger')) {
-      expect(P.resolveCurrentRate({ customer, planLine: multi, ledgerSlice: { monthly_rate: 40 } })).toMatchObject({ cents: 4000, source: 'ledger_slice' });
-    }
+    expect(P.resolveCurrentRate({ customer, planLine: multi, ledgerSlice: { monthly_rate: 40 } })).toMatchObject({ cents: 4000, source: 'ledger_slice' });
   });
   test('annual_prepay: the term is matched to the line — linked visits first, then coverage family; two candidates are ambiguous', () => {
     const pest = { id: 't-pest', prepay_amount: 404, coverage_visit_count: 4, coverage_service_type: 'Quarterly Pest Control' };
