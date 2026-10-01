@@ -11059,11 +11059,13 @@ const InvoiceService = {
       // Closed by an earlier reinstatement (not the office): nothing to refuse.
       if (handoffPayload.systemRetired === true) continue;
       if (!handoff.resolved_at) {
-        await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({
+        const closed = await conn("dispatch_alerts").where({ id: handoff.id }).whereNull("resolved_at").update({
           resolved_at: new Date(),
           payload: conn.raw("coalesce(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ systemRetired: true, retiredBy: `reinstated invoice ${invoiceId}` })]),
         });
-        continue;
+        // Lost the CAS: the office resolved it between the read and this
+        // write — that is office action, so it falls through to the refusal.
+        if (Number(closed) > 0) continue;
       }
       const message = `The setup fee on invoice ${invoiceId} was handed to the office after it was voided and the office already acted on it — check that fee before restoring this invoice`;
       if (strict) throw new Error(message);

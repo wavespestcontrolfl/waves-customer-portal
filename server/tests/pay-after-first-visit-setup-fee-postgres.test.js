@@ -461,6 +461,21 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       // (Below: the same handoff as if the OFFICE had resolved it.)
       await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ payload: mockPg.raw("payload - 'systemRetired'") });
 
+      // The office resolves it between the un-void's read and its close (a lost
+      // CAS): that is office action, so a strict un-void refuses.
+      await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: null });
+      const racing = (table) => {
+        const qb = mockPg(table);
+        if (table !== 'dispatch_alerts') return qb;
+        const update = qb.update.bind(qb);
+        qb.update = (...args) => mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: new Date() })
+          .then(() => update(...args));
+        return qb;
+      };
+      racing.raw = mockPg.raw.bind(mockPg);
+      await expect(Invoices.retireRodentSetupObligationForReinstatedInvoice(racing, inv.id, { strict: true }))
+        .rejects.toThrow(/handed to the office after it was voided/);
+
       // Had the office already acted on it, a strict un-void refuses (no double bill).
       await mockPg('dispatch_alerts').where({ id: handoff.id }).update({ resolved_at: new Date(Date.now() - 1000) });
       await expect(Invoices.retireRodentSetupObligationForReinstatedInvoice(mockPg, inv.id, { strict: true }))
