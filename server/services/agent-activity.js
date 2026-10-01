@@ -24,6 +24,11 @@ const db = require('../models/db');
 // feature-gates.js is evaluated once at boot, so isEnabled() would freeze
 // the flag until a redeploy — a kill switch has to work on the next request.
 const { gateEnvValue } = require('../config/feature-gates');
+// The ONE content-version expression (md5 over title/body/link/detail/metadata)
+// the bell's Done fence uses. Activity's Done sends the same value back to
+// PUT /admin/notifications/:id/done, so a row rewritten in place since the
+// owner saw it answers 409 instead of being closed unseen.
+const { NOTIFICATION_VERSION_SQL } = require('./notification-service')._private;
 
 const STATUSES = ['running', 'awaiting_review', 'blocked', 'completed', 'failed', 'skipped'];
 const MAX_WINDOW_HOURS = 24 * 14;
@@ -327,6 +332,9 @@ function digestItem(row) {
     // The Review link marks this bell row read (PUT /admin/notifications/:id/read)
     // so an ACT item clears from the feed once the owner has followed it.
     notificationId: row.id,
+    // Content version for the fenced Done in this feed: only a row that can
+    // still be marked done (not done, not resolved) carries one.
+    version: !done && !resolved && row.version ? String(row.version) : null,
     agent: OPS_AGENT,
     // New rows never carry the prefix (the bell title already dropped it);
     // this strip only matters for a legacy row still holding one.
@@ -440,7 +448,7 @@ const PINNED_CAP = 5000;
 // feed just because the row aged out of both the pinned and windowed sets.
 async function loadDigestRows(db, since, focusId) {
   const base = () => db('notifications')
-    .select(...DIGEST_COLUMNS)
+    .select(...DIGEST_COLUMNS, db.raw(`${NOTIFICATION_VERSION_SQL} AS version`))
     .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
   // Admin-alerts-brevity scope (2026-09-28): new rows carry metadata.kind and
   // no title prefix at all — the title regexes below only still match a

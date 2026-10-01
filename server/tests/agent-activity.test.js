@@ -283,6 +283,26 @@ describe('buildActivity digests', () => {
     expect(summary).toMatchObject({ awaiting_review: 2, completed: 3 });
   });
 
+  it('exposes the content version (the Done fence) only on a digest that can still be marked done', () => {
+    const v = 'a'.repeat(32);
+    const base = { body: 'x', created_at: '2026-09-02T06:00:00Z', read_at: null, version: v };
+    const { items } = buildActivity({
+      digests: [
+        { ...base, id: 'pending-act', title: 'Pending ACT', metadata: { kind: 'ACT', opsKey: 'a', feed: 'activity' } },
+        { ...base, id: 'pending-fix', title: 'Pending FIX', metadata: { kind: 'FIX', opsKey: 'b' } },
+        { ...base, id: 'done-act', title: 'Done ACT', metadata: { kind: 'ACT', opsKey: 'c' }, done_at: '2026-09-02T10:00:00Z' },
+        { ...base, id: 'resolved-act', title: 'Resolved ACT', metadata: { kind: 'ACT', opsKey: 'd', resolved: true } },
+        { ...base, id: 'no-version', title: 'Legacy fake', metadata: { kind: 'ACT', opsKey: 'e' }, version: undefined },
+      ],
+    });
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    expect(byId['digest:pending-act'].version).toBe(v);
+    expect(byId['digest:pending-fix'].version).toBe(v);
+    expect(byId['digest:done-act'].version).toBeNull();
+    expect(byId['digest:resolved-act'].version).toBeNull();
+    expect(byId['digest:no-version'].version).toBeNull();
+  });
+
   it('a resolved finding (fall-off rule) reads as completed · cleared, even a FIX', () => {
     const { items } = buildActivity({
       digests: [

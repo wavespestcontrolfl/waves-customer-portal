@@ -130,7 +130,7 @@ async function markDigestRead(item) {
   }
 }
 
-function ActivityRow({ item, onReview, focused }) {
+function ActivityRow({ item, onReview, onDone, doneBusy, focused }) {
   const [open, setOpen] = useState(() => !!focused);
   const rowRef = useRef(null);
   // The bell's ops_digest rows deep-link here with &focus=<notification id>
@@ -149,6 +149,16 @@ function ActivityRow({ item, onReview, focused }) {
   // so this row is the only way to reach it.
   const needsAction = !!item.link && (item.status === "awaiting_review" || item.kind === "digest");
   const actionLabel = item.status === "awaiting_review" ? "Review" : "Open";
+  // Done: Review/Open only marks the row read, and read is not done — an
+  // ACT/REVIEW (or FIX) digest stays pinned here until a person closes it.
+  // An Activity-only row never reaches the bell, so this is its only Done.
+  // The server sends `version` only for a row that can still be marked done.
+  const canDone = item.kind === "digest" && !!item.notificationId && !!item.version;
+  const doneButton = canDone && (
+    <Button size="sm" variant="secondary" onClick={() => onDone?.(item)} disabled={doneBusy}>
+      Done
+    </Button>
+  );
   return (
     <li ref={rowRef} className={cn("border-t border-hairline border-zinc-200 first:border-t-0", focused && "bg-zinc-100")}>
       <div className="flex items-start gap-3 px-3 py-3 md:px-4">
@@ -191,6 +201,7 @@ function ActivityRow({ item, onReview, focused }) {
           )}
         </div>
         <div className="flex flex-shrink-0 items-center gap-1">
+          {canDone && <span className="hidden md:inline-flex">{doneButton}</span>}
           {needsAction && (
             <Link
               to={item.link}
@@ -213,15 +224,16 @@ function ActivityRow({ item, onReview, focused }) {
           )}
         </div>
       </div>
-      {needsAction && (
-        <div className="px-3 pb-3 md:hidden">
-          <Link
+      {(needsAction || canDone) && (
+        <div className="flex items-center gap-2 px-3 pb-3 md:hidden">
+          {canDone && doneButton}
+          {needsAction && <Link
             to={item.link}
             onClick={() => onReview?.(item)}
             className="inline-flex h-11 items-center rounded-sm border-hairline border-zinc-300 bg-white px-4 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
           >
             {actionLabel}
-          </Link>
+          </Link>}
         </div>
       )}
     </li>
@@ -244,6 +256,10 @@ export default function AgentActivityTab() {
   // Only the latest request may write state: two quick window changes can
   // resolve out of order and the 24h rows would overwrite the 7d view.
   const requestRef = useRef(0);
+  // Done: the id being closed (disables its button) and a short inline note
+  // after a stale or failed Done.
+  const [doneBusyId, setDoneBusyId] = useState(null);
+  const [doneNote, setDoneNote] = useState(null);
 
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -267,6 +283,25 @@ export default function AgentActivityTab() {
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  // Done sends the content version the feed served, so a row rewritten in
+  // place since it was loaded answers 409 instead of being closed unseen.
+  const markDigestDone = useCallback(async (item) => {
+    if (!item?.notificationId || !item?.version) return;
+    setDoneBusyId(item.id);
+    setDoneNote(null);
+    try {
+      await adminFetch(`/admin/notifications/${item.notificationId}/done`, {
+        method: "PUT",
+        body: JSON.stringify({ version: item.version }),
+      });
+    } catch (e) {
+      setDoneNote(e?.status === 409 ? "That item changed — the feed was refreshed." : "Could not mark that done — try again.");
+    } finally {
+      setDoneBusyId(null);
+    }
+    await load();
   }, [load]);
 
   useVisiblePageRefresh(load, { intervalMs: 30_000, enabled: !loading });
@@ -318,6 +353,12 @@ export default function AgentActivityTab() {
         </label>
       </div>
 
+      {doneNote && (
+        <div className="text-14 text-ink-secondary" role="status">
+          {doneNote}
+        </div>
+      )}
+
       {error && (
         <div className="flex flex-wrap items-center justify-between gap-3 text-13 text-alert-fg" role="alert">
           <span>{error}</span>
@@ -367,7 +408,7 @@ export default function AgentActivityTab() {
         ) : (
           <ol>
             {items.map((item) => (
-              <ActivityRow key={item.id} item={item} onReview={markDigestRead} focused={focusTarget != null && item.id === focusTarget} />
+              <ActivityRow key={item.id} item={item} onReview={markDigestRead} onDone={markDigestDone} doneBusy={doneBusyId === item.id} focused={focusTarget != null && item.id === focusTarget} />
             ))}
           </ol>
         )}
