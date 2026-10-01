@@ -18,6 +18,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
+const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -85,13 +86,15 @@ async function loadSubjects(rows) {
   const callIds = subjectIds(CALL_SUBJECT);
   try {
     if (smsIds.length) {
-      const texts = await db('sms_log').whereIn('id', smsIds).select('id', 'customer_id', 'direction', 'message_body', 'created_at');
+      const texts = await db('sms_log').whereIn('id', smsIds).select('id', 'from_phone', 'to_phone', 'direction', 'message_body', 'created_at');
       await Promise.all(texts.map(async (t) => {
-        const previous = t.customer_id
-          ? await db('sms_log').where({ customer_id: t.customer_id, direction: 'outbound' }).where('created_at', '<', t.created_at)
-            .orderBy('created_at', 'desc').first('message_body')
+        // The same lookup the shadow used (sms-shadow.readLastOutboundBody):
+        // this line's phone pair, successful non-internal sends, the 24h
+        // before the customer's text. Never a broader customer-wide read.
+        const previous = t.from_phone && t.to_phone
+          ? await readLastOutboundBody({ conn: db, customerPhone: t.from_phone, ourNumber: t.to_phone, before: t.created_at }).catch(() => null)
           : null;
-        subjects.set(`sms_log:${t.id}`, { type: 'sms_log', text: t.message_body || null, previousText: previous?.message_body || null, at: t.created_at });
+        subjects.set(`sms_log:${t.id}`, { type: 'sms_log', text: t.message_body || null, previousText: previous || null, at: t.created_at });
       }));
     }
     if (callIds.length) {

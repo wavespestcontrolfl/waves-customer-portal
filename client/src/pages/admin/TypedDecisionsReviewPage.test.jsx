@@ -1,0 +1,107 @@
+// @vitest-environment jsdom
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, expect, it, vi } from 'vitest';
+import TypedDecisionsReviewPage from './TypedDecisionsReviewPage';
+import { adminFetch } from '../../utils/admin-fetch';
+
+vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
+
+const yesNoRow = (over = {}) => ({
+  id: 'r1',
+  capability: 'sms_wants_callback',
+  question: 'Does the customer want a call back?',
+  subjectType: 'sms_log',
+  jevAnswer: { p: 0.91, yes: true, confident: true },
+  baselineAnswers: { production: { yes: false } },
+  outcomeEvidence: { source: 'visit_booked', window: '7d', value: 'booked', observed_at: '2026-10-01T14:00:00Z' },
+  sampledFor: 'disagreement',
+  label: null,
+  labelStatus: 'unreviewed',
+  createdAt: '2026-10-01T13:00:00Z',
+  subject: { type: 'sms_log', text: 'Fixture customer text', previousText: 'Fixture Waves text', direction: 'inbound', at: '2026-10-01T12:00:00Z' },
+  ...over,
+});
+
+const mockList = (reviews) => adminFetch.mockImplementation(async (url, options) => {
+  if (options?.method === 'POST') return { review: { ...reviews[0], labelStatus: 'confirmed_error' } };
+  return { reviews, count: reviews.length };
+});
+
+it('requests unreviewed rows by default and renders answers, baseline, evidence and badge', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Does the customer want a call back?')).toBeInTheDocument();
+  expect(adminFetch.mock.calls[0][0]).toContain('/admin/typed-decisions/reviews?status=unreviewed');
+  expect(screen.getByText('Jev: Yes (0.91)')).toBeInTheDocument();
+  expect(screen.getByText('production: No')).toBeInTheDocument();
+  expect(screen.getByText(/Outcome \(visit booked, 7d\): booked/)).toBeInTheDocument();
+  expect(screen.getByText('Disagreement', { selector: 'span' })).toBeInTheDocument();
+  expect(screen.getByText('Fixture Waves text')).toBeInTheDocument();
+  expect(screen.getByText('Fixture customer text')).toBeInTheDocument();
+});
+
+it('shows the empty state', async () => {
+  mockList([]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  expect(await screen.findByText('Nothing to review.')).toBeInTheDocument();
+});
+
+it('sends the inverse correct_value on Jev wrong and removes the row', async () => {
+  mockList([yesNoRow()]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.change(screen.getByLabelText('Note (optional)'), { target: { value: 'asked for text only' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_wrong', correct_value: false, note: 'asked for text only' }),
+  }));
+  await waitFor(() => expect(screen.getByText('Nothing to review.')).toBeInTheDocument());
+});
+
+it('offers no Jev wrong button for choice questions', async () => {
+  mockList([yesNoRow({ jevAnswer: { choice: 'reschedule' }, baselineAnswers: {} })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Jev: Reschedule');
+  expect(screen.queryByRole('button', { name: 'Jev wrong' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Jev right' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Unclear' })).toBeInTheDocument();
+});
+
+it('on 409 asks to replace and resends with force', async () => {
+  const conflict = Object.assign(new Error('already'), { status: 409, details: { labelStatus: 'confirmed_correct' } });
+  let posts = 0;
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method === 'POST') {
+      posts += 1;
+      if (posts === 1) throw conflict;
+      return { review: yesNoRow({ labelStatus: 'confirmed_correct' }) };
+    }
+    return { reviews: [yesNoRow()], count: 1 };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Does the customer want a call back?');
+  fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
+  expect(await screen.findByText('Already labeled (confirmed correct) — replace?')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+  await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
+    method: 'POST',
+    body: JSON.stringify({ verdict: 'jev_right', force: true }),
+  }));
+});
+
+it('collapses long call transcripts and refetches on status change', async () => {
+  const long = 'x'.repeat(400);
+  mockList([yesNoRow({ subject: { type: 'call_log', text: long, at: '2026-10-01T12:00:00Z' } })]);
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  const toggle = await screen.findByRole('button', { name: /Show full transcript/ });
+  expect(screen.queryByText(long)).toBeNull();
+  fireEvent.click(toggle);
+  expect(screen.getByText(long)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'disagreement' } });
+  await waitFor(() => expect(adminFetch.mock.calls.at(-1)[0]).toContain('status=disagreement'));
+});

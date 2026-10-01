@@ -77,7 +77,7 @@ test('rows: ONE alert with the counts, the review link and per-row detail', asyn
   expect(body).toBe('2 disagreements, 1 spot check · Jev vs rules/judge');
   expect(body.length).toBeLessThanOrEqual(110);
   expect(opts.link).toBe(LINK);
-  expect(LINK).toBe('/admin/agents/decisions?tab=typed');
+  expect(LINK).toBe('/admin/agents?tab=typed');
   expect(opts.metadata).toMatchObject({ area: 'System', severity: 'needs-you', doneWhen: 'reviews_labeled', who: 'person', subject: { type: 'check', id: 'typed-decisions-review' } });
   expect(opts.detail).toContain('call_judge is_spam: Jev yes (p 0.93) vs production no, deep judge no; estimates 48h: no');
   expect(opts.detail.split('\n').filter((l) => l.startsWith('Disagreement'))).toHaveLength(2);

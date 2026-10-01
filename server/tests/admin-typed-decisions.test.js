@@ -75,7 +75,7 @@ describe('GET /reviews', () => {
   test('lists the queue and joins the subject text live, for display only', async () => {
     const log = installDb({
       decision_reviews: { list: [baseRow(), baseRow({ id: '22222222-2222-4222-8222-222222222222', capability: 'call_judge', package_id: 'call_judge.v2', subject_type: 'call_log', subject_id: 'call-1', question_id: 'is_spam' })] },
-      sms_log: { list: [{ id: 'sms-1', customer_id: 'cust-1', direction: 'inbound', message_body: 'Thanks!', created_at: new Date('2026-09-30T11:59:00Z') }], first: { message_body: 'See you Tuesday.' } },
+      sms_log: { list: [{ id: 'sms-1', from_phone: '+15550000001', to_phone: '+15550000002', direction: 'inbound', message_body: 'Thanks!', created_at: new Date('2026-09-30T11:59:00Z') }], first: { message_body: 'See you Tuesday.' } },
       call_log: { list: [{ id: 'call-1', direction: 'inbound', created_at: new Date(), transcript_excerpt: 'Agent: Waves. Caller: hello.' }] },
     });
     const { status, body } = await get('/reviews?status=unreviewed&sampled_for=disagreement,random_audit&limit=50');
@@ -88,6 +88,12 @@ describe('GET /reviews', () => {
     expect(sms.question).toMatch(/courtesy closer/);
     expect(sms.subject).toMatchObject({ text: 'Thanks!', previousText: 'See you Tuesday.' });
     expect(body.reviews.find((r) => r.subjectType === 'call_log').subject).toMatchObject({ text: 'Agent: Waves. Caller: hello.' });
+    // The previous text is read the way the shadow read it: this line's phone
+    // pair, successful sends only, in the 24h before the customer's text.
+    expect(called(log, 'sms_log', 'where')).toContainEqual([{ direction: 'outbound', to_phone: '+15550000001', from_phone: '+15550000002' }]);
+    expect(called(log, 'sms_log', 'whereIn')).toContainEqual(['status', ['queued', 'sent', 'delivered']]);
+    expect(called(log, 'sms_log', 'where')).toContainEqual(['created_at', '>', new Date('2026-09-29T11:59:00Z')]);
+    expect(called(log, 'sms_log', 'where')).toContainEqual(['created_at', '<', new Date('2026-09-30T11:59:00Z')]);
     // Filters reached the query; the transcript is cut in SQL.
     expect(called(log, 'decision_reviews', 'where')).toContainEqual(['label_status', 'unreviewed']);
     expect(called(log, 'decision_reviews', 'whereIn')).toContainEqual(['sampled_for', ['disagreement', 'random_audit']]);

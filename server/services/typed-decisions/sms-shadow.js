@@ -19,15 +19,18 @@ const MAX_TEXT_CHARS = 2000;
 // The last Waves text this customer was sent on this line, for the model's
 // "what was Waves answering" context. Same filters as the webhook's own
 // lastOutboundAskedQuestion (a failed send never reached them; internal
-// alerts are not part of the thread; 24h), read here AFTER the Twilio ack so
-// the webhook adds no round trip.
+// alerts are not part of the thread; the 24h before the customer's text), read
+// here AFTER the Twilio ack so the webhook adds no round trip. The admin review
+// route calls this too, with the inbound row's own phones and time, so the
+// reviewer sees exactly the context Jev was given.
 async function readLastOutboundBody({ conn, customerPhone, ourNumber, before }) {
+  const end = before ? new Date(before) : new Date();
   const row = await conn('sms_log')
     .where({ direction: 'outbound', to_phone: customerPhone, from_phone: ourNumber })
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
-    .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-    .modify((q) => { if (before) q.where('created_at', '<', before); })
+    .where('created_at', '>', new Date(end.getTime() - 24 * 60 * 60 * 1000))
+    .where('created_at', '<', end)
     .orderBy('created_at', 'desc')
     .first('message_body');
   return row?.message_body || null;

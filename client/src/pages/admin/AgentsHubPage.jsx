@@ -4,6 +4,8 @@
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
  *                            or the Control center once features.ledger is enabled
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
+ *   - "Typed"             — TypedDecisionsReviewPage (label typed-decision
+ *                            shadow rows)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
  *   - "Shadow Drafts"      — AgentShadowDraftsPage (brand-voice loop:
@@ -34,7 +36,7 @@
  */
 import React, { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers } from "lucide-react";
+import { Activity, Bot, Cpu, LayoutGrid, ListChecks, MessageSquareDashed, MailCheck, DatabaseZap, Layers, Binary } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
@@ -44,6 +46,7 @@ import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
 import AgentModelsTab from "./AgentModelsTab";
 import AgentControlCenterTab from "./agents/AgentControlCenterTab";
+import TypedDecisionsReviewPage from "./TypedDecisionsReviewPage";
 import AgentQueueTab from "./AgentQueueTab";
 import AutoDispatchPage from "./AutoDispatchPage";
 import { getAdminUser } from "../../lib/adminAuth";
@@ -57,6 +60,7 @@ const TABS = {
   ACTIVITY: "activity",
   DISPATCH: "dispatch",
   DECISIONS: "decisions",
+  TYPED: "typed",
   DRAFTS: "drafts",
   SHADOW: "shadow",
   HYGIENE: "hygiene",
@@ -70,6 +74,9 @@ const TAB_LIST = [
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
   { key: TABS.DECISIONS, label: "Decisions", Icon: ListChecks },
+  // Typed — owner labels typed-decision shadow rows (a daily admin alert
+  // links to ?tab=typed).
+  { key: TABS.TYPED, label: "Typed", Icon: Binary },
   { key: TABS.DRAFTS, label: "Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow", Icon: MessageSquareDashed },
   { key: TABS.HYGIENE, label: "Hygiene", Icon: DatabaseZap },
@@ -168,7 +175,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
@@ -184,6 +191,8 @@ export default function AgentsHubPage() {
           <AutoDispatchPage embedded />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
+        ) : tab === TABS.TYPED ? (
+          <TypedDecisionsReviewPage embedded />
         ) : tab === TABS.DRAFTS ? (
           <PendingDraftsTab embedded />
         ) : tab === TABS.SHADOW ? (

@@ -3,7 +3,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { recordDecisions, sampleFor, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY } = require('../services/typed-decisions/shadow-recorder');
+const { recordDecisions, sampleFor, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY } = require('../services/typed-decisions/shadow-recorder');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 
 const pkg = packageFor('call_judge.v2');
@@ -22,7 +22,8 @@ function stubConn() {
     insert(rows) { calls.inserted = rows; return builder; },
     onConflict(key) { calls.conflict = key; return builder; },
     merge(cols) { calls.merge = cols; return builder; },
-    where(...args) { calls.where = args; return Promise.resolve([]); },
+    where(...args) { calls.where = args; return builder; },
+    whereRaw(sql) { calls.whereRaw = sql; return Promise.resolve([]); },
   };
   const conn = (table) => { calls.table = table; return builder; };
   return { conn, calls };
@@ -98,9 +99,10 @@ describe('recordDecisions', () => {
     await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c1', result: ok(), conn });
     expect(calls.conflict).toEqual(['capability', 'package_id', 'subject_type', 'subject_id', 'question_id']);
     expect(CONFLICT_KEY).toEqual(calls.conflict);
-    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'outcome_evidence', 'served_model', 'package_hash']);
+    expect(calls.merge).toEqual(['jev_answer', 'baseline_answers', 'outcome_evidence', 'served_model', 'package_hash', 'sampled_for']);
     expect(MERGE_COLUMNS).toEqual(calls.merge);
-    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'sampled_for', 'created_at']) expect(calls.merge).not.toContain(forbidden);
+    for (const forbidden of ['label', 'label_status', 'labeled_by', 'labeled_at', 'created_at']) expect(calls.merge).not.toContain(forbidden);
+    expect(calls.whereRaw).toMatch(/sampled_for IS DISTINCT FROM 'heldout'/);
     expect(calls.where).toEqual(['decision_reviews.label_status', 'unreviewed']);
   });
 
@@ -111,6 +113,24 @@ describe('recordDecisions', () => {
     const out = await recordDecisions({ capability: 'sms_courtesy', pkg: sms, subjectType: 'sms_log', subjectId: 's1', result, baselines: { is_courtesy_only: { rules: false } }, random: () => 0.5, conn });
     expect(out.recorded).toBe(1);
     expect(calls.inserted[0]).toMatchObject({ question_id: 'is_courtesy_only', served_model: null, sampled_for: 'disagreement' });
+  });
+
+  test('without a test draw, the random audit is a stable per-row hash: re-recording never re-rolls it', async () => {
+    const run = async (p, production) => {
+      const { conn, calls } = stubConn();
+      await recordDecisions({ capability: 'call_judge', pkg, subjectType: 'call_log', subjectId: 'c-stable', result: ok(p),
+        baselines: { is_lead: { production } }, conn });
+      return calls.inserted.find((r) => r.question_id === 'is_lead');
+    };
+    const first = await run(0.9, true);
+    const again = await run(0.9, true);
+    expect(again.sampled_for).toBe(first.sampled_for);
+    const draw = stableDraw(first);
+    expect(draw).toBeGreaterThanOrEqual(0);
+    expect(draw).toBeLessThan(1);
+    expect(first.sampled_for).toBe(draw < RANDOM_AUDIT_RATE ? 'random_audit' : null);
+    // the answer changed to disagree: sampled_for moves with it (and merges, see above)
+    expect((await run(0.2, true)).sampled_for).toBe('disagreement');
   });
 
   test('gate off: nothing written', async () => {

@@ -19,8 +19,8 @@ const { refreshOutcomeEvidence } = require('./outcome-evidence');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const CATEGORY = 'typed_decisions';
-// The client tab ships with the review UI; until then the link may 404.
-const LINK = '/admin/agents/decisions?tab=typed';
+// The Typed tab of the Agents hub (client/src/pages/admin/TypedDecisionsReviewPage.jsx).
+const LINK = '/admin/agents?tab=typed';
 const MAX_DISAGREEMENTS = 8;
 const MAX_SPOT_CHECKS = 2;
 const BASELINE_LABELS = { production: 'production', deep_judge: 'deep judge', rules: 'rules' };
