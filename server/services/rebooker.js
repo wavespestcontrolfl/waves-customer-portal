@@ -825,7 +825,7 @@ function planCarriedTargets(vg, sib, entry, updateData, dateStr) {
 // row in the visit (one visit, one stop — two occurrences of one series
 // cannot share it) with at least one partner, and every partner movable (the
 // unit mover's own rule) and still at this stop. Throws the refusal.
-function assertPartnersCanRide({ sweptInVisit, partners, allowLive, vg }) {
+function assertPartnersCanRide({ sweptInVisit, partners, visit, allowLive, vg }) {
   if (sweptInVisit.length !== 1 || !partners.length) {
     throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
   }
@@ -842,8 +842,13 @@ function assertPartnersCanRide({ sweptInVisit, partners, allowLive, vg }) {
   if (notMovable) {
     throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${notMovable.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: notMovable.id, isOperational: true });
   }
-  const detached = partners.find((partner) => dateOnly(partner.scheduled_date) !== dateOnly(occ.scheduled_date)
-    || String(partner.property_id || '') !== String(occ.property_id || ''));
+  // Full stop membership (the unit mover's rowStillAtVisitStop): each
+  // partner on the visit's own customer / property / date tuple — never
+  // another customer's row miswired into the visit — and on the
+  // occurrence's date and property.
+  const detached = !visit ? partners[0] : partners.find((partner) => dateOnly(partner.scheduled_date) !== dateOnly(occ.scheduled_date)
+    || String(partner.property_id || '') !== String(occ.property_id || '')
+    || !vg.rowStillAtVisitStop(partner, visit, [occ, ...partners.filter((other) => other !== partner)]));
   if (detached) {
     throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: detached.id, isOperational: true });
   }
@@ -3053,8 +3058,8 @@ class SmartRebooker {
                 // 2026-10-01); frozen visits were refused above.
                 const sweptInVisit = siblings.filter((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
                 const partners = carryPartnersLocked.get(vid) || [];
-                assertPartnersCanRide({ sweptInVisit, partners, allowLive: options.allowLive === true, vg });
                 const visitRow = await trx('service_visits').where({ id: vid }).first();
+                assertPartnersCanRide({ sweptInVisit, partners, visit: visitRow, allowLive: options.allowLive === true, vg });
                 carry.byVisit.set(vid, { visit: visitRow, partners, occurrenceId: String(sweptInVisit[0].id) });
                 carry.partnerIds.push(...partners.map((x) => String(x.id)));
               }
@@ -4017,6 +4022,22 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
         series_move_id: seriesMoveId,
       });
+      // Each carried partner gets its own per-service move record too —
+      // consumers that read a move from reschedule_log (e.g. the SMS
+      // commitment fulfillment check) must see it.
+      for (const row of moveRows.filter((r) => r.partner === true)) {
+        await trx('reschedule_log').insert({
+          scheduled_service_id: row.id,
+          customer_id: service.customer_id,
+          original_date: row.before.scheduled_date,
+          new_date: row.after.scheduled_date,
+          reason_code: `${reason}_series`,
+          initiated_by: initiatedBy,
+          original_window: row.before.window_start ? `${row.before.window_start}-${row.before.window_end}` : null,
+          new_window: row.after.window_start ? `${row.after.window_start}-${row.after.window_end}` : null,
+          series_move_id: seriesMoveId,
+        });
+      }
 
       return touched;
     }).catch(async (err) => {
@@ -4131,6 +4152,15 @@ class SmartRebooker {
         await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'rebooker-reschedule-series');
       } catch (activateErr) {
         logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
+      }
+      // Carried partners bypassed the per-row move seam that activates them.
+      for (const partner of carriedMembers) {
+        try {
+          const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
+          await activateLegacyOutboundReviewRowIfNeeded(db, partner.id, 'rebooker-reschedule-series');
+        } catch (activateErr) {
+          logger.warn(`[rebooker] legacy outbound activation failed for carried partner ${partner.id}: ${activateErr.message}`);
+        }
       }
     }
 

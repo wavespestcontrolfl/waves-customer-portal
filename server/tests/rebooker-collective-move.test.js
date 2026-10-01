@@ -1628,6 +1628,8 @@ describe('caller wiring (source)', () => {
     // passed today", like the anchor's, before its write.
     const fence = reb.slice(reb.indexOf('const fencePartner = async'), reb.indexOf('const recordCarriedPartner = async'));
     expect(fence).toContain('sameDayWindowElapsed(dateStr, pUpdate.window_end || pUpdate.window_start)');
+    // Carried partners run the same legacy-activation seam as the anchor.
+    expect(reb).toContain("await activateLegacyOutboundReviewRowIfNeeded(db, partner.id, 'rebooker-reschedule-series');");
     // Quick Move never carries: rain-out's unit-mover fallback owns grouped stops.
     expect(reb).toContain("if (options.sourceSurface === 'quick_move') return false;");
     // Staff allowlist: automatic/customer initiators never carry.

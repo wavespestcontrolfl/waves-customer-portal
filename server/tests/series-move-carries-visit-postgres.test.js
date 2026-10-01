@@ -413,6 +413,30 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
   });
 
+  test('a row of ANOTHER customer miswired into the visit is never carried: the move refuses', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const otherCustomer = randomUUID();
+    await db('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`, phone: '+19415550000', address_line1: '1 Elsewhere', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer' });
+    await db('scheduled_services').where({ id: f.pest[0].id }).update({ customer_id: otherCustomer });
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: f.pest[0].id });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
+  test('each carried partner gets its own reschedule_log row tied to the operation', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const result = await moveLawnSeries(f);
+    const logs = await db('reschedule_log').whereIn('scheduled_service_id', f.pest.map((r) => r.id)).select('*');
+    expect(logs.map((l) => String(l.scheduled_service_id)).sort()).toEqual(f.pest.map((r) => String(r.id)).sort());
+    for (const l of logs) {
+      expect(String(l.series_move_id)).toBe(String(result.seriesMoveId));
+      expect(dateOnly(l.new_date)).toBe(addDays(dateOnly(l.original_date), 1));
+    }
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
