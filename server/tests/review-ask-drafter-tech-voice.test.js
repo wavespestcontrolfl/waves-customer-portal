@@ -163,6 +163,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
 
   test('runs on the fast verifier lane, sees the record but not what Waves already sent', async () => {
     mockTables.review_requests = [{ sequence_step: 0, channel: 'sms', custom_body: 'Earlier touch about the sink', template_key: 'day0_ask_tech_voice' }];
+    mockTables.sms_log = [...SMS, { direction: 'outbound', message_body: 'Thanks again for having me out. A Google review would help: x', created_at: new Date() }];
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     expect(await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 1 })).toBe(GOOD.body);
     const req = mockFactCheck.mock.calls[0][1];
@@ -170,6 +171,8 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const { record, sentences } = factInput(req);
     expect(record).toContain('I need to go to work');
     expect(record).not.toContain('Earlier touch about the sink');
+    // Nothing Waves texted either: an earlier review ask in sms_log cannot back a claim.
+    expect(record).not.toContain('Thanks again for having me out');
     expect(sentences).toHaveLength(3);
   });
 
@@ -197,6 +200,17 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isAskOnlySentence('Marta, a Google review would really help: {review_url}', new Set(['marta']))).toBe(true);
     expect(isAskOnlySentence('A Google review would help us a lot.', new Set())).toBe(true);
     expect(isAskOnlySentence('Congrats on the baby, a Google review would help: {review_url}', new Set())).toBe(false);
+  });
+
+  test('every verdict must judge the sentence actually being sent', async () => {
+    mockDispatch.mockResolvedValue(reply(GOOD));
+    mockFactCheck.mockImplementation(async (_p, req) => ({
+      ok: true,
+      json: { sentences: factInput(req).sentences.map((sentence, i) => (i === 1
+        ? { sentence: 'I need to go to work.', ask_only: false, supported: true, quote: 'I need to go to work' }
+        : approveAll(req).json.sentences[i])) },
+    }));
+    expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
   });
 
   test('a wrong-length answer or an unavailable checker never sends the draft', async () => {

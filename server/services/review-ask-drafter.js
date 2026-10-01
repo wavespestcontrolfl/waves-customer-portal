@@ -753,6 +753,8 @@ ${JSON.stringify({ record, sentences })}`,
   const normRecord = normalizeForMatch(record);
   for (let i = 0; i < sentences.length; i += 1) {
     const j = judged[i] || {};
+    // Each verdict must be about the sentence actually being sent.
+    if (normalizeForMatch(j.sentence) !== normalizeForMatch(sentences[i])) return "fact_check_bad_answer";
     if (j.ask_only) {
       if (!isAskOnlySentence(sentences[i], names)) return "fact_check_bad_answer";
       continue;
@@ -775,9 +777,12 @@ async function draftTechVoice({ customer, recipientFirstName, serviceType, techN
     const termite = isTermiteService(serviceType);
     const facts = buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx });
     const check = { channel, firstName, techName, termite, corpus: facts, ownWords: customerOwnWords(ctx) };
-    // The fact check reads the record without the messages Waves already
-    // sent: a claim is never backed by our own earlier wording.
-    const record = buildTechVoiceFacts({ firstName, serviceType, techName, serviceDaysAgo, termite, ctx: { ...ctx, priorTouches: [] } });
+    // The fact check reads the record without anything Waves texted (earlier
+    // review asks included): a claim is never backed by our own wording.
+    const record = buildTechVoiceFacts({
+      firstName, serviceType, techName, serviceDaysAgo, termite,
+      ctx: { ...ctx, priorTouches: [], sms: ctx.sms.filter((m) => m.direction === "customer") },
+    });
     let note = "";
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
