@@ -135,6 +135,7 @@ describe('GET /reviews', () => {
     });
     const { body } = await get('/reviews');
     expect(body.reviews.map((r) => r.subjectChanged)).toEqual([true, false, false]);
+    expect(body.reviews[1].subjectVersion).toBe(callSubjectHash('Caller: now'));
   });
 
   test('rejects an unknown status or sampled_for, clamps the limit', async () => {
@@ -180,6 +181,8 @@ describe('POST /reviews/:id/label', () => {
     expect(called(log, 'decision_reviews', 'whereNotIn')).toContainEqual(['label_status', ['confirmed_correct', 'confirmed_error']]);
     // only while the row still holds the answer the reviewer saw
     expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['jev_answer = ?::jsonb', [JSON.stringify(SEEN)]]);
+    // and the transcript version shown (null for a text subject)
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [null]]);
     expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({
       actor_type: 'technician', actor_id: 'admin-1', action: 'typed_decision.labeled', resource_type: 'decision_review', resource_id: ID,
       metadata: expect.objectContaining({ verdict, label_status: status, forced: false }),
@@ -247,11 +250,13 @@ describe('POST /reviews/:id/label', () => {
     expect(mockAudit).not.toHaveBeenCalled();
   });
 
-  test('the same call transcript labels normally', async () => {
+  test('the same call transcript labels normally, bound to the transcript version shown', async () => {
     const words = 'Caller: the original words';
-    const callRow = baseRow({ subject_type: 'call_log', subject_id: 'call-1', capability: 'call_judge', package_id: 'call_judge.v2', question_id: 'is_spam', subject_hash: callSubjectHash(words) });
-    installDb({ decision_reviews: { first: [callRow], returning: [callRow] }, call_log: { first: [{ transcription: words }] } });
-    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN })).status).toBe(200);
+    const version = callSubjectHash(words);
+    const callRow = baseRow({ subject_type: 'call_log', subject_id: 'call-1', capability: 'call_judge', package_id: 'call_judge.v2', question_id: 'is_spam', subject_hash: version });
+    const log = installDb({ decision_reviews: { first: [callRow], returning: [callRow] }, call_log: { first: [{ transcription: words }] } });
+    expect((await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: version })).status).toBe(200);
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [version]]);
   });
 
   test('jev_wrong on a missing review is 404 before any write', async () => {

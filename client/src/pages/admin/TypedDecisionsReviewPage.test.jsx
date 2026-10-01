@@ -58,7 +58,7 @@ it('sends the inverse correct_value on Jev wrong and removes the row', async () 
   fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/typed-decisions/reviews/r1/label', {
     method: 'POST',
-    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, correct_value: false, note: 'asked for text only' }),
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, correct_value: false, note: 'asked for text only' }),
   }));
   await waitFor(() => expect(screen.getByText('Nothing to review.')).toBeInTheDocument());
 });
@@ -90,7 +90,7 @@ it('on 409 asks to replace and resends with force', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
   await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
     method: 'POST',
-    body: JSON.stringify({ verdict: 'jev_right', seen_answer: { p: 0.91, yes: true, confident: true }, force: true }),
+    body: JSON.stringify({ verdict: 'jev_right', seen_answer: { p: 0.91, yes: true, confident: true }, seen_subject: null, force: true }),
   }));
 });
 

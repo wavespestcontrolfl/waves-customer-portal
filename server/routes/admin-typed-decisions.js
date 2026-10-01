@@ -82,6 +82,9 @@ function mapReview(row, subject) {
     // The call was reprocessed after Jev answered: the transcript shown is not
     // the one Jev judged, and the label route refuses it (subject_changed).
     subjectChanged: subjectChanged(row, subject),
+    // Which transcript version this answer was recorded against (a digest,
+    // never text); the label POST sends it back as seen_subject.
+    subjectVersion: row.subject_hash || null,
   };
 }
 
@@ -172,7 +175,9 @@ function readLabelRequest(body) {
   const seen = body.seen_answer;
   if (!seen || typeof seen !== 'object' || Array.isArray(seen)) return { error: 'seen_answer (the Jev answer shown) is required' };
   const note = body.note == null ? null : String(body.note).trim().slice(0, MAX_NOTE_CHARS) || null;
-  return { verdict, seen, note, force: body.force === true };
+  // The transcript version shown (subjectVersion); null for text subjects.
+  const seenSubject = typeof body.seen_subject === 'string' && /^[0-9a-f]{64}$/.test(body.seen_subject) ? body.seen_subject : null;
+  return { verdict, seen, seenSubject, note, force: body.force === true };
 }
 
 // jev_wrong must say what the right answer was, in the question's own domain
@@ -192,7 +197,7 @@ function correctValueFor(target, { verdict, seen }, value) {
 }
 
 // Why a guarded update matched no row: gone (404), already confirmed without
-// force, or the Jev answer moved since the page loaded (409, by code).
+// force, or the Jev answer / transcript version moved since the page loaded (409, by code).
 // A call reprocessed after Jev answered: the live transcript's digest no longer
 // matches the one stored with the decision, so a label would confirm an
 // answer against text Jev never saw.
@@ -208,7 +213,7 @@ async function unwrittenLabel(id, force) {
   if (!force && CONFIRMED.includes(existing.label_status)) {
     return [409, { error: 'This review already has a confirmed label; send force: true to replace it', code: 'already_confirmed', labelStatus: existing.label_status }];
   }
-  return [409, { error: "Jev's answer changed since this review was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status }];
+  return [409, { error: "This review's answer or transcript changed since it was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status }];
 }
 
 router.post('/reviews/:id/label', async (req, res, next) => {
@@ -225,7 +230,7 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     if (await subjectMoved(target)) {
       return res.status(409).json({ error: 'This call was reprocessed after Jev answered; its transcript is not the one Jev judged', code: 'subject_changed' });
     }
-    const { verdict, seen, note, force } = request;
+    const { verdict, seen, seenSubject, note, force } = request;
     const labelStatus = VERDICT_STATUS[verdict];
 
     const update = db(TABLE).where({ id }).update({
@@ -237,6 +242,9 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     // A confirmed label is only replaced on purpose.
     if (!force) update.whereNotIn('label_status', CONFIRMED);
     update.whereRaw('jev_answer = ?::jsonb', [JSON.stringify(seen)]);
+    // ...and the same transcript version: a nightly re-record after a
+    // reprocess can replace subject_hash while leaving an identical answer.
+    update.whereRaw('subject_hash IS NOT DISTINCT FROM ?', [seenSubject]);
     const [row] = await update.returning('*');
     if (!row) {
       const [status, payload] = await unwrittenLabel(id, force);

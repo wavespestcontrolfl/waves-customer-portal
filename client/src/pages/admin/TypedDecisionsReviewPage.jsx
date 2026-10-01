@@ -129,7 +129,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
   const submit = async (verdict, force = false) => {
     setBusy(verdict);
     setError("");
-    const body = { verdict, seen_answer: review.jevAnswer };
+    const body = { verdict, seen_answer: review.jevAnswer, seen_subject: review.subjectVersion ?? null };
     if (verdict === "jev_wrong") body.correct_value = !review.jevAnswer.yes;
     if (note.trim()) body.note = note.trim();
     if (force) body.force = true;
