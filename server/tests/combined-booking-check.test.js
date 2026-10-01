@@ -194,6 +194,21 @@ describe('evaluateCombinedBooking', () => {
     expect(check.acceptedPrograms(est).programs.get('pest_control').perVisit).toBe(150);
   });
 
+  test('an add-on the office put on an invoice-mode invoice is not service dollars', () => {
+    const invoiceMode = { id: 'inv-1', status: 'sent',
+      notes: 'Auto-generated from accepted estimate #estimate-1 (invoice-mode recurring). Monthly equivalent: $100.00/mo.',
+      line_items: [{ description: 'Pest + Lawn (quarterly recurring — first quarterly visit)', quantity: 1, unit_price: 250, amount: 250 },
+        { description: 'Fire ant treatment', quantity: 1, unit_price: 50, amount: 50 }] };
+    expect(check.firstApplicationAmount(invoiceMode)).toBe(250);
+  });
+
+  test('an invoice whose discount lives only in discount_amount is never certified (lines cannot give its net)', () => {
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: { ...goodInvoice(), unbacked_discount: true } });
+    expect(verdict.problems).toEqual([]);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.deferred).toBe(true);
+  });
+
   test('a discount scoped to an add-on line does not reduce the first-application total', () => {
     const items = [firstApp(150, 'Quarterly Pest Control'), firstApp(100, 'Lawn Care'),
       { description: 'Fire ant add-on', quantity: 1, unit_price: 50, amount: 50, client_id: 'addon_1' },
@@ -452,6 +467,15 @@ describe('postAlert', () => {
 describe('markPrepaidCoverage', () => {
   const renewals = require('../services/annual-prepay-renewals');
   afterEach(() => jest.restoreAllMocks());
+
+  test('a partial out-of-band prepayment does not cover the visit (its price is still checked)', async () => {
+    const rows = [
+      { id: 'partial', prepaid_amount: 10, prepaid_method: 'cash', estimated_price: 120 },
+      { id: 'full', prepaid_amount: 120, prepaid_method: 'check', estimated_price: 120 },
+    ];
+    await markPrepaidCoverage({}, rows);
+    expect(rows.map((row) => row.prepaid_covered)).toEqual([false, true]);
+  });
 
   test('an out-of-band stamp counts; an annual stamp counts only when the coverage validator says so; a bare term id never does', async () => {
     const validator = jest.spyOn(renewals, 'annualPrepayCoversVisit').mockImplementation(async (row) => row.id === 'valid');

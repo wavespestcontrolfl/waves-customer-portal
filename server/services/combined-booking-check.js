@@ -229,12 +229,11 @@ function firstApplicationAmount(invoice) {
   // buildEstimateInvoiceModeDraft, recognized by
   // isInvoiceModeRecurringAcceptInvoice) bills the first visit as one
   // "<services> (<cadence> recurring — first <visit>)" line with no
-  // _primary client id; every positive line on it but its setup fee is
-  // service dollars.
+  // _primary client id; that line is the service dollars, and anything the
+  // office added beside it is not.
   const { isInvoiceModeRecurringAcceptInvoice } = require('./estimate-first-application-invoice');
-  const isSetupFee = (item) => /setup fee/i.test(String(item?.description || '')) && !/waiv/i.test(String(item?.description || ''));
   const isBase = isInvoiceModeRecurringAcceptInvoice(invoice)
-    ? (item) => item?.category !== 'deposit_credit' && !isSetupFee(item)
+    ? (item) => /\brecurring\s+[\u2014-]\s+first\b/i.test(String(item?.description || ''))
     : (item) => InvoiceService.lineIsBaseApplication(item);
   const base = items.filter((item) => isBase(item) && amountOf(item) > 0);
   if (!base.length) return null;
@@ -343,6 +342,7 @@ function checkStampedFirstDay(stamped, programs, invoices) {
   if (!invoice || ['void', 'voided', 'cancelled', 'canceled', 'refunded'].includes(String(invoice.status || '').toLowerCase())) {
     return [{ code: 'first_invoice_missing', text: 'first invoice is missing, void or refunded' }];
   }
+  if (invoice.unbacked_discount) return [];
   const billed = firstApplicationAmount(invoice);
   if (billed == null) {
     return [{ code: 'first_invoice_malformed', text: 'first invoice has no readable service lines' }];
@@ -360,7 +360,8 @@ function checkSplitInvoices(split, programs) {
   const off = [];
   for (const row of split) {
     const expected = expectedFor(row, programs);
-    const billed = row.own_first_invoice ? firstApplicationAmount(row.own_first_invoice) : null;
+    const billed = row.own_first_invoice && !row.own_first_invoice.unbacked_discount
+      ? firstApplicationAmount(row.own_first_invoice) : null;
     if (expected != null && billed != null && Math.abs(billed - expected) > PRICE_TOLERANCE) {
       off.push(`${lowerLabel(programRowFamilies(row, programs)[0])} ${money(billed)} vs ${money(expected)}`);
     }
@@ -450,7 +451,9 @@ function evaluateCombinedBooking(ctx) {
   // booking OK. Neither does an estimate the classifier did not judge, nor one
   // with no accepted per-visit price to compare against (its problems below
   // are still reported).
-  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesUnverifiable;
+  const unbackedDiscount = [...stamped.map((row) => invoices.get(String(row.first_application_invoice_id))),
+    ...split.map((row) => row.own_first_invoice)].some((invoice) => invoice?.unbacked_discount);
+  const deferred = scheduleGaps.length > 0 || scheduleUnjudged || pricesUnverifiable || unbackedDiscount;
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
@@ -512,7 +515,13 @@ async function markPrepaidCoverage(conn, rows) {
   const { hasOutOfBandPrepaidStamp } = require('./schedule-integrity-watchdog');
   for (const row of rows) {
     row.prepaid_covered = false;
-    if (hasOutOfBandPrepaidStamp(row)) { row.prepaid_covered = true; continue; }
+    // An out-of-band stamp covers the visit only when it pays the whole visit
+    // price: completion bills the rest of a partial prepayment, so a partly
+    // prepaid visit keeps its price check.
+    if (hasOutOfBandPrepaidStamp(row)) {
+      row.prepaid_covered = Number(row.prepaid_amount) + 0.005 >= rowPrice(row);
+      continue;
+    }
     if (!row.annual_prepay_term_id && !(Number(row.prepaid_amount) > 0)) continue;
     try {
       row.prepaid_covered = await annualPrepayCoversVisit(row, conn) === true;
@@ -537,7 +546,7 @@ async function loadFirstInvoices(conn, rows) {
   const InvoiceService = require('./invoice');
   const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
   const { resolveGoverningInvoice } = require('./first-application-sibling-split');
-  const columns = ['id', 'status', 'total', 'subtotal', 'line_items', 'notes', 'scheduled_service_id', 'created_at'];
+  const columns = ['id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'notes', 'scheduled_service_id', 'created_at'];
   const stampedIds = [...new Set(stamped.map((row) => String(row.first_application_invoice_id)))];
   const stampedInvoices = await conn('invoices').whereIn('id', stampedIds).select(columns);
   const ownerIds = [...new Set([...stamped.map((row) => String(row.id)),
@@ -551,6 +560,13 @@ async function loadFirstInvoices(conn, rows) {
     const governing = resolveGoverningInvoice(invoice, onAnchor);
     invoices.set(String(invoice.id), governing);
     governingIds.add(String(governing.id));
+  }
+  // A document-level discount (create()'s discountIds picks) is stored in
+  // discount_amount with no negative line: the lines alone cannot give the
+  // net application amount, so such an invoice is never certified.
+  const { _invoiceHasUnbackedDocumentDiscount: unbacked } = InvoiceService;
+  for (const invoice of [...stampedInvoices, ...live]) {
+    invoice.unbacked_discount = await unbacked(invoice, invoice.line_items, conn);
   }
   const byRow = new Map(stamped.map((row) => [String(row.id), row]));
   for (const invoice of live) {
