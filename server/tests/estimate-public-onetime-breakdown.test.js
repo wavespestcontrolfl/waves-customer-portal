@@ -4525,6 +4525,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Pay per application');
     expect(html).toContain('Annual prepay');
     expect(html).toContain('We send the invoice automatically and make secure payment available.');
+    // Pay-per-application card (R2 2026-09-28): nothing collected before the first visit.
+    expect(html).toContain('Next: pick a time, then confirm. Nothing is charged today.');
+    expect(html).not.toContain('so you can pay before service');
+    expect(html).not.toContain('so you can pay in-flow');
     expect(html).toContain('After confirmation, your annual prepay invoice totals');
     expect(html).toContain('id="payment-setup-summary"');
     expect(html).toContain('id="change-payment-setup-btn"');
@@ -7749,6 +7753,8 @@ describe('public estimate one-time breakdown', () => {
       firstApplicationAmount: 89,
     })).toEqual(expect.objectContaining({
       totalAmount: 188,
+      payAfterBody: 'Approve now; nothing is charged today. The setup + first application total of $188.00 is billed at your first visit.',
+      billingSmall: 'No payment is charged on this page. The setup plus first application, totaling $188.00, is billed at your first visit.',
       payPrefCardSub: 'Invoice includes bait station setup + first application ($188.00).',
     }));
     expect(buildStandardPayPerApplicationInvoiceCopy({
@@ -7756,7 +7762,7 @@ describe('public estimate one-time breakdown', () => {
       setupLabel: 'bait station setup',
       firstApplicationAmount: 0,
     })).toEqual(expect.objectContaining({
-      payAfterBody: 'Approve now; after you confirm, we send the bait station setup invoice for $99.00 so you can pay before service.',
+      payAfterBody: 'Approve now; nothing is charged today. The bait station setup fee of $99.00 is billed at your first visit.',
       payPrefCardSub: 'Invoice includes bait station setup ($99.00).',
     }));
   });
