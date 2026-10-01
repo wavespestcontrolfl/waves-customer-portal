@@ -268,7 +268,8 @@ describe('POST /restock-requests/:id/action', () => {
       expect(res.status).toBe(200);
       expect(statusUpdates.some((u) => u.status === expected)).toBe(true);
       expect(bellRetires).toHaveLength(1); // the parked row's "order manually" bell must not outlive the action
-      expect(bellRetires[0].read_at).toBeInstanceOf(Date);
+      // Closed as done (read is not done): done_at / done_by / resolution keep-existing writes, never a bare read_at.
+      expect(bellRetires[0]).toEqual(expect.objectContaining({ done_at: expect.anything(), done_by: expect.anything(), resolution: expect.anything() }));
     });
   });
 

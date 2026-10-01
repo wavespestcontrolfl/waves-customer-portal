@@ -25,6 +25,15 @@
 // Dispatch CompletionPanel — before any attempt may have reached the
 // server; so does "+ Other product" when the product list did not load.
 //
+// Customer text (dark, GATE_FAST_COMPLETE_RECAP, `service.recapEnabled`): off,
+// the sheet pins sendCompletionSms / requestReview / includePayLink to false
+// and the customer gets nothing. On, it asks for the ONE fixed re-service text
+// (customerRecapMode 'reservice_fixed'); the SERVER builds it from the saved
+// facts (address, where, pests, products) and sends it through its normal send
+// path, so consent, STOP and opt-out checks still apply. No customer wording
+// lives here, no review ask and no pay link go with it, and after Complete the
+// tech sees the exact text that went (or why none did) from the response.
+//
 // The layout is compact (three/four-across choice rows, the note behind a
 // tap) so the choices fit a typical phone screen; the Complete button is
 // pinned in the footer either way.
@@ -216,7 +225,24 @@ function targetsOf(form) {
   return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
+// Gate on: the completion text is asked for in the server's fixed re-service
+// mode (services/reservice-fixed-recap.js). The review ask and the pay link
+// stay off, as on a re-service they always were (fast-complete scope: "leave it
+// off on re-services").
+const CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: true,
+  requestReview: false,
+  includePayLink: false,
+  customerRecapMode: 'reservice_fixed',
+};
+// Today's body: no customer text, no review ask, no pay link.
+const NO_CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: false,
+  requestReview: false,
+  includePayLink: false,
+};
+
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -244,12 +270,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
-    // The customer recap text ships in a later Fast Complete PR; until then
-    // this path sends none. No review ask on a re-service (adopted
-    // 2026-09-26), and a free callback never carries a pay link.
-    sendCompletionSms: false,
-    requestReview: false,
-    includePayLink: false,
+    // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
+    // link. Gate on: the fixed re-service text; the server composes it.
+    ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
   };
 }
 
@@ -389,7 +412,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
 }
 
 function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+  if (submission.done) {
+    return (
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+        <CustomerTextResult outcome={submission.done.customerText} />
+      </SavedView>
+    );
+  }
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
@@ -484,7 +513,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
+      () => completionBody(form, rows, {
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+      }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -546,6 +577,35 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         )}
       </CompleteFooter>
       {picker.sheet}
+    </div>
+  );
+}
+
+// Only an exact true turns the customer recap on (GATE_FAST_COMPLETE_RECAP,
+// delivered as the schedule row's fastCompleteRecapEnabled).
+const recapOn = (service) => service?.recapEnabled === true;
+
+// After Complete: the exact text the server sent (its words, shown as sent),
+// or why none went. Nothing when the sheet never asked for one.
+// A held message's channel is only known once the replay picks it.
+function queuedLabel(channel) {
+  if (channel === 'push') return 'Queued for the customer\'s app';
+  if (channel === 'sms') return 'Text queued';
+  return 'Message queued';
+}
+
+function CustomerTextResult({ outcome }) {
+  if (!outcome) return null;
+  const { sent, queued, unverified, body, reason, channel } = outcome;
+  // The recorded channel decides the words: a text is not an app message.
+  const app = channel === 'push';
+  return (
+    <div data-testid="fast-complete-text-result">
+      {sent && <p className="tech-visit-muted">{app ? 'Sent to the customer\'s app:' : 'Text sent to the customer:'}</p>}
+      {!sent && queued && <p className="tech-visit-muted">{queuedLabel(channel)}: {reason}.</p>}
+      {!sent && unverified && <p className="tech-visit-muted">Delivery not confirmed: {reason}.</p>}
+      {!sent && !queued && !unverified && <p className="tech-visit-muted">No text sent: {reason}.</p>}
+      {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}
     </div>
   );
 }

@@ -1031,6 +1031,39 @@ export function completionReconcilePrompt(error) {
   return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
 }
 
+// Whether the notes still carry a generated report's titles: the two-section
+// paragraph or the four-section report (writer rules), each title on its own
+// line or written inline with its text ("WHAT WE FOUND: You mentioned…"),
+// the forms the server's parser accepts.
+export function reportShapedNotes(notes) {
+  const text = String(notes || '');
+  return /^\s*WHAT WE DID(?: AND WHY)?(?::.*)?$/m.test(text)
+    && /^\s*WHAT WE FOUND(?::.*)?$/m.test(text);
+}
+
+// Whether a Generate should save the current notes as the tech's own
+// handwritten notes (the grounding a later regeneration or invalidation
+// restores). Never the untouched installed draft; never an edited draft
+// (report-shaped notes while a draft is installed, codex r54); but notes a
+// tech typed under the report's headings before any draft was installed
+// are theirs and are saved.
+export function shouldCaptureHandwrittenNotes({ notes, installedText = null, draftInstalled = false } = {}) {
+  const text = String(notes || '');
+  if (draftInstalled && reportShapedNotes(text)) return false;
+  return text.trim() !== String(installedText || '').trim();
+}
+
+// The completion route's edit heads-up 409 (code 'report_rules_review',
+// four-section report under GATE_REPORT_WRITER_RULES): an edit added
+// something the report leaves out. Returns the confirm() text, or null for
+// any other error. Like the reconciliation 409 it keeps the idempotency key,
+// so the confirmed resubmit replays under the same key.
+export function completionReportRulesPrompt(error) {
+  if (error?.code !== "report_rules_review") return null;
+  const lead = String(error?.message || "").trim();
+  return `Heads-up on your edits:\n${lead}\n\nOK — send as is.\nCancel — go back and edit the report.`;
+}
+
 // Human copy for a re-entry stepper value ("No wait", "45 min", "2 hr",
 // "2 hr 15 min"). Minutes only — the steppers clamp to 0..1440.
 export function formatReentryStepperMinutes(min) {
@@ -13055,6 +13088,12 @@ export function CompletionPanel({
   // stale AI prose can't publish beside contradicting structured findings
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
+  // The installed generated report the notes hold (or were edited from);
+  // null again once the handwritten notes come back. Saved with the draft.
+  // Lets a regeneration tell an edited draft from handwritten notes that
+  // merely use the report's headings, and is the base completion compares
+  // the submitted report against for the edit heads-up (Codex #5500).
+  const installedReportDraftRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -15125,6 +15164,7 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        installedReportDraft: installedReportDraftRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15534,6 +15574,10 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    // Older drafts lack the field: a restored installed report counts.
+    installedReportDraftRef.current = typeof savedDraft.installedReportDraft === "string" && savedDraft.installedReportDraft
+      ? savedDraft.installedReportDraft
+      : generatedReportTextRef.current;
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -15726,6 +15770,7 @@ export function CompletionPanel({
         setChipLinesDetached(preGenerationChipDetachedRef.current === true);
         preGenerationNotesRef.current = null;
         preGenerationChipDetachedRef.current = false;
+        installedReportDraftRef.current = null;
         setGeneratedReportCleared(true);
       }
     }
@@ -15966,19 +16011,23 @@ export function CompletionPanel({
     installedPhotoGroundingUsedRef.current = photoGroundingUsed;
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
-    // An EDITED older draft still carries the two-section report shape and
-    // must not be captured either: invalidation would restore it and
-    // completion would publish stale generated copy that predates the
-    // final findings (codex r54). Only genuinely handwritten notes ground
-    // a regeneration; the previous handwritten capture is kept otherwise.
-    const notesLookGenerated = /^\s*WHAT WE DID:?\s*$/m.test(notes)
-      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
-    if (!notesLookGenerated
-      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+    // An EDITED older draft still carries the report shape (two sections,
+    // or the four-section report under the writer rules, whose title is
+    // "WHAT WE DID AND WHY") and must not be captured either: invalidation
+    // would restore it and completion would publish stale generated copy
+    // that predates the final findings (codex r54). Only genuinely
+    // handwritten notes ground a regeneration; the previous handwritten
+    // capture is kept otherwise.
+    if (shouldCaptureHandwrittenNotes({
+      notes,
+      installedText: generatedReportTextRef.current,
+      draftInstalled: Boolean(installedReportDraftRef.current),
+    })) {
       preGenerationNotesRef.current = notes;
       preGenerationChipDetachedRef.current = chipLinesDetached;
     }
     generatedReportTextRef.current = String(reportText || "").trim();
+    installedReportDraftRef.current = generatedReportTextRef.current || null;
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
@@ -17158,7 +17207,7 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false } = {}) {
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false } = {}) {
     // The status poll's "resumable" verdict re-enters here while submitting
     // is STILL true (the button stayed in its completing state through the
     // whole chain) — that re-entry is the continuation of the same logical
@@ -17726,6 +17775,10 @@ export function CompletionPanel({
         // Set only on the resubmit after the tech OK'd the reconciliation
         // prompt — the server then skips the 409 and completes.
         ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
+        // Edit heads-up (four-section report): the draft the notes were
+        // edited from, and the tech's "send as is" on the resubmit.
+        reportDraftBase: installedReportDraftRef.current || null,
+        ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -18038,7 +18091,7 @@ export function CompletionPanel({
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
-      return settleCompletionSubmitError(e, reconcileConfirmed);
+      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed);
     }
     setSubmitting(false);
   }
@@ -18060,7 +18113,7 @@ export function CompletionPanel({
 
   // Every non-success outcome of a completion POST — the fresh build and
   // the committed replay end here.
-  async function settleCompletionSubmitError(e, reconcileConfirmed) {
+  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false) {
     // Any outcome but another quiet side-effects retry ends the retry
     // COUNT — the committed flag and body snapshot deliberately survive
     // (see the ref declarations): after a committed 409, even the manual
@@ -18085,7 +18138,17 @@ export function CompletionPanel({
     if (reconcileText) {
       setSubmitting(false);
       if (window.confirm(reconcileText)) {
-        return handleSubmit(true);
+        return handleSubmit(true, { rulesConfirmed });
+      }
+      return;
+    }
+    // Edit heads-up (409, key preserved): never blocks — OK sends the
+    // report as is, Cancel goes back to edit it.
+    const rulesText = completionReportRulesPrompt(e);
+    if (rulesText) {
+      setSubmitting(false);
+      if (window.confirm(rulesText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true });
       }
       return;
     }
@@ -18470,6 +18533,7 @@ export function CompletionPanel({
       setChipLinesDetached(restoredDetached);
       preGenerationNotesRef.current = null;
       preGenerationChipDetachedRef.current = false;
+      installedReportDraftRef.current = null;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
       return restoredDetached;

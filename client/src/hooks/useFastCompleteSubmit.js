@@ -68,10 +68,12 @@ export default function useFastCompleteSubmit({ base, request }) {
     setError('');
     const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
     try {
-      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
+      const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
       pendingBodyRef.current = null;
       setFailure(null);
-      setDone({ summary });
+      // customerText: what the server says it sent the customer (the pest
+      // sheet's fixed re-service text), shown on the saved view.
+      setDone({ summary, customerText: result?.customerText || null });
       // Saved: the done view can be dismissed (Close, Escape, backdrop).
       setSubmitting(false);
       inFlight.current = false;

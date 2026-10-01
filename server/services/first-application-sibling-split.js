@@ -620,7 +620,9 @@ async function clearStandingAlerts(conn, prefix, { exceptKey = null } = {}) {
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]);
   if (exceptKey) q = q.whereRaw("metadata->>'dedupeKey' <> ?", [exceptKey]);
   return q.update({
-    read_at: conn.raw('COALESCE(read_at, NOW())'),
+    ...require('./notification-service')._private.doneColumns({
+      by: 'first-application', resolution: 'The first-application alert no longer applies', keepExisting: true, conn,
+    }),
     metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ autoCleared: true })]),
   });
 }

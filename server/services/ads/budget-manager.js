@@ -23,6 +23,21 @@ const MAX_DAILY_BUDGET = 99999999.99;
 // otherwise-successful change. Bound it up front so the audit insert can't fail
 // on length. Cron-generated reasons are short by construction.
 const MAX_REASON_LEN = 255;
+// Under the caller's campaign row lock: every ad_budget_log writer holds the
+// same lock, so a change logged after this check can't slip in before the push.
+async function assertNoChangeSince(trx, campaign, since) {
+  if (!since) return;
+  const recent = await trx('ad_budget_log')
+    .where({ campaign_id: campaign.id })
+    .where('created_at', '>=', since)
+    .first('created_at');
+  if (recent) {
+    const err = new Error(`"${campaign.campaign_name}" had a budget or mode change in the last 7 days, so this recommendation may repeat or undo it. Make the change manually if it's still right.`);
+    err.code = 'recent_change';
+    throw err;
+  }
+}
+
 function boundReason(reason) {
   return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
 }
@@ -407,10 +422,11 @@ class BudgetManager {
    * 'live_push_ambiguous'). Unlinked campaigns keep DB-only intent.
    * opts.requireActive: reject ('campaign_inactive') unless status='active',
    * re-checked under the same lock.
+   * opts.requireNoChangeSince: see setBudget.
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
    * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, trigger = 'manual' } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual' } = {}) {
     reason = boundReason(reason);
     // This operation's identity stamp on its audit row (lets the rollback —
     // and the no-push catch below — recognize a lost-COMMIT-ack as "actually
@@ -448,6 +464,7 @@ class BudgetManager {
             err.code = 'campaign_inactive';
             throw err;
           }
+          await assertNoChangeSince(trx, campaign, requireNoChangeSince);
           // Under the lock: two concurrent applies of the same rec both pass
           // the route's unlocked no-op check; the loser must not re-push the
           // already-current mode and count a second "applied" change.
@@ -822,9 +839,12 @@ class BudgetManager {
    * factor of the LOCKED row's base (falling back to current) and actually
    * changes something — the caller's unlocked pre-checks can be raced by a
    * concurrent base edit or a duplicate apply.
+   * opts.requireNoChangeSince: reject ('recent_change') if ad_budget_log
+   * holds a change to this campaign at or after this Date, checked under the
+   * row lock (the advisor's 7-day no-repeat/no-reversal rule).
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, trigger = 'manual' } = {}) {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, requireNoChangeSince = null, trigger = 'manual' } = {}) {
     reason = boundReason(reason);
     const opId = randomUUID(); // audit-row identity; supersession anchor is taken in-lock
     // Validate the amount up front — a non-positive / NaN / non-finite base would
@@ -877,6 +897,7 @@ class BudgetManager {
             err.code = 'campaign_inactive';
             throw err;
           }
+          await assertNoChangeSince(trx, campaign, requireNoChangeSince);
           // Under the lock, so a mode transition can no longer race this
           // check: a throttled campaign must not take a raw-target push the
           // caller would report as the live daily budget.

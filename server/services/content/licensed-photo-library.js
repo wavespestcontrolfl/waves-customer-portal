@@ -199,13 +199,22 @@ function escapeRegExp(value) {
 // of them ("bugs like fire ants", Codex r1 on #5272): only the terminal
 // "what do X look like" identification phrase is exempt, and it is already
 // stripped from comparisonTestText below before this runs (Codex r5/r7).
-// Main's connector words stay UNCONDITIONAL comparison markers — and, or,
+// The connector words stay UNCONDITIONAL markers for the automatic match — and, or,
 // from, not (Codex r6–r9 on #5272: every narrowing of them let a two-subject
 // topic through: "fire ants and insects", "…or pests", "…and gnats",
 // "this is not a fire ant"). The catalog pest count below is an extra
 // check on top, never a replacement. Cost: "where do fire ants come from"
-// gets no automatic photo — the slot goes to a human (fail closed).
-const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?|not|and|or|from)\b/i;
+// gets no AUTOMATIC photo; an LLM may confirm it instead (below), else the
+// slot goes to a human (fail closed).
+//
+// Split (LLM-confirmed single-subject slot, 2026-09-30): the explicit
+// comparison words below block OUTRIGHT, always. Only the four connector
+// words (and/or/from/not) are "connector-blocked": code still finds the
+// candidate species for such a topic, and ONLY a separate structured LLM call
+// (photo-subject-confirmer.js) may CONFIRM it is a single-subject topic
+// about that exact species — it can never introduce one.
+const HARD_COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?)\b/i;
+const CONNECTOR_WORDS_RE = /\b(not|and|or|from)\b/i;
 // A hyphenated "-like" suffix ("ant-like insects") is the same look-alike
 // construction without the word "look" — still a comparison, not an
 // identification of the named species itself.
@@ -292,15 +301,22 @@ const OTHER_ORGANISM_CLASS_RE = /\b(?:other|similar|related|different)\s+(?:[a-z
 const TERMINAL_LOOKS_LIKE_RE = /\blooks?\s+like\b(?=\s*(?:\?|$|(?:in|around|near|on|at|up)\b))/i;
 
 /**
- * matchSpecies(topic) → the ONE library entry whose alias matches `topic`
- * as a whole word/phrase, or null when none matches, more than one
+ * matchSpeciesEntry(topic) → the ONE library entry whose alias matches
+ * `topic` as a whole word/phrase, or null when none matches, more than one
  * distinct species matches, or the topic is comparison-shaped.
+ *
+ * `{ ignoreConnectors: true }` skips ONLY the and/or/from/not test (never the
+ * explicit comparison words or the "-like" suffix, and never the
+ * other-pest count) — it exists so connectorBlockedCandidate can name the
+ * entry such a topic WOULD match. Nothing ships a photo from that result
+ * alone.
  */
-function matchSpeciesEntry(topic) {
+function matchSpeciesEntry(topic, { ignoreConnectors = false } = {}) {
   const norm = String(topic || '').trim().toLowerCase();
   if (!norm) return null;
   const comparisonTestText = norm.replace(TERMINAL_LOOKS_LIKE_RE, '').trim();
-  if (COMPARISON_WORDS_RE.test(comparisonTestText) || SUFFIX_LIKE_RE.test(comparisonTestText)) return null;
+  if (HARD_COMPARISON_WORDS_RE.test(comparisonTestText) || SUFFIX_LIKE_RE.test(comparisonTestText)) return null;
+  if (!ignoreConnectors && CONNECTOR_WORDS_RE.test(comparisonTestText)) return null;
   const matched = new Set();
   for (const entry of PHOTO_LIBRARY) {
     // Trailing e?s? tolerates the ordinary plural ("fire ants").
@@ -314,6 +330,18 @@ function matchSpeciesEntry(topic) {
   const [entry] = matched;
   return namesAnotherPest(comparisonTestText, entry) ? null : entry;
 }
+
+/**
+ * connectorBlockedCandidate(topic) → the library entry a topic names when
+ * matchSpeciesEntry returned null ONLY because of an and/or/from/not
+ * connector (everything else about the matcher would have passed), else
+ * null. A topic that matches today, or that fails for any other reason
+ * (comparison word, "-like", two species, another pest named), has none.
+ */
+function connectorBlockedCandidate(topic) {
+  if (matchSpeciesEntry(topic)) return null;
+  return matchSpeciesEntry(topic, { ignoreConnectors: true });
+}
 function matchSpecies(topic) {
   return matchSpeciesEntry(topic)?.species || null;
 }
@@ -326,9 +354,21 @@ function entryForSlot(entry, slot) {
   return null;
 }
 
-/** findPhotoForSlot(topic, slot) → the slot's photo object, or null. */
-function findPhotoForSlot(topic, slot) {
-  return photoOf(entryForSlot(matchSpeciesEntry(topic), slot));
+// The entry a topic's slots are built from: today's unconditional match, or —
+// only when the caller passes the slug an LLM confirmed — the connector-
+// blocked candidate, and only when code STILL derives exactly that candidate
+// from the topic (a stale or forged slug never introduces a species).
+function speciesEntryFor(topic, confirmedSlug) {
+  const direct = matchSpeciesEntry(topic);
+  if (direct) return direct;
+  if (!confirmedSlug) return null;
+  const candidate = connectorBlockedCandidate(topic);
+  return candidate && candidate.catalog_slug === confirmedSlug ? candidate : null;
+}
+
+/** findPhotoForSlot(topic, slot, { confirmedSlug }) → the slot's photo object, or null. */
+function findPhotoForSlot(topic, slot, { confirmedSlug = null } = {}) {
+  return photoOf(entryForSlot(speciesEntryFor(topic, confirmedSlug), slot));
 }
 
 /**
@@ -336,9 +376,12 @@ function findPhotoForSlot(topic, slot) {
  * look-alike). A slot with no library photo carries `photo: null` and
  * `flagged_for_human: true`; the writer omits it (never AI art). The
  * caption names the matched canonical species, never the raw topic.
+ * `confirmedSlug` (from photo-subject-confirmer.js, an LLM that may only
+ * CONFIRM the code-found connector-blocked candidate) is honored only when
+ * it equals that candidate's catalog_slug.
  */
-function buildPhotoSlots(topic) {
-  const entry = matchSpeciesEntry(topic);
+function buildPhotoSlots(topic, { confirmedSlug = null } = {}) {
+  const entry = speciesEntryFor(topic, confirmedSlug);
   return SLOTS.map(({ slot, captionTemplate }) => {
     const photo = photoOf(entryForSlot(entry, slot));
     return { slot, caption: captionTemplate(entry?.species || null), photo, flagged_for_human: !photo };
@@ -385,6 +428,7 @@ function blankLibraryPhotoAttributions(text) {
 module.exports = {
   PHOTO_LIBRARY,
   matchSpecies,
+  connectorBlockedCandidate,
   findPhotoForSlot,
   buildPhotoSlots,
   libraryPhotoBySrc,

@@ -123,13 +123,15 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
   );
 }
 
-// What the tech sees once the visit is saved.
-export function SavedView({ service, summary, onCompleted }) {
+// What the tech sees once the visit is saved; `children` carries a sheet's
+// own line under the summary (the pest sheet's sent-text result).
+export function SavedView({ service, summary, onCompleted, children }) {
   return (
     <div className="tech-visit-body">
       <div className="tech-visit-card">
         <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
         <p>{summary}</p>
+        {children}
       </div>
       <div className="tech-visit-actions">
         <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>

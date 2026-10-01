@@ -15,6 +15,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
+  fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return fn;
 });
 jest.mock('../services/collections/outbound-voice/origination', () => ({
@@ -255,6 +256,16 @@ describe('gh-r2', () => {
     originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
     await runCollectionsDialSweep({ now: NOW });
     expect(card.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust:1:14']);
+    // Retired as done (read is not done): picked by done_at, closed by the sweep.
+    // The closing selection is openToCloser's: not done, or done by a person.
+    const openToCloserArg = card.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(openToCloserArg).toBeDefined();
+    const inner = { whereNull: jest.fn(() => inner), orWhereRaw: jest.fn(() => inner) };
+    openToCloserArg(inner);
+    expect(inner.whereNull).toHaveBeenCalledWith('done_at');
+    expect(inner.orWhereRaw.mock.calls[0][0]).toContain('done_by');
+    // done_by is the latest closer (plain value), so a system close owns a person-done row.
+    expect(card.update).toHaveBeenCalledWith(expect.objectContaining({ done_by: 'collections' }));
   });
 });
 

@@ -1,0 +1,103 @@
+/**
+ * Customer location line (config/locations.js resolveServiceLocation, used by
+ * services/twilio.js deriveOutboundNumber under GATE_SMS_LINE_ADDRESS_FALLBACK).
+ *
+ * The contract: a customer whose city maps today keeps the exact line
+ * resolveLocation(city) gives them — no one changes lines mid-conversation.
+ * Only a blank/unmapped city falls through ZIP → geocode → default.
+ */
+jest.mock('twilio', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const {
+  CITY_TO_LOCATION,
+  resolveLocation,
+  resolveServiceLocation,
+} = require('../config/locations');
+
+// Near the Venice office — nearest-office math picks venice.
+const NEAR_VENICE = { latitude: 27.09, longitude: -82.41 };
+
+describe('resolveServiceLocation', () => {
+  test('every mapped city resolves exactly like resolveLocation, whatever the ZIP/geocode say', () => {
+    for (const city of Object.keys(CITY_TO_LOCATION)) {
+      expect(resolveServiceLocation({ city, zip: '34286', ...NEAR_VENICE }).id)
+        .toBe(resolveLocation(city).id);
+    }
+  });
+
+  test('does not inherit the review-routing overrides', () => {
+    // Review routing sends Longboat Key to bradenton and lets ZIP 34243
+    // outrank a "Sarasota" city; the location line must not move either.
+    expect(resolveServiceLocation({ city: 'Longboat Key' }).id).toBe('sarasota');
+    expect(resolveServiceLocation({ city: 'Sarasota', zip: '34243' }).id).toBe('sarasota');
+  });
+
+  test('blank city falls through to the ZIP', () => {
+    expect(resolveServiceLocation({ city: '', zip: '34286' }).id).toBe('venice');
+    expect(resolveServiceLocation({ zip: '34221-1234' }).id).toBe('parrish');
+    expect(resolveServiceLocation({ zip: 'FL 34219' }).id).toBe('parrish');
+  });
+
+  test('unmapped city falls through to the ZIP, then the geocode', () => {
+    expect(resolveServiceLocation({ city: 'Somewhere Else', zip: '34286' }).id).toBe('venice');
+    expect(resolveServiceLocation({ city: 'Somewhere Else', ...NEAR_VENICE }).id).toBe('venice');
+    expect(resolveServiceLocation({ city: 'Somewhere Else', latitude: '27.09', longitude: '-82.41' }).id)
+      .toBe('venice');
+  });
+
+  test('no usable address resolves to the default office, never the office nearest (0,0)', () => {
+    expect(resolveServiceLocation({}).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: null, longitude: null }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: '', longitude: '' }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ zip: '99999' }).id).toBe('bradenton');
+    // Sentinel / out-of-range / far-away geocodes are not usable.
+    expect(resolveServiceLocation({ latitude: 0, longitude: 0 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: 999, longitude: 999 }).id).toBe('bradenton');
+    // Wrapped angles: haversine would put these ~0 mi from an office.
+    expect(resolveServiceLocation({ latitude: 27.09, longitude: -82.41 + 360 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ latitude: 27.09 + 360, longitude: -82.41 }).id).toBe('bradenton');
+    expect(resolveServiceLocation({ city: 'Miami', latitude: 25.76, longitude: -80.19 }).id).toBe('bradenton');
+  });
+});
+
+describe('deriveOutboundNumber + GATE_SMS_LINE_ADDRESS_FALLBACK', () => {
+  const ORIGINAL = process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+    else process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = ORIGINAL;
+  });
+
+  const TwilioService = require('../services/twilio');
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const unmapped = { id: 'c1', city: '', zip: '34286', ...NEAR_VENICE };
+  const mapped = { id: 'c2', city: 'Palmetto', zip: '34286', ...NEAR_VENICE };
+
+  test('gate off: blank city keeps the Bradenton default (today\'s behavior)', async () => {
+    delete process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+    expect(await TwilioService.deriveOutboundNumber({ customer: unmapped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('bradenton'));
+  });
+
+  test('gate on: blank city resolves by ZIP to the Venice line', async () => {
+    process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customer: unmapped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('venice'));
+  });
+
+  test('a mapped city gets the same line with the gate on or off', async () => {
+    delete process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+    const off = await TwilioService.deriveOutboundNumber({ customer: mapped });
+    process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = 'true';
+    const on = await TwilioService.deriveOutboundNumber({ customer: mapped });
+    expect(on).toBe(off);
+    expect(on).toBe(TWILIO_NUMBERS.getOutboundNumber('parrish'));
+  });
+
+  test('an explicit customerLocationId still wins', async () => {
+    process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = 'true';
+    expect(await TwilioService.deriveOutboundNumber({ customerLocationId: 'sarasota', customer: unmapped }))
+      .toBe(TWILIO_NUMBERS.getOutboundNumber('sarasota'));
+  });
+});

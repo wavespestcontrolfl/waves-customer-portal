@@ -73,7 +73,25 @@ function isPendingOutboundReviewBooking(svc) {
     && !svc.customer_confirmed;
 }
 
+/**
+ * A dispatch-owned booking the office has NOT reviewed, as the customer-facing surfaces must see
+ * it: still 'pending', OR a voice-agent booking a writer (SmartRebooker on a move) left 'confirmed'
+ * with customer_confirmed false — that is the street-level address hold's moved shape, and it
+ * stays hidden and un-confirmable / un-reschedulable by the customer until the office confirms.
+ * `svc` needs source_action, status, customer_confirmed.
+ */
+function isUnreviewedDispatchOwned(svc) {
+  if (!svc || !DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action) || svc.customer_confirmed) return false;
+  const status = String(svc.status || '').toLowerCase();
+  return status === 'pending' || (svc.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && status === 'confirmed');
+}
+
+// SQL twin for the customer list reads (see routes/schedule.js): the rows a customer may NOT see.
+const UNREVIEWED_VOICE_MOVED_SQL = "(scheduled_services.source_action = 'voice_agent' AND scheduled_services.status = 'confirmed' AND COALESCE(scheduled_services.customer_confirmed, false) = false)";
+
 module.exports = {
+  isUnreviewedDispatchOwned,
+  UNREVIEWED_VOICE_MOVED_SQL,
   CALL_FOLLOWUP_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
   VOICE_AGENT_BOOKING_SOURCE_ACTION,

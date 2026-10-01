@@ -34,15 +34,21 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
 
+// The street-level address-hold lookup (a technician may not confirm or run a hold): none of these fixtures is one.
+const mockIsHold = jest.fn(async () => false);
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: (...a) => mockIsHold(...a),
+  // The under-lock recheck reads the same answer as the pre-check.
+  assertNotLiveHoldUnderLock: async (...a) => { if (await mockIsHold(...a)) throw Object.assign(new Error('Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.'), { status: 409, code: 'street_level_hold' }); } }));
+let mockRole = 'technician';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
   return {
     ...actual,
     adminAuthenticate: (req, _res, next) => {
-      req.technician = { id: 'tech-A', role: 'technician' };
+      req.technician = { id: 'tech-A', role: mockRole };
       req.technicianId = 'tech-A';
-      req.techRole = 'technician';
+      req.techRole = mockRole;
       return next();
     },
   };
@@ -139,6 +145,9 @@ function fieldConfirmedWrite() {
 }
 
 beforeEach(() => {
+  mockRole = 'technician';
+  mockIsHold.mockReset();
+  mockIsHold.mockResolvedValue(false);
   mockTransitionJobStatus.mockClear();
   db.__state.writes = [];
   // An unactivated outbound-review booking (still owing activation —
@@ -201,3 +210,55 @@ describe('admin-schedule.js PUT /:id/status', () => {
     expect(mockTransitionJobStatus).not.toHaveBeenCalled();
   });
 });
+
+describe('a street-level address hold: the office must confirm first, for EVERY role', () => {
+  const asHold = () => { db.__state.scheduledServices[0].source_action = 'voice_agent'; mockIsHold.mockResolvedValue(true); };
+  for (const [base, label] of [['/api/admin/dispatch', 'admin-dispatch'], ['/api/admin/schedule', 'admin-schedule']]) {
+    for (const status of ['en_route', 'on_site']) {
+      test(`${label}: an ADMIN token advancing a held visit to ${status} is refused (409 street_level_hold), nothing transitions`, async () => {
+        mockRole = 'admin';
+        asHold();
+        const { status: code, body } = await putStatus(base, 'svc-1', { status });
+        expect(code).toBe(409);
+        expect(body.code).toBe('street_level_hold');
+        expect(body.error).toContain('Office must confirm the address first');
+        expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+      });
+    }
+    test(`${label}: control — an admin advancing a NON-hold voice visit is unaffected, and an admin CONFIRM of the hold is the path that is allowed`, async () => {
+      mockRole = 'admin';
+      db.__state.scheduledServices[0].source_action = 'voice_agent';
+      mockIsHold.mockResolvedValue(false);
+      expect((await putStatus(base, 'svc-1', { status: 'en_route' })).status).toBe(200);
+      mockTransitionJobStatus.mockClear();
+      mockIsHold.mockResolvedValue(true);
+      const confirm = await putStatus(base, 'svc-1', { status: 'confirmed' });
+      expect(confirm.status).not.toBe(409);   // the explicit office confirm is not refused for an admin
+    });
+  }
+});
+
+describe('no-show on a street-level address hold', () => {
+  test('admin-dispatch refuses no_show for an ADMIN token on a live hold (409 street_level_hold); a non-hold no_show is not refused by the hold guard', async () => {
+    mockRole = 'admin';
+    db.__state.scheduledServices[0].source_action = 'voice_agent';
+    mockIsHold.mockResolvedValue(true);
+    const held = await putStatus('/api/admin/dispatch', 'svc-1', { status: 'no_show' });
+    expect(held.status).toBe(409);
+    expect(held.body.code).toBe('street_level_hold');
+    expect(held.body.error).toContain('Office must confirm the address first');
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    mockIsHold.mockResolvedValue(false);
+    const plain = await putStatus('/api/admin/dispatch', 'svc-1', { status: 'no_show' });
+    expect(plain.body.code).not.toBe('street_level_hold');
+  });
+  test('admin-schedule never persists no_show at all (409 no_show_wrong_route), hold or not', async () => {
+    mockRole = 'admin';
+    db.__state.scheduledServices[0].source_action = 'voice_agent';
+    mockIsHold.mockResolvedValue(true);
+    const r = await putStatus('/api/admin/schedule', 'svc-1', { status: 'no_show' });
+    expect(r.status).toBe(409);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  });
+});
+

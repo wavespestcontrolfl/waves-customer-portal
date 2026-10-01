@@ -57,7 +57,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -107,7 +107,8 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeS
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -1273,26 +1274,15 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
     .select('id', 'name', 'analysis_n', 'analysis_p'), []);
   if (!profile) return [];
 
-  // Stamped visit address OUTRANKS the turf-profile municipality (matches
-  // the plan engine): the 1:1 profile describes the primary home, so a visit
-  // stamped at a rental in another city must use the treated property's
-  // ordinances, not the profile's — and when the stamped city diverges, the
-  // profile county is dropped too (the rental's county is unknown; keeping
-  // the primary home's county would OR its blackout onto the rental).
-  const stampedCity = String(svc.service_address_city || '').trim();
-  const profileCity = String(profile.municipality || '').trim();
-  const customerCity = String(svc.city || '').trim();
-  // The county belongs to the PROFILE, so divergence is measured against the
-  // profile's own city context (its municipality, else the customer city as
-  // its implied context): a stamped visit in a different city drops the
-  // profile county even when the CUSTOMER's city happens to match the stamp
-  // (stale-profile case: Charlotte profile, Bradenton customer+visit). No
-  // known reference city -> keep the county (can't prove divergence).
-  const countyReferenceCity = profileCity || customerCity;
-  const stampedDiverges = !!stampedCity && !!countyReferenceCity &&
-    countyReferenceCity.toLowerCase() !== stampedCity.toLowerCase();
-  const county = stampedDiverges ? '' : String(profile.county || '').trim();
-  const city = stampedCity || profileCity || customerCity;
+  // Same jurisdiction resolution as the plan (stamped visit address outranks
+  // the profile; a county-less profile falls back to the treated address's
+  // county via address-county).
+  const { county, city } = resolveOrdinanceJurisdiction(profile, {
+    stampedCity: svc.service_address_city,
+    stampedZip: svc.service_address_zip,
+    customerCity: svc.city,
+    customerZip: svc.customer_zip,
+  });
   if (!county && !city) return [];
 
   const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
@@ -1947,6 +1937,117 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Plain words for each writer-rules rejection, for the edit heads-up.
+const REPORT_RULE_FINDING_LABELS = Object.freeze({
+  amount: 'An amount or measurement',
+  footage: 'A measured area (feet or acres)',
+  percent: 'A percentage',
+  rate: 'A rate or mix strength',
+  per_visit: '"Per visit"',
+  company_name: 'A company name other than Waves Pest Control',
+  safe_word: 'The word "safe" (or harmless, non-toxic)',
+  chemical: 'The word "chemical"',
+  owner_phrase: 'A word the report leaves out',
+  unscoped_absence: '"No activity" for the whole property',
+  aftercare: 'Care instructions (the report prints its own)',
+  reentry: 'Re-entry or drying instructions (the report prints its own)',
+  timeframe: 'A timeframe not from the approved wording',
+  gauge: "The activity gauge's number",
+  quote: 'The customer quoted word for word',
+  price: 'A price, or free, included or covered',
+  date: 'A date or day',
+  time: 'A time or arrival window',
+  active_ingredient: 'An active ingredient name',
+  report_shape: 'The report no longer has its four titled parts with one line each, so the customer would get the standard summary instead',
+});
+// The writer's own titles, so a re-checked sentence is screened inside its
+// section: a timeframe allowed in WHAT TO EXPECT is refused in WHAT WE DID
+// AND WHY (Codex #5500). An unknown key screens as WHAT WE FOUND, where
+// nothing extra is allowed.
+const SECTION_SCREEN_TITLES = Object.freeze({
+  whatWeFound: 'WHAT WE FOUND', whatWeDid: 'WHAT WE DID AND WHY', whatToExpect: 'WHAT TO EXPECT', whatsNext: "WHAT'S NEXT",
+});
+const normalizeSentence = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
+  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/)
+    .map((sentence) => ({ key: section?.key || null, sentence: sentence.trim() })))
+  .filter((entry) => entry.sentence);
+const REFUSED_WORDS_LABEL = 'Words the report can\'t publish (it would show the plain summary instead)';
+// Unchanged means the same sentence in the same section.
+const sectionSentenceKey = (entry) => `${entry.key}|${normalizeSentence(entry.sentence)}`;
+
+// Edit heads-up for the four-section report (owner 2026-10-01: "it
+// shouldn't stop us, but we should rerun it if I or a tech edits it";
+// Codex #5500). The writer rules run again on every sentence that differs
+// from the installed generated draft; any finding returns one 409 the tech
+// confirms ("send as is") or goes back to edit. Never blocks: a confirmed
+// resubmit passes. Only the four-section report is checked, and it exists
+// only while GATE_REPORT_WRITER_RULES is live. Fail-open on checker errors.
+function reportRulesReviewBlockPayload({
+  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null, activeIngredients = [],
+}) {
+  if (isIncompleteVisit || reportRulesConfirmed) return null;
+  try {
+    // Structure, not the publishable parse: an edit that adds a refused
+    // word ("safe") drops the whole body at render, and the tech must hear
+    // about that too (Codex #5500).
+    const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
+      ? fourSectionReport(reportDraftBase)
+      : null;
+    const submitted = fourSectionReport(technicianNotes);
+    if (!submitted) {
+      // An installed draft edited out of its shape (a second line in a
+      // section, a changed title): the render parse refuses it too and the
+      // customer gets the standard summary, so the tech hears about it
+      // (Codex #5500). Notes with no installed draft are not a report, and
+      // notes in the older two-section layout still publish as one.
+      if (!base || normalizeSentence(technicianNotes) === normalizeSentence(reportDraftBase)) return null;
+      const legacy = technicianReportCustomerCopy(technicianNotes);
+      if (legacy?.body) return null;
+      return reportRulesReviewPayload([legacy
+        ? { reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: legacy.violations.join(', ') }
+        : { reason: 'report_shape', label: REPORT_RULE_FINDING_LABELS.report_shape, sentence: null }]);
+    }
+    const unchanged = new Set(reportSentences(base?.sections).map(sectionSentenceKey));
+    // The same context the generation screen had: this visit's catalog
+    // actives, and the timeframes and dates the generated draft carried
+    // (they passed that screen), so an edit that keeps them is no finding.
+    const screenOptions = {
+      activeIngredients,
+      allowedPhrases: groundedTimeframePhrases([base?.body || '']),
+      allowedDates: draftDatePhrases(base?.body || ''),
+    };
+    const findings = [];
+    if (submitted.violations.length) {
+      findings.push({ reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: submitted.violations.join(', ') });
+    }
+    for (const entry of reportSentences(submitted.sections)) {
+      if (unchanged.has(sectionSentenceKey(entry))) continue;
+      const titled = `${SECTION_SCREEN_TITLES[entry.key] || SECTION_SCREEN_TITLES.whatWeFound}\n${entry.sentence}`;
+      const reason = writerRulesRejection(titled, screenOptions);
+      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence: entry.sentence });
+    }
+    if (!findings.length) return null;
+    return reportRulesReviewPayload(findings);
+  } catch {
+    return null;
+  }
+}
+
+function reportRulesReviewPayload(findings) {
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code, so the plain-words list
+      // rides in the error string; the structured list stays for tests.
+      error: findings.map((finding) => (finding.sentence ? `${finding.label}: "${finding.sentence}"` : finding.label)).join('\n'),
+      code: 'report_rules_review',
+      findings,
+      confirmable: true,
+    },
+  };
+}
+
 // Completion invoice-candidate lookups + reconciliation live in
 // services/completion-invoice-candidate.js (shared with the card-expiry
 // exemption so both read the same rows through the same rules).
@@ -2133,8 +2234,11 @@ function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
   reportToken,
+  // The fixed re-service text is only a pointer to the report, so it needs a
+  // real report token on any template version (never the portal home link).
+  reserviceFixedRecap = false,
 }) {
-  if (!serviceReportV1Delivery) return false;
+  if (!serviceReportV1Delivery && !reserviceFixedRecap) return false;
   if (typedDeliveryMode === 'disabled') return false;
   return !reportToken;
 }
@@ -2461,6 +2565,17 @@ function shouldAutoInvoiceCompletion({
  * Returns an HTTP-independent { status, body } result; unexpected failures throw.
  * actor comes from authenticated staff middleware, never from the submitted body.
  */
+// An incomplete or customer-declined closeout of a street-level hold settles it exactly like cancel / skip
+// (owner ruling): the review card closes with a note, the address is NOT approved (no field stamp, no
+// office-confirm activation, no inspection credit). No-op (null) for every other visit; false when the
+// settlement FAILED, so the caller keeps the closeout resumable (503) and a retry settles it.
+async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
+  if (svc?.source_action !== 'voice_agent' || svc.customer_confirmed === true) return null;
+  return require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
+    note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
+  });
+}
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -2505,7 +2620,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       thatchMeasurement,
       soilPh,
       soilMoisture,
-      sendCompletionSms,
+      sendCompletionSms: sendCompletionSmsRequested,
+      // Fast Complete's fixed re-service text (GATE_FAST_COMPLETE_RECAP): the
+      // sheet names the mode, the server builds the text — see
+      // services/reservice-fixed-recap.js. Honored only below, once the live
+      // completion profile and both dark gates are known.
+      customerRecapMode,
       requestReview,
       reviewTiming,
       reviewScheduledFor,
@@ -2565,6 +2685,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
+      reportDraftBase = null, // the installed generated draft the notes were edited from
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -2702,6 +2824,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? typedPhotoSummary.trim().slice(0, 600)
       : '';
     const isIncompleteVisit = visitOutcome === 'incomplete';
+    // A closeout that did not reach the property's work (incomplete, declined) never confirms its address.
+    const addressConfirmingOutcome = visitOutcome !== 'incomplete' && visitOutcome !== 'customer_declined';
     // A visit the tech never performed at all (incomplete, customer
     // declined) discards its station payload entirely — the post-commit
     // sync below skips it, so the pre-commit station preflights (cap,
@@ -2866,7 +2990,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.property_type',
+        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -3072,6 +3196,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
         code: 'completion_profile_lookup_failed',
       } });
     }
+    // Fast Complete's fixed re-service text. Asked for by the sheet, honored
+    // only while both dark gates are on and the visit is (still) a pest
+    // re-service. A request that is NOT honored sends no completion text at
+    // all — never the templated one — so a stale sheet cannot cause a second
+    // kind of text; gate off is byte-identical to today.
+    const ReserviceFixedRecap = require('./reservice-fixed-recap');
+    const reserviceFixedRecapRequested = customerRecapMode === ReserviceFixedRecap.MODE;
+    const reserviceFixedRecap = ReserviceFixedRecap.reserviceFixedRecapHonored({
+      requestedMode: customerRecapMode,
+      fastCompleteGate: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
+      recapGate: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
+      serviceKey: completionProfile?.serviceKey,
+      visitOutcome,
+    });
+    const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
+      ? false
+      : sendCompletionSmsRequested;
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
@@ -3191,6 +3332,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (reconcileBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
+      }
+    }
+    // Edit heads-up on the four-section report (see
+    // reportRulesReviewBlockPayload): same 409 shape, same committed-retry
+    // exemption as the reconciliation prompt just above.
+    {
+      // This visit's catalog actives, as the generation screen reads them
+      // (fail-soft: the common list still applies inside the screen).
+      const reviewProductIds = (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
+      const reviewActives = reportRulesConfirmed || !reviewProductIds.length
+        ? []
+        : (await failSoftRead(db, (k) => k('products_catalog').whereIn('id', reviewProductIds).select('active_ingredient'), []))
+          .map((row) => row?.active_ingredient).filter(Boolean);
+      const rulesBlock = reportRulesReviewBlockPayload({
+        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
+      });
+      if (rulesBlock
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
@@ -5108,6 +5268,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
         ? resumedStructuredNotes.customerRequestedReview
         : null;
       durableCompletionCommitted = true;
+      // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+      // its address — released only now that the completion is durably committed (a rejected
+      // completion never approves the address) and before any customer delivery below, so the
+      // recap is no longer a held message. A no-op for every other visit; best-effort.
+      const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+      // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+      // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+      if (holdRelease === false) {
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+        return ({ status: 503, body: {
+          error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+          code: 'street_level_hold_release_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+        } });
+      }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -5251,6 +5426,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // The body came from the four-section report (writer rules): the
+        // frozen cards carrying it are stamped so a later kill switch hides
+        // them (report-data).
+        let technicianReportFourSection = false;
         // Request-context rejections (trade names from THIS visit's
         // products, companion contradictions) must survive to the RENDER
         // path: untyped completions have no governing snapshot, so
@@ -5264,6 +5443,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          technicianReportFourSection = Boolean(technicianReport?.sections);
           // The generate endpoint screens trade names per-request, but a
           // post-generation inline edit reaches completion with only the
           // static banned-word checks — rerun the visit-specific product
@@ -5820,6 +6000,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             });
           const structuredNotes = {
             ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
+            // Frozen with the record itself, so no reader (recap-delivery's
+            // video-recap refusal) can ever see this visit's record without
+            // the fixed-text marker: the record and the marker commit together.
+            ...(reserviceFixedRecap ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook
@@ -6388,6 +6572,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (companionActivity) companionActivityInserts.push(companionActivity);
             }
             if (companionSnapshots.length) serviceData.companionReportSnapshots = companionSnapshots;
+          }
+          if (technicianReportFourSection) {
+            for (const snapshot of [serviceData.typedReportSnapshot, ...(serviceData.companionReportSnapshots || [])]) {
+              if (snapshot?.todaysResult?.bodySource === 'technician_report') snapshot.todaysResult.bodyFormat = 'four_section';
+            }
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')
@@ -7335,6 +7524,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
+        // Owner ruling 2026-10-01: completing a street-level hold's visit AT THE PROPERTY confirms its
+        // address. The durable field stamp commits with the 'completed' status (before any post-commit
+        // activator runs), is the evidence the lazy activation requires, and keeps the card funnel off
+        // (the technician collects in person). An incomplete or declined closeout confirms nothing.
+        if (addressConfirmingOutcome && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true
+          && await require('./street-level-hold').isStreetLevelHoldVisit(svc.id, trx)) {
+          scheduledServiceUpdate.field_confirmed_at = svc.field_confirmed_at || new Date();
+        }
         // The closeout stamp follows the same program-attribution predicate
         // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
         // keeping a legacy tier is a WaveGuard closeout for the completion
@@ -7387,6 +7584,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           fromStatus,
           toStatus: 'completed',
           transitionedBy: completionInput.actor.technicianId,
+          holdCompletionOutcome: addressConfirmingOutcome ? 'performed' : String(visitOutcome),
           trx,
         });
 
@@ -7467,6 +7665,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
+        // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as confirming
+        // its address — released only now that the completion is durably committed (a rejected
+        // completion never approves the address) and before any customer delivery below, so the
+        // recap is no longer a held message. A no-op for every other visit; best-effort.
+        const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
+        // A hold that could NOT be released leaves the recap a held message: keep the saved completion
+        // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
+        if (holdRelease === false) {
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, new Error('street_level_hold_release_failed'));
+          return ({ status: 503, body: {
+            error: 'The visit is saved, but its address hold could not be released yet — the closeout is NOT finalized. Retry the closeout.',
+            code: 'street_level_hold_release_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          } });
+        }
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
       // was allowed through dissolves only now that the completion
@@ -9363,6 +9576,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}. The earlier manual-billing instruction for refunded invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} no longer applies; do NOT bill or collect again.`),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: `Invoice ${liveBesideLabel} on this visit is ${liveBesideNow.status}`, keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ liveBesideInvoiceId: liveBesideNow.id, resolvedCovered: true })]),
               });
             }
@@ -9530,7 +9746,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`),
-                read_at: trx.fn.now(),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'An annual-prepay term covers the setup fee', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
               });
             }
@@ -9639,8 +9857,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`),
-                // No action left — never a false unread badge (Codex PR r9 P2).
-                read_at: trx.fn.now(),
+                // No action left: closed done, never an open card (Codex PR r9 P2).
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'Live invoices cover the setup fee and the application charge', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }
@@ -9705,7 +9925,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             await trx('notifications').where({ id: already.id }).update({
               ...require('../services/notification-service').adminBodyColumns('billing', alertBody + crossVisitNote),
               // Newly actionable again — surface in the unread badge.
-              read_at: null,
+              read_at: null, done_at: null, done_by: null, resolution: null,
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: false, parkedVisitIds, expectedSetupFeeCents, expectedApplicationCentsByVisit, ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}) })]),
             });
             return true;
@@ -10074,7 +10294,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // operator-reachable "today's visit" text days after the fact — so this
     // rail is gated like the other customer-contact rails. Recap delivery also
     // refuses the structured_notes.backfill marker as defense in depth.
-    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    // The fixed re-service text is the visit's ONE customer text: no video
+    // recap is queued behind it (an approved recap would text a second,
+    // differently worded completion message). recap-delivery.js also refuses
+    // the completionSmsRecapMode marker, for a row queued before completion.
+    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id && !reserviceFixedRecap) {
       if (isBackfillCompletion) {
         logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
       } else {
@@ -11617,7 +11841,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid' && invoice.status !== 'prepaid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !packetEffects && !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview
-      && !suppressTypedCustomerComms;
+      && !suppressTypedCustomerComms
+      // The fixed re-service text is the ONE text: no review ask rides it or
+      // follows it (scope: "leave it off on re-services").
+      && !reserviceFixedRecap;
     // NOTE: includePayLink (the "report only, no pay link" operator choice) is
     // deliberately NOT folded in here. suppressCompletionInvoiceLink also drives
     // invoicePaymentActionRequired (the mobile in-person payment sheet), so
@@ -12533,7 +12760,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (handOverExit) return handOverExit;
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
-      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken, reserviceFixedRecap })) {
       // Report-v1 visit with no public report token (mint failed above): the
       // report-lane template would render "your report is ready" around
       // reportUrl, which is the portal HOME on this path (delivery.js only
@@ -12747,7 +12974,52 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && serviceReportV1SmsContext.smsType === 'service_report_v1_with_invoice'
           && require('../config/feature-gates').isEnabled('reportV1InvoiceSms')
           && await isOptInSmsTemplateEnabled('service_report_v1_with_invoice');
-        if (completionUsesReportLane({
+        // Fast Complete's fixed re-service text replaces the whole template
+        // chain below: exactly one text, built from the saved facts.
+        let reserviceFixedBody = null;
+        if (reserviceFixedRecap) {
+          let reserviceFixedFacts;
+          try {
+            // Shortened here (the same tracked report code the report lane
+            // mints), so the body is final before the send: GATE_SMS_LINK_WRAP
+            // leaves an /l/ link alone, and a send-window replay goes out
+            // with exactly the text stored and shown now.
+            const fixedReportLink = reportSmsUrl && reportSmsUrl !== reportUrl
+              ? reportSmsUrl
+              : await shortenOrPassthrough(reportUrl, {
+                kind: 'service_report',
+                entityType: 'service_records',
+                entityId: record.id,
+                customerId: svc.customer_id,
+                codePrefix: 'report',
+              });
+            reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
+              svc,
+              recordId: record.id,
+              reportUrl: fixedReportLink,
+            });
+          } catch (factsErr) {
+            // A read outage before any send: nothing went out and no send
+            // fence is written yet, so the closeout stays open and the tech's
+            // retry composes and sends the text (finalizing here would replay
+            // a stored result with no text, for good).
+            logger.warn(`[dispatch] fixed re-service text facts read failed for ${record.id}; closeout left open for retry: ${factsErr.message}`);
+            return exitForCompletionSmsResume(factsErr);
+          }
+          reserviceFixedBody = ReserviceFixedRecap.buildReserviceFixedRecap(reserviceFixedFacts);
+          if (!reserviceFixedBody) throw new Error('Re-service completion text has no report link');
+        }
+        if (reserviceFixedBody) {
+          // Message type stays the completion family's (channel routing and
+          // the customer's completion-text preference are the same); the
+          // template key and notes name the fixed text.
+          sentSmsType = 'service_complete';
+          // The body the provider is handed (scheme stripped, GSM punctuation
+          // normalized, as sendCustomerMessage does), so what is audited, stored
+          // and shown to the tech is what the customer gets.
+          sentSmsBody = ReserviceFixedRecap.providerBody(reserviceFixedBody);
+          completionSmsWasTruncated = false;
+        } else if (completionUsesReportLane({
           reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
           invoiceCreated,
           usePaidCompletionTemplate,
@@ -12956,6 +13228,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // resume still cannot replay a message that may have gone out.
             completionSmsDeliveryUnverifiedAt: new Date().toISOString(),
             completionSmsType: sentSmsType,
+            ...(reserviceFixedBody ? { completionSmsRecapMode: ReserviceFixedRecap.MODE } : {}),
             completionSmsBody: sentSmsBody,
             completionSmsTruncated: completionSmsWasTruncated,
             completionSmsAttemptedAt: new Date().toISOString(),
@@ -12967,6 +13240,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
+          // The fixed re-service text is not a DB template: name it, so the
+          // sms_log row and the office read what it really is.
+          if (reserviceFixedBody) smsMetadata.templateKey = ReserviceFixedRecap.TEMPLATE_KEY;
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -13010,6 +13286,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             type: sentSmsType,
             channel: sentSmsChannel,
             reviewCarried: !bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl),
+            // The fixed text adopts the provider-handed body (link wrap) even
+            // when the send was accepted but its audit insert threw.
+            fixedRecap: !!reserviceFixedBody,
             // Block-scoped inside this try; the accepted-error catch reads it
             // from the snapshot for the invoice bookkeeping.
             invoiceLinkAllowed: allowCompletionInvoiceLink,
@@ -13058,6 +13337,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
             : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
+          // GATE_SMS_LINK_WRAP can swap the report link for a fresh /l/ short
+          // link inside sendCustomerMessage. The fixed text stores (and shows
+          // the tech) the body the provider was actually handed, or, for a
+          // send-window hold, the transformed body the queued row replays.
+          const fixedBodyFinal = smsResult.sent === true
+            || (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred === true);
+          if (reserviceFixedBody && fixedBodyFinal
+            && typeof smsResult.sentBody === 'string' && smsResult.sentBody) {
+            sentSmsBody = smsResult.sentBody;
+            smsNotesDelta.completionSmsBody = sentSmsBody;
+            sendingNotes.completionSmsBody = sentSmsBody;
+            completionSmsAcceptedSnapshot.body = sentSmsBody;
+          }
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -13116,7 +13408,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   replay_purpose: 'service_completion',
                   // The frozen body above came from this template row; the
                   // morning replay records it on the sent sms_log row.
-                  ...(sentSmsType ? { template_key: sentSmsType } : {}),
+                  ...(reserviceFixedBody
+                    ? { template_key: ReserviceFixedRecap.TEMPLATE_KEY }
+                    : (sentSmsType ? { template_key: sentSmsType } : {})),
                   notificationEventKey: `scheduled-service:${svc.id}:completed`,
                   useCustomerChannel: true,
                   service_record_id: record.id,
@@ -13342,7 +13636,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.error(`[dispatch] Completion SMS delivery unverified for service_record ${record.id} — send claim held for review: ${e.message}`);
         } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
+          if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
+          // The normal result never arrived to switch the snapshot to push:
+          // the accepted outcome itself names the provider.
+          if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
           const acceptedDelta = {
+            ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',
             completionSmsDeliveryUnverifiedAt: null,
             ...(snap.body ? { sentSmsBody: snap.body } : {}),
@@ -13874,6 +14173,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       completionSmsError: finalRecordNotes.completionSmsError || null,
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
+      // Fast Complete's fixed re-service text: what the tech sees after
+      // Complete — the exact text, or why none went. Only when the sheet
+      // asked, so every other response is unchanged.
+      ...(reserviceFixedRecapRequested ? {
+        customerText: ReserviceFixedRecap.customerTextOutcome({
+          honored: reserviceFixedRecap,
+          status: completionSmsStatus,
+          body: finalRecordNotes.completionSmsBody || finalRecordNotes.sentSmsBody || null,
+          channel: finalRecordNotes.sentSmsChannel || null,
+          error: finalRecordNotes.completionSmsError || null,
+          deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,
+        }),
+      } : {}),
       completionPhotoUpload: completionPhotoUploadResult,
       completionAdvisories: completionAdvisoryMessages({
         blackout: waveguardBlackoutApproval,
@@ -13938,6 +14250,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
 module.exports = {
   completeScheduledService,
+  actualProductBlackoutBlocks,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
@@ -13973,6 +14286,7 @@ module.exports = {
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,
+  reportRulesReviewBlockPayload,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   reportV1InvoiceBodyCarriesPayLink,
