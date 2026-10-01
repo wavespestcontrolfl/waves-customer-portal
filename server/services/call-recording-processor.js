@@ -1855,6 +1855,19 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
     },
   };
 }
+// True when the customer row's address no longer matches the on-file snapshot the
+// street-level proof was computed against (house line, unit, city, ZIP, state).
+// A missing snapshot or row counts as changed (fail closed).
+function streetLevelProofAddressChanged(snapshot, row) {
+  if (!snapshot || !row) return true;
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const stateOf = (v) => normalizeState(String(v || '').trim()) || SERVICE_STATE;
+  return norm(snapshot.line1) !== norm(row.address_line1)
+    || norm(snapshot.line2) !== norm(row.address_line2)
+    || norm(snapshot.city) !== norm(row.city)
+    || zip5Of(snapshot.zip) !== zip5Of(row.zip)
+    || stateOf(snapshot.state) !== stateOf(row.state);
+}
 // Rings the one "confirm the address" admin bell for a held visit. Reads the visit
 // LIVE right before ringing: staff may have confirmed (or cancelled) it since the
 // booking committed, and a bell for a confirmed visit is noise (a lookup blip
@@ -16921,6 +16934,13 @@ const CallRecordingProcessor = {
                     geoErr.fencedGeoVeto = fencedGeoVeto;
                     throw geoErr;
                   }
+                  // The street-level trust was proved against the on-file address as it stood
+                  // BEFORE this fence; if the customer row's address moved while we waited
+                  // (an office edit, a merge-undo), that proof no longer vouches for it.
+                  // Held for office review (the schedErr path), nothing booked.
+                  if (v2StreetLevelHold && streetLevelProofAddressChanged(v2OnFileAddressProofSnapshot, freshCallCustomer)) {
+                    throw new Error('on-file address changed while waiting on the comms fence — street-level address proof is stale; booking held for office review');
+                  }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
                   // call_log the undo repointed while we waited means
@@ -21937,6 +21957,7 @@ CallRecordingProcessor._test = {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
+  streetLevelProofAddressChanged,
   ringStreetLevelHoldBell,
   summarizePriorCall,
   providerTimeoutSignal,

@@ -437,7 +437,7 @@ describe('voice-agent bookings share the office-review activation path', () => {
     const fn = (table) => {
       const q = {};
       ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
-        'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+        'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' && rows ? rows : []));
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return { ...row };

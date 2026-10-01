@@ -2511,6 +2511,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // technician token confirming ANOTHER technician's office-review visit
     // would stamp it field-confirmed and skip the card funnel.
     const explicitFieldConfirm = isOfficeReviewConfirm && req.techRole === 'technician';
+    // A street-level address hold is released ONLY by the office: a technician token may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    if (req.techRole === 'technician' && (isOfficeReviewConfirm || takeoverCandidate)
+      && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
     // Hoisted: the post-commit activation below must key skipCardRequest on
     // the SAME row-locked verification — a technician token alone is not
     // proof, and passing skipCardRequest for an unowned confirm permanently

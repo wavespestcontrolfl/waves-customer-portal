@@ -43,6 +43,7 @@ const trackTransitions = require('../services/track-transitions');
 const { transitionJobStatus } = require('../services/job-status');
 const { isPendingOutboundReviewBooking } = require('../services/call-booking-source-actions');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+const { isStreetLevelHoldVisit } = require('../services/street-level-hold');
 
 // ── Dispatch-implies-confirm phases (owner decision 2026-08-11) ──
 //
@@ -102,6 +103,14 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
     if (!isPendingOutboundReviewBooking(fresh)) {
       const e = new Error('Review state changed');
       e.code = 'REVIEW_STATE_CHANGED';
+      throw e;
+    }    // A street-level address hold is NOT confirmable by a field tap: Google matched only the
+    // street, so the office must confirm the address with the customer first. Refused (not
+    // allowed-without-confirming): nothing is confirmed, no review card is resolved, and no
+    // tracking text goes to an unverified address. Fails closed on a lookup error.
+    if (await isStreetLevelHoldVisit(svc.id, trx)) {
+      const e = new Error('Street-level address hold');
+      e.code = 'STREET_LEVEL_HOLD';
       throw e;
     }
     // ⭐ NO STAMP IN HERE. `customer_confirmed` is the completion RECEIPT for
@@ -250,6 +259,13 @@ function respondToTransitionConflict(res, err, fromStatus) {
     res.status(409).json({
       error: 'This job has been rescheduled to a future date. Refresh your route.',
       code: 'future_scheduled_date',
+    });
+    return true;
+  }
+  if (err && err.code === 'STREET_LEVEL_HOLD') {
+    res.status(409).json({
+      error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+      code: 'street_level_hold',
     });
     return true;
   }
@@ -1681,3 +1697,4 @@ router.post('/:id/dictation', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.__private = { autoConfirmOutboundReviewBooking, respondToTransitionConflict };

@@ -20784,6 +20784,15 @@ router.put('/:id/status', async (req, res, next) => {
       && svc.customer_confirmed !== true
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
+    // A street-level address hold is released ONLY by the office: a technician may neither
+    // confirm it nor run it day-of (the office must confirm the address with the customer first).
+    if (isTechnicianRequest(req) && (isOfficeReviewConfirm || isFieldLifecycleTakeover)
+      && await require('../services/street-level-hold').isStreetLevelHoldVisit(svc.id)) {
+      return res.status(409).json({
+        error: 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.',
+        code: 'street_level_hold',
+      });
+    }
 
     // The transition's committed payload — the voice-confirm card below
     // must name the holder as WRITTEN, not as read.

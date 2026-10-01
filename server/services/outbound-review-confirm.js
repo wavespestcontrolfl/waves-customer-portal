@@ -19,7 +19,7 @@
  */
 
 const logger = require('./logger');
-const { findStreetLevelHoldCard } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit } = require('./street-level-hold');
 const db = require('../models/db');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -797,13 +797,20 @@ async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
  */
 async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation', opts = {}) {
   try {
-    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
     const row = await db('scheduled_services')
       .where({ id: serviceId })
       .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
         'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
         'is_callback', 'estimated_price');
     if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
+      return false;
+    }    // A street-level address hold is released ONLY by the office's explicit confirm: no writer
+    // that merely moves the visit (SmartRebooker, admin-schedule update-details, the bulk
+    // paths, the sweep) may activate it. A hold whose status the office already flipped to
+    // 'confirmed' (its hook failed before the stamp) stays on the retry rail. Fails closed.
+    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && row.status !== 'confirmed' && await isStreetLevelHoldVisit(serviceId, db)) {
+      logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
       return false;
     }
     // Rejected rows are not activated — a cancelled/skipped legacy review

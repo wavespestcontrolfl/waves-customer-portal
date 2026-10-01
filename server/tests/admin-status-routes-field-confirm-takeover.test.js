@@ -34,6 +34,8 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
 
+// The street-level address-hold lookup (a technician may not confirm or run a hold): none of these fixtures is one.
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
   const actual = jest.requireActual('../middleware/admin-auth');
