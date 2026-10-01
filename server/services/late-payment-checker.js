@@ -147,6 +147,18 @@ async function markEmailAtAcceptedTime(ContactLedger, ledger, result) {
   return ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
 }
 
+// Settle a reserved Email leg that did not reach the customer. A dispute hold that landed after the
+// preflight (COLLECTION_HOLD_DEFER from the email authority) is a WAIT: release the reservation, no
+// failed row. Any other definite non-send stamps send_failed as before; an uncertain outcome keeps
+// the reservation held.
+async function settleUnsentEmailReservation(ContactLedger, ledger, result, stamp) {
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    return ContactLedger.releaseHeldReservation(ledger);
+  }
+  if (result?.deliveryOutcome === 'uncertain') return false;
+  return ContactLedger.markSendFailed(ledger, stamp);
+}
+
 async function completePendingEmail(row, channel = 'sms+email') {
   if (!row?.id) return false;
   try {
@@ -182,6 +194,13 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = '
     // Classify the same way as a returned outcome, including a bell that
     // committed before a later audit/provider failure.
     result = { ...result, retryable: true };
+  }
+  // A dispute hold that landed after the policy consult refused this leg at the send boundary: a WAIT,
+  // not a failed send. Release the reservation (no failed row) and report a retryable deferral so the
+  // run leaves the tier open - the reminder goes out on the first run after the release.
+  if (require('./collections/collection-hold').isHoldSuppression(result)) {
+    await ContactLedger.releaseHeldReservation(ledger);
+    return { ...result, sent: false, retryable: true, deferred: true };
   }
   // A legacy blocked result with no outcome is a definite non-send.
   const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
@@ -359,9 +378,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       invoice: inv, customer, touchKey: `${tierDays}d`, enforceBillingPreference: true,
     }).catch((e) => ({ ok: false, error: e.message }));
     if (result?.ok !== true) {
-      if (result?.deliveryOutcome !== 'uncertain') {
-        await ContactLedger.markSendFailed(emailLedger, { error: result?.reason || 'sidecar_failed' });
-      }
+      await settleUnsentEmailReservation(ContactLedger, emailLedger, result, { error: result?.reason || 'sidecar_failed' });
       if (isTerminalEmailRefusal(result)
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger.id }, 'email_terminal_refusal')) {
         await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
@@ -433,9 +450,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       }).catch((e) => ({ ok: false, error: e.message }));
       emailDelivered = emailResult?.ok === true;
       if (emailDelivered) await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
-      else if (emailResult?.deliveryOutcome !== 'uncertain') {
-        await ContactLedger.markSendFailed(emailLedger, { error: emailResult?.reason || 'sidecar_failed' });
-      }
+      else await settleUnsentEmailReservation(ContactLedger, emailLedger, emailResult, { error: emailResult?.reason || 'sidecar_failed' });
     };
     if (explicitEmailSelected) await attemptEmail();
 
@@ -822,8 +837,8 @@ const LatePaymentService = {
           }
           if (emailResult?.ok === true) {
             await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
-          } else if (emailResult?.deliveryOutcome !== 'uncertain') {
-            await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+          } else {
+            await settleUnsentEmailReservation(ContactLedger, emailLedger, emailResult, { reason: emailResult?.reason || 'email_not_sent' });
           }
           return emailResult;
         };

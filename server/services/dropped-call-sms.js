@@ -16,9 +16,12 @@
  *   send side (this module), in order:
  *   1. GATE_DROPPED_CALL_SMS — customer-facing auto-send, fails CLOSED in
  *      every environment until the owner enables it.
- *   2. Quiet hours — sends only 8am–8pm ET; outside the window the one-shot
- *      is NOT consumed (the triage card still tells the office to call
- *      back).
+ *   2. Quiet hours — INBOUND drops text at any hour (owner ruling
+ *      2026-09-30: a reply to the customer's own contact is never held to
+ *      8 AM; the send carries customerInitiated). OUTBOUND return /
+ *      auto-bridge legs are our contact and keep the 8am–8pm fence; outside
+ *      the window the one-shot is NOT consumed (the triage card still tells
+ *      the office to call back).
  *   3. One text per phone number EVER — DB-atomic claim on
  *      dropped_call_sms_claims (phone PRIMARY KEY, INSERT ... ON CONFLICT
  *      DO NOTHING), belt-and-suspenders sms_log history check, plus an
@@ -39,9 +42,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isWithinSendWindowET } = require('./messaging/send-window');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
-const { isWithinSendWindowET } = require('./messaging/send-window');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
@@ -217,6 +220,10 @@ function callbackClause(dialedLine) {
 // malformed/unregistered/toll-free candidate (or an inbound call, where
 // this is never called) returns null: the caller then omits the clause /
 // skips the fromNumber override rather than expose or invent a number.
+function isOutboundLeg(call = {}) {
+  return String(call?.direction || '').toLowerCase().startsWith('outbound');
+}
+
 function outboundWavesCallerId(call = {}) {
   let metadata = call?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
@@ -229,15 +236,6 @@ function outboundWavesCallerId(call = {}) {
     && !TWILIO_NUMBERS.isTechLine(candidate)
     && !TWILIO_NUMBERS.isStaffForwardNumber(candidate))
     ? candidate : null;
-}
-
-// Boundary source is the shared customer-SMS window module — this fence
-// predates GATE_SMS_SEND_WINDOW and stays live regardless of the gate (the
-// gate check lives in the canonical-path validator, not in the bounds), but
-// the 8/20 ET hours themselves must have exactly one owner so a future
-// hours change can't update one fence and leave the other stale.
-function withinSendWindowET(now = new Date()) {
-  return isWithinSendWindowET(now);
 }
 
 async function stampStatus(leadId, status) {
@@ -340,11 +338,13 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
     return { sent: false, skipped: 'call_too_old' };
   }
 
-  // Quiet hours BEFORE any claim: an evening drop still gets its triage card
-  // ("call them back"); the one-shot stays available in case a later
-  // scheduler rail wants to pick it up.
-  if (!withinSendWindowET()) {
-    logger.info(`[dropped-call-sms] Outside 8am-8pm ET window — text skipped for lead ${leadId}`);
+  // Quiet hours for OUTBOUND legs only, BEFORE any claim: an evening
+  // outbound drop still gets its triage card ("call them back") and the
+  // one-shot stays available. Inbound drops are the caller reaching us
+  // (owner ruling 2026-09-30) and go straight through — sendClaimed marks
+  // them customerInitiated so the shared validator lets them out at night.
+  if (isOutboundLeg(call) && !isWithinSendWindowET()) {
+    logger.info(`[dropped-call-sms] Outbound-leg drop outside 8am-8pm ET window — text skipped for lead ${leadId}`);
     return { sent: false, skipped: 'quiet_hours' };
   }
 
@@ -490,7 +490,7 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
   // bridge dialed first) — outboundWavesCallerId resolves the real managed
   // line instead. Inbound is unaffected (call.to_phone is the dialed office
   // line, exactly as before).
-  const isOutbound = String(call?.direction || '').toLowerCase().startsWith('outbound');
+  const isOutbound = isOutboundLeg(call);
   const wavesCallerId = isOutbound ? outboundWavesCallerId(call) : call.to_phone;
 
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
@@ -535,6 +535,10 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'dropped_call_text_back' },
     entryPoint: 'dropped_call_sms',
+    // Inbound only (owner ruling 2026-09-30): the caller just dialed us, so
+    // the reply is theirs to receive at any hour. Outbound legs never carry
+    // it — the pre-claim fence above already held them at night.
+    ...(isOutbound ? {} : { customerInitiated: true }),
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
@@ -877,5 +881,5 @@ module.exports = {
   detectDroppedMidIntake,
   eligibleNewProspect,
   MIN_CALL_SECONDS,
-  _private: { callbackClause, outboundWavesCallerId, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
+  _private: { callbackClause, outboundWavesCallerId, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
 };

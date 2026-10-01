@@ -32,6 +32,15 @@
  * hold committing in the milliseconds after the check races the charge
  * exactly like a dispute call landing just after the card was charged.
  *
+ * MESSAGING is the wider rule (Codex #5424 r13). A pay link / dunning touch waits on ANY active
+ * collection_hold row - a dispute OR a wrong-number / wrong-party fallback, which is an
+ * all-channel outreach block (ContactPolicy FLAG_BLOCKED_CHANNELS) that must survive a dispute's
+ * release. ONE predicate answers it: messagingHeldByCollectionHold (SQL twins:
+ * activeMessagingHolds, collectionHoldExistsSql). The two trusted exemptions (an operator send, a
+ * link the customer asked for) pass `ignoreDisputeHold`, which skips ONLY a plain dispute row,
+ * never a fallback row (nor a dispute row that still carries its embedded fallback trailer) -
+ * the same rule ContactPolicy applies. Charging keeps the dispute-only readers above.
+ *
  * Refusal codes (both thrown BEFORE any Stripe call, both RETRYABLE):
  *   COLLECTION_HOLD_ACTIVE        a dispute hold is active
  *   COLLECTION_HOLD_CHECK_FAILED  the lookup itself failed (fail closed)
@@ -104,10 +113,57 @@ function disputeHoldExistsSql(builder, outerCustomerColumn) {
     .whereRaw('f.reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`]);
 }
 
+// MESSAGING readers: ANY active collection_hold row (dispute or fallback). `ignoreDisputeHold`
+// (a trusted operator / customer exemption) skips a plain dispute row only: a fallback row, and a
+// dispute row that still carries its "[earlier hold: ...]" fallback trailer, keep blocking.
+// In-memory twin: rowBlocksMessaging.
+const EARLIER_HOLD_LIKE = `%${PRIOR_HOLD_OPEN}%${PRIOR_HOLD_CLOSE}`;
+function rowBlocksMessaging(reason, { ignoreDisputeHold = false } = {}) {
+  if (!ignoreDisputeHold) return true;
+  return !isDisputeHoldReason(reason) || Boolean(priorHoldReasonOf(reason));
+}
+function activeMessagingHolds(query, { ignoreDisputeHold = false, alias = null } = {}) {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  const scoped = query.where(col('flag'), HOLD_FLAG).whereNull(col('released_at'));
+  if (!ignoreDisputeHold) return scoped;
+  return scoped.where((w) => w
+    .whereRaw(`COALESCE(${col('reason')}, '') NOT ILIKE ?`, [`${DISPUTE_REASON_PREFIX}%`])
+    .orWhereRaw(`${col('reason')} LIKE ?`, [EARLIER_HOLD_LIKE]));
+}
+
+// The messaging twin of disputeHoldExistsSql: a correlated EXISTS body for the sender / dunning due
+// queries (`this` is the whereExists / whereNotExists builder). Any active hold row.
+function collectionHoldExistsSql(builder, outerCustomerColumn, { ignoreDisputeHold = false } = {}) {
+  return activeMessagingHolds(
+    builder.select(1).from('collections_flags as f').whereRaw('f.customer_id = ??', [outerCustomerColumn]),
+    { ignoreDisputeHold, alias: 'f' },
+  );
+}
+
 async function customerHasActiveCollectionHold(customerId, database = db) {
   if (!customerId) return false;
   const row = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('id');
   return !!row;
+}
+
+// MESSAGING: is ANY hold (dispute or fallback) active? `ignoreDisputeHold` is the trusted exemption.
+async function customerHasActiveMessagingHold(customerId, database = db, { ignoreDisputeHold = false } = {}) {
+  if (!customerId) return false;
+  const row = await activeMessagingHolds(database('collections_flags').where({ customer_id: customerId }), { ignoreDisputeHold }).first('id');
+  return !!row;
+}
+
+// Same answer, but a lookup failure throws COLLECTION_HOLD_CHECK_FAILED
+// (fail closed, retryable) - the messaging twin of customerHasActiveCollectionHoldChecked.
+async function customerHasActiveMessagingHoldChecked(customerId, database = db, opts = {}) {
+  try {
+    return await customerHasActiveMessagingHold(customerId, database, opts);
+  } catch (err) {
+    throw Object.assign(new Error(`Collection hold could not be verified (${err.message}). Review before sending.`), {
+      code: HOLD_CHECK_FAILED_CODE,
+      cause: err,
+    });
+  }
 }
 
 // Same answer, but a lookup failure throws COLLECTION_HOLD_CHECK_FAILED
@@ -130,6 +186,23 @@ async function assertNoCollectionHold(customerId, database = db) {
     throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {
       code: HOLD_ACTIVE_CODE,
     });
+  }
+}
+
+// Completion-time customer messages (the completion/report text, the decline
+// notice, a deferred completion replay) leave the pay link OUT while a dispute
+// hold stands: the customer was told on the call that all billing follow-up
+// is on hold. The report link and the rest of the message still send. Fail
+// closed - a lookup failure answers true (omit the link) rather than risk a
+// pay link reaching a disputing customer.
+async function shouldWithholdPayLink(customerId, database = db) {
+  if (!customerId) return false;
+  try {
+    // ANY active hold (dispute or fallback): the completion text is automated pay-link outreach.
+    return await customerHasActiveMessagingHold(customerId, database);
+  } catch (err) {
+    require('../logger').warn(`[collection-hold] pay-link hold lookup failed for customer ${customerId} - omitting the pay link: ${err.message}`);
+    return true;
   }
 }
 
@@ -188,6 +261,220 @@ async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAge
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Pay-link delivery under a dispute hold (owner ruling 2026-09-30).
+//
+// (a) While a customer has an ACTIVE dispute hold no pay link reaches them.
+// (b) When the hold ends, an invoice whose pay link was held back is sent at
+//     once through the normal invoice path and the Day 3-90 ladder starts.
+//
+// ONE chokepoint enforces (a): the scheduled-invoice SENDER
+// (InvoiceService.processScheduledSends). Right after it claims a due invoice
+// it asks messagingHeldByCollectionHold(); a held invoice is left `scheduled`,
+// pushed a tick out with NO attempt spent, and the claim released. That covers
+// an invoice queued before the hold was placed, and a lookup that failed (fail
+// closed, retried every tick - never a permanent park).
+//
+// (b) then needs no release hook at all: every withhold point simply QUEUES
+// the invoice onto that sender (queueHeldInvoiceForSender: draft -> scheduled,
+// due now). While the hold stands the sender defers it; the first tick after
+// the hold is released - by the admin route, the ops script, or any other
+// path, since the flag row is the only thing the sender reads - sends it.
+// ---------------------------------------------------------------------------
+
+// How far the sender pushes a held invoice: just under one */5 cron tick, so
+// the deferred row is due again at the very next tick (a full 5 minutes would
+// land a hair AFTER that tick and cost a whole extra tick). A release is
+// therefore sent within one tick.
+const HOLD_DEFER_MS = 4 * 60 * 1000;
+// How long a held, unresolved-Bill-To invoice (a packet or renewal-successor row) that the live fence
+// confirmed self-pay stays out of the scheduled sender's due query (invoices.hold_bill_to_checked_at):
+// the recheck interval at which a payer change is next picked up while the hold stands.
+const HOLD_BILL_TO_RECHECK_MS = 30 * 60 * 1000;
+
+// Lifecycle (payment.*) email templates whose body carries a pay / update-card link. ONE list
+// for the fresh-send guard (payment-lifecycle-email.js) and the provider-retry rail
+// (transactional-email-provider-retry.js), so a scheduled retry of a stored snapshot can never
+// reach a disputing customer through a path the fresh send refuses.
+// Category stamped on a payment.failed row that answers the customer's own payment attempt: the
+// retry rail keeps the customerInitiated exemption from it.
+const CUSTOMER_INITIATED_EMAIL_CATEGORY = 'customer_initiated';
+// Category stamped on a dunning email an OPERATOR sent on purpose (the office "send now" button):
+// a stored copy of it re-sent by the provider-retry rail keeps the operator exemption.
+const OPERATOR_INITIATED_EMAIL_CATEGORY = 'operator_initiated';
+const HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+// Machine-initiated dunning emails that carry a pay / update-card / billing link: the Day 3-90
+// invoice follow-up ladder, the customer-level combined steps, the late-payment reminders
+// (balance-reminder + late-payment-checker), the bank-verification re-nudge and the legacy previsit
+// balance email. They are exactly the sender-rendered billing emails (billing-email-no-replay.js,
+// one list, so a new dunning template cannot join one and miss the other). They go through the
+// billing email authority (billing-channel-email-authority.js), which re-reads the hold at the
+// provider boundary for these keys. (The routed billing.notice email leg is gated one step
+// earlier, at the customer-message boundary, by HOLD_GATED_DUNNING_ENTRY_POINTS.)
+const HOLD_GATED_DUNNING_EMAIL_TEMPLATES = require('../billing-email-no-replay').SENDER_RENDERED_TEMPLATES;
+const HOLD_GATED_EMAIL_TEMPLATES = new Set([
+  ...HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES, ...HOLD_GATED_DUNNING_EMAIL_TEMPLATES,
+]);
+
+// Customer-message entry points (sendCustomerMessage `entryPoint`) of the machine-initiated dunning
+// senders. Their `purpose` is the shared 'payment_link' / 'billing', which non-dunning senders use
+// too (the invoice sender, an operator's project payment link, price-change notices), so the
+// boundary keys on the entry point for these. A new dunning sender must be added here (the sweep
+// test fails until it is classified).
+const HOLD_GATED_DUNNING_ENTRY_POINTS = new Set([
+  'invoice_followup_sequence',
+  'invoice_followup_customer', // the customer-level combined schedule (customer-dunning/send.js)
+  'late_payment_checker',
+  'late_payment_checker_microdeposit',
+  'balance_reminder_workflow',
+  'balance_reminder_late_payment_check',
+  'previsit_balance_reminder',
+]);
+
+// The two trusted exemptions a caller can assert: a deliberate operator send, and a send the
+// customer asked for themselves. Everything else waits out the hold.
+function holdExemptionApplies(holdExempt) {
+  return holdExempt === 'operator' || holdExempt === 'customer';
+}
+
+// A send result the hold refused BEFORE the provider. Every hold refusal anywhere in messaging is ONE
+// outcome (holdDeferOutcome: COLLECTION_HOLD_DEFER, retryable + deferred + nextAllowedAt; Codex
+// #5424 r14) - the customer-message boundary, the email authority, the lifecycle emails, the sender.
+// It is a WAIT: the owed touch stays due and goes out after the release; the caller must not stamp a
+// failure, spend an attempt or pause anything for it. (The retired COLLECTION_HOLD_SUPPRESSED code is
+// still read here so a stale result shape is never mistaken for a failure; nothing emits it.)
+function isHoldSuppression(result) {
+  const code = result?.code || result?.reason;
+  return code === 'COLLECTION_HOLD_SUPPRESSED' || code === HOLD_DEFER_CODE || result?.holdDefer === true;
+}
+
+// THE messaging-hold predicate (Codex #5424 r13): every automated pay-link / dunning leg asks it.
+// { held: true, reason: 'hold' | 'lookup_failed', error? } | { held: false }.
+// Held by ANY active collection_hold (dispute or wrong-number / wrong-party fallback);
+// `ignoreDisputeHold` is the trusted operator / customer exemption (see the header): a plain dispute
+// row is skipped, a fallback never is. Fail closed: a lookup that cannot be answered holds the send
+// (retried next tick). On a caller's transaction the read runs in a SAVEPOINT, so a failed lookup
+// cannot leave that (lock-holding) transaction aborted (25P02).
+async function messagingHeldByCollectionHold(customerId, database = db, { ignoreDisputeHold = false } = {}) {
+  if (!customerId) return { held: false };
+  try {
+    const held = database.isTransaction && typeof database.transaction === 'function'
+      ? await database.transaction((sp) => customerHasActiveMessagingHold(customerId, sp, { ignoreDisputeHold }))
+      : await customerHasActiveMessagingHold(customerId, database, { ignoreDisputeHold });
+    return held ? { held: true, reason: 'hold' } : { held: false };
+  } catch (err) {
+    return { held: true, reason: 'lookup_failed', error: err };
+  }
+}
+
+// The ONE schedulable-hold answer every delayed pay-link leg returns while a
+// dispute hold stands (or cannot be verified): retryable, deferred, one cron
+// tick out. Its code is in billing-channel-routing's REPLAY_HOLD_CODES and the
+// scheduled-SMS rail refunds the claimed attempt for it, so a hold that lasts
+// days never walks a queued leg to its attempt cap: the leg waits, then sends
+// after the release.
+const HOLD_DEFER_CODE = 'COLLECTION_HOLD_DEFER';
+function holdDeferOutcome(held = { reason: 'hold' }) {
+  return {
+    code: HOLD_DEFER_CODE,
+    reason: held.reason === 'lookup_failed'
+      ? 'The collections dispute-hold lookup failed; delivery deferred'
+      : 'Customer has an active collections dispute hold; delivery deferred until it is released',
+    retryable: true,
+    deferred: true,
+    deliveryOutcome: 'not_sent',
+    nextAllowedAt: new Date(Date.now() + HOLD_DEFER_MS).toISOString(),
+  };
+}
+
+// Queue a self-pay draft invoice onto the scheduled-invoice sender - the same
+// idiom the packet closeout uses (status 'scheduled', scheduled_send_at now).
+// ONE guarded UPDATE moves a still-draft, unpaid, unsent, self-pay invoice with
+// no other send stamp. Returns { queued: true } when THIS call moved it.
+//
+// A zero-row result is success ONLY when the invoice is VERIFIABLY handled: it
+// is already scheduled (the sender owns it), already delivered, paid, void,
+// refunded or otherwise finished, or owned by a payer / another send lane's own
+// stamp. Anything else - above all a TRANSIENT 'sending' (a concurrent sender
+// holds the claim and may still restore the invoice to draft) - THROWS a coded
+// retryable error (QUEUE_INVOICE_NOT_SETTLED): every caller owes the invoice a
+// retry, a durable alert or a deferral, never a finalized hand-off.
+const QUEUE_NOT_SETTLED_CODE = 'QUEUE_INVOICE_NOT_SETTLED';
+const HANDLED_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'paid', 'prepaid', 'void', 'voided', 'refunded', 'canceled', 'cancelled', 'processing']);
+async function queueHeldInvoiceForSender(invoiceId, database = db) {
+  if (!invoiceId) return { queued: false };
+  const n = await database('invoices')
+    .where({ id: invoiceId, status: 'draft' })
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at')
+    .where((q) => q.whereNull('scheduled_send_error').orWhere('scheduled_send_error', ''))
+    .update({
+      status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+      scheduled_send_error: null, updated_at: database.fn.now(),
+    });
+  if (Number(n) > 0) return { queued: true };
+  const row = await database('invoices').where({ id: invoiceId })
+    .first('status', 'payer_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'scheduled_send_error');
+  const status = String(row?.status || '').toLowerCase();
+  const handled = !row
+    || HANDLED_INVOICE_STATUSES.has(status)
+    || row.payer_id || row.payer_statement_id
+    || row.paid_at || row.sent_at || row.sms_sent_at || row.email_sent_at
+    // a draft carrying another lane's own stamp (payer_billed:, renewal withheld, park) is that lane's
+    || (status === 'draft' && String(row.scheduled_send_error || '') !== '');
+  if (handled) return { queued: false, settled: true };
+  throw Object.assign(new Error(`Invoice ${invoiceId} could not be queued behind the dispute hold (status ${status || 'unknown'}) - retry`), {
+    code: QUEUE_NOT_SETTLED_CODE, retryable: true,
+  });
+}
+
+// The hold answer for a STORED lifecycle email row (a provider-block retry, a bounce
+// recovery): { held: false } unless the row's template carries a pay / update-card link
+// (HOLD_GATED_EMAIL_TEMPLATES), it is addressed to a customer, and it is not the notice for
+// the customer's OWN payment attempt (CUSTOMER_INITIATED_EMAIL_CATEGORY, stamped at send).
+// Fail closed like the fresh-send guard: an unanswerable lookup is held.
+async function storedLifecycleEmailHeld(message, database = db) {
+  if (!HOLD_GATED_EMAIL_TEMPLATES.has(String(message?.template_key || '').trim())) return { held: false };
+  if (String(message.recipient_type || '').toLowerCase() !== 'customer' || !message.recipient_id) return { held: false };
+  let categories = message.categories;
+  if (typeof categories === 'string') {
+    try { categories = JSON.parse(categories); } catch { categories = []; }
+  }
+  // A stored copy of the customer's own notice / an operator's deliberate send keeps its dispute
+  // exemption but still waits on a wrong-number / wrong-party fallback hold.
+  const exempt = Array.isArray(categories) && (categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)
+    || categories.includes(OPERATOR_INITIATED_EMAIL_CATEGORY));
+  return messagingHeldByCollectionHold(message.recipient_id, database, { ignoreDisputeHold: exempt });
+}
+
+// A direct sender that refused on the hold and restored the invoice to draft must
+// leave it SCHEDULED: a hold deferral always leaves the invoice on the sender's
+// queue, so it goes out after the release. Best-effort here (the caller already
+// returns the retryable refusal): a queue failure raises the durable office alert.
+async function requeueHeldInvoice(invoiceId, { customerId = null } = {}) {
+  try {
+    await queueHeldInvoiceForSender(invoiceId);
+    return true;
+  } catch (err) {
+    require('../logger').error(`[collection-hold] held invoice ${invoiceId} could not be re-queued after a hold refusal: ${err.message}`);
+    try {
+      await require('../dispatch-alerts').createAlert({
+        type: 'collection_hold_invoice_queue_failed',
+        severity: 'warn',
+        payload: {
+          invoiceId: String(invoiceId),
+          customerId: customerId ? String(customerId) : null,
+          error: String(err.message || err).slice(0, 300),
+          action: 'A dispute hold withheld this invoice\'s pay link but the invoice could not be queued to send once the hold ends. Send it from the invoice page after the hold is released.',
+        },
+      });
+    } catch (alertErr) {
+      require('../logger').error(`[collection-hold] office alert for the un-queued held invoice ${invoiceId} also failed: ${alertErr.message}`);
+    }
+    return false;
+  }
+}
+
 // ── Never-attempted hold deferrals ──────────────────────────────────────
 // The monthly dues cron, on an active dispute hold, writes a payments row
 // with status 'failed' and metadata.deferred_reason = 'collection_hold' (no
@@ -238,6 +525,28 @@ function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
 const excludeHoldDeferralPlaceholders = excludeNeverAttemptedHoldDeferrals;
 
 module.exports = {
+  storedLifecycleEmailHeld,
+  HOLD_GATED_EMAIL_TEMPLATES,
+  HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES,
+  HOLD_GATED_DUNNING_EMAIL_TEMPLATES,
+  HOLD_GATED_DUNNING_ENTRY_POINTS,
+  CUSTOMER_INITIATED_EMAIL_CATEGORY,
+  OPERATOR_INITIATED_EMAIL_CATEGORY,
+  holdExemptionApplies,
+  isHoldSuppression,
+  messagingHeldByCollectionHold,
+  customerHasActiveMessagingHold,
+  customerHasActiveMessagingHoldChecked,
+  activeMessagingHolds,
+  collectionHoldExistsSql,
+  rowBlocksMessaging,
+  holdDeferOutcome,
+  HOLD_BILL_TO_RECHECK_MS,
+  HOLD_DEFER_CODE,
+  queueHeldInvoiceForSender,
+  requeueHeldInvoice,
+  QUEUE_NOT_SETTLED_CODE,
+  HOLD_DEFER_MS,
   isNeverAttemptedHoldDeferral,
   excludeHoldDeferralPlaceholders,
   excludeNeverAttemptedHoldDeferrals,
@@ -259,6 +568,7 @@ module.exports = {
   isDisputeHoldReason,
   customerHasActiveCollectionHold,
   customerHasActiveCollectionHoldChecked,
+  shouldWithholdPayLink,
   assertNoCollectionHold,
   collectionHoldInvoiceIds,
 };

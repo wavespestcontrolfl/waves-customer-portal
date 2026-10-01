@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { redactEmailAddresses } = require('../utils/redact-contact');
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const {
@@ -92,9 +93,6 @@ function safeUrl(url) {
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
 // provider error before it is persisted or audited (SendGrid 4xx bodies can
 // echo the recipient address).
-function redactEmailAddresses(text) {
-  return String(text || '').replace(/[^\s@:<>()"']+@[^\s@:<>()"']+\.[^\s@:<>()"']+/g, '[redacted-email]');
-}
 
 function textFor(payload, key) {
   const value = payload?.[key];

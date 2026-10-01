@@ -34,7 +34,7 @@ describe('termite annual renewal charge', () => {
     // the payer tests override this.
     jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
     // B10: no collections dispute hold by default; the hold tests override.
-    jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => false) }));
+    jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => false), messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })) }));
     jest.doMock('../models/db', () => {
       const dbFn = jest.fn();
       dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -1549,7 +1549,7 @@ describe('termite annual renewal charge', () => {
       const quoteInvoiceSavedCardCharge = jest.fn();
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
 
-      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => true) }));
+      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => true), messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })) }));
       const { _private } = require('../services/termite-annual-renewal-charge');
       const { conn, deferredUpdate } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
@@ -1570,7 +1570,7 @@ describe('termite annual renewal charge', () => {
       const chargeInvoiceWithSavedCard = jest.fn();
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn() }));
 
-      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => { throw new Error('flags unreadable'); }) }));
+      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => { throw new Error('flags unreadable'); }), messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })) }));
       const { _private } = require('../services/termite-annual-renewal-charge');
       const { conn } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
@@ -1940,6 +1940,8 @@ describe('termite annual renewal charge', () => {
         jest.doMock('../services/collections/collection-hold', () => ({
           ...jest.requireActual('../services/collections/collection-hold'),
           customerHasActiveCollectionHold: jest.fn(async () => { if (held === 'throws') throw new Error('flags unreadable'); return held; }),
+          // The pay-link legs (payLinkVerdict / refuseRecoveryDelivery) read the MESSAGING predicate.
+          messagingHeldByCollectionHold: jest.fn(async () => (held === 'throws' ? { held: true, reason: 'lookup_failed', error: new Error('flags unreadable') } : { held: Boolean(held) })),
         }));
         return require('../services/termite-annual-renewal-charge')._private;
       }
@@ -3155,7 +3157,7 @@ describe('termite annual renewal charge', () => {
         const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
         jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
         const customerHasActiveCollectionHold = jest.fn(holdImpl);
-        jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold }));
+        jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold, messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })) }));
         return { ...deps, notifyAdmin, customerHasActiveCollectionHold, _private: require('../services/termite-annual-renewal-charge')._private };
       }
       function expectNothingIrreversible({ voidInvoice, raiseTermiteRetrievalTask, recordDecision }, conn) {

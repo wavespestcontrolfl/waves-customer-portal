@@ -925,11 +925,11 @@ router.post('/sms', async (req, res, next) => {
           async () => {
             const consent = await ReviewService.reviewSmsAllowedNow(rr.customer_id);
             if (!consent.allowed) return { consent };
-            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
+            const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id, { staffComposer: true });
             if (!gate.allowed) return { gate };
-            // The send-time click guard every review sender uses: a customer who
-            // tapped a tracked review link since this draft's anchor is not asked again.
-            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
+            // No click guard here by owner ruling: the Quick Links link is the
+            // staff "send anytime" link, so a prior tap does not suppress it. A
+            // tap on THIS link is still recorded and stops the cadence (/go).
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -998,9 +998,6 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
-        }
-        if (seam.clicked) {
-          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -1290,8 +1287,13 @@ router.post('/sms', async (req, res, next) => {
         return result;
       };
       return reviewLooking
+        // skipSpacing only for a Quick Links tracked link (a claimed request):
+        // that path ran the full seam (consent/review prefs, the staff-composer
+        // unscheduled gate incl. the cap, the click guard) and records the ask
+        // on review_requests. A pasted or typed link has none of that, so it
+        // keeps the 72-hour spacing exactly as on main.
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: Boolean(claimedReviewRequestId) })
         : sendAndSettle();
     };
     const result = prepLinkSends
@@ -2726,7 +2728,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
 //     owned by the public page — plan state can change after the text.
 router.post('/reservice-link', requireAdmin, async (req, res) => {
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+    const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
     if (!reserviceSelfServeEnabled()) {
       return res.status(404).json({ error: 'Self-serve re-service links are not enabled' });
     }
@@ -2779,38 +2781,45 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     // property the operator actually picked (codex P2 #3194). Remaining
     // siblings follow in a sorted (deterministic) order —
     // customerIdsForAccount has no ORDER BY of its own. First eligible row
-    // wins; none → nothing to insert.
+    // wins; none → nothing to insert. Eligibility itself is the ONE shared
+    // predicate (reservice-scheduler.loadEligibleReserviceLanes, Codex
+    // round-4 P1) — the SAME check the SMS FREE RE-SERVICE fact and the
+    // send-time promise recheck resolve through, so this route's behavior
+    // can never drift from what those report.
     const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
     const orderedIds = selectedId
       ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
       : [...customerIds].sort();
-    let eligible = null;
+    let eligibleId = null;
     let lanes = [];
     for (const id of orderedIds) {
-      const row = await db('customers')
-        .where({ id })
-        .whereNull('deleted_at')
-        .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false || !row.reservice_token) continue;
-      const rowLanes = await reserviceLanesForCustomer(row);
+      // Codex round-21 P2: a lookup FAILURE aborts the whole scan (500) — never "no lanes, try the next
+      // sibling", which could text a link for a different property than the operator picked.
+      let rowLanes;
+      try {
+        rowLanes = await loadEligibleReserviceLanesStrict(id);
+      } catch (lookupErr) {
+        logger.error(`reservice-link eligibility lookup failed for ${id}: ${lookupErr.message}`);
+        return res.status(500).json({ error: 'Could not verify re-service eligibility — try again in a moment' });
+      }
       if (rowLanes.length) {
-        eligible = row;
+        eligibleId = id;
         lanes = rowLanes;
         break;
       }
     }
-    if (!eligible) {
+    if (!eligibleId) {
       return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
     }
 
     const { buildReserviceLink } = require('../services/reservice-link');
-    const { url, line } = await buildReserviceLink(eligible.id);
+    const { url, line } = await buildReserviceLink(eligibleId);
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
       url: stripSmsUrlScheme(url),
       line: stripSmsUrlScheme(line),
-      customerId: eligible.id,
+      customerId: eligibleId,
       lanes,
       firstName: recipientFirstName,
     });
@@ -2884,7 +2893,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
     logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
     await ReviewService.markInlineDelivered(requestId, claimToken);
   }
-  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true }) : null;
 }
 
 // The inline review ask once the composer's send has THROWN: a throw after
@@ -2912,7 +2921,7 @@ async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailR
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
   if (!emailRequested) return;
-  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId, { skipClickGuard: true });
   err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
     ? 'the review email was sent too.'
     : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
@@ -2938,7 +2947,7 @@ async function emailReviewAskNow(primaryId) {
     // on the delivered text cannot land between the click check inside
     // sendInlineEmailCopy and the email provider call.
     const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id, { skipClickGuard: true }),
       { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(copy)) {
       return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };

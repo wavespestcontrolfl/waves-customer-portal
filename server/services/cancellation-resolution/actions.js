@@ -186,9 +186,12 @@ async function executeSetPreferences({ customerId, caseRow, params }) {
 /* ------------------------------------------------------------------ */
 /* away_mode / hold / away_pairing — C2 primitives live in ./holds      */
 /* ------------------------------------------------------------------ */
-async function executeAwayMode({ customerId, caseRow, params }) {
-  const { startAwayMode } = require('./holds');
-  const result = await startAwayMode({ customerId, caseId: caseRow.id, until: params?.resumeDate || null });
+// A paired accept passes its holds (their recovery record is written under the
+// preference's row lock) and defers the staff note until the accept stands.
+async function executeAwayMode({ customerId, caseRow, params }, { holdIds = [], deferNote = false } = {}) {
+  const { startAwayMode, noteAwayMode } = require('./holds');
+  const result = await startAwayMode({ customerId, caseId: caseRow.id, until: params?.resumeDate || null, holdIds });
+  if (!deferNote) await noteAwayMode({ customerId, caseId: caseRow.id, until: result.until });
   return { ...result, effects: [
     `Exterior-only visits continue while you are away${result.until ? ` (through ${result.untilDisplay})` : ''} — nobody needs to be home, and every report still lands in your inbox.`,
     'Your price and WaveGuard level do not change.',
@@ -270,7 +273,7 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
     // effects[0] is the confirmation text's {summary}: keep it short.
     `${heldLabels.join(' and ')} paused until ${first.resumeDisplay}: no visits and no charges for ${heldLabels.length > 1 ? 'them' : 'it'} until then.`,
     'Visits that fall while you are away are skipped, and your regular schedule picks up after you are back.',
-    ...(results.some((r) => r.moved) ? ['Visits you already paid for are not lost: we moved them to after you are back.'] : []),
+    ...(results.some((r) => r.moved) ? ['Visits inside the pause that are already arranged on your account are not lost: we moved them to after you are back.'] : []),
     ...notNeededEffects,
     'Your WaveGuard level and prices stay locked. We text you a week before your first visit back so you can move the date or cancel.',
   ], ...(deferTechNotices ? { techNotices, holdResults: results, ownHolds: ownHoldIds(results) } : {}) };
@@ -281,15 +284,11 @@ async function executeAwayPairing(ctx) {
   // single idempotent preference write, so nothing partial can linger.
   const { techNotices, holdResults, ownHolds, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
   let away;
-  // The Away Mode value before this accept, as first recorded on its holds
-  // (a same-case retry keeps the first attempt's); undefined without holds.
-  let recordedPrevious;
   try {
-    // Durable first: recovery can undo the Away Mode write if this accept
-    // dies before its holds are marked.
-    const { ymdOrDefaultAwayUntil } = require('./holds');
-    recordedPrevious = await require('./holds').recordPendingAwayMode(hold.holds, { customerId: ctx.customerId, until: ymdOrDefaultAwayUntil(ctx.params?.resumeDate) });
-    away = await executeAwayMode(ctx);
+    // One locked write: the prior value, the new preference and the durable
+    // record recovery undoes it from (if this accept dies before its holds
+    // are marked) commit together.
+    away = await executeAwayMode(ctx, { holdIds: hold.holds, deferNote: true });
   } catch (err) {
     // Nothing partial survives (codex r2 P1): undo every hold this accept
     // created before reporting the failure.
@@ -304,11 +303,12 @@ async function executeAwayPairing(ctx) {
   } catch (err) {
     // The holds are undone; Away Mode goes back too, so a failed accept
     // really changed nothing.
-    try { await holds.restoreAwayMode(ctx.customerId, recordedPrevious !== undefined ? recordedPrevious : away.previousUntil, away.until); } catch (undoErr) {
+    try { await holds.restoreAwayMode(ctx.customerId, away.previousUntil, away.until); } catch (undoErr) {
       logger.error(`[cancel-actions] away-mode restore failed for ${ctx.customerId}: ${undoErr.message}`);
     }
     throw err;
   }
+  await holds.noteAwayMode({ customerId: ctx.customerId, caseId: ctx.caseRow.id, until: away.until });
   holds.emitHoldTechNotices(techNotices);
   await holds.applyHoldSkips(holdResults);
   await holds.sendDueRestartTexts(hold.holds);
