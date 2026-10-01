@@ -135,3 +135,24 @@ describe('a Zelle offer AND a denial in one reply are both rechecked', () => {
     await expect(run()).resolves.toMatchObject({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 });
+
+// Local Codex review pass 2: a STAFF EDIT's copied sentences are not re-verified by the contract, so every figure in it is judged by
+// main's rule (owed, plus settled payments in an acknowledgement)
+describe('staff-edited real-answers bodies: amounts judged against live billing', () => {
+  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const V12 = 'house_voice_v12_real_answers5_cf_pf';
+  const dbh = (table) => ({ where: () => ({ first: async () => (table === 'customers' ? { id: 'c1' } : null) }) });
+  const live = (billing) => ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [], ...billing } });
+  const staff = (body) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: { sentences: ['Your account balance is $95.00.'] }, dbh });
+  test('a copied balance kept in a staff edit is stale once the customer has paid it (live balance $0)', async () => {
+    live({ outstandingBalance: 0 });
+    await expect(staff('Your account balance is $95.00. Thanks!')).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    live({ outstandingBalance: 95 });
+    await expect(staff('Your account balance is $95.00. Thanks!')).resolves.toEqual({ stale: false });
+  });
+  test('a staff-written receipt amount backed by a settled payment sends; an unbacked one is stale', async () => {
+    live({ recentPayments: [{ id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12' }] });
+    await expect(staff('Thanks, we received your $120.00 payment.')).resolves.toEqual({ stale: false });
+    await expect(staff('Thanks, we received your $150.00 payment.')).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+});

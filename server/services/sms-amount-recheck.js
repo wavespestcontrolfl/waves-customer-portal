@@ -494,7 +494,11 @@ async function statusAndAmountsStale({ customerId, text, promptVersion, inboundM
     : null;
   if (statusReason) return { stale: true, reason: statusReason };
   if (trustOwedAmounts) return { stale: false }; // a human reviewed the owed figures; status and Zelle were judged above
-  // ...and the figures judged are the ones OUTSIDE the copied sentences (those were just re-verified live).
+  // A STAFF EDIT's status wording is not judged by the contract, so its copied sentences were NOT re-verified: every figure in the body,
+  // copied or not, is judged by main's rule (owed, plus settled payments in an acknowledgement) - a stale copied balance is caught and a
+  // staff-written receipt amount backed by a settled payment passes (local review pass 2).
+  if (strict && humanEditedBody === true) return ownedAmountsStale({ customerId, text, checked: text, strict: false, dbh });
+  // ...otherwise the figures judged are the ones OUTSIDE the copied sentences (those were just re-verified live).
   const checked = strict ? paymentStatus.withoutCopies(text, paymentStatus.copiedSentences(text, paymentStatusSnapshot?.sentences)) : text;
   return ownedAmountsStale({ customerId, text, checked, strict, dbh });
 }

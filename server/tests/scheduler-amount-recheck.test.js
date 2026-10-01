@@ -175,7 +175,7 @@ describe('recheckScheduledSmsAmounts', () => {
     expect(zelle.reason).toMatch(/^zelle_/);
     // gate off + no prompt version: main's behavior - a human-edited status / figure is not rechecked
     await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
-    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta })).resolves.toMatchObject({ stale: false, reason: null, boundary: { customerId: null } });
+    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta })).resolves.toEqual({ stale: false, reason: null }); // no customer: no boundary (it could only refuse)
     db.mockClear();
     const plain = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'See you Tuesday!' }, claimMeta });
     expect(plain).toEqual({ stale: false, reason: null });
@@ -238,4 +238,17 @@ describe('scheduled replies: billing fingerprint before the recheck, checked aga
     expect(src).toContain('billingBoundary = amountsVerdict.boundary || null;');
     expect(src).toContain("require('./billing-fingerprint').billingUnchangedProviderPreSendCheck({ ...billingBoundary, getBody: () => replayInput.body })");
   });
+});
+
+// Local Codex review pass 2: a customerless staff edit with only exempt status wording takes no billing boundary (it could only refuse)
+test('a staff-edited status body with no customer: clean, and no boundary', async () => {
+  const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ prompt_version: 'house_voice_v12_real_answers5_cf_pf', input_snapshot: null, customer_id: null, suggested_message: 'Thanks for reaching out!' })) };
+  db.mockReset().mockImplementation(() => q);
+  recheck.outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+  const prev = process.env.GATE_SMS_REAL_ANSWERS;
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
+  try {
+    await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Yes, we got your payment, thanks!' }, claimMeta: { agent_decision_id: 'd1', human_authored: true } }))
+      .resolves.toEqual({ stale: false, reason: null });
+  } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
 });

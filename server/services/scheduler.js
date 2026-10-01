@@ -45,10 +45,16 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
     const decision = pre.decisionLoaded ? pre.decision : await loadDecision();
     const staffEdited = pre.staffEdited || isStaffEditedScheduledBody(claimMeta, decision, msg, bodyIsStaffEdited);
     const args = scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot: parseInputSnapshot(decision?.input_snapshot), staffEdited });
-    // Codex round-50 P1: the billing fingerprint BEFORE the recheck, so the provider-boundary check refuses if anything changes after it
-    const fingerprint = args.customerId ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
+    // Codex round-50 P1: the billing fingerprint BEFORE the recheck, so the provider-boundary check refuses if anything changes after it.
+    // Only for a body the boundary judges - a staff edit's own status wording is exempt (owner ruling), and with no customer there is
+    // nothing to fingerprint (the recheck itself fails closed for anything it must verify) - local review pass 2.
+    const boundaryJudged = !!args.customerId && recheck.bodyNeedsBillingBoundaryCheck(args.body, {
+      inboundMessage: args.inboundMessage, promptVersion: args.promptVersion, statusVocabulary: !staffEdited,
+    });
+    const fingerprint = boundaryJudged ? await require('./billing-fingerprint').billingFingerprint(args.customerId) : null;
     const verdict = await recheck.outgoingAmountsStale(args);
     if (verdict.stale) return { stale: true, reason: verdict.reason || 'amount_recheck_failed' };
+    if (!boundaryJudged) return { stale: false, reason: null };
     return { stale: false, reason: null, boundary: { customerId: args.customerId, fingerprint, zelleInvoiceId: verdict.zelleInvoiceId || null, zelleDenial: verdict.zelleDenial || null } };
   } catch (err) {
     logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
