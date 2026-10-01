@@ -85,6 +85,12 @@ describe('plan lines are scoped to the selected property', () => {
     expect(streetScope.requireSharedLocality).toBe(true);
   });
 
+  test('a closed scope (every property retired) claims no plan and never reads ownership', async () => {
+    const card = await build({ scope: { customerId: 'cust-1', enabled: true, multi: false, scoped: true, closed: true, property: null } });
+    expect(loaders.loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+    expect(Object.values(card.plan).some(Boolean)).toBe(false);
+  });
+
   test('a scoped property with no readable street claims no plan at all', async () => {
     const card = await build({ scope: { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'p3', is_primary: false } } });
     expect(loaders.loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();

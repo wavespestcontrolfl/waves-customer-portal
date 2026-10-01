@@ -76,9 +76,12 @@ function emptyPlan() {
 // reads ownership only for rows at THAT property's street (the estimate
 // pricing's per-property scope, strict locality), so a plan at one house is
 // never "in your plan" at another. A scoped property with no readable
-// street claims nothing.
+// street, or a closed scope with no property at all, claims nothing.
 async function propertyStreetScope(customerId, scope, knex) {
-  if (!scope || !scope.scoped || !scope.property) return null;
+  if (!scope || !scope.scoped) return null;
+  // Scoped with no property (every saved property retired, closed:true):
+  // nothing here can be "in your plan".
+  if (!scope.property) return { unreadable: true };
   const { normalizedStampedStreet } = require('./estimate-property-linkage');
   const p = scope.property;
   const estimateStreet = normalizedStampedStreet(p.address_line1, p.address_line2, p.city, p.zip);
