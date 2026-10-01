@@ -3279,6 +3279,15 @@ describe('aeo_question_gap bucket', () => {
     expect(g.competitors_mentioned).toEqual(['Example Pest Co']);
   });
 
+  test('competitors_mentioned on a question gap lists every company the answers named (companies_named), canonicalised, Waves excluded', () => {
+    const q6 = q('Q6');
+    const rows = synthetic([q6]).map((r, i) => (i % 2 === 0
+      ? { ...r, companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Waves Pest Control' }, { name: 'Turner Pest Control' }]), competitors_mentioned: JSON.stringify([{ name: 'turner pest' }]) }
+      : { ...r, companies_named: null, competitors_mentioned: JSON.stringify([{ name: 'turner pest' }, { name: 'Example Pest Co' }]) }));
+    const [gap] = evaluateAeoQuestionGaps(rows, [q6], { minDays: 3, minEngines: 3 });
+    expect(gap.competitors_mentioned).toEqual(['Example Bug Control', 'Example Pest Co', 'Turner Pest Control']);
+  });
+
   test('a target cited by enough engines does not qualify; minEngines and minDays are both required', () => {
     const q6 = q('Q6');
     // Claude cites the target too → only 2 engines missing.
@@ -3632,6 +3641,31 @@ describe('aeo_question_gap bucket', () => {
       const miner = stubbed(synthetic([q('Q6')]), []);
       miner._liveHubRoutes.mockRejectedValue(new Error('fetch failed'));
       expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+    });
+  });
+
+  describe('mineAeoGaps rivals', () => {
+    const OLD = { ...process.env };
+    afterEach(() => { process.env = { ...OLD }; jest.restoreAllMocks(); });
+
+    test('the city x service gap counts every named rival, not only the known-list hits, so real local rivals strengthen it', async () => {
+      const db = require('../models/db');
+      const day = (n) => `2026-09-0${n}`;
+      const base = { query: 'best pest control in Bradenton, Florida', q_city: 'Bradenton', q_service: 'pest control', llm_platform: 'gemini',
+        model_version: 'dataforseo:gemini_app:m', measurement_version: 2, answer_available: true, citations_complete: true, waves_cited_urls: '[]' };
+      const rows = [1, 2, 3].map((n) => ({
+        ...base, check_date: day(n),
+        competitors_mentioned: JSON.stringify([{ name: 'orkin', context: '' }]),
+        companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Sample Pest Solutions' }, { name: 'Orkin' }]),
+      }));
+      const chain = { leftJoin: () => chain, where: () => chain, select: async () => rows };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_gscDemandByServiceCity').mockImplementation(async () => new Map([[ownPageKey('pest', 'Bradenton'), 100000]]));
+      const out = await miner.mineAeoGaps('2026-08-30');
+      expect(out).toHaveLength(1);
+      expect(out[0].signal_metadata.competitors_mentioned.sort()).toEqual(['Example Bug Control', 'Orkin', 'Sample Pest Solutions']);
+      expect(out[0].signal_metadata.gap_strength).toBe(1);
     });
   });
 });

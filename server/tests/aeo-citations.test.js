@@ -88,6 +88,24 @@ test('the strategy tool reports unavailable evidence as unknown instead of a cit
   } finally { scan.mockRestore(); }
 });
 
+test('the strategy tool lists every company a new answer named as competitors, in its old {name, context} shape', async () => {
+  const monitor = require('../services/seo/backlink-monitor');
+  const scan = jest.spyOn(monitor, 'checkLLMMentions').mockResolvedValue({});
+  db.mockReturnValue({ orderBy: () => ({ limit: async () => [
+    measured({ companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Waves Pest Control' }, { name: 'Orkin' }]),
+      competitors_mentioned: JSON.stringify([{ name: 'orkin', context: 'then Orkin follows' }]) }),
+    measured({ companies_named: null, competitors_mentioned: JSON.stringify([{ name: 'turner pest', context: 'Turner Pest' }]) }),
+  ] }) });
+  try {
+    const { executeBacklinkTool } = require('../services/seo/backlink-strategy-tools');
+    const { checks } = await executeBacklinkTool('check_llm_mentions', {});
+    expect(checks[0].competitors_mentioned).toEqual([
+      { name: 'Example Bug Control', context: null }, { name: 'Orkin', context: 'then Orkin follows' },
+    ]);
+    expect(checks[1].competitors_mentioned).toEqual([{ name: 'Turner Pest Control', context: 'Turner Pest' }]);
+  } finally { scan.mockRestore(); }
+});
+
 test('the frozen benchmark excludes custom queries and does not blend provider model versions', () => {
   const rows = [measured({ waves_cited_urls: [WAVES] }), measured({ model_version: 'previous-search' }), measured({ query: 'custom question', waves_cited_urls: [WAVES] })];
   const dashboard = buildDashboard(rows, benchmark.questions);
