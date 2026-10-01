@@ -505,6 +505,10 @@ describe('open-loop commitments recheck', () => {
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toBeNull();
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 1 }) })).resolves.toBe('stop_count_stale');
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ status: 'on_site' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
+      // the tracker can lead a lagging 'confirmed' status
+      for (const trackState of ['en_route', 'on_property', 'complete']) {
+        await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ track_state: trackState }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
+      }
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit({ technician_id: 't2' }), ahead: 2 }) })).resolves.toBe('stop_count_stale');
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: null, ahead: 2 }) })).resolves.toBe('stop_count_stale');
       await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2, recorded: { id: 'sr1' } }) })).resolves.toBe('stop_count_stale');

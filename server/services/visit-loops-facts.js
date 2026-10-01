@@ -174,7 +174,9 @@ async function countStopsAhead(conn, visit, now) {
 async function currentStopsAhead({ conn = db, visitId, techId, now = new Date() }) {
   const visit = await conn('scheduled_services').where({ id: visitId })
     .first('id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state');
-  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status) || visit.track_state === 'complete') return null;
+  // started by status OR by tracker (the tracker can lead a lagging status), or done
+  if (!visit || !NOT_STARTED_STATUSES.includes(visit.status)
+    || LIVE_TRACK_STATES.includes(visit.track_state) || visit.track_state === 'complete') return null;
   if (String(visit.technician_id) !== String(techId) || calendarDay(visit.scheduled_date) !== etDateString(now)) return null;
   const recorded = await conn('service_records').where({ scheduled_service_id: visitId }).first('id');
   if (recorded) return null;
