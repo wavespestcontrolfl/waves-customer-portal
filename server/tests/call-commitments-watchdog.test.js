@@ -3,7 +3,11 @@
 // is mocked; the classifier is covered in call-commitments-queue.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // A system retire closes the row done (read is not done).
+  _private: { doneColumns: jest.fn(({ by, resolution, at }) => ({ done_at: at, done_by: by, resolution, read_at: at })) },
+}));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
@@ -18,6 +22,7 @@ const { listOpenCommitments, refreshFulfillment, listSlotKeptCallIds, listLapsed
 const { runCallCommitmentsWatchdog, AGGREGATE_THRESHOLD } = require('../services/call-commitments-watchdog');
 
 const NOW = new Date('2026-09-05T15:00:00Z');
+const notificationUpdates = [];
 const daysAgo = (n) => new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000).toISOString();
 const row = (id, extra = {}) => ({
   id, call_log_id: `call-${id}`, status: 'open', party: 'waves', kind: 'callback', description: `Call back ${id}`,
@@ -26,6 +31,7 @@ const row = (id, extra = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  notificationUpdates.length = 0;
   const db = require('../models/db');
   db.raw = (sql) => sql;
   db.transaction = async (run) => run(db);
@@ -35,7 +41,7 @@ beforeEach(() => {
     for (const name of ['where', 'whereNull', 'whereRaw', 'whereNot', 'whereNotExists', 'orderBy', 'forUpdate', 'join']) q[name] = () => q;
     q.whereIn = (_column, values) => { ids = values; return q; };
     q.modify = (fn) => { fn(q); return q; };
-    q.update = async () => 1;
+    q.update = async (patch) => { if (String(table).startsWith('notifications')) notificationUpdates.push(patch); return 1; };
     q.first = async () => null;
     q.select = async () => table === 'call_commitments as cc'
       ? [...new Map((await Promise.all(listOpenCommitments.mock.results.map((r) => r.value))).flat().map((r) => [r.id, r])).values()].filter((r) => ids.includes(r.id)) : [];
@@ -199,6 +205,17 @@ test('nothing overdue → quiet', async () => {
   listOpenCommitments.mockResolvedValue([row('c', { due_at: new Date(NOW.getTime() + 3600000).toISOString() })]);
   expect(await runCallCommitmentsWatchdog({ now: NOW })).toEqual({ skipped: false, scanned: 1, overdue: 0, alerted: 0, unverified: 0 });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('a system retire closes the reminder done, never with read_at alone (read is not done)', async () => {
+  listOpenCommitments.mockResolvedValue([row('c', { due_at: new Date(NOW.getTime() + 3600000).toISOString() })]);
+  await runCallCommitmentsWatchdog({ now: NOW });
+  // The no-longer-overdue sweep and the emptied-aggregate retire both ran.
+  expect(notificationUpdates.length).toBeGreaterThanOrEqual(2);
+  for (const patch of notificationUpdates) {
+    expect(patch).toMatchObject({ done_by: 'call-commitments-watchdog', done_at: NOW });
+    expect(typeof patch.resolution).toBe('string');
+  }
 });
 
 test('while the follow-up pager is live, a callback still on its 24-hour list is left to it — no overdue bell', async () => {

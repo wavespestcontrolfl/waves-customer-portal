@@ -9475,7 +9475,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: an annual-prepay term now covers estimate ${feeEstimateRef}; the setup fee is waived by that plan. The earlier manual-billing instruction no longer applies; do NOT bill.`),
-                read_at: trx.fn.now(),
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'An annual-prepay term covers the setup fee', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
               });
             }
@@ -9584,8 +9586,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (already) {
               await trx('notifications').where({ id: already.id }).update({
                 ...require('../services/notification-service').adminBodyColumns('billing', `RESOLVED — no action needed: live invoice ${feeLabel2} (${feeCoveredBy.status}) covers the setup fee and ${applicationCoveredBy ? `invoice ${applicationCoveredBy.invoice_number || applicationCoveredBy.id} (${applicationCoveredBy.status}) covers` : 'an out-of-band prepayment (marked prepaid) covered'} the application charge for estimate ${feeEstimateRef}. The earlier manual-billing instruction no longer applies; do NOT bill again.`),
-                // No action left — never a false unread badge (Codex PR r9 P2).
-                read_at: trx.fn.now(),
+                // No action left: closed done, never an open card (Codex PR r9 P2).
+                ...require('../services/notification-service')._private.doneColumns({
+                  by: 'setup-fee-alert', resolution: 'Live invoices cover the setup fee and the application charge', keepExisting: true, conn: trx,
+                }),
                 metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ acceptanceInvoiceId: feeCoveredBy.id, resolvedCovered: true })]),
               });
             }

@@ -252,9 +252,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (heal.extraKeys && heal.extraKeys.length) {
         await db('notifications')
           .where({ recipient_type: 'admin' })
-          .whereNull('read_at')
+          .whereNull('done_at')
           .whereIn(db.raw("metadata->>'dedupeKey'"), heal.extraKeys)
-          .update({ read_at: db.fn.now() })
+          .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'A duplicate case card was retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
       }
 
@@ -394,9 +394,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
         if (existing.idempotency_key && existing.idempotency_key !== idempotencyKey) {
           await db('notifications')
             .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
+            .whereNull('done_at')
             .whereRaw("metadata->>'dedupeKey' = ?", [existing.idempotency_key])
-            .update({ read_at: db.fn.now() })
+            .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case card was replaced by a newer version', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] superseded-card retirement failed: ${err.message}`));
         }
         caseRow = updated;
@@ -444,9 +444,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
         if (recheck) {
           await db('notifications')
             .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
+            .whereNull('done_at')
             .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
-            .update({ read_at: db.fn.now() })
+            .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The call was placed, so the proposal no longer stands', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] post-file card recheck retirement failed: ${err.message}`));
         }
       }
@@ -493,9 +493,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (keys.length) {
         await db('notifications')
           .where({ recipient_type: 'admin' })
-          .whereNull('read_at')
+          .whereNull('done_at')
           .whereIn(db.raw("metadata->>'dedupeKey'"), keys)
-          .update({ read_at: db.fn.now() })
+          .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case lapsed, so its proposal card retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] card retirement failed: ${err.message}`));
       }
     }

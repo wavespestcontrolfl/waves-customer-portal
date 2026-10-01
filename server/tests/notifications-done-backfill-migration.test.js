@@ -18,6 +18,7 @@ const describeOrSkip = SKIP ? describe.skip : describe;
 
 const migration = require('../models/migrations/20261001003000_notifications_done_backfill');
 const followup = require('../models/migrations/20261001004000_notifications_done_followup');
+const systemRetires = require('../models/migrations/20261001005000_notifications_done_backfill_system_retires');
 
 describeOrSkip('20261001003000 notifications done backfill (DB-backed)', () => {
   let knex;
@@ -101,4 +102,67 @@ describeOrSkip('20261001003000 notifications done backfill (DB-backed)', () => {
       throw new Error('rollback');
     })).rejects.toThrow('rollback');
   });
+
+  test('20261001005000 closes a marked system retire as done at its read time; down() undoes only its own', async () => {
+    await expect(knex.transaction(async (trx) => {
+      const readAt = '2026-09-22T12:00:00.000Z';
+      const insert = async (fields) => {
+        const [row] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'System retire fixture', ...fields,
+          metadata: JSON.stringify(fields.metadata || {}) }).returning('id');
+        return row.id || row;
+      };
+      const marked = {
+        retired: { retired: true, dedupeVersion: 'empty' },
+        retiredVersion: { dedupeVersion: 'retired' },
+        individuals: { retired: true, dedupeVersion: 'individuals' },
+        emptied: { emptied: true },
+        autoRetired: { autoRetired: true },
+        resolvedCovered: { resolvedCovered: true },
+        batched: { batchedBy: 'n-1' },
+      };
+      const ids = {};
+      for (const [name, metadata] of Object.entries(marked)) ids[name] = await insert({ read_at: readAt, metadata });
+      const unmarkedRead = await insert({ read_at: readAt, metadata: { dedupeKey: 'plain' } });
+      const notRetired = await insert({ read_at: readAt, metadata: { retired: false, dedupeVersion: 'abc', resolvedCovered: false } });
+      const unread = await insert({ read_at: null, metadata: { retired: true } });
+      const personDone = await insert({ read_at: readAt, done_at: readAt, done_by: '7', resolution: 'By hand', metadata: { retired: true } });
+      const customerRow = await insert({ recipient_type: 'customer', read_at: readAt, metadata: { retired: true } });
+      const get = (id) => trx('notifications').where({ id }).first();
+
+      await systemRetires.up(trx);
+      for (const id of Object.values(ids)) {
+        const row = await get(id);
+        expect(row).toMatchObject({ done_by: 'backfill', resolution: 'Retired automatically before the done state existed' });
+        expect(row.done_at.toISOString()).toBe(readAt);
+        expect(row.metadata.doneBackfillSystemRetire).toBe(true);
+      }
+      for (const id of [unmarkedRead, notRetired, unread, customerRow]) expect((await get(id)).done_at).toBeNull();
+      expect(await get(personDone)).toMatchObject({ done_by: '7', resolution: 'By hand' });
+
+      // A second run changes nothing (the rows are done now).
+      await systemRetires.up(trx);
+      expect((await get(ids.retired)).done_by).toBe('backfill');
+
+      // A module's later done on a stamped row stands; the rest are reopened.
+      await trx('notifications').where({ id: ids.emptied }).update({ done_by: 'followup-sla' });
+      await systemRetires.down(trx);
+      for (const [name, id] of Object.entries(ids)) {
+        const row = await get(id);
+        if (name === 'emptied') { expect(row.done_by).toBe('followup-sla'); continue; }
+        expect(row).toMatchObject({ done_at: null, done_by: null, resolution: null });
+        expect(row.metadata.doneBackfillSystemRetire).toBeUndefined();
+        expect(row.read_at).not.toBeNull();
+      }
+      expect(await get(personDone)).toMatchObject({ done_by: '7', resolution: 'By hand' });
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+  });
+});
+
+test('20261001005000 is a no-op when the done columns are missing', async () => {
+  const calls = [];
+  const fake = { schema: { hasTable: async () => true, hasColumn: async (_t, c) => c !== 'resolution' }, raw: async (sql) => { calls.push(sql); } };
+  await systemRetires.up(fake);
+  await systemRetires.down(fake);
+  expect(calls).toEqual([]);
 });

@@ -947,9 +947,9 @@ async function resolveReviewBell(requestId) {
   try {
     await db('notifications')
       .where({ recipient_type: 'admin' })
-      .whereNull('read_at')
+      .whereNull('done_at')
       .whereRaw("metadata->>'dedupeKey' = ?", [`admin_cancel_review:${requestId}`])
-      .update({ read_at: new Date() });
+      .update(require('./notification-service')._private.doneColumns({ by: 'admin-cancellation', resolution: 'The cancellation closed cleanly', keepExisting: true }));
   } catch (bellErr) {
     logger.warn(`[admin-cancellation] review-bell resolve failed for request ${requestId}: ${bellErr.message}`);
   }

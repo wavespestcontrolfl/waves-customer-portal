@@ -27,7 +27,11 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue(null) }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
+  // A system retire closes the bell done (read is not done).
+  _private: { doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+}));
 jest.mock('../services/cancellation-confirmations', () => ({
   confirmationChannelAvailability: jest.fn(async (c) => ({ sms: !!(c && c.phone), email: !!(c && c.email) })),
   sendCancellationConfirmations: jest.fn().mockResolvedValue({ smsSent: true, emailSent: true, channels: ['sms', 'email'], smsTemplateKey: 'service_cancellation_confirmation' }),
@@ -1710,7 +1714,7 @@ describe('POST /:id/cancel-plan', () => {
       expect(body.processed).toBe(true);
       expect(body.errors).toEqual([]);
       expect(mockState.service_requests[0].status).toBe('resolved');
-      expect(mockState.notifications[0].read_at).not.toBeNull();
+      expect(mockState.notifications[0]).toMatchObject({ done_by: 'admin-cancellation', done_at: expect.anything() });
     }));
 
     test('a repair retry after the refunded term LEFT coverage carries the recorded prepay facts — the financial record is never blanked', () => withServer(async (baseUrl) => {

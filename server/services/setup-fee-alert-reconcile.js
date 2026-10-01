@@ -521,8 +521,10 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             if (wasResolved) return; // already settled — idempotent
             await trx('notifications').where({ id: staleAlert.id }).update({
               ...NotificationService.adminBodyColumns('billing', `RESOLVED — no action needed: live invoices now cover BOTH the one-time setup fee and every parked visit's application charge for this estimate. The earlier manual-billing instruction no longer applies; do NOT bill again on this alert.`),
-              // Nothing left to act on — never a false unread billing badge.
-              read_at: trx.fn.now(),
+              // Nothing left to act on: closed done, never an open billing card.
+              ...NotificationService._private.doneColumns({
+                by: 'setup-fee-alert', resolution: 'Live invoices now cover the setup fee and every application charge', keepExisting: true, conn: trx,
+              }),
               metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolvedCovered: true })]),
             });
             logger.warn(`[setup-fee-reconcile]${actorLabel} stale unminted-setup-fee alert ${staleAlert.id} rewritten as resolved — fee and application coverage both proven`);

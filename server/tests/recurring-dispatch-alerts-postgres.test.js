@@ -5,10 +5,15 @@ const describeWithDatabase = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
   db.transaction = (run) => db.connection.transaction(run);
+  db.raw = (...args) => db.connection.raw(...args);
   return db;
 });
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real done writer: a system retire closes the card done (read is not done).
+  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 describeWithDatabase('recurring placement alert retirement on PostgreSQL', () => {
@@ -43,7 +48,7 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
       CREATE TEMP TABLE customers AS
         SELECT * FROM public.customers WITH NO DATA;
       CREATE TEMP TABLE notifications AS
-        SELECT recipient_type, category, title, body, detail, metadata, read_at
+        SELECT recipient_type, category, title, body, detail, metadata, read_at, done_at, done_by, resolution
         FROM public.notifications WITH NO DATA;
     `);
     await trx('customers').insert([
@@ -77,11 +82,15 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     const rows = await trx('notifications').select('*');
     const byService = Object.fromEntries(rows.map((row) => [row.metadata.scheduledServiceId, row]));
     for (const name of ['placed', 'cancelled', 'old_due', 'missing', 'inactive', 'archived']) {
+      // Retired as done (read is not done), by the sweep.
+      expect(byService[ids[name]].done_at).toEqual(now);
+      expect(byService[ids[name]].done_by).toBe('auto-dispatch');
       expect(byService[ids[name]].read_at).toEqual(now);
       expect(byService[ids[name]].title).toBe('Recurring placement alert resolved');
     }
     for (const name of ['unplaced', 'customer_notice', 'other_lane']) {
       expect(byService[ids[name]].read_at).toBeNull();
+      expect(byService[ids[name]].done_at).toBeNull();
     }
 
     // Staff can acknowledge the pending card before placement. Its content
@@ -92,13 +101,15 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     const closed = await trx('notifications')
       .whereRaw("metadata->>'scheduledServiceId' = ?", [ids.unplaced]).first();
-    expect(closed.read_at).toEqual(now);
+    // The person's own read stands; the retire still closes it done.
+    expect(closed.read_at).toEqual(new Date('2099-01-19T16:00:00Z'));
+    expect(closed.done_at).toEqual(now);
     expect(closed.title).toBe('Recurring placement alert resolved');
 
     await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2099-01-21T16:00:00Z'));
     const stillClosed = await trx('notifications')
       .whereRaw("metadata->>'scheduledServiceId' = ?", [ids.unplaced]).first();
-    expect(stillClosed.read_at).toEqual(now); // no daily rewrite of resolved history
+    expect(stillClosed.done_at).toEqual(now); // no daily rewrite of resolved history
 
     await trx('scheduled_services').where({ id: ids.unplaced }).update({ window_start: null });
     notifications.notifyAdmin.mockClear();

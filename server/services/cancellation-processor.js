@@ -183,7 +183,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
         .where({ recipient_type: 'admin' })
         .whereRaw("metadata->>'kind' = ?", ['termite_station_retrieval'])
         .whereRaw("metadata->>'customerId' = ?", [String(customerId)])
-        .select('id', 'read_at', 'metadata');
+        .select('id', 'read_at', 'done_at', 'metadata');
       const others = (history || []).map((row) => ({ row, meta: parseMeta(row) })).filter(({ meta }) => String(meta.dedupeKey || '') !== dedupeKey);
       const requestIds = [...new Set([requestId, ...others.map(({ meta }) => rowRequestId(meta))].filter(Boolean).map(String))];
       const openedAt = new Map();
@@ -208,9 +208,13 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       // of the same event renders the identical body (refreshOnDedupe
       // compares content — a transient note would reopen an acted-on task).
       if (others.length) superseded = { dated: others.some(({ meta }) => !!meta.retrieveAfter) };
-      const retire = others.filter(({ row }) => row.read_at == null);
+      // A task someone only opened is still open work, so it retires too:
+      // picked by done_at, closed done (read is not done).
+      const retire = others.filter(({ row }) => row.done_at == null);
       if (retire.length) {
-        await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update({ read_at: new Date() });
+        await trx('notifications').whereIn('id', retire.map(({ row }) => row.id)).update(
+          require('./notification-service')._private.doneColumns({ by: 'cancellation-processor', resolution: 'Replaced by a newer termite station retrieval task', keepExisting: true, conn: trx }),
+        );
         const ownRead = (history || []).find((row) => row.read_at != null && String(parseMeta(row).dedupeKey || '') === dedupeKey);
         if (ownRead) await trx('notifications').where({ id: ownRead.id }).update({ read_at: null, done_at: null, done_by: null, resolution: null });
       }

@@ -8,7 +8,11 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'n-1' }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...a) => mockNotifyAdmin(...a),
+  // A system retire closes the task done (read is not done).
+  _private: { doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+}));
 
 let mockTables;
 let mockFailUpdate;
@@ -159,14 +163,15 @@ test('legacy rows without a stamped requestId are dated by the request id inside
   expect(mockNotifyAdmin.mock.calls[0]).toBeUndefined();
 });
 
-test('rows already READ are never retired (the note still names them), and another customer\'s rows are out of scope', async () => {
+test('rows already DONE are never retired (the note still names them), and another customer\'s rows are out of scope', async () => {
   mockTables.notifications = [
     datedRow('req-0', { }), datedRow('req-x', { customerId: 'c2' }),
   ];
   mockTables.notifications[0].read_at = new Date('2026-01-01');
+  mockTables.notifications[0].done_at = new Date('2026-01-01');
   await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
-  expect(mockTables.notifications[0].read_at).not.toBeNull();
-  expect(mockTables.notifications[1].read_at).toBeNull();
+  expect(mockTables.notifications[0].done_at).not.toBeNull();
+  expect(mockTables.notifications[1].done_at).toBeFalsy();
   expect(mockLog.filter((l) => l === 'update:notifications')).toEqual([]);
   expect(mockNotifyAdmin.mock.calls[0][2]).toMatch(/supersedes an earlier station-retrieval task/);
 });
@@ -274,4 +279,12 @@ describe('request-less raise with eventAt (portal renewal decline)', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'event:2026-08-25T00:00:00.000Z' }));
   });
+});
+
+test('an earlier task someone only READ is still open work: the newer task retires it as done', async () => {
+  mockTables.notifications = [datedRow('req-0', { })];
+  mockTables.notifications[0].read_at = new Date('2026-01-01');
+  await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+  expect(mockTables.notifications[0]).toMatchObject({ done_by: 'cancellation-processor' });
+  expect(mockTables.notifications[0].done_at).not.toBeNull();
 });
