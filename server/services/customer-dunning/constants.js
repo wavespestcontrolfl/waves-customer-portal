@@ -2,7 +2,8 @@
 
 /**
  * Customer-level overdue reminders (dunning consolidation) — shared constants
- * and key builders. PR 1: inert; nothing on a live path imports this yet.
+ * and key builders (the lock key and open statuses are shared with the
+ * per-invoice engine, invoice-followups.js, which reads ownership with them).
  *
  * Identity of a touch is (schedule.id, episode, step id) EVERYWHERE — ledger
  * keys, notificationEventKey, email idempotency key, email trigger event id.
@@ -14,7 +15,7 @@
  */
 
 // collections_contact_ledger.source / email entry point for every touch this
-// engine sends (dunning-spacing.js OVERDUE_SOURCES gains it in the wiring PR).
+// engine sends (also one of dunning-spacing.js OVERDUE_SOURCES).
 const SOURCE = 'invoice_followups_customer';
 
 // A schedule in one of these statuses OWNS its customer's per-invoice
@@ -31,6 +32,9 @@ const CLOSED_REASONS = Object.freeze([
   'released_gate_off',
   'released_prereq_off',
   'released_admin',
+  // A customer merge (customer-dedupe.js) released the open schedule of either party before repointing
+  // it; the next run promotes the merged customer as one (customer-dunning/merge.js).
+  'released_merge',
   'customer_missing',
 ]);
 

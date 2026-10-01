@@ -120,6 +120,9 @@ function setDbQueues(queues) {
       if (table === 'payment_plans') return chain({ first: undefined });
       if (table === 'collections_contact_ledger') return chain({ result: [] });
       if (table === 'notification_prefs') return chain({ first: undefined });
+      // runPending's read of which PaymentIntent rows' customers are on a combined
+      // reminder schedule (customer-dunning): none here.
+      if (table === 'customer_dunning_schedules') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();

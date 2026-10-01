@@ -46,6 +46,9 @@ const OVERDUE_SOURCES = new Set([
   // The follow-up rail's deferred SMS, delivered after the send window
   // (deferred-replay-registry.js; Codex #5189 r3).
   'invoice_followup_replay',
+  // The customer-level schedule (dunning consolidation): its legs share one
+  // notificationEventKey, so a multi-leg touch collapses into one event.
+  'invoice_followups_customer',
   'late_payment_checker',
   'previsit_balance_reminder',
   'balance_reminder_late_payment_check',
