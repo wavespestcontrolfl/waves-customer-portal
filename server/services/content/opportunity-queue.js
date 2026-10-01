@@ -339,7 +339,7 @@ class OpportunityQueue {
    * if nothing's available. Caller is responsible for calling complete()
    * or skip() (or letting the stale-claim timeout recover it).
    */
-  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
+  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
@@ -348,6 +348,9 @@ class OpportunityQueue {
     // `notes` column (the migration in #1021 only defines status /
     // skip_reason / timestamps). Audit lives in the logger instead.
     const whereActionType = actionType ? `AND ${effectiveActionSql} = ?` : '';
+    // bucket scopes the claim to one lane (the daily batch's reserved
+    // citability backfill slots). Every other eligibility rule still applies.
+    const whereBucket = bucket ? 'AND bucket = ?' : '';
     // excludeIds lets the daily batch skip opportunities that already failed
     // this run. A failed runNext() releases its claim back to 'pending', so
     // without this the highest-scored failing row would just be re-claimed
@@ -405,6 +408,7 @@ class OpportunityQueue {
            -- separate floor would strand it persisted-but-unclaimable.
            AND score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
+           ${whereBucket}
            ${whereExclude}
            ${whereFamilyGate}
            ${whereCitabilityGate}
@@ -417,6 +421,7 @@ class OpportunityQueue {
        RETURNING *, ${effectiveActionSql} AS effective_action_type`,
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
+        .concat(bucket ? [bucket] : [])
         .concat(exclude.length ? [exclude] : [])
       );
     });

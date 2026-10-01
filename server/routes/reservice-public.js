@@ -75,6 +75,7 @@ const {
   reserviceSelfServeEnabled,
   reserviceLanesForCustomer,
   openReserviceCallbacks,
+  reserviceLaneAvailability,
 } = require('../services/reservice-scheduler');
 const {
   RESERVICE_PEST_CHOICES,
@@ -312,8 +313,9 @@ function reserviceAvailabilityPayload(availability, range) {
 async function resolveLaneState(customer, laneCatalog) {
   // Churned/deactivated rows keep their token but lose eligibility — the
   // page renders the friendly not-eligible state with the office contacts.
-  const eligible = customer.active === false ? [] : await reserviceLanesForCustomer(customer);
-  const open = eligible.length ? await openReserviceCallbacks(customer.id) : {};
+  // Codex round-11 P2 (PR #5336): the SAME shared computation the SMS promise
+  // validators use (reservice-scheduler.reserviceLaneAvailability).
+  const { eligible, open } = await reserviceLaneAvailability(customer);
   const lanes = eligible
     .filter((lane) => laneCatalog[lane])
     .map((lane) => ({

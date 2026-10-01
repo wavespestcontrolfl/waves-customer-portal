@@ -29,11 +29,26 @@ const scheduler = {
   lanes: ['pest'],
   lanesError: null,
 };
+// reserviceStreamlineAccess now delegates its customer-row/lane lookup to
+// reservice-scheduler's loadReserviceEligibility (Codex round-6 P1, one
+// predicate shared with loadEligibleReserviceLanes) instead of running its
+// own `customers` query + reserviceLanesForCustomer call — this mock mirrors
+// that loader's real contract (null for a missing/inactive/tokenless row, a
+// lookup error, or no qualifying lane; else { customer, lanes }) off the same
+// customerRows/scheduler fixtures the tests below already drive.
 jest.mock('../services/reservice-scheduler', () => ({
   reserviceSelfServeEnabled: jest.fn(() => scheduler.selfServe),
   reserviceLanesForCustomer: jest.fn(async () => {
     if (scheduler.lanesError) throw scheduler.lanesError;
     return scheduler.lanes;
+  }),
+  loadReserviceEligibility: jest.fn(async (customerId) => {
+    if (!customerId) return null;
+    const customer = customerRows.row;
+    if (!customer || customer.active === false || !customer.reservice_token) return null;
+    if (scheduler.lanesError) throw scheduler.lanesError;
+    if (!scheduler.lanes.length) return null;
+    return { customer, lanes: scheduler.lanes };
   }),
 }));
 
