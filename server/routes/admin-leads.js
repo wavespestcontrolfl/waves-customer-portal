@@ -140,9 +140,10 @@ const LEAD_STATUSES = [
   'unresponsive',
   'disqualified',
   'duplicate',
-  // Closed, neither won nor lost: staff can set it by hand, and a /book
-  // preferred-time request takes it when the customer books online
-  // (booking-preferred-time.js). Never bridged to a funnel stage.
+  // Closed, neither won nor lost: a /book preferred-time request takes it
+  // when the customer books online (booking-preferred-time.js), which also
+  // settles its funnel row. System-set only (codex #5477 r9): staff never
+  // pick it by hand (the PATCH below refuses it), but can reopen it.
   'handled',
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
@@ -1120,6 +1121,9 @@ router.put('/:id', async (req, res, next) => {
     }
     if (updates.status !== undefined && !LEAD_STATUS_SET.has(updates.status)) {
       return res.status(400).json({ error: 'Invalid lead status' });
+    }
+    if (updates.status === 'handled' && existingLead.status !== 'handled') {
+      return res.status(400).json({ error: "'handled' is set automatically when the customer books online" });
     }
     // Mirror the create-side shape rules: clearing sends '', which stores as
     // NULL; the expiry column is a calendar DATE, so only a date-shaped

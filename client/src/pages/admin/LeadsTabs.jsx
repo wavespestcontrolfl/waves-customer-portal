@@ -1869,7 +1869,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               }
                               className={statusSelectClass(lead.status)}
                             >
-                              {STATUSES.map((s) => (
+                              {/* 'handled' is system-set only: shown for a lead that has it, never offered */}
+                              {STATUSES.filter((s) => s !== "handled" || lead.status === "handled").map((s) => (
                                 <option key={s} value={s}>
                                   {s.replace(/_/g, " ")}
                                 </option>

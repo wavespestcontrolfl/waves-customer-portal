@@ -91,6 +91,15 @@ describe("lead status 'handled'", () => {
     expect(ib).toMatch(/const LEAD_STATUSES = \[[^\]]*'handled',[^\]]*\];/s);
   });
 
+  test('handled is system-set only (codex #5477 r9): the Intelligence Bar refuses to write it and the Leads PATCH refuses it unless the lead already has it', async () => {
+    const { executeLeadsTool, LEADS_TOOLS } = require('../services/intelligence-bar/leads-tools');
+    expect(await executeLeadsTool('update_lead_status', { lead_id: 'lead-1', new_status: 'handled' })).toMatchObject({ error: 'Invalid lead status: handled' });
+    const tools = (LEADS_TOOLS || []).filter((t) => t.input_schema?.properties?.new_status?.enum);
+    for (const t of tools) expect(t.input_schema.properties.new_status.enum).not.toContain('handled');
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-leads.js'), 'utf8');
+    expect(route).toMatch(/if \(updates\.status === 'handled' && existingLead\.status !== 'handled'\) \{\s*return res\.status\(400\)/);
+  });
+
   test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {
     mockRows.length = 0;
     mockRows.push({ status: 'won' }, { status: 'new' }, { status: 'lost' }, { status: 'handled' }, { status: 'handled' });

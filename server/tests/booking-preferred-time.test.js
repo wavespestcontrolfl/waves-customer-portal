@@ -936,6 +936,24 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(activities()).toHaveLength(0);
   });
 
+  test.each([
+    ['a pest request, then an online lawn booking', 'Pest Control', 0],
+    ['a lawn request, then the lawn booking', 'Lawn Care', 1],
+    ['a request that named no service', null, 1],
+  ])('a booking settles only the request for its own service line (codex #5477 r9): %s', async (_label, serviceInterest, closed) => {
+    mockLockedLead = { ...mockLockedLead, service_interest: serviceInterest };
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed });
+    expect(closeWrites()).toHaveLength(closed);
+  });
+
+  test('the customer share lock is taken before the visit lock (codex #5477 r9: a merge locks customer, then visits)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    const customerLock = src.indexOf("trx('customers').where({ id: customerId }).forShare()");
+    const visitLock = src.indexOf("trx('scheduled_services').where({ id: visit.id }).forUpdate()");
+    expect(customerLock).toBeGreaterThan(-1);
+    expect(visitLock).toBeGreaterThan(customerLock);
+  });
+
   test('a visit cancelled between the first read and the close is re-checked under its row lock (codex #5477 r5): nothing closed', async () => {
     mockVisitDiesBeforeLock = true;
     expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });

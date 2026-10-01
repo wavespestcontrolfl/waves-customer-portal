@@ -297,13 +297,13 @@ jest.setTimeout(60000);
 
     describe('first touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8)', () => {
       // a closed request whose row came in on a paid click, and a booking row of its own
-      const setupPaid = async ({ bookingTouch }) => {
+      const setupPaid = async ({ bookingTouch, requestTouch = {} }) => {
         const cust = randomUUID();
         await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
         const req = await recordPreferredTimeRequest(database, value(), { notify: false });
         await database('ad_service_attribution').insert({
           lead_id: req.leadId, funnel_stage: 'lead', lead_source: 'google_ads', lead_source_detail: 'brand', lead_date: '2026-09-20',
-          gclid: 'g-first', utm_campaign: 'fall-pest', utm_term: 'pest control', is_paid: true,
+          gclid: 'g-first', utm_campaign: 'fall-pest', utm_term: 'pest control', is_paid: true, ...requestTouch,
         });
         const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
         await database('scheduled_services').insert({ self_booking_id: sba[0].id });
@@ -322,6 +322,11 @@ jest.setTimeout(60000);
           funnel_stage: 'booked', lead_source: 'google_ads', lead_source_detail: 'brand', gclid: 'g-first', utm_campaign: 'fall-pest', utm_term: 'pest control', is_paid: true,
         });
         expect(String(rows[0].lead_date instanceof Date ? rows[0].lead_date.toISOString() : rows[0].lead_date)).toMatch(/^2026-09-20/);
+      });
+
+      test('a request that came in on paid UTMs with its click id stripped still carries its credit to a direct booking (codex #5477 r9)', async () => {
+        const { sbaId } = await setupPaid({ requestTouch: { gclid: null }, bookingTouch: { lead_source: 'website', is_paid: false } });
+        expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'google_ads', utm_campaign: 'fall-pest', gclid: null, is_paid: true });
       });
 
       test('a booking with paid UTMs but no click id of its own takes the request\'s click', async () => {

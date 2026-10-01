@@ -26,6 +26,10 @@ const LEAD_STATUSES = [
   'handled',
 ];
 const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
+// 'handled' is system-set only (a /book request closed by the customer's own
+// booking, codex #5477 r9): readable and filterable, never written by a tool.
+const WRITABLE_LEAD_STATUSES = LEAD_STATUSES.filter((s) => s !== 'handled');
+const WRITABLE_LEAD_STATUS_SET = new Set(WRITABLE_LEAD_STATUSES);
 const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
@@ -122,7 +126,7 @@ Use for: "move Henderson to contacted", "mark the Smith lead as lost — chose c
       properties: {
         lead_id: { type: 'string' },
         lead_name: { type: 'string', description: 'Find lead by name (partial match)' },
-        new_status: { type: 'string', enum: LEAD_STATUSES },
+        new_status: { type: 'string', enum: WRITABLE_LEAD_STATUSES },
         lost_reason: { type: 'string', description: 'Required when marking as lost' },
         notes: { type: 'string' },
       },
@@ -513,7 +517,7 @@ async function resolveLeadForUpdate({ lead_id, lead_name }) {
 
 async function updateLeadStatus(input) {
   const { new_status, lost_reason, notes } = input;
-  if (!LEAD_STATUS_SET.has(new_status)) {
+  if (!WRITABLE_LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
@@ -645,7 +649,7 @@ async function settleBulkWon(ids) {
 
 async function bulkUpdateLeads(input) {
   const { current_status, older_than_days, new_status, lost_reason, dry_run = true, _approved_lead_ids: lead_ids } = input;
-  if (!LEAD_STATUS_SET.has(new_status)) {
+  if (!WRITABLE_LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 

@@ -950,7 +950,10 @@ terminal status `handled`. A lead qualifies only when its phone matches (last
 corroborates the booked customer (`corroboratesBookedCustomer`): it is linked
 to that customer, or its email matches the customer's non-blank email, or its
 first AND last name both match. A phone match alone never closes a request (a
-shared household or reassigned number). A request staff attached an estimate
+shared household or reassigned number). The request must also be for the booked
+visit's service line (`inferServiceLine`: lawn, pest, mosquito, termite, ...); a
+request that named no service is answered by any booking, and one for another
+line stays open for the office. A request staff attached an estimate
 to (`leads.estimate_id` set) is never closed and never converted by the
 booking: it stays open, as before this change, and converts the way any
 estimate-linked lead does (the estimate's acceptance,
@@ -963,24 +966,27 @@ booking's own attribution runs exactly as for any other booking. Once the
 booking has its own funnel row, the closed request's row is removed
 (`dropSupersededPreferredFunnelRows`), so the journey counts as one lead. First
 touch keeps the credit (owner ruling 2026-10-01): when the request's row came
-in on a paid click and the booking's own row has no paid click, the booking's
+in paid (`is_paid`: a paid click, or paid UTMs whose click id was stripped)
+and the booking's own row has no paid click id, the booking's
 row first takes the request's touch (source, detail, lead date, click ids,
 UTM campaign/term, `is_paid`; the earliest paid request wins; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
 is credited, and reported, to that ad. Every other lead surface
 treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later
 form, call, estimate or email fan-out. The close runs inside the per-(lead,
-visit) transaction that re-reads the lead `FOR UPDATE` (still
-`book_preferred_time`, open, not converted or deleted, no estimate attached,
-phone still matching, `customer_id` null or the booker's, identity still
-corroborated), and locks and re-reads the booked visit (still live and not a
-callback), then writes ONE `status_change` activity row
+visit) transaction that takes, in order, the booked customer `FOR SHARE`
+(re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
+live and not a callback; customer before visit, the order a customer merge
+uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
+converted or deleted, no estimate attached, phone still matching the
+customer's current phone, `customer_id` null or the booker's, identity still
+corroborated, same service line), then writes ONE `status_change` activity row
 ("Closed automatically — customer booked <service> for <date> (visit <id>) on
 /book"), deduped per (lead, visit) through `lead_activities.metadata`, so a
 replay never closes twice; a newer request is new work and stays open. The office
 gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
 deduped per (lead, visit)) and nothing else: no customer message of any kind.
-Staff can also set `handled` by hand. The lead's `first_contact_channel`
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
 booking that committed while a submit was still in flight (its close ran before

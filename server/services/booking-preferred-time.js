@@ -458,6 +458,14 @@ function corroboratesBookedCustomer(lead, customer, customerId) {
   return !!(first && last && first === normName(lead.first_name) && last === normName(lead.last_name));
 }
 const CLOSED_STATUS = 'handled';
+// A booking settles only the request it answers (codex #5477 r9): the same service
+// line (lawn, pest, mosquito, termite...). A request that named no service is
+// answered by any booking; one for another line (a lawn request, then an online
+// pest booking) stays open for the office.
+function sameServiceLine(requestedService, bookedService) {
+  if (!String(requestedService || '').trim()) return true;
+  return inferServiceLine(requestedService) === inferServiceLine(bookedService);
+}
 
 // The one FYI the office gets when a request closes itself. composeAdminAlert
 // enforces docs/admin-notifications.md (headline 60, one-sentence why of 110, no
@@ -588,7 +596,15 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // have been cancelled, skipped or rescheduled since. Lock and re-read it
         // here so a request never closes on a booking that no longer holds a
         // live, non-callback visit.
-        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback');
+        // The booked customer's identity, re-read under a share lock (codex #5477 r8):
+        // staff may have corrected or reassigned their phone, email or name since the
+        // snapshot above, and the corroboration must judge the identity as it is now.
+        // Taken BEFORE the visit lock (codex #5477 r9): a customer merge locks the
+        // customer rows first and then sweeps their visits, so this order matches it.
+        const liveCustomer = await trx('customers').where({ id: customerId }).forShare()
+          .first('phone', 'first_name', 'last_name', 'email');
+        const liveTen = tenDigitPhone(liveCustomer && liveCustomer.phone);
+        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
@@ -597,15 +613,9 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // to close). The advisory lock only orders closers, so the lead's own
         // state, phone identity and request recency are re-proven right here.
         const current = await trx('leads').where({ id: lead.id }).forUpdate().first(
-          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id',
+          'lead_type', 'status', 'converted_at', 'deleted_at', 'phone', 'customer_id', 'first_name', 'last_name', 'email', 'estimate_id', 'service_interest',
           trx.raw(`(${LAST_REQUESTED_SQL.replace(' > ?', ' <= ?')}) AS requested_in_time`, [new Date(bookedMs + BOOKING_SLACK_MS)]),
         );
-        // The booked customer's identity, re-read under a share lock (codex #5477 r8):
-        // staff may have corrected or reassigned their phone, email or name since the
-        // snapshot above, and the corroboration must judge the identity as it is now.
-        const liveCustomer = await trx('customers').where({ id: customerId }).forShare()
-          .first('phone', 'first_name', 'last_name', 'email');
-        const liveTen = tenDigitPhone(liveCustomer && liveCustomer.phone);
         const stillOurs = current
           && liveTen === ten
           && current.lead_type === LEAD_TYPE
@@ -616,7 +626,8 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           && current.requested_in_time === true
           && String(current.phone || '').replace(/\D/g, '').slice(-10) === ten // same last-10 rule as tenMatch
           && (!current.customer_id || String(current.customer_id) === String(customerId))
-          && corroboratesBookedCustomer(current, liveCustomer, customerId);
+          && corroboratesBookedCustomer(current, liveCustomer, customerId)
+          && sameServiceLine(current.service_interest, liveVisit.service_type);
         if (!stillOurs) return null;
         await trx('leads').where({ id: lead.id }).update({ status: CLOSED_STATUS, updated_at: trx.fn.now() });
         await trx('lead_activities').insert({
@@ -711,20 +722,20 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .select('l.id')) || [];
       const closedIds = locked.map((r) => r.id);
       if (!closedIds.length) return 0;
-      // First touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8): a
-      // request that came in on a paid click and a booking that came back direct
-      // (no paid click of its own) is one paid lead, so the booking's own row takes
-      // the request's touch before the request's row goes, the same credit an
-      // ordinary lead's own row gets when its booking advances it. The earliest
-      // paid request wins; a booking with a paid click of its own keeps it.
-      // The touch columns are the ones lead-funnel-bridge stampLeadFunnelRow writes;
-      // a touch is paid on a paid click id (fbp is a browser id, not a click).
+      // First touch keeps the credit (owner ruling 2026-10-01, codex #5477 r8/r9): a
+      // request that came in paid (is_paid: a paid click, or paid UTMs whose click id
+      // was stripped) and a booking with no paid click of its own is one paid lead, so
+      // the booking's own row takes the request's touch before the request's row goes,
+      // the same credit an ordinary lead's own row gets when its booking advances it.
+      // The earliest paid request wins; a booking with a paid click of its own keeps it.
+      // The touch columns are the ones lead-funnel-bridge stampLeadFunnelRow writes
+      // (fbp is a browser id, not a click).
       const { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS } = require('./lead-funnel-bridge');
       const touchColumns = ['lead_source', 'lead_source_detail', 'lead_date', ...CLICK_ID_COLUMNS, 'utm_campaign', 'utm_term', 'is_paid'];
       const bookingRow = await trx('ad_service_attribution')
         .where({ self_booked_appointment_id: booking.id }).forUpdate().first();
       const hasPaidClick = (row) => !!row && PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
-      const paidRow = (row) => hasPaidClick(row) && row.is_paid === true;
+      const paidRow = (row) => !!row && row.is_paid === true;
       // The booking's own row keeps any paid click it has, whatever its is_paid
       // flag (attributeSelfBooking's new-customer mint leaves it NULL); a row with
       // no paid click (direct, or paid UTMs only) takes the request's click.
