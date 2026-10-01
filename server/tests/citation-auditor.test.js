@@ -398,6 +398,8 @@ describe('classifyListing', () => {
       expect(text('<p>Portland, or 97201</p>').status).toBe('unverified');
       expect(text('<p>Atlanta GA 30303</p>').status).toBe('unverified'); // unambiguous code, no comma needed
       expect(text('<p>99 Palm Terrace Boise ID 83702</p>').status).toBe('unverified'); // house number gives context
+      expect(text('<p>123 North Martin Luther King Junior Drive Boise ID 83702</p>').status).toBe('unverified');
+      expect(text('<p>Order ID 12345 confirmed</p><p>Open 7 days</p>').status).toBe('verified');
     });
 
     test('a page with no state + ZIP and no street-like string is still judged on name + phone', () => {

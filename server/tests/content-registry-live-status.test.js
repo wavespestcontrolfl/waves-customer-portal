@@ -572,3 +572,17 @@ describe('content registry live status helpers', () => {
     expect(liveStatus.normalizeStatuses('all')).toBe(null);
   });
 });
+
+describe('soft-404 heading detector (shared with the citation auditor)', () => {
+  const { notFoundHeading, computeBodySignals } = liveStatus;
+  test('reads <title>/<h1> only, decoded, ignoring markup that never renders', () => {
+    expect(notFoundHeading('<title>Page&nbsp;Not&nbsp;Found</title>')).toBe(true);
+    expect(notFoundHeading("<h1>Sorry, we couldn't find this page</h1>")).toBe(true);
+    expect(notFoundHeading('<h1>Pest control in Bradenton</h1><p>404 reviews</p>')).toBe(false);
+    expect(notFoundHeading('<script type="text/template"><h1>Page not found</h1></script><!-- <h1>Not found</h1> -->')).toBe(false);
+  });
+  test('owned-page body signals flag the same headings', () => {
+    expect(computeBodySignals('<html><head><title>x</title></head><body><h1>We could not find that page</h1></body></html>', 'text/html').softNotFound).toBe(true);
+    expect(computeBodySignals('<html><head><title>Lawn care</title></head><body><h1>Lawn care</h1></body></html>', 'text/html').softNotFound).toBe(false);
+  });
+});

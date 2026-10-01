@@ -1,4 +1,5 @@
 const http = require('http');
+const { decodeHTML } = require('entities');
 const https = require('https');
 const db = require('../../models/db');
 const registry = require('./content-registry');
@@ -148,6 +149,19 @@ function visibleText(html) {
     .trim();
 }
 
+// THE soft-404 heading detector, shared by owned-page health and the citation auditor: a
+// branded "Page not found" served as 200 says so in its <title> or <h1>. Headings only, so
+// "404 reviews" or a 404-area-code phone in body copy is not a not-found page. Scripts,
+// styles, templates and comments never render, so an unused error template inside one is not
+// the page's heading. Entities are decoded before whitespace is collapsed (&nbsp;).
+const NOT_FOUND_HEADING_RE = /\bnot found\b|\berror\s*404\b|\b404\s*error\b|^404\s*(?:[|:\u2013\u2014]|-\s|$)|\bpage (?:doesn.?t|does not|no longer) exists?\b|\b(?:can.?t|cannot|couldn.?t|could not) find (?:that|this|the) page\b/i;
+const NON_RENDERED_RE = /<!--[\s\S]*?-->|<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const headingText = (inner) => decodeHTML(visibleText(inner)).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+function notFoundHeading(html) {
+  return [...String(html || '').replace(NON_RENDERED_RE, ' ').matchAll(/<(title|h1)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)]
+    .some((m) => NOT_FOUND_HEADING_RE.test(headingText(m[2])));
+}
+
 /**
  * Computed once per fetched body; harmless (and unused) for a non-2xx page.
  * Challenge and non-document detection are the shared page-body classifier's
@@ -163,7 +177,7 @@ function computeBodySignals(html, contentType) {
     title,
     challenge: kind === 'challenge',
     nonHtml: kind === 'non_html',
-    softNotFound: SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
+    softNotFound: notFoundHeading(html) || SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
     visibleTextLength: visibleText(html).length,
   };
 }
@@ -688,6 +702,7 @@ module.exports = {
   visibleText,
   computeBodySignals,
   SOFT_404_RE,
+  notFoundHeading,
   classifyLiveStatus,
   classifyRedirectLiveStatus,
   safeFetchImpl,
