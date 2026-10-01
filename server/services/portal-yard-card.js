@@ -72,10 +72,28 @@ function emptyPlan() {
   return { lawn: false, pest: false, treeShrub: false, mosquito: false, rodent: false, termite: false };
 }
 
-async function loadPlan(customerId, knex) {
+// The selected property's own plan lines. A multi-property (scoped) session
+// reads ownership only for rows at THAT property's street (the estimate
+// pricing's per-property scope, strict locality), so a plan at one house is
+// never "in your plan" at another. A scoped property with no readable
+// street claims nothing.
+async function propertyStreetScope(customerId, scope, knex) {
+  if (!scope || !scope.scoped || !scope.property) return null;
+  const { normalizedStampedStreet } = require('./estimate-property-linkage');
+  const p = scope.property;
+  const estimateStreet = normalizedStampedStreet(p.address_line1, p.address_line2, p.city, p.zip);
+  if (!estimateStreet) return { unreadable: true };
+  const cust = await knex('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+  const customerPrimaryStreet = normalizedStampedStreet(cust?.address_line1, cust?.address_line2, cust?.city, cust?.zip);
+  return { estimateStreet, customerPrimaryStreet, requireSharedLocality: true };
+}
+
+async function loadPlan(customerId, knex, scope = null) {
   const plan = emptyPlan();
   try {
-    const keys = await loadOwnedRecurringServiceKeys(knex, customerId);
+    const streetScope = await propertyStreetScope(customerId, scope, knex);
+    if (streetScope?.unreadable) return plan;
+    const keys = await loadOwnedRecurringServiceKeys(knex, customerId, { streetScope });
     for (const key of keys) {
       const line = PLAN_KEY_TO_LINE[key];
       if (line) plan[line] = true;
@@ -222,7 +240,7 @@ async function loadLastLawnVisit(customerId, scope, knex) {
 async function buildYardCard({ customerId, place, scope = null, now = new Date(), knex = db }) {
   const month = etParts(now).month;
   // The pest list tags each pest with inPlan, so the plan loads first.
-  const plan = await loadPlan(customerId, knex);
+  const plan = await loadPlan(customerId, knex, scope);
   const [grass, homePests, lastLawnVisit] = await Promise.all([
     loadGrass(customerId, scope, knex),
     loadHomePests(place, plan),

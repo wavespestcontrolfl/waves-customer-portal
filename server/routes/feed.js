@@ -593,7 +593,10 @@ router.get('/yard', async (req, res, next) => {
   try {
     if (!portalYardCalendarLive()) return res.json({ available: false });
     const place = resolveWeatherLocation(req.property, req.customer);
-    const scope = await resolveSessionScope(req).catch(() => null);
+    // A failed scope lookup is an error, never an unscoped read: the client
+    // falls back to the Local Conditions card rather than show another
+    // property's visit or grass under this property's heading.
+    const scope = await resolveSessionScope(req);
     const card = await buildYardCard({ customerId: req.customerId, place, scope });
     res.json({ available: true, ...card });
   } catch (err) { next(err); }

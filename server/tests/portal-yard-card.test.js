@@ -70,6 +70,28 @@ const build = (over = {}) => service.buildYardCard({
   customerId: 'cust-1', place: PLACE, scope: null, now: OCT_NOON_UTC, knex: fakeKnex(null), ...over,
 });
 
+describe('plan lines are scoped to the selected property', () => {
+  const property = { id: 'p2', is_primary: false, address_line1: '12 Palm Ave', address_line2: null, city: 'Venice', zip: '34285' };
+
+  test('an unscoped session reads customer-wide ownership', async () => {
+    await build();
+    expect(loaders.loadOwnedRecurringServiceKeys.mock.calls[0][2]).toEqual({ streetScope: null });
+  });
+
+  test('a scoped session reads ownership only at that property, strict locality', async () => {
+    await build({ scope: { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property } });
+    const { streetScope } = loaders.loadOwnedRecurringServiceKeys.mock.calls[0][2];
+    expect(streetScope.estimateStreet).toBeTruthy();
+    expect(streetScope.requireSharedLocality).toBe(true);
+  });
+
+  test('a scoped property with no readable street claims no plan at all', async () => {
+    const card = await build({ scope: { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'p3', is_primary: false } } });
+    expect(loaders.loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+    expect(card.plan).toEqual({ lawn: false, pest: false, treeShrub: false, mosquito: false, rodent: false, termite: false });
+  });
+});
+
 describe('month, location and items', () => {
   test('uses the ET month, so ET-evening Oct 31 is still October', async () => {
     const card = await build({ now: new Date('2026-11-01T02:00:00Z') });
@@ -306,11 +328,10 @@ describe('GET /api/feed/yard', () => {
     expect(args.scope).toEqual({ enabled: true, scoped: true });
   });
 
-  test('gate on: a scope lookup failure still serves the customer-wide card', async () => {
+  test('gate on: a scope lookup failure is an error, never an unscoped card', async () => {
     gateLive = true;
     scopeRejects = true;
-    const body = await get({ customer: { city: 'Venice' } });
-    expect(body.available).toBe(true);
-    expect(buildYardCard.mock.calls[0][0].scope).toBeNull();
+    await expect(get({ customer: { city: 'Venice' } })).rejects.toThrow('db');
+    expect(buildYardCard).not.toHaveBeenCalled();
   });
 });
