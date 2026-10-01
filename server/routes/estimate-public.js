@@ -27596,7 +27596,29 @@ async function composeEstimateDataPayload(estimate, {
   // ?refresh=1 re-fetch (the client keeps the first load's offer) and never
   // a non-page projection such as the Intelligence Bar's estimate detail.
   includeConsultationOffer = false,
+  // Internal: the served-evidence result of a document render pass whose
+  // composition was restarted from the row that pass found frozen under it
+  // (set only by the restart below — never recurses twice).
+  documentEvidence = null,
 } = {}) {
+    // A document render pass (the headless capture, or a customer's bare
+    // ?mode=pdf view) is a customer-facing document: make the served
+    // evidence durable BEFORE anything is composed, exactly like /pdf
+    // (Sonnet fallback audit + pre-push Codex on #5434). The headless pass
+    // finds the marker already current (the /pdf route wrote it). A row that
+    // froze between the read and the write restarts this composition from
+    // the row as it is now — acceptance record, pricing, status, everything
+    // — never a payload stitched from the stale open row.
+    if (isPdfRenderPass && !documentEvidence) {
+      const evidence = await require('../services/estimate-proposal-billing').ensureRateReviewTermsEvidenceBeforeRender(estimate);
+      if (evidence.estimate !== estimate) {
+        return composeEstimateDataPayload(evidence.estimate, {
+          adminDraftPreview, isPdfRenderPass, docRenderPin, verifiedStaffPreview, currentViewRecorded, isInternalRefresh, includeConsultationOffer,
+          documentEvidence: evidence,
+        });
+      }
+      documentEvidence = evidence;
+    }
     let estimateDataForIntelligence = {};
     try {
       estimateDataForIntelligence = typeof estimate.estimate_data === 'string'
@@ -27903,7 +27925,6 @@ async function composeEstimateDataPayload(estimate, {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
         const {
           proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRateReviewTermsEligible, proposalRowTermsScope,
-          ensureRateReviewTermsEvidenceBeforeRender,
           resolveProposalBillingContext,
         } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
@@ -27912,16 +27933,6 @@ async function composeEstimateDataPayload(estimate, {
           livePricing: proposalBilling?.livePricing || null,
         });
         const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
-        // A document render pass (the headless capture, or a customer's bare
-        // ?mode=pdf view) is a customer-facing document: make the served
-        // evidence durable BEFORE projecting the line, exactly like /pdf
-        // (Sonnet fallback audit on #5434). The headless pass finds the
-        // marker already current (the /pdf route wrote it); unproven
-        // persistence withholds the line; a row that froze under us is
-        // projected as the frozen row it now is.
-        const documentEvidence = isPdfRenderPass
-          ? await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing: proposalBilling })
-          : null;
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
@@ -27934,9 +27945,12 @@ async function composeEstimateDataPayload(estimate, {
           // own narrower taxonomy (codex #5434 r1 P1 — a "Weed Control"
           // row is lawn here and was unclassifiable there). Explicit
           // boolean, like noGuaranteeClaims.
+          // A document pass whose served evidence could not be proven
+          // durable (documentEvidence, resolved before composition) never
+          // projects the line.
           rateReviewTermsEligible: documentEvidence?.withholdRateReviewTerms === true
             ? false
-            : proposalRateReviewTermsEligible(proposalForView, estimate.id, { estimate: documentEvidence?.estimate || estimate, acceptance: acceptanceRecord }),
+            : proposalRateReviewTermsEligible(proposalForView, estimate.id, { estimate, acceptance: acceptanceRecord }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),

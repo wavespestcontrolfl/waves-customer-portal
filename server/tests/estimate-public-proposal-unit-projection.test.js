@@ -55,7 +55,9 @@ function chainFor(result) {
     orderBy: jest.fn(() => chain),
     limit: jest.fn(() => chain),
     first: jest.fn().mockResolvedValue(result),
-    update: jest.fn().mockResolvedValue(1),
+    // dbRows.__update(row): a per-test hook for the served-evidence write
+    // (returns the affected-row count; may mutate dbRows to simulate a race).
+    update: jest.fn(async () => (typeof dbRows.__update === 'function' ? dbRows.__update(result) : 1)),
     insert: jest.fn().mockResolvedValue([1]),
     then: undefined,
   };
@@ -200,6 +202,45 @@ describe('GET /:token/data — proposal line projection', () => {
         termsScope: eligible ? 'all' : 'satisfaction',
       });
     });
+  });
+
+  test('document mode: a row that freezes between the read and the evidence write restarts the payload from the frozen row (pre-push Codex on #5434)', async () => {
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-rate-review-race',
+      monthly_total: 85,
+      annual_total: 1020,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Ornamental Care Program', monthlyPrice: 85 }],
+        result: { recurring: { services: [{ service: 'tree_shrub', name: 'Ornamental Care Program', mo: 85 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{ name: 'Service location', lineItems: [{ description: 'Ornamental Care Program', unitPrice: 85, frequency: 'monthly', taxable: false }] }],
+        },
+      },
+    };
+    let writes = 0;
+    dbRows.__update = () => {
+      writes += 1;
+      // The accept from another tab committed first: the guarded evidence
+      // UPDATE matches nothing and the row is now accepted (no stamp).
+      dbRows.estimates = { ...dbRows.estimates, status: 'accepted', price_locked_at: '2026-10-01T06:00:00.000Z' };
+      return 0;
+    };
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(writes).toBe(1);
+        // Composed from the frozen row, not the stale open snapshot.
+        expect(body.estimate.status).toBe('accepted');
+        expect(body.proposal.rateReviewTermsEligible).toBe(false);
+      });
+    } finally {
+      dbRows.__update = null;
+    }
   });
 
   // codex #5434 r2 P1: a frozen (accepted) document keeps the terms the
