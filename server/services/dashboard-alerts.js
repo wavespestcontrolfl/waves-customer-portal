@@ -13,6 +13,7 @@
 // mark-as-read flow.
 
 const db = require('../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
@@ -145,6 +146,8 @@ function excludeInternalLeads(qb) {
 async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   const today = etDateString();
   const alerts = [];
+  // Generators that threw. Each one fail-softs, so `alerts` silently lacks that queue; needs-me reads this.
+  const failures = [];
 
   // 1. Invoices 60+ days overdue. paid_at IS NULL is the source of truth
   //    (matches /core-kpis AR Days + getOutstandingBalances). Excludes
@@ -170,14 +173,15 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/invoices',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] ar_overdue_60: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'ar_overdue_60' }); logger.error(`[dashboard-alerts] ar_overdue_60: ${err.message}`); }
 
   // 2. Failed payments today. Operator should see these every login.
   try {
-    const failed = await db('payments')
+    // B10: dues deferred under a dispute hold were never attempted — not failures.
+    const failed = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .where('payment_date', today)
+      .where('payment_date', today))
       .count('* as count').first();
     const count = parseInt(failed?.count || 0);
     if (count > 0) {
@@ -189,7 +193,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/invoices',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] payments_failed_today: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'payments_failed_today' }); logger.error(`[dashboard-alerts] payments_failed_today: ${err.message}`); }
 
   // 3. Inbound calls today on numbers we haven't catalogued in
   //    lead_sources. A non-zero count means real customers are dialing
@@ -214,7 +218,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/communications',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] calls_unmapped_today: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'calls_unmapped_today' }); logger.error(`[dashboard-alerts] calls_unmapped_today: ${err.message}`); }
 
   // 4. Cards expiring in next 7 days. Tighter than billing-health's
   //    60-day window — this is "act this week or autopay breaks."
@@ -276,8 +280,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
           + "BETWEEN (NOW() AT TIME ZONE 'America/New_York')::date "
           + "AND ((NOW() AT TIME ZONE 'America/New_York')::date + INTERVAL '7 days')",
       )
-      .count('* as count').first()
-      .catch(() => ({ count: 0 }));
+      // No inner catch: a failed expiry query must reach the outer catch and
+      // land in `failures`, never read as an empty queue.
+      .count('* as count').first();
     const count = parseInt(expiring?.count || 0);
     if (count > 0) {
       alerts.push({
@@ -288,7 +293,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/customers',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] cards_expiring_7d: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'cards_expiring_7d' }); logger.error(`[dashboard-alerts] cards_expiring_7d: ${err.message}`); }
 
   // 5. Inventory unit cleanup. Bad/missing/ambiguous units undermine
   // forecast, readiness, closeout deduction, restock receiving, and costing.
@@ -310,7 +315,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/inventory?tab=unit-review',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] inventory_unit_review: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'inventory_unit_review' }); logger.error(`[dashboard-alerts] inventory_unit_review: ${err.message}`); }
 
   // 6. Customers at churn risk per the latest health-score snapshot.
   //    Pulls only the most-recent score per customer so a stale
@@ -338,7 +343,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/customers?healthRisk=at_risk',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'churn_at_risk' }); logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }
 
   // 6b. Billable draft invoices unsent for 3+ days (owner ruling
   //     2026-08-24, after a 7-week-old unsent completion draft was caught
@@ -396,7 +401,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: `/admin/invoices?invoice=${encodeURIComponent(staleDraftRows[0].id)}`,
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'stale_draft_invoices' }); logger.error(`[dashboard-alerts] stale_draft_invoices: ${err.message}`); }
 
   // 6c. Completed visits TODAY that are not closed out — report, material
   //     log, photos, report delivery, or a completion that never committed —
@@ -537,6 +542,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       }
     }
   } catch (err) {
+    failures.push({ id: 'closeout_gaps_today' });
     logger.error(`[dashboard-alerts] closeout_gaps_today: ${err.message}`);
     // A generator failure must not read as resolution: re-emit the alert
     // as it last stood (same-day persisted row, else the in-process carry).
@@ -594,7 +600,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         });
       }
     }
-  } catch (err) { logger.error(`[dashboard-alerts] persisted_admin_alerts: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'persisted_admin_alerts' }); logger.error(`[dashboard-alerts] persisted_admin_alerts: ${err.message}`); }
 
   // ——— Action Inbox generators (kind: 'action') — "do this now" items, as
   // opposed to the watch-state alarms above. Same fail-soft contract: each
@@ -636,7 +642,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/leads',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] leads_awaiting_contact: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'leads_awaiting_contact' }); logger.error(`[dashboard-alerts] leads_awaiting_contact: ${err.message}`); }
 
   // 9. Sent estimates expiring within 3 days — call before the quote dies.
   //    Same exclusions as /sales-capture (archived + internal-test rows out);
@@ -688,7 +694,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/estimates',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] estimates_expiring: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'estimates_expiring' }); logger.error(`[dashboard-alerts] estimates_expiring: ${err.message}`); }
 
   // 10. MRR the next billing run can't count on (service-paused, autopay-paused,
   //     overdue, or prepay payment-pending). Reuses the SAME shared breakdown
@@ -713,7 +719,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/billing-recovery',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] at_risk_mrr: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'at_risk_mrr' }); logger.error(`[dashboard-alerts] at_risk_mrr: ${err.message}`); }
 
   // 11. Autopay coverage below target — every manual-pay account is monthly
   //     collection labor + churn risk. Shares autopayActivePredicate
@@ -746,7 +752,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         });
       }
     }
-  } catch (err) { logger.error(`[dashboard-alerts] autopay_coverage_low: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'autopay_coverage_low' }); logger.error(`[dashboard-alerts] autopay_coverage_low: ${err.message}`); }
 
   // 12. Data quality: this week's leads with no lead_source — they render as
   //     'Unknown' in every attribution panel and silently corrupt LTV:CAC.
@@ -788,7 +794,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/leads',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'leads_unattributed_7d' }); logger.error(`[dashboard-alerts] leads_unattributed_7d: ${err.message}`); }
 
   // 13. Builder termite warranties expiring — open leads whose builder-provided
   //     coverage lapses inside the pitch window (or lapsed recently enough
@@ -815,7 +821,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         href: '/admin/leads?builder_warranty=expiring',
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] builder_warranty_expiring: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'builder_warranty_expiring' }); logger.error(`[dashboard-alerts] builder_warranty_expiring: ${err.message}`); }
 
   // Duplicate customers pending review — pairs sharing a phone that haven't
   // been merged or dismissed. Green-tier pairs clear on the nightly auto-merge
@@ -840,7 +846,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         members: queueMembers(pairIds),
       });
     }
-  } catch (err) { logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }
+  } catch (err) { failures.push({ id: 'customer_duplicates_review' }); logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }
 
   // Everything not explicitly tagged above is a passive watch-state alarm; the
   // client separates do-this-now actions from alerts on this field.
@@ -848,7 +854,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
     if (!a.kind) a.kind = 'alert';
   }
 
-  return { asOf: today, alerts };
+  return { asOf: today, alerts, failures };
 }
 
 // computeDashboardAlerts sits on two hot paths — the dashboard banner (60s

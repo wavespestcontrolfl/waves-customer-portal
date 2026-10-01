@@ -32,6 +32,27 @@ const FIELD_GROUPS = {
     'preferred_date_time',
     'proposed_start_at',
     'agent_committed_booking',
+    // The reschedule agreement and the appointment it moves (schema 1.16.0)
+    // decide whether the applier moves a visit, and which one.
+    'caller_accepted_slot',
+    'moved_appointment_date',
+    // The agreed slot's and moved appointment's verbatim words (schema
+    // 1.17.0) are what the reschedule applier checks against the evidence
+    // quotes, so a model that drifts on either must show in the replay.
+    'agreed_slot_words',
+    'moved_appointment_words',
+    // The language judgements (schema 1.20.0) the applier only verifies: a
+    // model that drifts on any of them must show in the replay.
+    'definite_commitment',
+    'relative_date_used',
+    'moved_appointment_relative_date_used',
+    // The commercial dictated booking judgements (schema 1.21.0) the path
+    // only verifies.
+    'price_offered_by_staff',
+    'price_accepted_by_caller',
+    'price_is_final',
+    'staff_accepted_proposed_slot',
+    'selected_day_words',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -90,6 +111,12 @@ const FIELD_GROUPS = {
     // hallucinating one) must show up here, not just in a triage-flag count.
     'caller_id_disclaimed',
     'phone_note',
+    // sms_declined (schema 1.19.0, codex P1 on #5292) — the dedicated
+    // explicit-SMS-refusal field the booking-link staging check reads
+    // (call-booking-link-text.js). A model that stops catching (or starts
+    // hallucinating) a refusal must show up here, not just as a silent
+    // change in who gets texted.
+    'sms_declined',
   ],
   low: [
     'lead_quality',
@@ -406,25 +433,53 @@ function normalizeTime(value) {
   return normalizeString(s);
 }
 
+// agreed_slot_words is an object ({ day, hour, period }), not a scalar, so
+// it needs its own signature — the default normalizeString(value) below
+// would stringify it as "[object Object]" and never surface a real drift.
+function normalizeAgreedSlotWords(value) {
+  if (!value || typeof value !== 'object') return null;
+  const day = normalizeString(value.day);
+  const hour = normalizeString(value.hour);
+  const period = normalizeString(value.period);
+  if (!hour) return null;
+  return `${day || ''}|${hour}|${period || ''}`;
+}
+
+// Field-specific normalizers (wrapped so the lookups resolve at call time).
+const FIELD_NORMALIZERS = {
+  agreed_slot_words: (v) => normalizeAgreedSlotWords(v),
+  address_line1: (v) => normalizeString(normalizeStreetLine(v)),
+  phone: (v) => normalizePhone(v),
+  email: (v) => normalizeString(v),
+  preferred_date_time: (v) => normalizeDateTime(v),
+  proposed_start_at: (v) => normalizeDateTime(v),
+};
+// Booleans compared as they are, null kept distinct from false:
+//   - price_accepted is a tri-state (true/false/null): unlike
+//     agent_committed_booking, null is NOT collapsed into false — "acceptance
+//     never at issue" is a distinct state from "the caller declined".
+//   - caller_id_disclaimed is the same tri-state shape as price_accepted — the
+//     schema never sets it false (see call-extraction.model-output.schema.json),
+//     so null (not addressed) must stay distinct from a hypothetical false.
+//   - sms_declined (schema 1.19.0) is the same tri-state shape — null (never
+//     judged, including every pre-1.19 row) must stay distinct from an
+//     explicit false, which the booking-link staging check treats very
+//     differently (null fails closed; false does not block).
+const BOOL_FIELDS = new Set([
+  'appointment_confirmed', 'is_spam', 'is_voicemail', 'price_accepted', 'caller_id_disclaimed',
+  'sms_declined', 'definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used',
+  'price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot',
+]);
+// agent_committed_booking postdates every legacy extraction: absent/null
+// means "not committed", identical to false — collapse them so replays
+// don't report a spurious high-severity delta on every pre-1.8.0 row
+// (codex P2). A genuine true↔false disagreement still surfaces.
+const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot']);
+
 function normalizeField(field, value) {
-  if (field === 'address_line1') return normalizeString(normalizeStreetLine(value));
-  if (field === 'phone') return normalizePhone(value);
-  if (field === 'email') return normalizeString(value);
-  if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
-  // price_accepted is a tri-state (true/false/null): unlike
-  // agent_committed_booking, null is NOT collapsed into false — "acceptance
-  // never at issue" is a distinct state from "the caller declined".
-  if (field === 'price_accepted') return normalizeBool(value);
-  // caller_id_disclaimed is the same tri-state shape as price_accepted — the
-  // schema never sets it false (see call-extraction.model-output.schema.json),
-  // so null (not addressed) must stay distinct from a hypothetical false.
-  if (field === 'caller_id_disclaimed') return normalizeBool(value);
-  // agent_committed_booking postdates every legacy extraction: absent/null
-  // means "not committed", identical to false — collapse them so replays
-  // don't report a spurious high-severity delta on every pre-1.8.0 row
-  // (codex P2). A genuine true↔false disagreement still surfaces.
-  if (field === 'agent_committed_booking') return normalizeBool(value) === true;
-  if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
+  if (Object.hasOwn(FIELD_NORMALIZERS, field)) return FIELD_NORMALIZERS[field](value);
+  if (BOOL_FIELDS.has(field)) return normalizeBool(value);
+  if (COLLAPSED_BOOL_FIELDS.has(field)) return normalizeBool(value) === true;
   return normalizeString(value);
 }
 
@@ -976,6 +1031,8 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   // back to review. Replaying without it over-counts auto-routes.
   if (conflictCheck) {
     route = conflictCheck.demote(route, conflictCheck.extractedV1, conflictCheck.knownCaller);
+    // The gate's downstream full-transcript service veto (live path parity).
+    if (conflictCheck.veto) route = conflictCheck.veto(route, conflictCheck.extractedV1, conflictCheck.transcription);
   }
   return {
     allowed: !!route.allowed,
@@ -1172,6 +1229,9 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
+    // callStartedAt() backs out a post-call fallback row's own length (codex #5377 r12 P2)
+    'duration_seconds',
+    'recording_duration_seconds',
     // customer_id is no longer selected (Codex #4933 r3 P2): the linked
     // customer is now resolved via resolveKnownCallerCustomer (contactPhone
     // + operator override), which never reads that column.
@@ -1241,7 +1301,12 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  const storedAvUnwaived = parseJson(call.ai_address_validation, null);
+  // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
+  // for the PRIOR extraction's service and property. It rebuilds for the prior
+  // route only; a fresh extraction is judged on the unwaived verdict unless it
+  // names the same service and property type (codex #5378 pre-push P1).
+  const storedAvRaw = require('../services/call-triage-flags').reconstructWaivedAddressValidation(storedAvUnwaived);
   // Effective-verdict reconstruction (codex round-12 P2, mirroring the
   // readiness script): a recovered address routed on the recovery's ACCEPTING
   // verdict while the ORIGINAL unresolvable one was persisted — the
@@ -1279,15 +1344,33 @@ async function replayCall(call, context) {
   // unlink is no known caller — never read straight off call.customer_id,
   // which can disagree with the live selection (carried from #4933 r3).
   const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db }).catch(() => null);
-  const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
+  // `transcript` is the text the extraction being routed was made from: the
+  // persisted one for the prior route, the RE-transcription under --retranscribe for
+  // the fresh one (the commercial context and its catalog quote checker are grounded
+  // in it; codex #5377 r10 P2).
+  const bookableServices = await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => null);
+  const contextFor = (transcript) => CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,
     contactPhone,
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+    unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+    // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's catalog-aware quote check reads the
+    // bookable catalog (absent = the replay holds the call).
+    bookableServices,
+    ...(transcript !== undefined ? { transcript } : {}),
+    // A re-transcription has no matching V1 record (the replay never re-runs V1), so the
+    // persisted ai_extraction's service view does not describe it: the commercial quote
+    // check gets no V1 view and holds the call rather than mix the two (codex #5377 r19 P2).
+    ...(transcript !== undefined && transcript !== call.transcription ? { extracted: null } : {}),
   });
+  const { knownCaller, options: failOpenContext } = contextFor(undefined);
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
-  const conflictCheck = { demote: CRP.demoteFailOpenOnV1AddressConflict, extractedV1: legacyFlat, knownCaller };
+  const conflictCheck = {
+    demote: CRP.demoteFailOpenOnV1AddressConflict, veto: CRP.applyUnclearServiceTranscriptVeto, extractedV1: legacyFlat, knownCaller, transcription: call.transcription,
+  };
   const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext, conflictCheck) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
@@ -1338,17 +1421,27 @@ async function replayCall(call, context) {
   const current = transcriptForExtraction
     ? await CRP._test.extractCallDataV2(transcriptForExtraction, contactPhone, {
         callId: call.id,
-        callStartedAt: call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date(),
+        // The real call start, not the post-call fallback row's insert time, so relative dates resolve
+        // against the day the call began exactly as the routing context below verifies them (codex #5377).
+        callStartedAt: require('../utils/call-timeline').callStartedAt(call)
+          || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date()),
       })
     : { status: replayTranscription.status || 'no_transcription', extraction: null, errors: null };
   const durationMs = Date.now() - startedAt;
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
+  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+  const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
+    && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
+    ? storedAvUnwaived : storedAv;
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
-      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
-      failOpenContext, conflictCheck)
+      avVerdictForExtraction(storedAvForCurrent, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
+      // A re-transcription rebuilds the WHOLE context (transcript and the commercial
+      // quote checker grounded in it), never just the text.
+      transcriptForExtraction === call.transcription ? failOpenContext : contextFor(transcriptForExtraction).options,
+      { ...conflictCheck, transcription: transcriptForExtraction })
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];
@@ -1686,4 +1779,6 @@ module.exports = {
   applyFixtureReplayOptions,
   runReplayVariance,
   etScheduleParts,
+  routeForV2,
+  defaultReplayHelpers,
 };

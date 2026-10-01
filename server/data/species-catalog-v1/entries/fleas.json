@@ -18,7 +18,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "70e30a17d871f36ca56c0d691c440297a2c8e79083bdd7d64576790ce510d4f0"
     },
     "slug": "cat-flea",
     "common_name": "Cat Flea",
@@ -43,8 +44,9 @@
       {
         "slug": "chiggers",
         "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are picked up outdoors and too small to see, causing welts at sock lines.",
-        "next_photo": "A technician judges from the site (pets/carpet vs. outdoor vegetation) and whether a jumping insect is caught — a bite pattern alone can't confirm which insect caused it.",
-        "photo_can_confirm": false
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where you were bitten (pets/carpet vs. outdoor plants); a technician judges from that.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",

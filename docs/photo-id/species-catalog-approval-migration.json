@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-09-27",
+  "approval_bound_content": "Every entry field except review metadata and the loader-injected level; objects are recursively key-sorted and arrays retain authored order before SHA-256.",
+  "trusted_approval_sources": [
+    {
+      "commit": "f05b815b4ce13b3a0121b98de98b60ef783c9789",
+      "scope": "52 website entries whose owner-review content fingerprint matched"
+    },
+    {
+      "commit": "c5e8e2f86f93488ad88d178056e5731ef26ca849",
+      "scope": "7 additional website entries whose owner-review content fingerprint matched"
+    },
+    {
+      "commit": "bbe617e26aaee660d4cb7431f3cd6b74d5ee93ec",
+      "scope": "review-backup approvals for the 179-entry expansion, applied only on content-hash match with no open verification"
+    }
+  ],
+  "before": {
+    "owner_approved": 74,
+    "draft": 165
+  },
+  "comparison": {
+    "trusted_content_matches": 73,
+    "trusted_content_mismatches": [
+      {
+        "slug": "bagworm",
+        "trusted_commit": "bbe617e26aaee660d4cb7431f3cd6b74d5ee93ec",
+        "changed_fields": [
+          "not_matches"
+        ],
+        "action": "downgraded_to_draft"
+      }
+    ]
+  },
+  "after": {
+    "owner_approved": 73,
+    "draft": 166,
+    "approved_hash_mismatches": 0
+  }
+}

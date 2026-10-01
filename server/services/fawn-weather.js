@@ -8,19 +8,13 @@
  */
 
 const logger = require('./logger');
-const { addETDaysAtWallClock } = require('../utils/datetime-et');
 
 // `lastObservation/summary/` is not a real FAWN endpoint (confirmed live
 // 2026-09-26: it 400s). The documented, working "all stations" feed is
-// `{period}/summary/json`. Two different periods, two different jobs:
-// lastHour is near-real-time (~15-45min old) and is what "current
-// conditions" (getCurrent) means; lastDay is
-// the most recent COMPLETE day's totals, which is what "recent rainfall"
-// (getRecentRainfall, used by the public pest forecast to judge "has it
-// been wet lately") actually needs — an hour's rain_sum is almost always
-// zero unless it happens to be raining at fetch time.
+// `{period}/summary/json`; lastHour is near-real-time (~15-45min old) and
+// is what "current conditions" (getCurrent) means. The public pest
+// forecast's recent rainfall comes from MRMS radar (mrms-qpe.js), not FAWN.
 const FAWN_LAST_HOUR_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastHour/summary/json';
-const FAWN_LAST_DAY_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json';
 
 // The real API's summary rows carry ONLY a numeric `StationID` — no name,
 // county, or lat/lng field (confirmed live 2026-09-26). There is also no
@@ -33,25 +27,16 @@ const STATION_HINTS = [
   { key: 'arcadia', id: '490', label: 'Arcadia', names: ['arcadia'], latitude: 27.22621, longitude: -81.83838 },
 ];
 
-// Cache for 15 minutes to avoid hammering FAWN. Separate slots per period —
-// lastHour and lastDay are different datasets and must not overwrite one
-// another's cache.
-const _stationCache = { lastHour: null, lastDay: null };
-const _stationCacheTime = { lastHour: 0, lastDay: 0 };
+// Cache for 15 minutes to avoid hammering FAWN.
+let _stationCache = null;
+let _stationCacheTime = 0;
 const CACHE_TTL = 15 * 60 * 1000;
 
-// getRecentRainfall()'s last-good fallback, keyed per requested coordinate
-// (not a single global) so a failure for one location never serves another
-// location's station reading, and bounded by age so a multi-hour FAWN
-// outage doesn't preserve a stale wet/dry signal indefinitely (Codex
-// review, 2026-09-26).
-const _recentRainfallCache = new Map(); // key -> { at, snapshot }
-const RAIN_FALLBACK_MAX_AGE = 6 * 60 * 60 * 1000; // 6h
-
-// getCurrent()'s last-good fallback — same per-coordinate, age-bounded shape
-// as above. A single global slot let a Fort Myers request (no station in
-// range) receive North Port's conditions after any earlier success (Codex
-// review, 2026-09-26).
+// getCurrent()'s last-good fallback, keyed per requested coordinate and
+// bounded by age. A single global slot let a Fort Myers request (no station
+// in range) receive North Port's conditions after any earlier success, and
+// kept serving them through an outage indefinitely (Codex review,
+// 2026-09-26).
 const _currentCache = new Map(); // key -> { at, snapshot }
 const CURRENT_FALLBACK_MAX_AGE = 2 * 60 * 60 * 1000; // 2h
 
@@ -60,13 +45,6 @@ function unavailableCurrent(message) {
     temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null,
     soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
     error: message,
-  };
-}
-
-function rainfallUnavailable(message) {
-  return {
-    rainfall_in: null, station: 'unavailable', station_key: null, observation_time: null,
-    ...(message ? { error: message } : {}),
   };
 }
 
@@ -141,7 +119,7 @@ function stationCoordinates(station = {}) {
   return hint ? { latitude: hint.latitude, longitude: hint.longitude } : null;
 }
 
-// FAWN's documented `rain_sum` field (lastDay/summary) is a SUM in
+// FAWN's documented `rain_sum` field ({period}/summary) is a SUM in
 // centimeters, not inches (confirmed live 2026-09-26). `Rain_Tot` /
 // `rainfall_in` / `precipitation` are defensive fallbacks for any shape
 // that already reports inches (e.g. test fixtures) — never seen on the
@@ -150,21 +128,6 @@ function rainfallInches(station = {}) {
   const cm = numberOrNull(station.rain_sum);
   if (cm != null) return cm / 2.54;
   return numberOrNull(firstDefined(station.Rain_Tot, station.rainfall_in, station.precipitation));
-}
-
-// FAWN documents 15-minute observations from 23:45 on the preceding local
-// date: https://fawn.ifas.ufl.edu/controller.php/lastDay/ . A numeric rain_sum
-// can cover only part of that day. Recognized SWFL stations use Eastern time;
-// advance one calendar day at the same wall time so DST requires 92 or 100
-// observations instead of the usual 96. Unknown coverage cannot prove a total.
-function hasCompleteDailyCoverage(station) {
-  const count = Number(station.num_obs);
-  if (!Number.isInteger(count) || typeof station.startTime !== 'string'
-    || !/(?:Z|[+-]\d{2}:\d{2})$/.test(station.startTime)) return false;
-  const start = new Date(station.startTime);
-  if (!Number.isFinite(start.getTime())) return false;
-  const expected = (addETDaysAtWallClock(start, 1).getTime() - start.getTime()) / (15 * 60 * 1000);
-  return [92, 96, 100].includes(expected) && count === expected;
 }
 
 // FAWN's documented temperature fields (t2m_avg, tsoil_avg) are °C, and wind
@@ -210,22 +173,19 @@ function distanceMiles(from, to) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function fetchStationRows(period) {
-  const url = period === 'lastDay' ? FAWN_LAST_DAY_URL : FAWN_LAST_HOUR_URL;
-  const slot = period === 'lastDay' ? 'lastDay' : 'lastHour';
-
-  if (_stationCache[slot] && Date.now() - _stationCacheTime[slot] < CACHE_TTL) return _stationCache[slot];
+async function fetchStationRows() {
+  if (_stationCache && Date.now() - _stationCacheTime < CACHE_TTL) return _stationCache;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(FAWN_LAST_HOUR_URL, { signal: controller.signal });
     if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
 
     const data = await res.json();
     const rows = Array.isArray(data) ? data : [];
-    _stationCache[slot] = rows;
-    _stationCacheTime[slot] = Date.now();
+    _stationCache = rows;
+    _stationCacheTime = Date.now();
     return rows;
   } finally {
     clearTimeout(timeout);
@@ -263,8 +223,7 @@ function selectStation(stations = [], options = {}) {
   // arbitrary statewide row. The live feed carries no name/coords, so an
   // unrecognized row can't even be distance-checked; treating it as a
   // candidate risks silently attaching a random Florida station's reading
-  // to the SWFL forecast/current-conditions consumers (Codex review,
-  // 2026-09-26).
+  // to the SWFL current-conditions consumers (Codex review, 2026-09-26).
   //
   // Coordinates are required: with none, "the first recognized row" would
   // hand every caller North Port's reading regardless of where the property
@@ -328,7 +287,7 @@ const FawnWeather = {
 
     const key = coordKey(options);
     try {
-      const data = await fetchStationRows('lastHour');
+      const data = await fetchStationRows();
       const station = selectStation(data, options);
 
       if (!station) throw new Error('No FAWN station in range in the feed');
@@ -345,58 +304,6 @@ const FawnWeather = {
       const cached = _currentCache.get(key);
       if (cached && Date.now() - cached.at < CURRENT_FALLBACK_MAX_AGE) return cached.snapshot;
       return unavailableCurrent(err.message);
-    }
-  },
-
-  /**
-   * Get the most recent COMPLETE day's rainfall total for the nearest SWFL
-   * station — a meaningfully-sized "has it been wet lately" reading, unlike
-   * getCurrent()'s near-real-time (and almost always zero) hourly rain_sum.
-   * Used by the public pest forecast's SWFL enrichment; kept separate from
-   * getCurrent() so a day-total never masquerades as "current
-   * conditions" (Codex review, 2026-09-26).
-   * Returns: { rainfall_in, station, station_key, observation_time }
-   */
-  async getRecentRainfall(options = {}) {
-    const target = targetOf(options);
-    if (!target) return rainfallUnavailable('Coordinates required for FAWN rainfall');
-    // Out of coverage (e.g. Fort Myers/Cape Coral) — no FAWN rainfall for
-    // this city, by design. No `error`, so the forecast doesn't log it as a
-    // failure on every cache fill.
-    if (!inStationCoverage(target)) return { ...rainfallUnavailable(null), out_of_coverage: true };
-
-    const key = coordKey(options);
-    try {
-      const data = await fetchStationRows('lastDay');
-      const station = selectStation(data, options);
-
-      if (!station) throw new Error('No FAWN station found');
-      if (!hasCompleteDailyCoverage(station)) throw new Error('Selected station has incomplete daily observation coverage');
-
-      const rainfall_in = rainfallInches(station);
-      // A missing/non-numeric rain_sum on the selected row (a FAWN schema
-      // change, an incomplete station row) is an enrichment failure, not a
-      // valid "0 inches" reading — never cache it as last-good, so a later
-      // failure can't silently replay it and pest-forecast/weather.js's
-      // logging (which only fires on a resolved `error`) actually sees the
-      // problem (Codex review, 2026-09-26).
-      if (rainfall_in == null) throw new Error(`Selected station's rain_sum missing/non-numeric: ${JSON.stringify(station.rain_sum)}`);
-
-      const hint = hintForStation(station);
-      const snapshot = {
-        rainfall_in,
-        station: stationName(station) || hint?.label || 'FAWN SWFL',
-        station_key: hint?.key || null,
-        observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),
-      };
-      _recentRainfallCache.set(key, { at: Date.now(), snapshot });
-
-      return snapshot;
-    } catch (err) {
-      logger.error(`[fawn-weather] Recent-rainfall fetch failed: ${err.message}`);
-      const cached = _recentRainfallCache.get(key);
-      if (cached && Date.now() - cached.at < RAIN_FALLBACK_MAX_AGE) return cached.snapshot;
-      return rainfallUnavailable(err.message);
     }
   },
 

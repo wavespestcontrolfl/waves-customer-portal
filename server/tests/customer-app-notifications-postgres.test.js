@@ -53,7 +53,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
-    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers', 'service_requests', 'technicians', 'ops_email_send_state']) {
+    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers', 'service_requests', 'technicians', 'ops_email_send_state', 'collections_flags', 'annual_prepay_terms']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     expect(await mockPg.schema.hasColumn('notification_prefs', 'push_enabled')).toBe(true);
@@ -408,8 +408,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   test('App readiness uses the caller transaction with a one-connection pool', async () => {
     await device(owner);
     const previous = mockPg;
+    // Allow proxy connection startup; max: 1 still detects a second acquisition inside the transaction.
     const limited = require('knex')({ client: 'pg', connection, searchPath: [schema],
-      acquireConnectionTimeout: 500, pool: { min: 0, max: 1 } });
+      acquireConnectionTimeout: 10000, pool: { min: 0, max: 1 } });
     mockPg = limited;
     try {
       await limited.transaction(async (trx) => {
@@ -653,7 +654,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     try {
       expect((await put({ billingReminderChannels: ['email'] })).status).toBe(409);
       expect((await put({ billingEmail: 'billing@example.com', billingReminderChannels: ['email'] })).status).toBe(200);
-      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(409);
+      // The portal-wide switch does not make the now-saved billing email
+      // unavailable (owner ruling 2026-09-26).
+      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(200);
     } finally {
       await mockPg('customers').where({ id: owner }).update({ email: 'qa-app-0@example.invalid' });
       await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
@@ -721,7 +724,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       invoice_channels: ['email', 'sms'], email_enabled: false,
     });
     expect((await put({ paymentConfirmationChannels: ['sms'] })).status).toBe(409);
-    expect((await put({ invoiceChannels: ['email'] })).status).toBe(409);
+    // The portal-wide email switch does not make Email unavailable (owner
+    // ruling 2026-09-26); the property customer has an address on file, so
+    // an Email-only choice still succeeds even with the switch off.
+    expect((await put({ invoiceChannels: ['email'] })).status).toBe(200);
     expect((await put({ paymentConfirmationChannels: ['sms'], paymentConfirmationSms: true })).status).toBe(200);
   });
 
@@ -740,8 +746,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     });
   });
 
+  // emailEnabled is deliberately not in this table: the portal-wide switch
+  // never strands a single-channel Email array any more (owner ruling
+  // 2026-09-26), so a standalone emailEnabled:false toggle no longer 409s.
   test.each([
-    ['emailEnabled', 'invoice_channels', 'invoiceChannels', 'email'],
     ['smsEnabled', 'invoice_channels', 'invoiceChannels', 'sms'],
     ['paymentConfirmationSms', 'payment_receipt_channels', 'paymentConfirmationChannels', 'sms'],
     ['pushEnabled', 'invoice_channels', 'invoiceChannels', 'push'],
@@ -758,7 +766,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await device();
     await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'push'] });
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
-    expect((await put({ emailEnabled: false })).status).toBe(409);
+    // The portal-wide email switch no longer strands invoice_channels=
+    // ['email','push'] even with the App gate off: Email stays available
+    // regardless of the switch (owner ruling 2026-09-26).
+    expect((await put({ emailEnabled: false })).status).toBe(200);
 
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
     await mockPg('notification_prefs').where({ customer_id: property }).update({ email_enabled: true, invoice_channels: null });
@@ -767,14 +778,20 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).push_enabled).not.toBe(false);
   });
 
-  test('concurrent delivery-toggle saves cannot strand a billing category', async () => {
+  test('a concurrent portal-wide switch toggle cannot strand a billing category — email delivery is not gated by it', async () => {
+    // Owner ruling 2026-09-26: the portal-wide email switch never takes
+    // Email away from a billing category, so neither concurrent toggle can
+    // strand invoice_channels=['email','sms'] any more — Text alone
+    // stranding it used to require the OTHER leg (Email) to already be
+    // unavailable via the switch, which is no longer possible.
     await mockPg('notification_prefs').where({ customer_id: property }).update({
       invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: true,
     });
     const responses = await Promise.all([put({ emailEnabled: false }), put({ smsEnabled: false })]);
-    expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 200]);
     const saved = await mockPg('notification_prefs').where({ customer_id: property }).first();
-    expect([saved.email_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
+    expect(saved.email_enabled).toBe(false);
+    expect(saved.sms_enabled).toBe(false);
   });
 
   test('new Email and App checks compare against the row reread under lock', async () => {
@@ -811,7 +828,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
         billing_email: 'billing@example.com', invoice_channels: ['sms'],
       });
       expect(await raceLockedChange({ billing_email: null }, { invoiceChannels: ['email', 'sms'] }))
-        .toMatchObject({ status: 409, body: { error: 'Add a billing email and enable email notifications before choosing Email.' } });
+        .toMatchObject({ status: 409, body: { error: 'Add a billing email before choosing Email.' } });
 
       await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms', 'push'] });
       expect(await raceLockedChange({ invoice_channels: ['sms'] }, { invoiceChannels: ['sms', 'push'] }))
@@ -1015,7 +1032,8 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
     await mockPg('sms_log').where({ from_phone: 'push' }).del();
     // The template changed since delivery: the proof must not claim text the customer never got.
-    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' })).toMatchObject({ delivered: true });
+    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' }))
+      .toMatchObject({ delivered: false, deliveryOutcome: 'not_sent' });
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(0);
     // The same payload as delivered does repair.
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });

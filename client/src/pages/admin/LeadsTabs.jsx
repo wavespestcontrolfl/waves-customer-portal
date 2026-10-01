@@ -313,6 +313,7 @@ const STATUSES = [
   "unresponsive",
   "disqualified",
   "duplicate",
+  "handled",
 ];
 const CLOSED_STATUSES = [
   "won",
@@ -320,6 +321,7 @@ const CLOSED_STATUSES = [
   "unresponsive",
   "disqualified",
   "duplicate",
+  "handled",
 ];
 // Mirrors the server's expansion of the virtual `open` filter (admin-leads
 // OPEN_LEAD_STATUSES) — needed to know whether a given lead would survive
@@ -399,6 +401,25 @@ const TIMELINE_LABELS = {
   browsing: "Just pricing it out",
 };
 
+// Self-reported "How did you hear about us?" answer (leads.heard_about,
+// optional quote-form question, owner-approved 2026-09-27) — keys match the
+// Astro quote form's allowlisted <select> options and the portal's own
+// server-side allowlist (lead-webhook.js sanitizeHeardAbout). Kept SEPARATE
+// from the technically-observed lead source (source_name / SOURCE_NAMES on
+// the server) — this is what the customer typed, never merged with it.
+const HEARD_ABOUT_LABELS = {
+  google_search: "Google search",
+  google_maps: "Google Maps / Business Profile",
+  chatgpt: "ChatGPT",
+  other_ai: "Another AI assistant",
+  facebook_instagram: "Facebook or Instagram",
+  nextdoor: "Nextdoor",
+  yelp: "Yelp",
+  friend_neighbor: "Friend or neighbor",
+  truck_yard_sign: "Truck or yard sign",
+  other: "Other",
+};
+
 // preferred_date_time is an ET wall-clock string with NO timezone
 // ("2026-04-20T14:00" — the call extraction stores Eastern local time).
 // Don't route it through new Date(): a non-Eastern browser would reinterpret
@@ -439,6 +460,7 @@ const STATUS_SELECT_CLASS = {
   unresponsive: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
   disqualified: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
   duplicate: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+  handled: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
 };
 const STATUS_DOT_CLASS = {
   new: "bg-zinc-900",
@@ -450,6 +472,7 @@ const STATUS_DOT_CLASS = {
   unresponsive: "bg-zinc-400",
   disqualified: "bg-alert-fg",
   duplicate: "bg-zinc-400",
+  handled: "bg-zinc-400",
 };
 function statusSelectClass(status) {
   return STATUS_SELECT_CLASS[status] || "";
@@ -1370,19 +1393,23 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     loadLeadActivities(lead.id);
     if (consultationGate === true && !consultationLinks[lead.id]) loadConsultationLink(lead.id);
   };
-  const openLostModal = useCallback((leadId) => {
-    setFormData({ leadId });
+  // `seenStatus`: the status this page SHOWED when staff acted, so the server never
+  // lets a stale view reopen a request the customer's booking closed meanwhile.
+  const openLostModal = useCallback((leadId, seenStatus, seenUpdatedAt) => {
+    setFormData({ leadId, seen_status: seenStatus, seen_updated_at: seenUpdatedAt });
     setShowModal("lost");
   }, []);
-  const updateLeadStatus = async (leadId, status) => {
+  // `seenUpdatedAt`: the lead's updated_at as shown, so a close that landed again
+  // after a reopen is told apart from the one this page showed.
+  const updateLeadStatus = async (leadId, status, seenStatus, seenUpdatedAt) => {
     if (status === "lost") {
-      openLostModal(leadId);
+      openLostModal(leadId, seenStatus, seenUpdatedAt);
       return;
     }
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
         method: "PUT",
-        body: { status },
+        body: { status, seen_status: seenStatus, seen_updated_at: seenUpdatedAt },
       });
       loadLeads();
     } catch (e) {
@@ -1511,7 +1538,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       event.preventDefault();
       const droppedId = event.dataTransfer.getData("text/plain");
       const lead = leads.find((item) => String(item.id) === droppedId);
-      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage);
+      if (lead && lead.status !== stage) updateLeadStatus(lead.id, stage, lead.status, lead.updated_at);
       setDraggingLeadId(null);
     };
     return (
@@ -1842,11 +1869,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
                               onChange={(e) =>
-                                updateLeadStatus(lead.id, e.target.value)
+                                updateLeadStatus(lead.id, e.target.value, lead.status, lead.updated_at)
                               }
                               className={statusSelectClass(lead.status)}
                             >
-                              {STATUSES.map((s) => (
+                              {/* 'handled' is system-set only: shown for a lead that has it, never offered */}
+                              {STATUSES.filter((s) => s !== "handled" || lead.status === "handled").map((s) => (
                                 <option key={s} value={s}>
                                   {s.replace(/_/g, " ")}
                                 </option>
@@ -2112,6 +2140,25 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           Notes:{" "}
                                           <span className="text-zinc-900">
                                             {lead.transcript_summary}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {lead.heard_about && (
+                                        <div>
+                                          Heard about us:{" "}
+                                          <span className="text-zinc-900">
+                                            {HEARD_ABOUT_LABELS[
+                                              lead.heard_about
+                                            ] || lead.heard_about}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {lead.heard_about_prompt && (
+                                        <div>
+                                          Asked:{" "}
+                                          <span className="text-zinc-900">
+                                            &ldquo;{lead.heard_about_prompt}
+                                            &rdquo;
                                           </span>
                                         </div>
                                       )}
@@ -2607,6 +2654,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
+                                            seen_status: lead.status,
+                                            seen_updated_at: lead.updated_at,
                                           });
                                           setShowModal("convert");
                                         }}
@@ -2615,7 +2664,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       </Button>{" "}
                                       <Button
                                         variant={"danger"}
-                                        onClick={() => openLostModal(lead.id)}
+                                        onClick={() => openLostModal(lead.id, lead.status, lead.updated_at)}
                                       >
                                         Mark Lost
                                       </Button>{" "}
@@ -2867,6 +2916,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                   method: "POST",
                                                   body: {
                                                     ...extra,
+                                                  // the lead as this page shows it: a request the
+                                                  // customer's booking closed since is refused
+                                                  seen_status: lead.status,
+                                                  seen_updated_at: lead.updated_at,
                                                   date: apptForm.date,
                                                   time: apptForm.time,
                                                   serviceType:
@@ -3064,13 +3117,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           >
             {BOARD_STAGES.map((stage) => {
               const stageLeads = leads.filter((lead) => lead.status === stage);
+              // 'handled' is system-set only (the server refuses it): its column
+              // shows handled requests (dragged out to reopen) but takes no drops.
+              const acceptsDrops = stage !== "handled";
               const isDropTarget =
-                draggingLead && draggingLead.status !== stage;
+                acceptsDrops && draggingLead && draggingLead.status !== stage;
               return (
                 <div
                   key={stage}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => handleBoardDrop(e, stage)}
+                  onDragOver={acceptsDrops ? (e) => e.preventDefault() : undefined}
+                  onDrop={acceptsDrops ? (e) => handleBoardDrop(e, stage) : undefined}
                   className={
                     isDropTarget
                       ? "flex-[0_0_260px] min-w-[240px] bg-zinc-50 border-hairline border-zinc-200 rounded-md p-[10px] ring-2 ring-zinc-900"

@@ -204,3 +204,84 @@ describe('determineLeadSource — hub city detection (waves_website area)', () =
     expect(ds('https://wavespestcontrol.com/pest-control-palmetto-fl/').area).toBe('Palmetto');
   });
 });
+
+describe('determineLeadSource — AI-assistant referral (owner-approved 2026-09-27)', () => {
+  // args: (pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent,
+  //        fbclid, fbc, gclid, wbraid, gbraid, referrer)
+  const GCLID = 'CjwKCAjw3ejRBhAdEiwA';
+
+  test('utm_source=chatgpt.com attributes to ai_assistant / ChatGPT', () => {
+    const r = determineLeadSource('', 'https://wavespestcontrol.com/', 'chatgpt.com', '', '', '');
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'ChatGPT', channel: 'organic' });
+  });
+
+  test('utm_source=openai (seen in real ChatGPT citations) also attributes to ChatGPT', () => {
+    const r = determineLeadSource('', 'https://wavespestcontrol.com/', 'openai', '', '', '');
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'ChatGPT' });
+  });
+
+  test('a bare perplexity.ai referrer (no UTMs) attributes to ai_assistant / Perplexity', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/', '', '', '', '', '', '', '', '', '',
+      'https://www.perplexity.ai/search/pest-control-near-me',
+    );
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'Perplexity', channel: 'organic' });
+  });
+
+  test('a bare gemini.google.com referrer attributes to ai_assistant / Gemini', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/', '', '', '', '', '', '', '', '', '',
+      'https://gemini.google.com/app',
+    );
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'Gemini' });
+  });
+
+  test('an AI referral on a spoke domain still carries that spoke\'s area', () => {
+    const r = determineLeadSource(
+      '', 'https://www.veniceflpestcontrol.com/', 'chatgpt.com', '', '', '',
+    );
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'ChatGPT', area: 'Venice' });
+  });
+
+  test('an AI referral on a hub city page still carries that city\'s area', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/pest-control-sarasota-fl/', 'chatgpt.com', '', '', '',
+    );
+    expect(r).toMatchObject({ source: 'ai_assistant', detail: 'ChatGPT', area: 'Sarasota' });
+  });
+
+  test('precedence: a gclid still wins over an AI-assistant referrer', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/', '', '', '', '', '', '', GCLID, '', '',
+      'https://chatgpt.com/c/abc',
+    );
+    expect(r).toMatchObject({ source: 'google_ads', channel: 'paid' });
+  });
+
+  test('precedence: an explicit GBP utm still wins over an AI-assistant utm_source', () => {
+    // gbp wins via utm_source=gbp; chatgpt.com riding as the referrer must not
+    // override the more specific GBP match.
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/', 'gbp', '', '', '', '', '', '', '', '',
+      'https://chatgpt.com/c/abc',
+    );
+    expect(r.source).toBe('google_business');
+  });
+
+  test('no AI signal (no matching utm_source, no matching referrer) leaves classification unchanged', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/pest-control-sarasota-fl/', '', '', '', '', '', '', '', '', '',
+      'https://www.google.com/search?q=pest+control',
+    );
+    expect(r.source).toBe('waves_website');
+    expect(r.area).toBe('Sarasota');
+  });
+
+  test('an unrecognized utm_source/referrer never matches (fails closed to the domain/hub fallback)', () => {
+    const r = determineLeadSource(
+      '', 'https://wavespestcontrol.com/', 'newsletter', '', '', '', '', '', '', '', '',
+      'https://example.com/blog',
+    );
+    expect(r.source).not.toBe('ai_assistant');
+  });
+});

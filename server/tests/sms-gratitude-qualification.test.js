@@ -185,6 +185,10 @@ describe('sms gratitude qualification', () => {
     expect(store.rows[0]).not.toHaveProperty('suggested_message');
     expect(snapshot(store.rows[0]).pins).toMatchObject({
       policyVersion: 'gratitude_v1',
+      // Gate off (default here): currentPromptVersion() === PROMPT_VERSION
+      // (pre-push audit P1) — see the dedicated boundary test below for the
+      // gate-on case.
+      promptVersion: 'house_voice_v11',
       fixtureSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceFiles: expect.arrayContaining(['server/services/sms-gratitude-grading.js']),
@@ -798,5 +802,53 @@ describe('sms gratitude qualification', () => {
     setSnapshot(store.rows[0], changed);
     await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
       .resolves.toMatchObject({ qualified: false, reason: 'pins_changed' });
+  });
+
+  // Pre-push audit P1: with GATE_SMS_REAL_ANSWERS on, the rewritten system
+  // prompt used to interpolate followupSlaPhrase() directly — a value that
+  // flips at the 8am/8pm ET boundary with no code or config change. Since
+  // this pins.systemPromptSha256 IS the rendered system prompt's hash, that
+  // would have made a qualified gratitude run go stale (pins_changed) the
+  // moment the clock crossed the boundary. The fix moved the live phrase
+  // into the per-draft facts block (never hashed here) and made the system
+  // prompt text itself reference the fact instead of a computed value —
+  // this proves the pin survives both sides of the boundary.
+  test('systemPromptSha256 is IDENTICAL across the 8am/8pm ET boundary with the real-answers gate on (pre-push audit P1)', async () => {
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    const realNow = Date.now;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+
+      Date.now = () => new Date('2026-09-28T14:00:00Z').getTime(); // 10:00 AM ET
+      const inHoursStore = memoryDb();
+      const inHours = loadQualification({ dbi: inHoursStore });
+      const inHoursRun = await inHours.qualification.createGratitudeQualification({
+        dbi: inHoursStore.dbi, triggeredBy: 'test',
+      });
+
+      Date.now = () => new Date('2026-09-29T02:00:00Z').getTime(); // 10:00 PM ET
+      const afterHoursStore = memoryDb();
+      const afterHours = loadQualification({ dbi: afterHoursStore });
+      const afterHoursRun = await afterHours.qualification.createGratitudeQualification({
+        dbi: afterHoursStore.dbi, triggeredBy: 'test',
+      });
+
+      expect(inHoursRun.state).toBe('running');
+      expect(afterHoursRun.state).toBe('running');
+      const inHoursPins = snapshot(inHoursStore.rows[0]).pins;
+      const afterHoursPins = snapshot(afterHoursStore.rows[0]).pins;
+      expect(inHoursPins.systemPromptSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(inHoursPins.systemPromptSha256).toBe(afterHoursPins.systemPromptSha256);
+      // The pins.promptVersion LABEL must agree with the gate too (pre-push
+      // audit P1, second finding): it comes from currentPromptVersion(),
+      // not the static PROMPT_VERSION, which never moves once the gate goes
+      // live and would otherwise stamp every pin "v11" forever.
+      expect(inHoursPins.promptVersion).toBe('house_voice_v12_real_answers3_cfl');
+      expect(afterHoursPins.promptVersion).toBe('house_voice_v12_real_answers3_cfl');
+    } finally {
+      Date.now = realNow;
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
   });
 });

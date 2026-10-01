@@ -74,7 +74,7 @@ function composeClarifyBody({ missing, firstName, unitAskBuilding = null }) {
   const wantsBedrooms = missing.includes('bedroom_count');
   const wantsUnit = missing.includes('unit_number');
   if (wantsUnit && missing.length === 1) {
-    return `${greeting}it's Waves Pest Control — one quick thing to finish your quote: ${unitAsk(unitAskBuilding)}`;
+    return `${greeting}it's Waves — one quick thing to finish your quote: ${unitAsk(unitAskBuilding)}`;
   }
   if (wantsUnit) {
     // Unit alongside another gap: the base ask plus one trailing question
@@ -84,7 +84,7 @@ function composeClarifyBody({ missing, firstName, unitAskBuilding = null }) {
     return `${base} Also, ${unitAsk(unitAskBuilding)}`;
   }
   if (wantsBedrooms && !wantsAddress && !wantsService) {
-    return `${greeting}it's Waves Pest Control — one quick question to finish your quote: ${BEDROOM_ASK}`;
+    return `${greeting}it's Waves — one quick question to finish your quote: ${BEDROOM_ASK}`;
   }
   if (wantsBedrooms) {
     // Bedrooms alongside another gap: the base ask plus one trailing question.
@@ -92,12 +92,12 @@ function composeClarifyBody({ missing, firstName, unitAskBuilding = null }) {
     return `${base} Also, ${BEDROOM_ASK}`;
   }
   if (wantsAddress && wantsService) {
-    return `${greeting}it's Waves Pest Control — happy to get your quote started. Two quick things: what's the service address (street + city), and which service are you looking for (pest control, lawn care, mosquito, or something else)?`;
+    return `${greeting}it's Waves — happy to get your quote started. Two quick things: what's the service address (street + city), and which service are you looking for (pest control, lawn care, mosquito, or something else)?`;
   }
   if (wantsAddress) {
-    return `${greeting}it's Waves Pest Control — happy to put your quote together. What's the service address (street + city)?`;
+    return `${greeting}it's Waves — happy to put your quote together. What's the service address (street + city)?`;
   }
-  return `${greeting}it's Waves Pest Control — glad to get you a quote. Which service are you looking for — pest control, lawn care, mosquito, or something else?`;
+  return `${greeting}it's Waves — glad to get you a quote. Which service are you looking for — pest control, lawn care, mosquito, or something else?`;
 }
 
 // Every flags mutation for one phone's clarify lifecycle serializes under
@@ -1742,7 +1742,7 @@ function digitsFromClarifyRef(sourceRef) {
 
 // Statuses the staleness recheck retires with — kept byte-identical to the
 // pre-lock guard so operator-facing 409 copy doesn't churn.
-const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled']);
 
 /**
  * The dispatch decision for a CLAIMED clarify draft (admin approve/revise

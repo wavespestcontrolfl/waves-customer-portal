@@ -54,3 +54,12 @@ test('editing an entity-cohort prompt is refused; toggling it and editing other 
   mockFirst.mockResolvedValue(undefined);
   expect(await call(9, { query: 'x' })).toMatchObject({ status: 404 });
 });
+
+test('editing a benchmark prompt is refused (the miner and dashboard key on it); toggling still works', async () => {
+  const benchmarkQuery = require('../data/aeo-benchmark-v1.json').questions.find((q) => q.id === 'Q6').query;
+  mockFirst.mockResolvedValue({ query: benchmarkQuery });
+  expect(await call(6, { query: `${benchmarkQuery} (edited)` })).toMatchObject({ status: 409, body: { error: expect.stringMatching(/benchmark/) } });
+  expect(mockReturning).not.toHaveBeenCalled();
+  mockReturning.mockResolvedValue([{ id: 6, query: benchmarkQuery, active: false }]);
+  expect(await call(6, { active: false })).toMatchObject({ status: 200 });
+});

@@ -105,6 +105,98 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Street-level address hold (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling
+// 2026-10-01): NO customer text, email or app message about a visit that is a live
+// unconfirmed street-level hold goes out until the office confirms the address. This is the
+// shared send step every visit-scoped customer message passes (appointmentId is the visit);
+// appointment-email.js enforces the same predicate for the email sender. Fail closed: a
+// lookup error holds the send (retryable — the hold clears when the office confirms).
+const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
+  code: 'STREET_LEVEL_HOLD',
+  reason: 'Visit is an address hold awaiting the office confirm',
+});
+// The visit a send is about: appointmentId, or (callers that thread only metadata, e.g. the
+// card request) metadata.scheduled_service_id / scheduledServiceId. metadata.visit_id is a visit
+// GROUP id and is not used.
+function heldVisitIdOf(input) {
+  return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
+}
+// Every visit a send's BODY links to, resolved on the server from the text (composer-customer-links
+// visitsLinkedInBody: reschedule, appointment, track, prep and card-request links, long or /l/ short). The
+// body is the authority: a pasted link, a restored draft, a scheduled replay and an old composer tab carry
+// no client metadata, yet reach the same customer. Memoized per input (the hold is asked twice, at 6.35 and
+// at the provider boundary). A resolution error fails CLOSED like the hold predicate itself: it rejects, the
+// caller treats it as held (retryable).
+const bodyVisitLookups = new WeakMap();
+function visitsLinkedInBodyOf(input) {
+  if (!bodyVisitLookups.has(input)) {
+    bodyVisitLookups.set(input, require('../composer-customer-links').visitsLinkedInBody(input.body));
+  }
+  return bodyVisitLookups.get(input);
+}
+// Every visit the send is about: the explicit ids (appointmentId, metadata.scheduled_service_id, and the
+// composer's metadata.linked_scheduled_service_ids, kept as an additional input) plus the visits the body's
+// own links resolve to.
+async function heldVisitIdsOf(input) {
+  const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
+  const fromBody = typeof input.body === 'string' && input.body ? (await visitsLinkedInBodyOf(input)).map((v) => v.id) : [];
+  return [...new Set([heldVisitIdOf(input), ...linked, ...fromBody].filter(Boolean).map(String))];
+}
+async function streetLevelHoldBlocksSend(input) {
+  // Visit-scoped content is held whatever the generic audience classification says: a phone-only
+  // composer send (a reschedule link inserted for a number whose owner was not adopted) and a shared-phone
+  // scheduled send classify as 'lead' yet still carry a customer's visit link. Only staff-facing
+  // audiences (internal briefings, admin, tech) are never about a customer's held visit.
+  if (['internal', 'admin', 'tech'].includes(input.audience)) return false;
+  // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
+  // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
+  // the office approved the address (the activation guards refuse a hold otherwise).
+  if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
+  let visitIds;
+  try {
+    visitIds = await heldVisitIdsOf(input);
+  } catch (err) {
+    logger.warn(`[send_customer_message] linked-visit lookup failed — holding the send: ${err.code || err.name || 'error'}`);
+    return true;
+  }
+  if (!visitIds.length) return false;
+  // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
+  // stops NEW holds but never releases the customer messages of holds already open.
+  const { isStreetLevelHoldVisit } = require('../street-level-hold');
+  for (const visitId of visitIds) {
+    if (await isStreetLevelHoldVisit(visitId)) return true;
+  }
+  return false;
+}
+
+// A hand-composed text replayed from the scheduled-SMS queue whose reschedule link points at a visit that
+// can no longer be rescheduled (cancelled, skipped, completed, underway — the same status gate the
+// /reschedule/:token page applies on click, reschedule-eligibility RESCHEDULABLE_STATUSES) is a stale link:
+// end it blocked and say why, instead of sending it (a held visit that left the hold by cancelling is
+// not a live hold any more, so the hold step alone would let it through). Scheduled replays of operator
+// text only: every immediate send, and every automated notice, keeps its prior behavior.
+const LINKED_VISIT_ENDED_BLOCK = Object.freeze({
+  code: 'LINKED_VISIT_ENDED',
+  reason: 'The visit this reschedule link points at is no longer reschedulable (cancelled, skipped or completed)',
+});
+// `fresh`: re-resolve the body's visits (no memo) — the provider-boundary recheck reads their LIVE status.
+async function endedLinkedVisitBlocksSend(input, { fresh = false } = {}) {
+  if (input.entryPoint !== 'scheduled_sms_cron' || input.metadata?.humanAuthored !== true) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience) || typeof input.body !== 'string' || !input.body) return false;
+  let linked;
+  try {
+    linked = fresh
+      ? await require('../composer-customer-links').visitsLinkedInBody(input.body)
+      : await visitsLinkedInBodyOf(input);
+  } catch {
+    // Step 6.36's memoized lookup already succeeded for the hold step, so an error here is the boundary's
+    // fresh read failing: fail CLOSED (the caller defers retryably), never send on an unreadable visit.
+    return fresh ? 'lookup_failed' : false;
+  }
+  const { RESCHEDULABLE_STATUSES } = require('../reschedule-eligibility');
+  return linked.some((v) => v.rescheduleLink && v.status && !RESCHEDULABLE_STATUSES.has(String(v.status).toLowerCase()));
+}
+
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
 // round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
 // (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
@@ -260,6 +352,55 @@ function classifyDeliveryCertainty(outcome) {
   return 'unknown';
 }
 
+// Purposes whose SMS/App notices are billing follow-up (pay / update-card link or a
+// charge announcement) and so wait out an active collections dispute hold.
+const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
+
+// The machine-initiated dunning senders (Day 3-90 invoice follow-up ladder, late-payment checker,
+// balance reminder workflow, previsit balance reminder) send under the shared purposes
+// 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
+// the price-change notice also use - so they are recognised by their entry point
+// (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+// A queued replay (every deferred row replays under entry point scheduled_sms_cron) of a dunning
+// text whose purpose is the shared 'payment_link': the follow-up ladder's quiet-hours requeue. Its
+// registry recheck reads the hold before dispatch; this is the boundary read for a hold that commits
+// after it (Codex #5424 r14). The other gated queued rows replay under a gated purpose already.
+const HOLD_GATED_REPLAY_ORIGINS = Object.freeze(['invoice_followup_deferred']);
+function isHoldGatedBillingMessage(input = {}) {
+  if (input.audience !== 'customer' || !input.customerId) return false;
+  if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  if (input.entryPoint === 'scheduled_sms_cron'
+    && HOLD_GATED_REPLAY_ORIGINS.includes(String(input.metadata?.original_entry_point || ''))) return true;
+  return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
+}
+
+// The ONE gated hold predicate (round-11 P1, structural): run at step 1.5 AND again inside
+// providerPreparationCheck, the last pre-provider callback, so a dispute committed during the
+// policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
+// send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
+// customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+// (holdExempt 'operator') skip a plain dispute hold only - a fallback hold still waits; a lookup
+// failure answers held (fail closed).
+// `database` is the provider handoff's held transaction when the final-boundary re-check runs inside
+// one (providerPreparationCheck's `handoffDb`): the read MUST reuse that connection (a savepoint read),
+// never open a root-pool one - at DB_POOL_MAX=2 a second connection waiting on the locks the handoff
+// holds would deadlock the send against its own pool (Codex #5424 r13 P1). Undefined = the root pool.
+// The exemptions skip a plain DISPUTE hold only: a wrong-number / wrong-party fallback hold (an
+// all-channel outreach block) still stops the notice.
+async function billingHoldBlock(input = {}, database = undefined) {
+  const collectionHold = require('../collections/collection-hold');
+  if (!isHoldGatedBillingMessage(input)) return null;
+  const ignoreDisputeHold = input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt);
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
+  if (!held.held) return null;
+  logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  // ONE hold outcome everywhere (Codex #5424 r14): the retryable, deferred COLLECTION_HOLD_DEFER
+  // shape with nextAllowedAt. A queued replay (scheduler, registry, email retry rails) treats it as
+  // a wait and refunds the attempt; a caller that must not retry (the immediate completion text)
+  // reads it through collectionHold.isHoldSuppression and decides itself.
+  return { ok: false, ...collectionHold.holdDeferOutcome(held) };
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -330,12 +471,42 @@ async function sendCustomerMessage(input) {
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
+  // Short codes the SMS link wrap put in THIS attempt's body (stamped to the
+  // sms_log row in the finally below once the send is accepted).
+  let wrappedLinkCodes = [];
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+  }
+
+  // 1.5 Collections DISPUTE hold (owner ruling 2026-09-30): a payment-failure notice carries
+  // a pay / update-card link and is billing follow-up the customer was told is on hold. The
+  // billing-cron attempts, the Stripe webhook notices and every other live payment_failure
+  // sender reach the provider through here, so the live hold check sits at this one boundary
+  // (the accepted millisecond window of collection-hold.js: no cross-writer locking). Suppress
+  // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
+  // closed on an unverifiable hold. A notice for a payment the customer just made themselves
+  // (customerInitiated) is not follow-up and is exempt.
+  // The machine-initiated 'autopay' purpose is the same follow-up: the card-expiry sweeps
+  // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
+  // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
+  // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
+  // The machine-initiated DUNNING senders (isHoldGatedBillingMessage: the follow-up ladder, the
+  // late-payment and balance reminders, the previsit balance reminder) are the same follow-up:
+  // their preflight consulted the hold minutes earlier, but they await credit application, link
+  // shortening, ledger writes and rendering before reaching here, so a hold placed in between
+  // stops the send at this boundary. The suppression is a WAIT: every caller keeps the touch due
+  // (no failed row, nothing paused) and it goes out after the release. Exempt: a customer's own
+  // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+  // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
+  // these senders (they pause or skip before sending).
+  const heldBlock = await billingHoldBlock(input);
+  if (heldBlock) {
+    const { ok: _heldOk, ...heldOutcome } = heldBlock;
+    return { sent: false, blocked: true, ...heldOutcome };
   }
 
   // 2. Resolve policy
@@ -353,9 +524,31 @@ async function sendCustomerMessageCore(input) {
     preDispatchCheck,
     preProviderCheck,
     preSendCheck,
-    providerPreSendCheck,
-    withSmsHandoff,
+    providerPreSendCheck: suppliedProviderPreSendCheck,
+    onDispatchStart,
+    onDispatchAbort,
+    // codex #5196 r4 P2: same shape as onDispatchAbort, fired instead when
+    // twilio.js's own messages.create() throws a definitive rejection —
+    // the phone lock is still held at that point (onDispatchAbort's own
+    // comment explains why).
+    onDispatchRejected,
+    // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
+    // INTO the handoff transaction (twilio.js's dispatch() reads this same
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort/
+    // onDispatchRejected, through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // Omitted (the default for every caller that doesn't name it), twilio.js
+    // falls back to origin/main's own post-handoff, out-of-transaction insert.
+    logInHandoff,
+    withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
+    // Invoice-send-via-SMS's explicit billing Email leg only (see
+    // billingEmailLeg below): the invoice claim/visit/ownership/balance
+    // check withProviderHandoff runs for SMS/App, composed instead into
+    // providerPreparationCheck and run under the Email authority's OWN lock
+    // — withProviderHandoff itself is never invoked for this leg (see
+    // dispatchProvider below), so it never takes this handoff's lock on the
+    // same invoice row the authority already holds on a different connection.
+    billingEmailPreSendCheck,
     providerHandoffReservation: suppliedProviderHandoffReservation,
     ...inputRest
   } = input;
@@ -369,6 +562,10 @@ async function sendCustomerMessageCore(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') sendInput.channel = 'push';
+  // Recursive explicit App routing selects its leg before hook validation.
+  const previsitAppLeg = input.entryPoint === 'previsit_balance_reminder' && sendInput.channel === 'push';
+  const withSmsHandoff = previsitAppLeg ? null : suppliedSmsHandoff;
+  const providerPreSendCheck = previsitAppLeg ? undefined : suppliedProviderPreSendCheck;
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
   // link (its immediate send and its scheduled replay), plus promised
@@ -387,6 +584,13 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
+    // Legacy previsit balance Text keeps its current automatic App routing,
+    // but an actual Twilio leg holds the complete balance quote through the
+    // provider request. The producer supplies no preSendCheck; its final
+    // predicate is providerPreSendCheck on the held transaction.
+    || (input.audience === 'customer' && input.purpose === 'billing'
+      && input.entryPoint === 'previsit_balance_reminder'
+      && typeof providerPreSendCheck === 'function')
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
@@ -400,7 +604,48 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'sms_auto_send_executor'
       && input.metadata?.original_message_type === 'ai_gratitude'
       && Boolean(input.metadata?.agentDecisionId)
-      && typeof providerPreSendCheck === 'function');
+      && typeof providerPreSendCheck === 'function')
+    // The delayed booking-link follow-up (call-booking-link-text.js, codex
+    // #5018 r11 P1): a lead with no customer row yet, so there is no
+    // customer-comms lock to hold — only the phone-lock leg (matching the
+    // STOP writer's own lockSmsPhone) applies. Suppression/consent reload
+    // under that lock, then the lane's own providerPreSendCheck (its mutable
+    // never-send checks) re-runs on the SAME held connection right after.
+    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
+      && input.entryPoint === 'call_booking_link_text'
+      && typeof providerPreSendCheck === 'function')
+    // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
+    // #5018 r15 P2): staff can type any message, a manual consultation
+    // link included — the SAME phone lock the automated lane above takes
+    // serializes the two so a concurrent worker's own delivered-link check
+    // and this send can't interleave. Either audience, since the route
+    // resolves 'customer' when the lead's own linked customer owns this
+    // exact phone, 'lead' otherwise — manual semantics are unconditional
+    // either way, so no providerPreSendCheck requirement here.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'conversational'
+      && input.entryPoint === 'admin_leads_send_sms')
+    // Communications composer sends (admin-communications.js POST /sms,
+    // codex #5018 pre-push P2): the SAME shape and reason as the manual
+    // Leads-page compose above — a consultation link can ride this
+    // composer's body too, racing the SAME worker's own delivered-link
+    // check. Covers both purposes this ONE route's sendMessage ever emits
+    // (card_request when the composer carries a visit's card-request link,
+    // conversational otherwise) — applied to every composer SMS from this
+    // route, not only consultation-carrying ones, since it is a phone lock
+    // only and manual semantics are unconditional either way.
+    || (['lead', 'customer'].includes(input.audience)
+      && ['conversational', 'card_request'].includes(input.purpose)
+      && input.entryPoint === 'admin_communications_manual_sms')
+    // The estimate page's "text me the packet" send (estimate-public.js
+    // POST /:token/service-details/send, B01): a bearer-token page whose
+    // recipient can be a stranger's wrong number, so the phone lock (the STOP /
+    // wrong-number writers' own lockSmsPhone) is held through the provider
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
+      && input.entryPoint === 'estimate_service_details_send'
+      && input.metadata?.original_message_type === 'estimate_service_details');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -410,17 +655,42 @@ async function sendCustomerMessageCore(input) {
   }
   // Invoice delivery needs one lock boundary that covers whichever provider
   // the canonical router actually chooses (push-first, push+SMS, or Twilio).
-  // Keep this narrowly scoped to the invoice-send entry point: other callers
-  // use the stronger recipient/consent handoffs above, whose transaction is
-  // also threaded into their fresh suppression reads.
+  // Keep this narrowly scoped to the invoice-send entry point and its queued
+  // replay (the scheduler replays invoice_send_deferred rows under the
+  // invoice lock too — deferred-replay-registry.js): other callers use the
+  // stronger recipient/consent handoffs above, whose transaction is also
+  // threaded into their fresh suppression reads.
+  const invoiceDeliveryEntry = input.entryPoint === 'invoice_send_via_sms'
+    || (input.entryPoint === 'scheduled_sms_cron'
+      && input.metadata?.original_entry_point === 'invoice_send_deferred');
   const providerHandoffAllowed = input.audience === 'customer'
     && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
-    && input.entryPoint === 'invoice_send_via_sms';
-  if (withProviderHandoff
+    && invoiceDeliveryEntry;
+  // The SAME invoice-send entry point's explicit billing Email leg (a
+  // customer selection of Email, fanned out by dispatchBillingChannels)
+  // never takes withProviderHandoff — that handoff's own
+  // withInvoiceDepositSettlement lock would deadlock against the Email
+  // authority's own lock on the same invoice row (billing-channel-email-
+  // authority.js, a different connection). It gets the SAME invoice
+  // preconditions a different way instead: billingEmailPreSendCheck, run
+  // under the authority's own lock (see providerPreparationCheck below).
+  // A caller on this leg with no such check is refused exactly like any
+  // other unsupported handoff — never silently dropped to "no invoice
+  // check at all".
+  const billingEmailLeg = input.audience === 'customer'
+    && sendInput.channel === 'email'
+    && input.metadata?.billingDeliveryLeg === 'email'
+    && input.purpose === 'payment_link'
+    && invoiceDeliveryEntry;
+  if (withProviderHandoff && !billingEmailLeg
     && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
       reason: 'Locked provider handoff is restricted to invoice delivery' };
+  }
+  if (billingEmailLeg && typeof billingEmailPreSendCheck !== 'function') {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
+      reason: 'Billing Email delivery requires an invoice pre-send check' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -571,6 +841,32 @@ async function sendCustomerMessageCore(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
+  // GATE_SMS_LINK_WRAP: every portal link in a customer/lead SMS becomes a
+  // tracked /l/<code> short link (sms-link-wrap.js). Here — after the
+  // withheld-link rewrite, the app/billing routing and every earlier body
+  // transform, immediately before countSegments — so the audit row, segment
+  // count and the text that goes out all describe the SAME wrapped body. Never
+  // blocks: any failure inside keeps the original link.
+  if (sendInput.channel === 'sms') {
+    try {
+      const linkWrap = await require('./sms-link-wrap').wrapPortalLinks({
+        body: sendInput.body,
+        channel: sendInput.channel,
+        audience: sendInput.audience,
+        purpose: sendInput.purpose,
+        hasMedia: sendHasMedia,
+        customerId: sendInput.customerId,
+        leadId: sendInput.leadId,
+      });
+      if (linkWrap.codes.length) {
+        sendInput.body = linkWrap.body;
+        wrappedLinkCodes = linkWrap.codes;
+      }
+    } catch (err) {
+      logger.warn(`[send_customer_message] SMS link wrap failed, body unchanged: ${err?.name || 'error'}`);
+    }
+  }
+
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
@@ -642,6 +938,63 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      // A deferred hold is requeued by its caller: hand back the transformed
+      // body (link wrap included) so the queued row is the text that goes out.
+      ...(blockedBy.deferred ? { sentBody: sendInput.body } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
+  //      a held visit reaches the customer before the office confirms the address.
+  if (await streetLevelHoldBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput) || 'linked in the body'} is a street-level address hold (${sendInput.purpose})`);
+    const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['street_level_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.36 Stale reschedule link on a scheduled operator text (see endedLinkedVisitBlocksSend): terminal.
+  if (await endedLinkedVisitBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] blocked: a linked visit is no longer reschedulable (${sendInput.entryPoint})`);
+    const blocked = { code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['linked_visit_ended'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -775,10 +1128,12 @@ async function sendCustomerMessageCore(input) {
     providerBoundaryBlock = { ...verdict, validator };
     return verdict;
   };
-  const runCallerPreSendCheck = async () => {
+  // Email authority and App bell persistence pass their held transaction
+  // so the caller's boundary reads do not acquire another pooled connection.
+  const runCallerPreSendCheck = async (database) => {
     if (typeof preSendCheck !== 'function') return { ok: true };
     try {
-      const verdict = await preSendCheck({ channel: sendInput.channel });
+      const verdict = await preSendCheck({ channel: sendInput.channel, ...(database ? { database } : {}) });
       if (verdict?.ok === true) {
         if (Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
           if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) {
@@ -824,28 +1179,38 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreparationCheck = async ({ database: billingEmailTrx } = {}) => {
+  const providerPreparationCheck = async ({ database: handoffDb } = {}) => {
     if (sendInput.metadata?.billingDeliveryLeg) {
       // Settings can change while a provider prepares its request. Never
       // send a leg the customer removed after the initial preference read.
-      // Codex r2 P1: an explicit Email leg's caller
-      // (billing-channel-email-authority.js) already holds
-      // withCustomerCommsLock's transaction for this exact recheck and
-      // threads it through as `database` — reuse it for these reads instead of
-      // opening a second root-pool connection (DB_POOL_MAX=2 deadlock risk
-      // under two concurrent billing emails). Push/SMS callers never supply
-      // a trx here, so they keep reading through the plain pool unchanged.
-      let latest = await loadContactState(sendInput, billingEmailTrx);
+      // Both the Email authority and App bell callback hold a transaction.
+      // Reuse it here; a scheduler may already occupy the other pool slot.
+      // Other callers continue to read through the root pool.
+      let latest = await loadContactState(sendInput, handoffDb);
       const latestSuppressionInput = !sendInput.to
         && String(latest.customer?.id) === String(sendInput.customerId)
         ? { ...sendInput, to: latest.customer.phone || null }
         : sendInput;
-      latest = await loadSuppressionState(latestSuppressionInput, latest, billingEmailTrx);
+      latest = await loadSuppressionState(latestSuppressionInput, latest, handoffDb);
       if (!latestSuppressionInput.to) latest.suppressionLoaded = true;
       const suppressionVerdict = await checkSuppression(sendInput, policy, latest);
       if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
       const consentVerdict = await checkConsentForPurpose(sendInput, policy, latest);
       if (!consentVerdict.ok) return rememberBoundaryBlock(consentVerdict, 'check_consent_boundary');
+      // billingEmailLeg's own invoice guard (claim/visit/ownership/balance —
+      // the same checks withProviderHandoff runs for SMS/App), composed here
+      // instead of via that handoff: this runs under the Email authority's
+      // OWN lock on the invoice row (handoffDb IS that lock's
+      // transaction — see the comment above), never a second lock on the
+      // same row. billingEmailPreSendCheck is stripped from sendInput above
+      // and reaches here only when this leg is billingEmailLeg (the
+      // allowlist above refuses any other Email leg that supplies one).
+      if (sendInput.metadata?.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
+        const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: handoffDb });
+        if (!invoiceVerdict || invoiceVerdict.ok !== true) {
+          return rememberBoundaryBlock(invoiceVerdict, 'billing_email_pre_send_check_boundary');
+        }
+      }
     }
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
@@ -861,6 +1226,29 @@ async function sendCustomerMessageCore(input) {
         'move_hold_boundary',
       );
     }
+    // Street-level address hold boundary re-check: a promotion that commits during the provider's
+    // own awaits must still hold the send (the same retryable deferral as the move hold).
+    if (await streetLevelHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
+        'street_level_hold_boundary',
+      );
+    }
+    // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
+    // (the lookup there is memoized) must still end the scheduled operator text, on its LIVE status.
+    const endedVerdict = await endedLinkedVisitBlocksSend(sendInput, { fresh: true });
+    if (endedVerdict === 'lookup_failed') {
+      return rememberBoundaryBlock(
+        { ok: false, code: 'LINKED_VISIT_LOOKUP_FAILED', reason: 'Could not re-read the visit this text links to', retryable: true },
+        'linked_visit_lookup_boundary',
+      );
+    }
+    if (endedVerdict) {
+      return rememberBoundaryBlock(
+        { ok: false, code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason },
+        'linked_visit_ended_boundary',
+      );
+    }
     // callback_number_needed boundary re-check (codex round-6 P1): step
     // 6.45 ran before preDispatchCheck and the provider's own async
     // preparation — a hold committed in between (the call pipeline's
@@ -869,12 +1257,17 @@ async function sendCustomerMessageCore(input) {
     if (await callbackNumberHoldBlocksSend(sendInput)) {
       return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
-    const callerVerdict = await runCallerPreSendCheck();
+    const callerVerdict = await runCallerPreSendCheck(handoffDb);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
-    const annualVerdict = await annualOfferGuardVerdict(sendInput, billingEmailTrx);
+    const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
+    // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
+    // suppression, consent and caller checks; a hold committed since must still stop a gated
+    // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
+    const holdBlock = await billingHoldBlock(sendInput, handoffDb);
+    if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
@@ -920,11 +1313,19 @@ async function sendCustomerMessageCore(input) {
   };
   const dispatchProvider = () => {
     providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+    // A legacy previsit Text may route to App before provider dispatch. Its
+    // SMS-only authority callback is irrelevant there; omitting it lets the
+    // canonical App route deliver while every actual Twilio branch remains
+    // fenced. Other handoff callers retain the prior strict behavior.
+    const activeSmsHandoff = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? null : withSmsHandoff;
+    const activeProviderPreSendCheck = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? undefined : providerPreSendCheck;
     return dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
-    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async (trx, onProviderStart) => {
+    withSmsHandoff: activeSmsHandoff && (dispatch => activeSmsHandoff(async (trx, onProviderStart) => {
       // Lock acquisition may wait past an opt-out commit. Reuse the canonical
       // validators with fresh state on that same connection, before the SDK.
       const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
@@ -957,11 +1358,40 @@ async function sendCustomerMessageCore(input) {
     // after its authoritative annual-offer guard. Keeping it distinct from
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
-    providerPreSendCheck,
+    providerPreSendCheck: activeProviderPreSendCheck,
+    // The REAL attempt boundary (codex #5018 r15 P1) — invoked by twilio.js
+    // itself, immediately before dispatchStarted flips true and
+    // messages.create() runs, AFTER providerPreSendCheck and
+    // disclaimedNumberBlocksSend/preSendCheck.isStillValid have all
+    // cleared. A caller's durable "this attempt may have reached the
+    // provider" marker belongs here, never inside providerPreSendCheck
+    // itself, which still has real refusal paths ahead of it.
+    onDispatchStart,
+    // codex #5018 r15 pre-push P1: onDispatchStart's own await is real
+    // wall-clock time, which can itself cross the send window's close
+    // boundary that the LAST synchronous isStillValid() check ran before
+    // it. twilio.js invokes this to let the caller UNDO its own marker
+    // when that recheck, run again right after onDispatchStart, finds the
+    // window has closed — otherwise a send that never reached
+    // messages.create() would be misclassified as ambiguous forever.
+    onDispatchAbort,
+    // codex #5196 r4 P2: fired instead of onDispatchAbort when
+    // messages.create() itself throws a definitive rejection — still
+    // inside the handoff, lock held. See twilio.js's dispatch().
+    onDispatchRejected,
+    // codex #5018 structural fix (post-r7): threaded straight through, same
+    // as onDispatchStart/onDispatchAbort/onDispatchRejected above — see
+    // this file's own destructure comment and twilio.js's dispatch() for
+    // what it gates.
+    logInHandoff,
     providerHandoffReservation,
   });
   };
-  providerOutcome = providerCoordinationBlock || (withProviderHandoff
+  // billingEmailLeg never invokes withProviderHandoff itself (see the
+  // allowlist above) — its invoice check runs instead inside
+  // providerPreparationCheck, composed with billingEmailPreSendCheck, under
+  // the Email authority's own lock.
+  providerOutcome = providerCoordinationBlock || (withProviderHandoff && !billingEmailLeg
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
   await providerCoordination.finalizeProviderHandoffReservation({
@@ -977,7 +1407,10 @@ async function sendCustomerMessageCore(input) {
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
   // proves no leg was sent. Accepted or uncertain remains authoritative.
-  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
+  // A prior visible App event settles its original copy independently of
+  // a later native guard refusal; never replace that event's witness.
+  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent'
+    && !(providerOutcome.provider === 'push' && providerOutcome.error === 'app_event_already_visible')) {
     providerOutcome = {
       ...providerOutcome,
       blocked: true,
@@ -1009,6 +1442,7 @@ async function sendCustomerMessageCore(input) {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),
@@ -1040,6 +1474,8 @@ async function sendCustomerMessageCore(input) {
     });
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
+    // Accepted-but-unaudited callers still need the body that went out.
+    auditErr.sentBody = sendInput.body;
     throw auditErr;
   }
 
@@ -1064,7 +1500,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.eventVisibleAt ? { eventVisibleAt: providerOutcome.eventVisibleAt } : {}), ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
@@ -1102,6 +1538,7 @@ async function sendCustomerMessageCore(input) {
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
     };
   }
 
@@ -1121,10 +1558,14 @@ async function sendCustomerMessageCore(input) {
     deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     sentAt: providerOutcome.sentAt,
+    ...(providerOutcome.deduped === true ? { deduped: true } : {}),
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
+    // The audited body after every transform above (withheld-link rewrite,
+    // GATE_SMS_LINK_WRAP short links): what the provider was handed.
+    sentBody: sendInput.body,
     ...((withheldLinksRewritten || providerOutcome.withheldLinksRewritten)
       ? { withheldLinksRewritten: withheldLinksRewritten || providerOutcome.withheldLinksRewritten }
       : {}),
@@ -1143,6 +1584,14 @@ async function sendCustomerMessageCore(input) {
         .attachReservationContext(providerHandoffReservation, err.providerOutcome);
     }
     throw err;
+  } finally {
+    // Fire-and-forget: stamping never adds latency to the send path. The
+    // .catch is a backstop (settleWrappedLinks never throws); code only, never
+    // the message — a Knex error embeds the bound target_url.
+    if (wrappedLinkCodes.length) {
+      void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
+        .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
+    }
   }
 }
 
@@ -1170,14 +1619,19 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
   // window (codex P1, PR #4403 round 15).
   const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
     ? sendInput.metadata?.series_move_id || null : null;
-  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
-  if (!knownSlot && !seriesMoveId) return;
+  // A notice that quoted no window (promisedWindowUnknown — a windowless
+  // reschedule) records an UNKNOWN-window promise: its renderedSlotMs only
+  // guarded the send, and skipping it would leave the visit on its older
+  // window.
+  const windowUnknown = sendInput.promisedWindowUnknown === true;
+  const knownSlot = !windowUnknown && sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId && !windowUnknown) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null, windowUnknown,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -1269,6 +1723,7 @@ module.exports = {
   // Exposed for tests
   _internals: {
     validateContract,
+    recordPromiseEvidenceFallback,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

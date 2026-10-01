@@ -5,7 +5,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -22,10 +22,17 @@ const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const {
+  PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
+} = require('./same-line-visit');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+const { resolveWateringRule } = require('./lawn-watering-rule');
+const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
+const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
+const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -50,15 +57,31 @@ const {
   isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
-const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
-const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
+const { applyReportIdentitySnapshot, readReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
-const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+const {
+  STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
+  lawnDefiniteLivePestLabelForObservation,
+} = require('../../../shared/service-completion-observations');
+// The plan's callbacks, as a customer knows them ("re-service"). Not
+// re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
+// rodent_trapping_followup, an included trapping-program visit that no
+// customer would call a re-service.
+const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+const { isActivePlanCustomer } = require('../waveguard-existing-services');
+const { isPerformedVisitOutcome, NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts, customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
+// "Near you" privacy floor: a lawn pest is named for a city only once this
+// many OTHER customers there had it in the window, so one household's
+// problem is never broadcast.
+const NEAR_YOU_MIN_CUSTOMERS = 3;
 
 let PhotoService = null;
 try {
@@ -203,6 +226,22 @@ function approvedReportProductFacts(catalog = {}) {
     irrigationRequired: catalog.irrigation_required == null ? null : Boolean(catalog.irrigation_required),
     labelVerifiedAt: catalog.label_verified_at || null,
     labelVersion: catalog.label_version || null,
+    // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
+    // moa_group classifies the product's mode of action (e.g. "Group 2B") for
+    // the "what to expect" copy; rainfast_minutes feeds the rain line's
+    // rain-fast clause when the catalog has it. Both null-safe; neither is
+    // rendered directly, only classified deterministically.
+    moaGroup: catalog.moa_group || null,
+    rainfastMinutes: Number.isFinite(Number(catalog.rainfast_minutes)) ? Number(catalog.rainfast_minutes) : null,
+    // Post-application watering rule (hold / water_in / none, or null =
+    // unknown), frozen with the other facts so a later catalog edit never
+    // rewrites what an old visit told the customer. Internal only: it is NOT
+    // copied onto applications[].product (the public payload).
+    wateringRule: resolveWateringRule(catalog),
+    // Label mow hold in days (integer 1..14, or null = the label says nothing),
+    // frozen the same way and equally internal-only. Old frozen facts have no
+    // key: that is no claim, never a live catalog fallback.
+    mowHoldDays: normalizeMowHoldDays(catalog.mow_hold_days),
   };
 }
 
@@ -212,7 +251,69 @@ function approvedReportProductFacts(catalog = {}) {
 // approval, un-approval, label edit, or row delete must not rewrite what
 // this report says was applied. Ids absent from the map (pre-snapshot
 // records, or a product attached after the freeze) keep the live lookup.
-async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
+async function attachApprovedReportProductFacts(knex, products = [], options = {}) {
+  const attached = await attachApprovedReportProductFactsBase(knex, products, options);
+  return attachLiveWateringRules(knex, attached);
+}
+
+// Visits completed before the watering rule existed froze product facts with
+// no `wateringRule` key. For those (and only those) resolve the rule from the
+// live catalog and attach it to a COPY of the frozen facts: the snapshot object
+// itself is never mutated, and a product the snapshot marked unapproved (null
+// facts) keeps no rule. A failed lookup leaves the facts as they were (no rule
+// = no claim).
+async function attachLiveWateringRules(knex, products) {
+  if (!Array.isArray(products) || !products.length) return products;
+  const needsRule = (product) => {
+    const facts = product?.approved_report_product_facts;
+    return !!facts && typeof facts === 'object'
+      && !Object.prototype.hasOwnProperty.call(facts, 'wateringRule')
+      && !!canonicalProductId(product.product_id);
+  };
+  const ids = [...new Set(products.filter(needsRule).map((product) => canonicalProductId(product.product_id)))];
+  if (!ids.length) return products;
+  let rows = [];
+  try {
+    rows = await knex('products_catalog')
+      .whereIn('id', ids)
+      .select(
+        'id',
+        'name',
+        'category',
+        'subcategory',
+        'active_ingredient',
+        'formulation',
+        'application_method',
+        'irrigation_required',
+        'rainfast_minutes',
+        'post_application_watering',
+      );
+  } catch {
+    // The rules of these products are UNKNOWN, not absent: flag the list so the
+    // watering instruction is neither built nor frozen from a partial rule set.
+    const unread = products.slice();
+    if (products.catalogEnrichmentFailed) unread.catalogEnrichmentFailed = true;
+    unread.wateringRuleLookupFailed = true;
+    return unread;
+  }
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  const out = products.map((product) => {
+    if (!needsRule(product)) return product;
+    const row = byId.get(String(canonicalProductId(product.product_id)));
+    if (!row) return product;
+    return {
+      ...product,
+      approved_report_product_facts: {
+        ...product.approved_report_product_facts,
+        wateringRule: resolveWateringRule(row),
+      },
+    };
+  });
+  if (products.catalogEnrichmentFailed) out.catalogEnrichmentFailed = true;
+  return out;
+}
+
+async function attachApprovedReportProductFactsBase(knex, products = [], { frozenFacts = null } = {}) {
   const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
   // service_products.product_id is ON DELETE SET NULL: a catalog row deleted
   // after completion leaves the applied row keyed only by its snapshot
@@ -282,6 +383,13 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
         'label_verified_at',
         'label_version',
         'approved_for_service_report',
+        'moa_group',
+        'rainfast_minutes',
+        'subcategory',
+        'formulation',
+        'application_method',
+        'post_application_watering',
+        'mow_hold_days',
       );
   } catch {
     // Signal the failure instead of silently returning bare rows (codex P2
@@ -329,6 +437,107 @@ function numberOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+// FDACS applicator identification card number for a customer-facing report
+// (owner ruling 2026-09-26 — F.S. 482.2265(1)(b) lets a customer request "the
+// identification card number of the person applying the pesticide"; it's
+// already public record and prints on the public pre-construction
+// certificate). Null when blank on file, or when the license had already
+// expired by the date of the VISIT being documented (never "today" — a report
+// is a historical record). Date-only compare, mirroring the technician-
+// license judgment in closeout-status.js and the applicator picker in
+// admin-projects.js: a MISSING expiry is active by design (seed
+// 20260703000004) rather than a failure, so a blank expiry never withholds
+// the id. Shared by the service-report and project-report payloads.
+// Both dates go through etCalendarDayOf: pg hands DATE columns back as
+// UTC-midnight Date objects (String() of one is "Thu Dec 31 …", which
+// compares by weekday name — codex pre-push P1), and a project's created_at
+// fallback is a real timestamp that must land on its ET calendar day.
+function resolveApplicatorFdacsId(fdacsId, licenseExpiry, visitDate) {
+  const id = String(fdacsId == null ? '' : fdacsId).trim();
+  if (!id) return null;
+  const expiry = calendarDayOrNull(licenseExpiry);
+  const visitDay = calendarDayOrNull(visitDate);
+  if (expiry && visitDay && expiry < visitDay) return null;
+  return id;
+}
+
+function calendarDayOrNull(value) {
+  if (!value) return null;
+  try {
+    const day = etCalendarDayOf(value);
+    return /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : null;
+  } catch {
+    return null; // an unparseable date throws inside Intl — judge nothing
+  }
+}
+
+// Which technician's identity backs a PROJECT report's "applicator" line —
+// the person who actually performed the linked service, never merely the
+// staffer who typed up the project record (Codex P1, 2026-09-26: the
+// project create route stamps req.technicianId as created_by_tech_id
+// regardless of who performed the visit, admin-projects.js ~1727-1735 — an
+// admin creating a project for a tech-performed visit was publishing the
+// ADMIN's own FDACS id/name).
+//
+// Resolution order: the performed service_records row's technician_id (the
+// visit actually completed), then the linked scheduled_services row's
+// technician_id (a project attached to a visit with no service_record yet),
+// then the project's own created_by_tech_id — used ONLY for a genuinely
+// unlinked project (neither link present). Returns the technicians row
+// (name / fl_applicator_license / license_expiry) or null when nothing
+// resolves.
+async function resolveProjectApplicatorTechnician(project, knex = db) {
+  let technicianId = null;
+  if (project?.service_record_id) {
+    const row = await knex('service_records').where({ id: project.service_record_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  if (!technicianId && project?.scheduled_service_id) {
+    const row = await knex('scheduled_services').where({ id: project.scheduled_service_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  // The creator stands in ONLY for a genuinely unlinked project: a linked
+  // visit whose row names no technician leaves the applicator unknown —
+  // never the office staffer who typed the project up (codex pre-push P1).
+  if (!technicianId && !project?.service_record_id && !project?.scheduled_service_id) {
+    technicianId = project?.created_by_tech_id || null;
+  }
+  if (!technicianId) return null;
+  return knex('technicians').where({ id: technicianId }).first('id', 'name', 'fl_applicator_license', 'license_expiry');
+}
+
+// Shared by the public project report (reports-public.js) AND the admin
+// detail/preview endpoint (admin-projects.js) so neither route re-derives
+// this branching itself (each call site collapses to one await + a
+// destructure — see resolveProjectApplicatorTechnician above and
+// activity-indicators.js's projectPoisonControl for what each field means).
+// judgmentDate is the caller's own date to judge license expiry against —
+// the public route's viewerProjectDate (a WDO archived filing can override
+// project_date) vs the admin route's plain project_date || created_at.
+async function resolveProjectReportPreviewFields(project, judgmentDate, knex = db) {
+  const { projectPoisonControl, projectPrimaryApplication } = require('./activity-indicators');
+  const poisonControl = projectPoisonControl(project?.project_type, project?.findings, project?.followup_findings);
+  // The applicator line names the PRIMARY visit's technician, judged at the
+  // primary visit's date — so it prints only when that visit itself applied
+  // product. A bed-bug follow-up application alone keeps Poison Control but
+  // names no applicator (the follow-up's technician and date aren't stored,
+  // codex r3), and a rodent bait-station check keeps it but applied nothing,
+  // so it names none either (codex r4 on #5032).
+  if (!projectPrimaryApplication(project?.project_type, project?.findings)) {
+    return { applicatorFdacsId: null, applicatorName: null, poisonControl };
+  }
+  const technician = await resolveProjectApplicatorTechnician(project, knex);
+  return {
+    applicatorFdacsId: resolveApplicatorFdacsId(
+      technician?.fl_applicator_license,
+      technician?.license_expiry,
+      judgmentDate,
+    ),
+    applicatorName: String(technician?.name || '').trim() || null,
+    poisonControl,
+  };
 }
 
 function firstNumber(...values) {
@@ -524,6 +733,20 @@ function snapshotAreaValues(service = {}) {
     .filter(Boolean)));
 }
 
+// Every persisted spelling a per-product application area can arrive under —
+// camelCase JS objects (`applicationArea`), snake_case DB rows
+// (`application_area`), and the shorter `area` alias a couple of older
+// readers use. Exported so any other reader of `service_products` (e.g. the
+// email-division visit reader) merges the same values instead of growing its
+// own copy (codex round 8 P2 on #5164).
+function applicationAreaValues(applications = []) {
+  const values = [];
+  for (const app of applications || []) {
+    values.push(app.applicationArea, app.application_area, app.area);
+  }
+  return values;
+}
+
 function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const values = [
@@ -531,14 +754,10 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
     ...snapshotAreaValues(service),
+    ...applicationAreaValues(applications),
   ];
 
   for (const app of applications || []) {
-    values.push(
-      app.applicationArea,
-      app.application_area,
-      app.area,
-    );
     values.push(...parseJsonArray(app.targets));
   }
 
@@ -607,6 +826,55 @@ function structuredActionScope(service = {}) {
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
   return { hasInterior, hasExterior, hasTreatment, hasDryDownTreatment, hasActions, hasNonChemicalTreatment, hasReentryWait };
+}
+
+// Raw completed-action LABELS for the visit (same two sources
+// structuredActionScope reads), regardless of treatmentApplied — a sweep
+// action ("Swept eaves, window frames, door frames, and lanai") is
+// treatmentApplied: false but is still real completed work. Feeds the Pest
+// Report V2 spider expectation (GATE_PEST_REPORT_EXPECTATIONS): a dedicated
+// list rather than reusing structuredActionScope's scope-only booleans,
+// which discard the label text this needs.
+//
+// SERVER-INTERNAL ONLY (codex P0 2026-09-28): labels are tech/protocol
+// vocabulary and must never reach the public /api/reports/:token/data
+// payload. reports-public.js calls this directly on `service` for the
+// gated pestReportV2.expectations builder and does NOT attach the result
+// to the returned report data — buildReportV1Data's return object carries
+// no protocolActionLabels field, gate on or off.
+function completedProtocolActionLabels(service = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const entries = []
+    .concat(Array.isArray(service.protocolActionScopesCompleted) ? service.protocolActionScopesCompleted : [])
+    .concat(Array.isArray(structured.protocolActionScopesCompleted) ? structured.protocolActionScopesCompleted : []);
+  return [...new Set(
+    entries.map((entry) => String(entry?.label || '').trim()).filter(Boolean),
+  )];
+}
+
+// Same two sources as completedProtocolActionLabels, but keeping
+// treatmentApplied per entry — completedProtocolActionLabels's plain label
+// strings drop it. Needed by the Pest Report V2 spider "residual/treated"
+// wording (codex P1 2026-09-28): a sweep-only eave action (treatmentApplied:
+// false) must not be combined with an unrelated product's spider tag to
+// claim the eaves were actually treated — see pest-report-expectations.js's
+// buildSpiderExpectation. SERVER-INTERNAL ONLY, same contract as
+// completedProtocolActionLabels: never attached to `data`/the object
+// buildReportV1Data returns.
+function completedProtocolActionEntries(service = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const entries = []
+    .concat(Array.isArray(service.protocolActionScopesCompleted) ? service.protocolActionScopesCompleted : [])
+    .concat(Array.isArray(structured.protocolActionScopesCompleted) ? structured.protocolActionScopesCompleted : []);
+  const seen = new Set();
+  const result = [];
+  for (const entry of entries) {
+    const label = String(entry?.label || '').trim();
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    result.push({ label, treatmentApplied: entry?.treatmentApplied === true });
+  }
+  return result;
 }
 
 // Controlled treatment-area labels carry an explicit scope
@@ -1756,6 +2024,93 @@ function structuredCustomerConcern(structured = {}) {
   ).trim();
 }
 
+// The lawn pest most often recorded among OTHER lawn customers in this
+// report's own service city over the last 30 ET days, named only once
+// NEAR_YOU_MIN_CUSTOMERS distinct customers had it (the "Near you" line,
+// GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records only
+// (the Pest Pressure prior-visit rule). A visit's city is the one its own
+// report shows: the frozen reportIdentitySnapshot city when the record has
+// one (applyReportIdentitySnapshot), else the stamped service address city,
+// else the customer's, so a customer who later moved never carries old
+// findings to the new city (codex P2 on #5177). The pest comes only from each visit's
+// completion-form snapshot (structured_notes.formObservations: server-
+// allowlisted values, the provenance buildProtocolPayload trusts), matched
+// exactly to a definite-live-pest observation. Never from service_findings
+// titles, which can be free text (codex P0 on #5177). Returns { city, pest }
+// (a fixed customer noun, never a count, name, or address) or null.
+async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } = {}) {
+  const nearYouCity = String(city || '').trim();
+  if (!customerId || !nearYouCity) return null;
+  const todayEt = etDateString(now);
+  const sinceEt = etDateString(addETDays(now, -29));
+  const { rows } = await knex.raw(`
+    SELECT sr.customer_id,
+           sr.structured_notes->'formObservations' AS form_observations,
+           COALESCE(ss.service_address_city, c.city) AS live_city,
+           sr.service_data->'reportIdentitySnapshot' AS identity_snapshot
+    FROM service_records sr
+    LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+    JOIN customers c ON c.id = sr.customer_id
+    WHERE sr.status = 'completed'
+      AND sr.service_line = 'lawn'
+      AND sr.customer_id <> ?
+      AND sr.service_date >= ?::date AND sr.service_date <= ?::date
+      AND (
+        LOWER(TRIM(COALESCE(ss.service_address_city, c.city))) = LOWER(?)
+        OR LOWER(TRIM(sr.service_data->'reportIdentitySnapshot'->'address'->>'city')) = LOWER(?)
+      )
+      AND ${customerVisibleServiceRecordPredicate('sr')}
+      AND COALESCE(sr.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+  `, [customerId, sinceEt, todayEt, nearYouCity, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
+  const cityKey = nearYouCity.toLowerCase();
+  const customersByLabel = new Map();
+  for (const row of rows || []) {
+    if (!row.customer_id) continue;
+    // The SQL keeps either city; the report's own rule picks the one that counts.
+    const visitCity = applyReportIdentitySnapshot({
+      city: row.live_city,
+      service_data: { reportIdentitySnapshot: row.identity_snapshot },
+    }).city;
+    if (String(visitCity || '').trim().toLowerCase() !== cityKey) continue;
+    for (const observation of parseJsonArray(row.form_observations)) {
+      const label = lawnDefiniteLivePestLabelForObservation(observation);
+      if (!label) continue;
+      if (!customersByLabel.has(label)) customersByLabel.set(label, new Set());
+      customersByLabel.get(label).add(String(row.customer_id));
+    }
+  }
+  const [top] = [...customersByLabel.entries()]
+    .map(([label, customers]) => ({ label, customers: customers.size }))
+    .filter((entry) => entry.customers >= NEAR_YOU_MIN_CUSTOMERS)
+    .sort((a, b) => (b.customers - a.customers) || a.label.localeCompare(b.label));
+  const pest = top ? LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS.get(top.label) : null;
+  return pest ? { city: nearYouCity, pest } : null;
+}
+
+// A frozen card's four-section body (stamped bodyFormat 'four_section' at
+// completion) shows only while GATE_REPORT_WRITER_RULES is on: with it off
+// (the kill switch) the card keeps its headline and drops that body
+// (Codex #5500).
+function withoutDarkFourSectionBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
+  const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
+  return { ...snapshot, todaysResult: rest };
+}
+
+// The report's next-appointment shape for a scheduled_services row.
+function nextAppointmentFields(row) {
+  if (!row || !row.scheduled_date) return null;
+  const rawDate = row.scheduled_date;
+  return {
+    serviceType: row.service_type || null,
+    scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
+    // window_start only — the customer-facing arrival window is always
+    // window_start + 2 hours (window_end is the internal job block).
+    windowStart: row.window_start || null,
+  };
+}
+
 // LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
 // place: cached PDFs / static renders are content-key-insensitive snapshots,
 // and a reschedule after render would leave a stale appointment fossilized in
@@ -1766,9 +2121,28 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.nextSameServiceAppointment;
+  delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
+  delete data.planSummary;
+  delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  return data;
+}
+
+// report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+// 2026-09-28): the PDF/static/sms_preview cache keys never varied on this
+// gate, so a rolling deploy could otherwise cache copy under the worker's
+// OWN gate state rather than what the browser actually rendered. Same
+// contract/shape as stripLiveOnlyScheduleFields above — called from the
+// route helper's mode !== 'live' block AND directly from pdf-queue.js's
+// queued renderer, which builds its payload outside that helper.
+function stripLiveOnlyReportProductCopy(data) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.applications)) return data;
+  data.applications.forEach((app) => {
+    if (app?.product && 'report_copy' in app.product) delete app.product.report_copy;
+  });
   return data;
 }
 
@@ -2204,7 +2578,55 @@ class PinnedAssessmentUnavailable extends Error {
 // p5: before/after pairing is Front-only; close-up / trouble photos never
 // pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
 // the old any-zone pairing must not be reused.
-const LAWN_RENDER_STRATEGY = 'p5';
+// p6: lawn water-plan credits now require explicit product-instruction
+// provenance; older PDFs may contain the former inferred 24-hour instruction.
+// p7: GATE_LAWN_WATERING_RULE — the report can carry a product-instruction
+// aftercare, a top-of-report banner payload and a hold "not before" plan
+// overlay; PDFs rendered before the watering instruction existed must re-key.
+// p8: the unrendered snapshot.mainWatch / top-level seasonalNote keys left the
+// payload and the stock "No additional observations" photoSummary now collapses
+// to null, so the photo strip (web) and the PDF no longer print that sentence.
+// Cached lawn PDFs and renders that carry it must re-key.
+const LAWN_RENDER_STRATEGY = 'p8-lawn-dead-fields-20261001';
+
+// ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
+// pairs the render would use. Reads the record itself, so a partial row from a
+// cache-lookup caller stamps the same as the full one. A failed read stamps
+// random (fail-open to a re-render, like the prefs read above).
+async function lawnWateringRuleStamp(service, knex) {
+  if (!service?.id) return ':wr=1';
+  try {
+    const row = await knex('service_records').where({ id: service.id }).first('structured_notes', 'service_data');
+    // A frozen visit's payload never changes by the clock (owner ruling
+    // 2026-09-30: the report is a record), so its stamp is constant.
+    if (readFrozenWateringInstruction(parseJsonObject(row?.structured_notes))) return ':wr=1';
+    const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
+    const products = await attachApprovedReportProductFacts(knex, rawProducts, {
+      frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
+    });
+    // A failed live rule lookup leaves rules UNKNOWN, not absent: hashing them
+    // as null would match a PDF cached before the rule existed.
+    if (products?.wateringRuleLookupFailed || products?.catalogEnrichmentFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+    // Each catalog row's revision too: a rule edited A -> B -> A during a
+    // render ends on the same value, but not the same updated_at, so the
+    // post-render stability check sees it.
+    const ids = [...new Set((products || []).map((p) => canonicalProductId(p.product_id)).filter(Boolean))];
+    const revisions = ids.length
+      ? await knex('products_catalog').whereIn('id', ids).select('id', 'updated_at')
+      : [];
+    const revisionOf = new Map(revisions.map((r) => [String(r.id), r.updated_at ? new Date(r.updated_at).toISOString() : '']));
+    const pairs = (products || []).map((p) => {
+      const id = canonicalProductId(p.product_id);
+      // A label mow hold re-keys the render when it changes; no value adds
+      // nothing, so visits without one keep their existing stamp.
+      const mow = normalizeMowHoldDays(p.approved_report_product_facts?.mowHoldDays);
+      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}${mow != null ? `|mow=${mow}` : ''}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
+    }).sort();
+    return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
+  } catch {
+    return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+  }
+}
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2257,6 +2679,18 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     weekPlanAvailableAt = snapshot?.availableAt && planBindsToService(snapshot, premise) ? new Date(snapshot.availableAt).toISOString() : null;
     irrigationStamp += `:plan=${weekPlanAvailableAt || 'none'}`;
   }
+  // The watering instruction is a render input once its gate is on (gate off
+  // leaves the signature byte-identical to before).
+  // A visit with no frozen instruction renders from the LIVE catalog rules, so
+  // those rules ride the stamp: an owner correcting a product's rule re-keys the
+  // cached PDF. A frozen visit replays its snapshot and keeps the constant.
+  if (featureGates.lawnWateringRuleLive()) irrigationStamp += await lawnWateringRuleStamp(service, knex);
+  // The report lead (GATE_LAWN_REPORT_LEAD) changes what the lawn web report
+  // and its PDF render (lead-mode findings, stock sentences left out), so a PDF
+  // cached before a flip must never be served after it, nor the reverse. The
+  // stamp rides only while the gate is live: gate off leaves every signature,
+  // and so every cached PDF key, byte-identical to before.
+  if (featureGates.lawnReportLeadLive()) irrigationStamp += ':lead=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -2503,15 +2937,206 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
-  if (serviceLine !== 'lawn') return null;
+// Pest week-weather — the SAME freeze pattern as the lawn water balance
+// immediately above, and for the identical reason (codex P1 2026-09-29
+// round 3, pre-push audit): the pre-render pass (direct PDF route /
+// pdf-queue) and the browser's own independent live /data fetch are TWO
+// SEPARATE invocations of buildReportV1Data — a preflight fetch racing a
+// short deadline in one process cannot know what the browser's own fetch,
+// in a DIFFERENT request, will see (a successful preflight followed by a
+// browser-side timeout would cache a PDF that disagrees with what the
+// browser actually rendered). Freezing the settled answer here — first
+// successful render wins, every later reader (preflight OR live view)
+// replays the SAME persisted value — removes the divergence entirely:
+// there is no separate preflight fetch to disagree with the render,
+// because both paths call buildReportV1Data and both read/write the
+// identical pin. No per-assessment map needed (unlike lawn, which can
+// hold several assessments per customer) — a pest service_record IS its
+// own single visit, so the guard is simply the key's absence.
+function storedPestWeekFor(structuredNotes) {
+  const entry = parseJsonObject(structuredNotes).pestWeekWeather;
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+async function freezePestWeekWeather(serviceRecordId, weekWeather, knex = db) {
+  if (!serviceRecordId || !weekWeather) return null;
+  try {
+    const updated = await knex('service_records')
+      .where({ id: serviceRecordId })
+      // First writer wins — the guard is this key's absence, in the
+      // predicate, with no preceding read (same shape as the lawn freeze).
+      .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'pestWeekWeather' IS NULL")
+      .update({
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('pestWeekWeather', ?::jsonb)",
+          [JSON.stringify(weekWeather)],
+        ),
+      });
+    if (updated > 0) return weekWeather;
+    // Lost the race: adopt what the winner stored so both renders agree.
+    const row = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('structured_notes');
+    return storedPestWeekFor(row?.structured_notes);
+  } catch (err) {
+    logger.warn(`[report-data] pest week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Resolves (and freezes) the visit's pest week-weather for THIS build —
+// called unconditionally (mode-independent, like the lawn freeze) so the
+// pin settles on whichever render happens first, live or not. Returns
+// { weekWeather, uncacheable }: weekWeather is the raw fetched/frozen
+// object ({ rainInches, et0Inches, dailyRain, rainConfidence, rainSource,
+// windowClosed }) or null (no coordinates, or gate off); uncacheable is
+// true whenever the visit has no coordinates yet (the geocoder backstop
+// may still fill them) or a fetch was attempted and the result is not both
+// settled and persisted — an open window, a provider outage, or a freeze
+// that could not be written are all treated alike, matching pestWeekWeatherUncacheable's existing
+// contract (docs/public-route-contracts.md).
+async function resolvePestWeekWeather(service, serviceLine, knex = db) {
+  if (serviceLine !== 'pest' || !pestReportExpectationsGateOn()) {
+    return { weekWeather: null, uncacheable: false, reason: null };
+  }
+  const stored = storedPestWeekFor(service.structured_notes);
+  if (stored) return { weekWeather: stored, uncacheable: false, reason: null };
+
+  const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+  const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+  const latN = toCoordinate(latitude);
+  const lonN = toCoordinate(longitude);
+  if (latN == null || lonN == null || (latN === 0 && lonN === 0)) {
+    // No coordinates: PENDING for a legacy record (codex P2 2026-09-28
+    // round 4 — the hourly geocoder backstop fills null customer/service-
+    // location coordinates, so a PDF stored now would keep serving without
+    // its rain block after geocoding; same rule as the lawn path's
+    // `no_coordinates`), but PERMANENT once the completion-time identity
+    // snapshot has frozen mapCenter (codex P2 round 5): applyReportIdentitySnapshot
+    // restores that frozen value — including a frozen null — on every
+    // render, and the geocoder only repairs upcoming appointments, so a
+    // completed report can never recover coordinates. Deferring it forever
+    // would re-render every download and defer the queue job until it fails.
+    const frozenIdentity = service.report_identity_snapshot;
+    const coordinatesFrozen = !!frozenIdentity && typeof frozenIdentity === 'object'
+      && Object.prototype.hasOwnProperty.call(frozenIdentity, 'mapCenter');
+    return coordinatesFrozen
+      ? { weekWeather: null, uncacheable: false, reason: null }
+      : { weekWeather: null, uncacheable: true, reason: 'no_coordinates' };
+  }
+  try {
+    const fetched = await fetchServiceWeekWeather({ latitude, longitude, serviceDate: service.service_date });
+    if (!fetched.windowClosed) {
+      // Still accumulating — not yet reproducible, so never frozen and
+      // never rendered (codex P2 round 5: the open-window value comes from
+      // the FORECAST endpoint and includes hours of today that have not
+      // happened yet, so it is not a reading of what has rained). Time-
+      // dependent: the queue waits for the window to close.
+      return { weekWeather: fetched, uncacheable: true, reason: 'open_window' };
+    }
+    if (fetched.rainInches == null) {
+      // Closed window we DID try to resolve and got nothing for — the
+      // providers were unreachable or incomplete. Never frozen (persisting
+      // the null would lock in "no rainfall known" forever); TRANSIENT, so
+      // the queue's normal failure retry ladder applies, not a midnight wait.
+      return { weekWeather: fetched, uncacheable: true, reason: 'unavailable' };
+    }
+    const canonical = await freezePestWeekWeather(service.id, {
+      rainInches: fetched.rainInches,
+      et0Inches: fetched.et0Inches ?? null,
+      dailyRain: fetched.dailyRain ?? null,
+      rainConfidence: fetched.rainConfidence ?? null,
+      rainSource: fetched.rainSource ?? null,
+      windowClosed: true,
+      frozenAt: new Date().toISOString(),
+    }, knex);
+    if (canonical) return { weekWeather: canonical, uncacheable: false, reason: null };
+    // Fetched fine but could not persist (or read back) — this output is
+    // not reproducible: a later view may freeze different provider data
+    // while a durably cached PDF kept these numbers forever. Transient.
+    return { weekWeather: fetched, uncacheable: true, reason: 'unfrozen' };
+  } catch {
+    // The fetch itself threw — transient by definition, nothing resolved.
+    return { weekWeather: null, uncacheable: true, reason: 'unavailable' };
+  }
+}
+
+// LIVE requests only: bounded to a short deadline so a slow provider never
+// holds a customer's page load (fetchServiceWeekWeather can cost up to
+// ~7s on a cold cache/outage) — codex P1 2026-09-29 round 4. A background
+// PDF/static pre-render pass (direct route or pdf-queue) is not a live UX
+// concern and stays UNBOUNDED, matching the lawn water balance's own
+// equivalent fetch exactly (no deadline there either).
+//
+// Critically, this does NOT reintroduce the divergence the pin exists to
+// close: the underlying resolvePestWeekWeather call is never cancelled on
+// timeout — it keeps running in the background and, if it eventually
+// settles, still freezes the REAL answer for every later reader. The
+// timed-out caller only ever returns the sentinel to ITS OWN request; it
+// never itself writes a freeze, so a request that hit the deadline can
+// never persist a wrong or partial answer.
+async function resolvePestWeekWeatherForBuild(service, serviceLine, knex, mode) {
+  if (mode !== 'live') return resolvePestWeekWeather(service, serviceLine, knex);
+  const DEADLINE = Symbol('deadline');
+  // Pre-caught so a rejection landing after the deadline already won the
+  // race never surfaces as an unhandled rejection (same shape
+  // getDailyRainOutlookBounded uses for its own in-flight lookup).
+  const lookup = resolvePestWeekWeather(service, serviceLine, knex)
+    .catch(() => ({ weekWeather: null, uncacheable: true }));
+  let timer;
+  const result = await Promise.race([
+    lookup,
+    new Promise((resolve) => { timer = setTimeout(resolve, 1200, DEADLINE); }),
+  ]).finally(() => clearTimeout(timer));
+  if (result === DEADLINE) {
+    return {
+      weekWeather: { rainInches: null, windowClosed: false, unavailable: true },
+      uncacheable: true,
+      reason: 'unavailable',
+    };
+  }
+  return result;
+}
+
+// The identity both the scorecard render and the PDF cache signature must
+// agree on: which assessment is CURRENTLY linked, and — when history goes
+// back far enough to pair a before/after — which earlier assessment anchors
+// the baseline. One resolver, so a caller resolving photo identity for the
+// cache key (photo-set-signature.js, through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds) can never drift from what the render itself
+// can show (pre-push P1, second round, 2026-09-28: the render's before/after
+// slider shows a customer-visible lawn_assessment_photos row from the
+// BASELINE assessment too, not only the currently linked one, and the
+// signature ignored that entirely).
+//
+// `failClosed` is threaded into loadLinkedLawnAssessment and, for the
+// gate-off history query below, changes catch-and-degrade into rethrow.
+// buildLawnAssessmentReportData calls this with failClosed left false — its
+// long-standing fail-soft posture, an unreadable assessment or history
+// degrades to "no lawn section" rather than 500ing a customer's report — a
+// signature caller opts in so the same failure reaches its own unique-token
+// fence instead of resolving a false empty identity.
+//
+// loadLinkedLawnAssessment already branches on `failClosed` on its own (see
+// its doc a few lines above, issue #3135: `const swallow = (err) => {
+// if (failClosed) throw err; return null; }` on every lookup inside it) —
+// that behavior predates this function and is unchanged here; this resolver
+// only forwards the flag. The photo-set-signature.js failClosed tests
+// (server/tests/report-photo-set-signature.test.js, "the linked-assessment
+// lookup throwing") exercise this exact path end-to-end.
+async function resolveLawnAssessmentAndHistory(service, knex = db, {
+  pinnedAssessmentId = null,
+  propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  lawnHistory,
+  failClosed = false,
+} = {}) {
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
-  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
+  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return { assessment: null, historyRows: [] };
   let assessment = pinnedAssessmentId
     ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
-    : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled });
-  if (!assessment) return null;
+    : await loadLinkedLawnAssessment(service, knex, { failClosed, propertyHistoryEnabled });
+  if (!assessment) return { assessment: null, historyRows: [] };
 
   let historyRows;
   if (propertyHistoryEnabled) {
@@ -2522,14 +3147,37 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     assessment = { ...resolved.current, is_baseline: resolved.isBaseline };
     historyRows = resolved.rows.map((row) => ({ ...row, service_date: row.visit_date }));
   } else {
-    const allAssessments = await knex('lawn_assessments')
+    const historyQuery = knex('lawn_assessments')
       .where({ customer_id: service.customer_id, confirmed_by_tech: true })
       .orderBy('service_date', 'asc')
-      .orderBy('created_at', 'asc')
-      .catch(() => []);
+      .orderBy('created_at', 'asc');
+    const allAssessments = failClosed ? await historyQuery : await historyQuery.catch(() => []);
     const assessmentIndex = allAssessments.findIndex((row) => String(row.id) === String(assessment.id));
     historyRows = assessmentIndex >= 0 ? allAssessments.slice(0, assessmentIndex + 1) : allAssessments;
   }
+  return { assessment, historyRows };
+}
+
+// The subset of resolveLawnAssessmentAndHistory's identity that actually
+// carries customer-visible PHOTOS: the current assessment, plus — only when
+// it differs — the earliest (baseline) assessment in its history. Consumed
+// by the PDF cache signature through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds, which requires this module lazily (this
+// file requires report-photo-set.js back, for the render's own turf-gallery
+// lookup below) to avoid a load-time require cycle.
+async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, options);
+  if (!assessment?.id) return [];
+  const ids = [assessment.id];
+  const baselineId = historyRows?.[0]?.id;
+  if (baselineId != null && String(baselineId) !== String(assessment.id)) ids.push(baselineId);
+  return ids;
+}
+
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
+  if (serviceLine !== 'lawn') return null;
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
+  if (!assessment) return null;
   const initialRow = historyRows[0] || assessment;
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
@@ -2885,7 +3533,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // must not claim a nonexistent run was covered (codex gh-r16).
       // afterTreatment: the plan reduced by a credited watering-in (the card
       // shows it INSTEAD of the unreduced plan under the credit note).
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }) } : null;
+      // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
+      // {holdUntil}" sentence, used while a product watering hold is in
+      // force. The literal token is filled (or the key dropped) by
+      // applyAfterHoldOverlay once the visit's instruction is known.
+      const afterHold = featureGates.lawnWateringRuleLive()
+        ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+        : null;
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
     }
   }
 
@@ -2963,6 +3618,111 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
+  };
+}
+
+// GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
+// the per-product rules FROZEN with the visit (approved_report_product_facts
+// .wateringRule — never the live catalog, never the public applications[]
+// .product), the completion time and the customer's own irrigation entries.
+// Runtime facts come from the same property_preferences row
+// portalIrrigationInches reads, and are withheld after a move
+// (scheduleUnconfirmed: the entries describe the former home).
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }) {
+  const waterContext = lawnAssessment?.waterContext || {};
+  let runtime = null;
+  if (!waterContext.scheduleUnconfirmed) {
+    // A FAILED read is not a missing row: it throws out of here so no
+    // instruction is built (and none is frozen) from generic minutes; the
+    // caller renders the legacy path and a later render retries.
+    const prefs = await knex('property_preferences')
+      .where({ customer_id: service.customer_id })
+      .first();
+    if (prefs) {
+      runtime = {
+        runMinutes: prefs.irrigation_run_minutes,
+        wateringDays: prefs.watering_days,
+        headTypes: prefs.irrigation_system_type,
+        explicitInchesPerWeek: numberOrNull(prefs.irrigation_inches_per_week),
+      };
+    }
+  }
+  return buildWateringInstruction({
+    rules: (Array.isArray(products) ? products : []).map((p) => ({
+      name: p?.product_name || null,
+      rule: p?.approved_report_product_facts?.wateringRule || null,
+      mowHoldDays: p?.approved_report_product_facts?.mowHoldDays ?? null,
+    })),
+    completedAt: completionTime,
+    runtime,
+  });
+}
+
+// The instruction frozen at completion (lawn-report-write-gate.js, under
+// structured_notes.lawnWateringFreeze.wateringInstruction; the older
+// lawnReportV2.wateringInstruction location is still read). Later reads replay it, so
+// a sprinkler-head or run-minutes edit after the visit never rewrites the
+// minutes an old report told the customer. Shape-checked; anything else is
+// ignored and the instruction is regenerated. A state-null instruction is a
+// snapshot only when it carries a label mow hold (the mow line is independent of
+// the watering state and freezes with the rest of the record).
+const FROZEN_INSTRUCTION_STATES = ['hold', 'water_in', 'hold_then_water_in', 'none'];
+function readFrozenWateringInstruction(structured) {
+  const frozen = structured?.lawnWateringFreeze?.wateringInstruction || structured?.lawnReportV2?.wateringInstruction;
+  if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
+  const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
+  const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
+  // A state-null instruction is a no-claim, never a snapshot: it is regenerated.
+  return frozen.state !== null && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+}
+
+// Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
+// end time, or drop the overlay when this visit has no hold. The token can
+// never survive into the payload. Returns a copy; the input is untouched.
+function applyAfterHoldOverlay(waterContext, instruction) {
+  const plan = waterContext?.weekPlan;
+  if (!plan || !Object.prototype.hasOwnProperty.call(plan, 'afterHold')) return waterContext;
+  const { afterHold, ...rest } = plan;
+  // An until-dry hold reads "the spray has dried" in the plan sentence (no clock time).
+  const label = instruction?.holdUntilPlanLabel || instruction?.holdUntilLabel;
+  const detail = typeof afterHold?.detail === 'string' && label ? afterHold.detail.split(HOLD_UNTIL_TOKEN).join(label) : null;
+  const filled = detail && !detail.includes(HOLD_UNTIL_TOKEN) ? { ...afterHold, detail } : null;
+  return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
+}
+
+// The banner payload: one server-built object the client, PDF and (later)
+// the completion text all read. expiresAt is when the instruction lapses.
+// The plan-dependent sentence is composed here, from the weekly plan present on
+// THIS render (composeBannerLines); the frozen instruction never carries it.
+// A label mow hold rides beside the watering lines as banner.mowHold (its own
+// last line on the page); it never enters `lines`, which other readers take as
+// watering text. A visit with a mow hold and no watering claim still gets a
+// banner (state null, no lines).
+function buildWateringBanner(instruction, weekPlan = null) {
+  if (!instruction) return null;
+  const mowHold = isValidMowHold(instruction.mowHold) ? instruction.mowHold : null;
+  const hasWatering = !!instruction.state && Array.isArray(instruction.lines) && instruction.lines.length > 0;
+  if (!hasWatering) {
+    return mowHold
+      ? { state: null, lines: [], holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: instruction.ruleSource || null, mowHold }
+      : null;
+  }
+  const planPresent = !!weekPlan?.title && weekPlan.visitInPlanWeek !== false;
+  const runDepth = weekPlan?.depthInches;
+  return {
+    state: instruction.state,
+    lines: composeBannerLines(instruction, {
+      hasWeekPlan: planPresent,
+      planRunInches: planPresent && weekPlan.prescribesRun === true && runDepth != null && runDepth !== '' ? numberOrNull(runDepth) : null,
+    }),
+    holdUntil: instruction.holdUntil,
+    waterInBy: instruction.waterInBy,
+    // The instruction's own expiry is authoritative: a hold that waits for
+    // drying has none, and falling back to holdUntil would end its banner at
+    // the clock time.
+    expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
+    ruleSource: instruction.ruleSource,
+    ...(mowHold ? { mowHold } : {}),
   };
 }
 
@@ -3200,7 +3960,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const typedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
-    ? serviceData.typedReportSnapshot
+    ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
     : null;
 
   const scheduledServicePromise = service.scheduled_service_id
@@ -3600,7 +4360,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // bad history must not take down the report.
   const staffViewer = opts.staffViewer === true;
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
     : [];
   const companionReports = await Promise.all(
     companionSnapshots
@@ -3660,6 +4420,47 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
         label_version: product.approved_report_product_facts?.labelVersion || null,
         facts_approved: !!product.approved_report_product_facts,
+        // moa_group / rainfast_minutes are DELIBERATELY NOT here (codex P0
+        // 2026-09-28): they classify the Pest Report V2 "expectations" copy
+        // (pest-report-expectations.js) but are server-internal facts, never
+        // part of the public /api/reports/:token/data payload (gate on or
+        // off, every service line). See expectationFactsOut below — the
+        // ONLY channel that carries them to the render path.
+        //
+        // report_copy (GATE_REPORT_PRODUCT_COPY, owner-approved 2026-09-28):
+        // the three short customer-facing lines for THIS product, matched
+        // against the static reviewed config — never fuzzy, never guessed.
+        // KEY OMITTED (not null) when the gate is off, the product has no
+        // approved wording, or the report is a termite-family visit — same
+        // "omit, never serialize null" contract the top-level
+        // planSummary/nearYou keys follow. LIVE-VIEW ONLY: stripped back off
+        // for every non-live render by stripLiveOnlyReportProductCopy above
+        // (the PDF cache key doesn't vary on this gate).
+        //
+        // Termite exclusion (codex P1 2026-09-28): the approved wording is
+        // written for the PEST line (ant/roach/spider labeled-for text).
+        // Taurus SC and other shared products are also used on termite
+        // liquid/trench/bait visits, where that wording is wrong. Reuses the
+        // SAME service-line classifier every other termite-vs-not decision
+        // in this file already reads (`serviceLine`, resolved above from
+        // `service.service_line || detectServiceLine(service.service_type)`)
+        // rather than a new regex — `detectServiceLine` always resolves to a
+        // line (defaults to 'pest' when it can't tell), so an unclassifiable
+        // service type never surfaces as "termite" and never spuriously gets
+        // copy it can't confirm is termite-safe either; it comes down to
+        // "not termite" only through that same existing default.
+        ...(reportProductCopyGateOn() && serviceLine !== 'termite'
+          ? (() => {
+            // service.city is the visit's own city (COALESCE stamped
+            // service_address_city, customers.city — the exact precedence
+            // the "Labeled for N+ City pests" ruling asks for: the property
+            // serviced, falling back to the customer's own city), already
+            // overlaid by applyReportIdentitySnapshot at the top of this
+            // function (owner ruling 2026-09-29).
+            const copy = reportProductCopyForApplicationProduct(product, service.city);
+            return copy ? { report_copy: copy } : {};
+          })()
+          : {}),
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override
@@ -3679,6 +4480,54 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       appliedAt: product.applied_at || product.created_at,
     };
   });
+  // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
+  // moa_group / rainfast_minutes classify the what-to-expect / rain-fast
+  // copy (pest-report-expectations.js) but must NEVER reach the public
+  // payload (codex P0 2026-09-28). Handed to the caller ONLY through this
+  // opt-in out-param — never attached to `applications`/the object this
+  // function returns — same "server-internal, never on `data`" contract
+  // completedProtocolActionLabels uses for raw protocol-action labels.
+  // Aligned to `applications` by index (both map 1:1 over `products`).
+  //
+  // pestWeekWeather is resolved (and FROZEN) here too, unconditionally —
+  // codex P1 2026-09-29 round 3: this is the ONE canonical fetch, called
+  // identically by every caller of buildReportV1Data (the direct PDF
+  // route's pre-render pass, pdf-queue.js's pre-render pass, AND the
+  // browser's own independent live /data fetch), so there is no separate
+  // preflight fetch left to disagree with whatever the browser actually
+  // renders — see resolvePestWeekWeather's own comment.
+  // OPT-IN (codex P2 2026-09-28 round 4): only callers that render the
+  // expectations block pay for the lookup — the /data response builder
+  // (live, bounded) and the PDF builders (direct route + pdf-queue,
+  // unbounded). Every other caller (e.g. the public map.svg handler, which
+  // passes no options) skips it entirely: no fetch, no pin write, cacheable.
+  // ...and only for reports that can actually render the block (codex P2
+  // round 5): the response composer excludes cockroach-family typed reports
+  // from pestReportV2 and requires PEST_REPORT_V2, so those never fetch,
+  // never pin, and never mark themselves uncacheable over weather.
+  const pestWeekWeatherEligible = opts.pestWeekWeather === true
+    && process.env.PEST_REPORT_V2 === 'true'
+    && !require('./pest-report-v2').isCockroachTypedReportType(typedSnapshot?.type);
+  const { weekWeather: pestWeekWeather, uncacheable: pestWeekWeatherUncacheable, reason: pestWeekWeatherPendingReason } = pestWeekWeatherEligible
+    ? await resolvePestWeekWeatherForBuild(service, serviceLine, knex, opts.mode)
+    : { weekWeather: null, uncacheable: false, reason: null };
+  if (opts.expectationFactsOut && typeof opts.expectationFactsOut === 'object') {
+    opts.expectationFactsOut.applications = applications.map((app, index) => ({
+      id: app.id,
+      product: {
+        name: app.product.name,
+        moa_group: products[index]?.approved_report_product_facts?.moaGroup || null,
+        rainfast_minutes: products[index]?.approved_report_product_facts?.rainfastMinutes ?? null,
+      },
+      targets: app.targets,
+    }));
+    // Raw provider numbers (rainInches, dailyRain, ...) are server-internal
+    // only — same channel as `applications` above, never attached to the
+    // returned object. reports-public.js applies its own mode-based
+    // settling (settledWeekWeatherForRender) to this before it can reach a
+    // non-live render.
+    opts.expectationFactsOut.weekWeather = pestWeekWeather;
+  }
   const evidenceLevel = serviceData.evidenceLevel
     || serviceData.evidence_level
     || structured.evidenceLevel
@@ -4089,12 +4938,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
-      // never reach the customer's permanent report token.
-      const turfPhotos = await knex('lawn_assessment_photos')
-        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
-        .orderBy('photo_order', 'asc')
-        .orderBy('taken_at', 'asc')
-        .catch(() => []);
+      // never reach the customer's permanent report token. Shared with the
+      // cache-signature side (photo-set-signature.js) through
+      // resolveLawnReportPhotos — see report-photo-set.js — so the two never
+      // drift on which rows a report can show (pre-push P1).
+      const turfPhotos = await require('./report-photo-set').resolveLawnReportPhotos(linkedAssessment.id, knex);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
         // Dropped-but-expected turf photo — same silent-omission class.
@@ -4280,6 +5128,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     first_name: service.technician_first_name,
     last_name: service.technician_last_name,
   });
+  // Withheld (not just left null upstream) when the identity snapshot froze a
+  // different technician name than the one currently joined — see
+  // applyReportIdentitySnapshot, which nulls technician_fdacs_id itself in
+  // that case so every caller of this builder gets the same withholding.
+  const applicatorFdacsId = resolveApplicatorFdacsId(
+    service.technician_fdacs_id,
+    service.technician_license_expiry,
+    service.service_date,
+  );
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
@@ -4403,8 +5260,46 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       } catch { /* snapshots table optional — trend simply doesn't render */ }
 
+      // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
+      // byte-identical to before.
+      let wateringInstruction = null;
+      let wateringInputsFailed = false;
+      if (featureGates.lawnWateringRuleLive()) {
+        // Rules are UNKNOWN (not absent) when either catalog read failed: the
+        // live rule lookup, or the base enrichment (which a product that
+        // already carries its category does not surface as productsLoadFailed).
+        const rulesUnknown = !!(products.wateringRuleLookupFailed || products.catalogEnrichmentFailed);
+        try {
+          // Replay the frozen instruction; regenerate only when none exists (and
+          // only from a complete rule set: a failed catalog read builds none).
+          wateringInstruction = readFrozenWateringInstruction(structured)
+            || (rulesUnknown ? null
+              : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
+        } catch { wateringInstruction = null; wateringInputsFailed = true; }
+        // An UNFROZEN render whose inputs could not be read omits the customer's
+        // watering direction: serve it, never cache it, and let a pinned delivery
+        // defer (the week-weather / prefs-read flags pdf-queue and reports-public
+        // already gate on). A frozen render read nothing and is unaffected.
+        if (!readFrozenWateringInstruction(structured)
+          && (wateringInputsFailed || rulesUnknown || productsLoadFailed)) {
+          lawnAssessment.wateringInputsUnavailable = true;
+          lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.weekWeatherPendingReason = lawnAssessment.weekWeatherPendingReason || 'unfrozen';
+          lawnAssessment.portalPrefsReadFailed = true;
+        }
+        // Out-param for the write gate, which freezes the complete instruction.
+        if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
+          opts.wateringInstructionOut.instruction = wateringInstruction;
+          // A failed product read means the rules were unknown, not absent.
+          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
+        }
+        // In place, so the lawnAssessment the payload returns never carries
+        // the raw {holdUntil} token either (a null instruction drops it).
+        lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
+        wateringInstruction,
         mowingHeight,
         applications,
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
@@ -4413,6 +5308,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterGapHistory,
         mowingTrendFallback,
       });
+      if (reportV2 && wateringInstruction) {
+        const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
+        if (banner) reportV2.banner = banner;
+      }
       // AI "What we applied today" narrative — same contract as the T&S path
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
@@ -4659,6 +5558,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // The candidate rows the next-appointment pick read, kept for the
+  // four-section report's property-scoped "What's next" visit below.
+  let upcomingVisitRows = null;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
   // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
@@ -4670,6 +5572,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachUpcomingRoachVisits;
   let cockroachProgramPosition;
   let cockroachRenderedSignature;
+  // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
+  // this year's performed-visit + re-service COUNTS — never a price, owner
+  // rule that prices live on estimate pages only. It lists no upcoming
+  // visits. Live-view only (stripLiveOnlyScheduleFields), like
+  // nextAppointment.
+  let planSummary = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4693,76 +5601,24 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       .orderBy('window_start', 'asc')
       .limit(200)
       .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
-    // A rodent report's "next visit" spans the whole rodent program —
-    // trapping, exclusion, sanitation, proofing — including service names
-    // that carry no rodent token ("Exclusion Service" alone falls to the
-    // pest default). Owner 2026-07-27: the rodent report shows the next
-    // service date if and only if it is rodent-related. The widened match
-    // only claims names NO other line detects (the 'pest' fallback) — a
-    // "Mosquito Trap Service" still detects as mosquito and stays out —
-    // and isRodentAdjacentServiceType's negative guard keeps non-rodent
-    // trapping ("Wildlife Trapping") out too. Other report lines keep the
-    // strict same-line match.
-    // Name shape alone is NOT rodent evidence (codex round-4/5 P2): a
-    // generic "Sanitation & Cleanup" booking that has nothing to do with
-    // the rodent program would satisfy the regex. The catalog is the
-    // authority: a candidate whose scheduled_services.service_id points at
-    // a services row with category 'rodent' is rodent-related regardless
-    // of its (possibly customized/renamed) service_type label; unlinked
-    // legacy rows fall back to exact catalog-NAME matching plus the
-    // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
-    // the strict same-line match.
-    let serviceCategoryById = null;
-    let rodentCatalogNames = null;
-    if (rodentReportRefresh) {
-      try {
-        const catalogRows = await knex('services').select('id', 'name', 'category');
-        serviceCategoryById = new Map((Array.isArray(catalogRows) ? catalogRows : [])
-          .filter((row) => row && row.id)
-          .map((row) => [String(row.id), String(row.category || '')]));
-        rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
-          .filter((row) => String(row?.category || '') === 'rodent')
-          .map((row) => String(row.name || '').trim().toLowerCase())
-          .filter(Boolean));
-      } catch { serviceCategoryById = null; rodentCatalogNames = null; }
-    }
+    upcomingVisitRows = Array.isArray(upcomingRows) ? upcomingRows : null;
+    // The next visit on this report's own line: one rule, shared with the
+    // report writer's NEXT VISIT record (same-line-visit.js), including the
+    // rodent program's catalog-aware match under GATE_RODENT_REPORT_REFRESH.
+    const { serviceCategoryById, rodentCatalogNames } = rodentReportRefresh
+      ? await loadRodentCatalogIndex(knex)
+      : { serviceCategoryById: null, rodentCatalogNames: null };
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
-      .find((row) => {
-        // A resolvable catalog link is authoritative in BOTH directions
-        // (codex round-8 P2): it admits a rodent-category visit under any
-        // label AND vetoes a rodent-sounding label linked to a non-rodent
-        // service. Label matching only ever judges unlinked/unresolvable
-        // rows.
-        const linkedCategory = rodentReportRefresh && serviceCategoryById && row.service_id
-          ? serviceCategoryById.get(String(row.service_id)) || null
-          : null;
-        if (linkedCategory) return linkedCategory === 'rodent';
-        const rowLine = detectServiceLine(row.service_type);
-        if (rowLine === serviceLine) return true;
-        if (!rodentReportRefresh) return false;
-        // unlinked legacy rows: exact rodent-catalog name + adjacent shape
-        return rowLine === 'pest'
-          && isRodentAdjacentServiceType(row.service_type)
-          && !!rodentCatalogNames
-          && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
-      }) || null;
+      .find((row) => isSameLineVisit(row, {
+        serviceLine, rodentReportRefresh, serviceCategoryById, rodentCatalogNames,
+      })) || null;
     // No upcoming visit on THIS report's service line → fall back to the
     // customer's next visit of any line (owner 2026-08-27). The rendered
     // label always carries the service name, so a pest visit on a termite
     // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
     // Same disclosable-status pool; the strict same-line pick above still
     // wins whenever it exists.
-    const toNextAppointment = (row) => {
-      if (!row || !row.scheduled_date) return null;
-      const rawDate = row.scheduled_date;
-      return {
-        serviceType: row.service_type || null,
-        scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
-        // window_start only — the customer-facing arrival window is always
-        // window_start + 2 hours (window_end is the internal job block).
-        windowStart: row.window_start || null,
-      };
-    };
+    const toNextAppointment = nextAppointmentFields;
     // The narrative builders below were written under the same-line
     // invariant (they keep only the date/window), so they receive the
     // strict same-line pick ONLY; the hero cell gets the cross-line
@@ -4868,7 +5724,100 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // store key reads it from the render, never from a second lookup.
       cockroachRenderedSignature = cockroachProgramSignature(program);
     }
+
+    // Placed last in this try so a failure here can never disturb the
+    // next-appointment picks already resolved above — this whole block is
+    // best-effort under the shared outer catch.
+    // OPT-IN, live builds only: the /data render path is the one caller that
+    // shows the card (opts.planSummary, set by reports-public.js). The Q&A
+    // endpoint's live build and the PDF, email, recap and map builders would
+    // never read the field, so they skip these reads entirely.
+    if (opts.mode === 'live' && opts.planSummary === true
+      && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+      const yearEt = Number(reportTodayIso.slice(0, 4));
+      // Active plan members only, by the canonical membership read, which
+      // fails closed to non-member: "Your plan" describes a plan a one-time
+      // customer does not have. The plan is account-level (the customers
+      // row), so the counts cover the account's visits, not one property's.
+      // Counts only, never "at no charge": a member's callback can still be
+      // billed, and that money claim needs per-visit proof (reservice-report.js).
+      const member = await isActivePlanCustomer(knex, service.customer_id);
+      // A visit counts only when it was PERFORMED — the same rule Pest
+      // Pressure uses for prior visits (pest-pressure/first-visit.js): a
+      // completed, customer-visible service record whose outcome is not
+      // inspection-only, customer-declined or incomplete. The schedule row's
+      // status alone is not proof: an incomplete or declined closeout still
+      // leaves it 'completed'. The booking joins in only for its visit_id
+      // (grouped stops); it never decides "re-service" — an admin can repoint
+      // or rename it after closeout.
+      const recordRows = member
+        ? await knex('service_records')
+          .leftJoin('scheduled_services', 'scheduled_services.id', 'service_records.scheduled_service_id')
+          .where('service_records.customer_id', service.customer_id)
+          .where('service_records.status', 'completed')
+          .andWhere('service_records.service_date', '>=', `${yearEt}-01-01`)
+          .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
+          .select(
+            'service_records.id',
+            'service_records.scheduled_service_id',
+            'service_records.service_line',
+            'service_records.service_type',
+            'service_records.structured_notes',
+            'service_records.service_data',
+            { record_is_callback: 'service_records.is_callback' },
+            'scheduled_services.visit_id',
+          )
+          .catch(() => null)
+        : null;
+      const performedRows = Array.isArray(recordRows)
+        ? recordRows.filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
+          && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
+        : [];
+      if (performedRows.length) {
+        // One physical stop is one visit: grouped services completed at one
+        // stop share the booking's visit_id (the service_visits parent), and
+        // one booking can own several completion records (the detailed form,
+        // the pest-recap rail, a project close — completion-record-invariants
+        // documents the sibling model), so the booking id comes next. Only a
+        // legacy record with no booking link is its own visit.
+        const visitIdentity = (row) => {
+          if (row.visit_id) return `visit:${row.visit_id}`;
+          if (row.scheduled_service_id) return `booking:${row.scheduled_service_id}`;
+          return `record:${row.id}`;
+        };
+        const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
+        const reservicesThisYear = new Set(performedRows
+          // Decided by the record's FROZEN completion-time evidence only, the
+          // rule reservice-report.js and 20260830000051_repair_recap_callback_
+          // flags.js set: its is_callback, or its service_data.
+          // completedServiceKey of pest_re_service / lawn_re_service. Never
+          // the booking row (repointable after closeout) or a "Re-Service"
+          // display name (a name can belong to a non-callback). A rodent-
+          // program visit (the included trapping follow-up, a trap check) is
+          // a program step, never a re-service, whatever its flags say. A
+          // stop counts once however many of its services were re-services.
+          .filter((row) => {
+            const frozenKey = parseJsonObject(row.service_data).completedServiceKey || null;
+            if (frozenKey === 'rodent_trapping_followup'
+              || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
+            return row.record_is_callback === true || PLAN_CALLBACK_RESERVICE_KEYS.has(frozenKey);
+          })
+          .map(visitIdentity)).size;
+        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
+      }
+    }
   } catch { /* best-effort */ }
+
+  // "Near you" line on the LIVE lawn report (owner ask 2026-09-28, "lawn
+  // only", GATE_REPORT_NEAR_YOU): see loadNearYouLawnPest. Same page-only
+  // opt-in as the plan card (the /ask build never pays for it).
+  let nearYou = null;
+  if (opts.mode === 'live' && opts.nearYou === true && featureGates.isEnabled('reportNearYou')
+    && serviceLine === 'lawn') {
+    try {
+      nearYou = await loadNearYouLawnPest(knex, { customerId: service.customer_id, city: service.city });
+    } catch { /* best-effort */ }
+  }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
   // links the customer to their active bond on the portal My Plan tab with
@@ -4932,6 +5881,259 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     } catch { /* best-effort */ }
   }
 
+  // "Your upcoming visits" card (owner-approved 2026-09-27,
+  // GATE_REPORT_UPCOMING_VISITS): every LIVE report can list ALL of the
+  // customer's upcoming scheduled visits across EVERY program (pest, lawn,
+  // tree & shrub, mosquito, termite, rodent, …) for THIS report's property,
+  // for the next 90 days — cap ~6. Distinct from nextAppointment above,
+  // which stays scoped to the report's OWN service line and is left
+  // unchanged. Live-view-only for the same staleness reason as
+  // nextAppointment (a reschedule after render must not fossilize into a
+  // cached PDF — see stripLiveOnlyScheduleFields). Ships dark: unset or
+  // anything other than exactly 'true' keeps the payload absent. Read
+  // directly at call time (same same-file convention as
+  // GATE_RODENT_REPORT_REFRESH / COCKROACH_REPORT_V2 above). Best-effort:
+  // never blocks the report.
+  // OPT-IN on the same terms as composeOffers/planSummary (codex round-5
+  // P2): only the /data render path shows the card, so only it pays for
+  // the scheduled_services scan (paged, up to MAX_PAGES * PAGE_SIZE rows,
+  // plus the property/estimate/single-premises reads it can trigger). The
+  // Q&A endpoint (/api/reports/:token/ask) calls this builder purely for
+  // report CONTEXT and reads report-assistant.js never touches the field —
+  // every customer question was paying for this scan nobody reads, under
+  // the general report limiter, repeatedly.
+  let upcomingVisitsCard = null;
+  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+    try {
+      // Shared stamp → property_id → source_estimate_id resolver (codex
+      // round-4 P1 — a FOURTH consecutive parallel reimplementation of
+      // this exact chain missed the source_estimate_id leg, so a
+      // secondary-property visit that is unstamped and carries no
+      // property_id — but WAS created from an estimate for that secondary
+      // property — was silently classified as the customer's primary
+      // property). server/services/service-report/visit-property-scope.js
+      // is the ONE implementation cross-sell.js's report-identity proof
+      // and this card both call — no more per-caller re-derivation to
+      // miss a leg on again. Key format is estimate-property-linkage.js's
+      // own `street|city|zip` scope key (not customer-properties.js's
+      // opaque addressKey hash) — only that format can be produced from
+      // an estimate's free-text address and carries the locality-lacks /
+      // locality-shares proofs a real property-equality compare needs.
+      const linkage = require('../estimate-property-linkage');
+      const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+
+      // THIS report's property identity. A linked visit's own stamp /
+      // property_id / source_estimate_id is the truth (a phone-booked
+      // rental's report must never list another property's visits) — a
+      // linked row with NONE of the three (hasEvidence false), or a
+      // genuinely unlinked/legacy report, falls back to the route's
+      // already-COALESCEd mirror address (service.address_line1/city/zip),
+      // the SAME premise every other live-only field on this report (map,
+      // cross-sell) is anchored to.
+      //
+      // A link was EXPECTED (scheduled_service_id present) but the row
+      // could not be resolved — a transient read error is indistinguishable
+      // here from a genuinely missing/deleted row, and EITHER must fail
+      // closed (codex round-2 P1): treating it as "genuinely unlinked"
+      // below would fall back to the customer mirror, which can name a
+      // DIFFERENT (e.g. primary) property than the one this report was
+      // actually linked to — exposing that other property's visits on a
+      // secondary-property report's token.
+      let reportLinkUnresolved = false;
+      let reportScope = null;
+      if (service.scheduled_service_id) {
+        const reportSs = await knex('scheduled_services')
+          .where({ id: service.scheduled_service_id })
+          .first('property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+          .catch(() => null);
+        if (reportSs) {
+          reportScope = await resolveVisitPropertyScope(reportSs, knex);
+        } else {
+          reportLinkUnresolved = true;
+        }
+      }
+      const mirrorKey = linkage.normalizedStampedStreet(
+        service.address_line1, service.address_line2, service.city, service.zip
+      ) || null;
+
+      // The mirror fallback (used below, and again per candidate) is only
+      // safe when this account can be PROVEN to have a single premises, the
+      // primary one (codex round-5 P1): a multi-property account's legacy
+      // no-evidence row — no stamp, no property_id, no source_estimate_id —
+      // could easily be the OTHER property, and without this proof it would
+      // pass sameResolvedProperty against a primary-property report on the
+      // mirror address alone. Reuses cross-sell.js's own single-premises
+      // proof (moved to visit-property-scope.js so both callers share it)
+      // anchored to the SAME mirrorKey the fallback itself uses — one
+      // customer read, and the proof can never disagree with the value it
+      // is guarding. Memoized: computed at most once per report, only the
+      // first time a no-evidence row actually needs the mirror. Fails
+      // CLOSED on any read failure (the proof throws on an unreadable
+      // witness by design) — a failed proof is "not proven single-premises",
+      // never "assume yes".
+      let singlePremisesProof = null;
+      const ensureSinglePremisesProven = async () => {
+        if (singlePremisesProof !== null) return singlePremisesProof;
+        if (!mirrorKey) { singlePremisesProof = false; return singlePremisesProof; }
+        try {
+          const customerRow = await knex('customers')
+            .where({ id: service.customer_id })
+            .first('has_multi_home');
+          // unresolvedFails: true (codex round-6 P1) — an unstamped witness
+          // row whose property_id/source_estimate_id cannot be resolved is
+          // NOT "no evidence either way" for this card's purposes: it might
+          // be the primary, or it might be the very secondary premises the
+          // mirror fallback would otherwise wrongly disclose. cross-sell.js
+          // keeps the default (unresolvedFails omitted) so its own
+          // behavior and tests stay byte-identical.
+          singlePremisesProof = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey, { unresolvedFails: true });
+        } catch {
+          singlePremisesProof = false;
+        }
+        return singlePremisesProof;
+      };
+
+      // PRIVACY (P1 2026-09-28, extended round-5): a linked row whose
+      // stamp/property_id/source_estimate_id was present but UNRESOLVABLE
+      // (e.g. a deleted property row) fails CLOSED — never falls back to
+      // the customer mirror, which names a DIFFERENT property for a
+      // multi-property account. Only a report with NO identity evidence at
+      // all — linked or not — may use the mirror fallback, and even then
+      // only once the single-premises proof above clears it.
+      const reportPropertyKey = reportLinkUnresolved
+        ? null
+        : (reportScope && reportScope.hasEvidence ? reportScope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null));
+
+      if (reportPropertyKey) {
+        // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
+        // fixed 90 * 24h window built off Date.now() crosses a DST change
+        // at a different wall-clock instant than the ET calendar does, so
+        // it can admit day 91 or drop day 90 depending which side of
+        // midnight ET the run lands on. addETDays/etDateString are the
+        // shared ET-calendar helpers (datetime-et.js) — no ad hoc math.
+        const todayIso = etDateString();
+        const cutoffIso = etDateString(addETDays(new Date(), 90));
+        // Disclosable statuses only (same allow-list as nextAppointment
+        // above): pending/confirmed/en_route/on_site excludes
+        // cancelled/completed/rescheduled by construction.
+        //
+        // Property scoping runs in JS (address-key comparison, not a SQL
+        // predicate), so the visit cap can only apply AFTER it — a flat
+        // LIMIT 60 ahead of that filter truncates candidates before
+        // scoping ever runs, and a multi-property customer with >60
+        // visits elsewhere can lose this property's own visits entirely
+        // (codex round-1 P2). Paged instead: PAGE_SIZE rows at a time,
+        // oldest-first (matching the eventual 6-visit ordering), until 6
+        // property-scoped matches are found, the rows run out, or the
+        // hard MAX_PAGES bound is hit — bounded so a customer with an
+        // enormous schedule can never turn this into an unbounded scan.
+        const PAGE_SIZE = 60;
+        const MAX_PAGES = 5;
+        const matched = [];
+        // Batched per-page caches for resolveVisitPropertyScope — one
+        // `.whereIn()` read per distinct property_id/source_estimate_id
+        // per page instead of a query per candidate row (the same
+        // optimization the previous property_id-only implementation used,
+        // now covering the estimate leg too).
+        const propertyById = new Map();
+        const estimateById = new Map();
+
+        for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
+          const candidates = await knex('scheduled_services')
+            .where('customer_id', service.customer_id)
+            .andWhere('scheduled_date', '>=', todayIso)
+            .andWhere('scheduled_date', '<=', cutoffIso)
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+            .modify((qb) => {
+              if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+            })
+            .orderBy('scheduled_date', 'asc')
+            .orderBy('window_start', 'asc')
+            // `id` breaks ties (codex round-2 P2): scheduled_date +
+            // window_start alone is not a TOTAL order (same-day/same-window
+            // rows tie), so paging by LIMIT/OFFSET over it can duplicate or
+            // skip a row across pages once ties exist. A unique tie-breaker
+            // key gives every page a stable, non-overlapping slice.
+            .orderBy('id', 'asc')
+            .limit(PAGE_SIZE)
+            .offset(page * PAGE_SIZE)
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id', 'source_estimate_id',
+              'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+            .catch(() => null);
+
+          if (!Array.isArray(candidates) || !candidates.length) break;
+
+          // Batch-resolve every CANDIDATE property_id / source_estimate_id
+          // in one read apiece per page (the report's own property, if
+          // linked, was already resolved above — fail-closed, never
+          // re-attempted here); ids already cached by an earlier page are
+          // skipped, and an id the batched read didn't return is cached as
+          // null (unresolvable) so resolveVisitPropertyScope's per-row
+          // cache lookup never re-queries it.
+          const newPropertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))]
+            .filter((id) => !propertyById.has(id));
+          if (newPropertyIds.length) {
+            const propertyRows = await knex('customer_properties')
+              .whereIn('id', newPropertyIds)
+              .select('id', 'address_line1', 'address_line2', 'city', 'zip')
+              .catch(() => []);
+            const foundIds = new Set();
+            for (const row of (Array.isArray(propertyRows) ? propertyRows : [])) {
+              propertyById.set(row.id, row);
+              foundIds.add(row.id);
+            }
+            for (const id of newPropertyIds) if (!foundIds.has(id)) propertyById.set(id, null);
+          }
+
+          const newEstimateIds = [...new Set(candidates.map((row) => row.source_estimate_id).filter(Boolean))]
+            .filter((id) => !estimateById.has(id));
+          if (newEstimateIds.length) {
+            const estimateRows = await knex('estimates')
+              .whereIn('id', newEstimateIds)
+              .select('id', 'address')
+              .catch(() => []);
+            const foundIds = new Set();
+            for (const row of (Array.isArray(estimateRows) ? estimateRows : [])) {
+              estimateById.set(row.id, row);
+              foundIds.add(row.id);
+            }
+            for (const id of newEstimateIds) if (!foundIds.has(id)) estimateById.set(id, null);
+          }
+
+          for (const row of candidates) {
+            if (matched.length >= 6) break;
+            // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
+            // property_id/source_estimate_id lookups below are cache hits
+            // after the batched reads above.
+            const scope = await resolveVisitPropertyScope(row, knex, { propertyById, estimateById });
+            // The customer mirror is the ONLY fallback for a candidate with
+            // NO stamp, property_id, or source_estimate_id at all (an
+            // unstamped legacy row) — and, same as the report's own
+            // resolution, only once the single-premises proof clears it
+            // (codex round-5 P1): an unscoped row on a MULTI-property
+            // account is excluded, never waved through on the mirror alone.
+            const rowKey = scope.hasEvidence ? scope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null);
+            if (sameResolvedProperty(rowKey, reportPropertyKey)) matched.push(row);
+          }
+
+          if (candidates.length < PAGE_SIZE) break;
+        }
+
+        if (matched.length) {
+          const visits = matched.map((row) => ({
+            serviceType: row.service_type || null,
+            scheduledDate: row.scheduled_date instanceof Date
+              ? row.scheduled_date.toISOString().slice(0, 10)
+              : String(row.scheduled_date).slice(0, 10),
+            windowStart: row.window_start || null,
+          }));
+          upcomingVisitsCard = { visits };
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
   // report uses, folding in the Pest Pressure trend, the visit's findings,
@@ -4949,6 +6151,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // The four-section report's screened sections (GATE_REPORT_WRITER_RULES),
+  // set only when that report is the summary; surfaces render them where
+  // they would print exactly that text.
+  let reportSections = null;
   // Tech-reviewed AI report copy ("Generate AI report" → notes, parsed by
   // its WHAT WE DID / WHAT WE FOUND shape and banned-copy-screened) is the
   // fullest customer-facing account of the visit — it beats the SMS-style
@@ -4960,98 +6166,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // snapshot) never resurfaces via the summary.
   {
     const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    // A viewer-visible trapping snapshot declaring an initial setup screens
-    // the body BEFORE it wins the summary. The snapshot that accepted this
-    // body can be a different findings type entirely (a non-trapping
-    // primary with a trapping COMPANION), so its acceptance never ran the
-    // setup guard — and a body generated before the companion's selector
-    // changed can still say the traps were checked or that nothing was
-    // caught, winning the Visit Summary beside the companion's frozen
-    // "Traps set" result (codex P1 r18). Same fallback as the narrative
-    // lanes: the recap stays, and with the source left as 'recap' the
-    // gated rodent narrative below rebuilds a grounded summary instead.
-    // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
-    // narrative's stage rules exactly (round 12).
-    // The COUNT screen runs from the same viewer-visible trapping snapshot
-    // regardless of stage (pre-push P1 on 256c1f9): a follow-up companion
-    // whose traps_checked or captures was corrected after the body was
-    // generated would otherwise publish the stale number in the summary.
-    // Unverifiable values (blank/missing) screen nothing, by
-    // countContradictions' own rules.
-    const visibleTrapSnapshot = [
-      typedSnapshot,
-      ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
-    ].find((snap) => snap?.type === 'rodent_trapping') || null;
-    // Scoped require matches this file's pattern for report-time helpers.
-    const indicators = require('./activity-indicators');
-    // A confirmed reconciliation prompt (frozen onto the accepting
-    // snapshot's todaysResult at completion) is a PERSON overriding the
-    // matcher — this render-time screen must honor that decision, not
-    // silently re-reject the body they reviewed (codex P1 on the
-    // reconciliation round).
-    const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
-      // Companion-only completions freeze the override on the trapping
-      // companion (there is no typed primary snapshot to carry it) —
-      // viewer-filtered like everything else, since visibleTrapSnapshot is.
-      || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true
-      || !technicianReport?.body
-      || (
-        (!narrativeTrapSetupSnapshot
-          || indicators.setupContradictions(technicianReport.body).length === 0)
-        && (!visibleTrapSnapshot
-          || indicators.countContradictions(technicianReport.body, {
-            traps_checked: visibleTrapSnapshot.values?.traps_checked,
-            captures: visibleTrapSnapshot.values?.captures,
-          }).length === 0)
-      );
-    // When a typed story GOVERNS the visit — the primary snapshot, or on
-    // companion-only profiles any customer-visible companion snapshot — the
-    // body may only drive the summary if that story ACCEPTED it (bodySource
-    // stamped). Zero-state branches deliberately refuse the drafted body in
-    // favor of fixed wording, and the summary must not resurrect what
-    // Today's Result refused (codex r26 on #3420).
-    const governingSnapshots = [
-      typedSnapshot,
-      // CUSTOMER-facing companions only, for staff too (codex r78):
-      // completion never offers the body to an internal_only companion, so
-      // treating one as a governing story for staff makes acceptance
-      // impossible and the admin preview would fall back to the legacy
-      // recap while the customer report promotes the reviewed body. The
-      // summary decision must match what the customer actually receives.
-      ...(typedSnapshot ? [] : companionSnapshots.filter(
-        (snap) => snap.delivery === 'auto_send',
-      )),
-    ].filter((snap) => snap?.todaysResult);
-    const typedStoryAcceptedBody = !governingSnapshots.length
-      || governingSnapshots.some(
-        (snap) => snap.todaysResult?.bodySource === 'technician_report'
-          // A frozen reconcile confirmation is a PERSON accepting the body
-          // over the matcher — honored here like trapSetupScreened above,
-          // EXCEPT on zero-state snapshots: their stories refuse the body
-          // for fixed wording regardless of the count reconciliation, so
-          // the flag never means body acceptance there (codex r42). A
-          // non-gauge cleared severity/activity select is a zero state too
-          // (codex r80) — buildTodaysResult keeps the fixed "No active
-          // signs" template for it, so the summary must not resurrect the
-          // body that result refused (the reconcile flag can originate
-          // from a trapping companion's count prompt).
-          || (snap.todaysResult?.reconcileConfirmed === true
-            && snap.activity?.score !== 0
-            && !['None observed', 'No activity'].includes(
-              String(snap.values?.severity || snap.values?.activity_level || ''),
-            )),
-      );
-    // A completion-time request-context rejection (trade name from the
-    // visit's own products, companion contradiction) is frozen into
-    // service_data — untyped visits have no governing snapshot, so
-    // without this the reparse would promote the rejected body
-    // (codex r58).
-    const drivesSummary = technicianReport?.body && trapSetupScreened
-      && typedStoryAcceptedBody
-      && !serviceData.technicianReportBodyRejected;
+    // THE rule (activity-indicators technicianReportDrivesSummary): the
+    // completion-time rejection frozen into service_data (codex r58), the
+    // governing typed story's acceptance (codex r26/r42/r78/r80) and the
+    // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
+    // 256c1f9), on the snapshots this report already normalised. Every
+    // other customer render of the note (context-aggregator.js
+    // customerSafeVisitNotes) runs the same rule, so none can show a body
+    // this report refuses.
+    const drivesSummary = technicianReport?.body
+      && require('./activity-indicators').technicianReportDrivesSummary({
+        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots,
+      });
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';
+      reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
     }
   }
   if (
@@ -5277,6 +6407,26 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const callbackNonPerformed = Boolean(reserviceReportBlock)
     && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
 
+  // The four-section report's "What's next" visit: the next booking on this
+  // report's own line AT this report's property (same-line-visit.js; a
+  // booking at another of the customer's properties never counts, and an
+  // unresolvable property shows nothing). Only for that report.
+  let nextSameServiceAppointment = null;
+  if (opts.mode === 'live' && reportSections && visitSummarySource === 'technician_report'
+    && upcomingVisitRows && service.scheduled_service_id) {
+    try {
+      const reportVisit = await knex('scheduled_services')
+        .where({ id: service.scheduled_service_id })
+        .first(...PROPERTY_SCOPE_COLUMNS);
+      const next = await nextSameLineVisitAtProperty({
+        knex, rows: upcomingVisitRows, reportVisit, serviceLine,
+      });
+      if (next.state === 'scheduled') nextSameServiceAppointment = nextAppointmentFields(next.row);
+    } catch {
+      nextSameServiceAppointment = null;
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -5291,6 +6441,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     treatmentPerformed: treatmentPerformedVerdict,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // see resolveApplicatorFdacsId above for the withholding rules.
+    applicatorFdacsId,
     technician: {
       name: technicianName,
       photoUrl: technicianPhotoUrl,
@@ -5405,6 +6558,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Present only for the four-section report (see reportSections above).
+    ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you
     // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
     // tree & shrub already consume it inside their own V2 builders.
@@ -5484,6 +6639,28 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // The next visit on THIS report's own service line at THIS property, for
+    // the four-section report's "What's next" line (owner 2026-10-01: same
+    // service only). Live view only, like nextAppointment
+    // (stripLiveOnlyScheduleFields).
+    ...(nextSameServiceAppointment ? { nextSameServiceAppointment } : {}),
+    // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
+    // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
+    // same as nextAppointment. The KEY itself (not just its value) is
+    // omitted entirely while the gate is dark (codex round-2 P0): a
+    // null-valued key still changes the shape of every live payload while
+    // the gate is unset, contradicting the documented "gate off: the field
+    // is absent" contract. Read directly at call time, same convention as
+    // the flag's own gating above. Also omitted for a caller that never
+    // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
+    // opts.upcomingVisitsCard check the work above already gated on.
+    ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
+    // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
+    // the gate is off, there's no customer, or there's nothing to show —
+    // stripLiveOnlyScheduleFields deletes it for every non-live render, same
+    // staleness rule as nextAppointment.
+    ...(planSummary ? { planSummary } : {}),
+    ...(nearYou ? { nearYou } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static
@@ -5535,6 +6712,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     protocol,
     advisory,
     lawnAssessment,
+    // Public cache-eligibility marker only (a boolean, no visit data) —
+    // same convention as lawnAssessment.weekWeatherUncacheable. Sibling of
+    // `pestReportV2` (composed later, in reports-public.js's wrapper), not
+    // nested inside it, so it survives even when pestReportV2 itself
+    // composes to nothing. See resolvePestWeekWeather above.
+    pestWeekWeatherUncacheable,
+    // Why (codex P2 2026-09-28 round 5): 'open_window' (time-dependent — the
+    // queue waits for the window to close), 'no_coordinates' (legacy record,
+    // the geocoder may fill them), 'unavailable' / 'unfrozen' (transient —
+    // normal failure retry ladder). null when cacheable.
+    pestWeekWeatherPendingReason: pestWeekWeatherPendingReason || null,
     mowingHeight,
     lawnProgramOverview: lawnCallbackNarrativeOwns ? null : lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
@@ -5634,6 +6822,9 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   termiteStationPinsFlag,
+  resolveApplicatorFdacsId,
+  resolveProjectApplicatorTechnician,
+  resolveProjectReportPreviewFields,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,
@@ -5641,11 +6832,14 @@ module.exports = {
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
+  stripLiveOnlyReportProductCopy,
+  loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,
   uniqueStrings,
+  applicationAreaValues,
   locationAreaLabels,
   taggedNoteLines,
   minutesFromElapsed,
@@ -5653,12 +6847,16 @@ module.exports = {
   inferCatalogProductType,
   approvedReportProductFacts,
   attachApprovedReportProductFacts,
+  completedProtocolActionLabels,
+  completedProtocolActionEntries,
   loadLawnProgramOverviewContext,
   normalizeAdvisoryForTreatmentScope,
   buildCompletionAdvisory,
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
+  resolveLawnAssessmentAndHistory,
+  resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
@@ -5669,7 +6867,14 @@ module.exports = {
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,
+  freezePestWeekWeather,
+  storedPestWeekFor,
+  resolvePestWeekWeather,
+  resolvePestWeekWeatherForBuild,
   LAWN_RENDER_STRATEGY,
+  buildReportWateringInstruction,
+  applyAfterHoldOverlay,
+  buildWateringBanner,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,

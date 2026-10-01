@@ -55,6 +55,14 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
+      // An UNKNOWN caller (no customer on file) who waited 25s+ and left no
+      // voicemail gets a text-back from the line they called — same grace,
+      // own try/catch so a failure here never blocks the bells above.
+      try {
+        await require('../services/missed-call-text-back').textBackIfMissed(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] missed-call text-back failed for ${maskSid(callSid)}: ${err.message}`);
+      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }
@@ -569,6 +577,27 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
 // values are identical either way — while keys only the fallback wrote
 // (e.g. source: 'status_callback') survive as provenance of which endpoint
 // created the row. Metadata may arrive as a jsonb object or a legacy string.
+// Promise-chaser eligibility, frozen at arrival (Codex #5019 r20/r21): a
+// per-call fact, not a time boundary — a dark-period call is never stamped,
+// so it can never ring however the gate later toggles, and a stamped call
+// keeps ringing across any number of ordinary restarts. Gate off returns
+// {}, so it contributes nothing and the insert payload is unchanged from
+// before this stamp existed. Read fresh, once, at the exact moment this
+// call's own row is built — never re-derived later, so a genuine Twilio
+// redelivery (which never re-reaches this code; see the firstDelivery
+// claim above) could not overwrite it even if it tried. See
+// promise-chaser-bell.js's own docstring for the full rationale, including
+// its known limitation: a call_log row created by a recovery path
+// (/call-status or /recording-status, when /voice itself never landed) is
+// never stamped and never rings — fails closed, and rare.
+function promiseChaserEligibilityStamp() {
+  const { isEnabled } = require('../config/feature-gates');
+  // The same conjunction the sweep checks (codex r6 P1): with either gate off,
+  // including GATE_CALL_COMMITMENTS used as a kill switch, no call is stamped,
+  // so re-enabling can never alert on calls taken while it was off.
+  return isEnabled('promiseChaserBell') && isEnabled('callCommitments') ? { promise_chaser_eligible: true } : {};
+}
+
 function foldVoiceMetadata(existingMetadata, freshMetadata) {
   let prior = {};
   if (existingMetadata && typeof existingMetadata === 'object') {
@@ -1326,6 +1355,7 @@ router.post('/voice', async (req, res) => {
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
           : {}),
+        ...promiseChaserEligibilityStamp(),
       });
     await db.transaction(async (trx) => {
       // Same per-SID advisory lock as /call-status and /recording-status.
@@ -2661,10 +2691,11 @@ router.post('/recording-status', async (req, res) => {
         // and the email-review cards close only on a human verdict — never
         // because the audio changed; Codex #3764 r3 + r4 P1).
         if (n > 0 && attach.action === 'replace') {
-          const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
+          const { SUPERSEDE_KEPT_REASON_CODES, SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
           const retired = await trx('triage_items')
             .where({ call_log_id: baseline.id })
             .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
           // The review flag follows the cards (Codex #3736 r14 P2): with the
@@ -3688,6 +3719,7 @@ router._test = {
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   foldVoiceMetadata,
+  promiseChaserEligibilityStamp,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,

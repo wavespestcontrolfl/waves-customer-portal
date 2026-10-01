@@ -15,7 +15,11 @@ jest.mock('../utils/cron-lock', () => ({
   wasLockSkipped: result => result?.skipped === true,
 }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
-  requiresDurableFinalize: entry => entry === 'durable-test',
+  requiresDurableFinalize: entry => ['durable-test', 'invoice_send_deferred'].includes(entry),
+}));
+jest.mock('../services/review-click-guard', () => ({
+  askIdSuppressedByClick: jest.fn(async () => false),
+  REVIEW_LINK_CLICKED_REASON: 'already tapped',
 }));
 const db = require('../models/db');
 const history = require('../services/review-ask-history');
@@ -183,6 +187,96 @@ test('repeated settlement failures preserve accepted evidence for the scheduler 
   expect(row.metadata.queued_at).toEqual(queuedAt);
 });
 
+test('a wrapper invoice replay persists the old App event time with its durable finalize claim', async () => {
+  const visibleAt = new Date('2026-09-08T15:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, eventVisibleAt: visibleAt, deliveryOutcome: 'accepted',
+    channelResults: { push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt } } };
+  expect(await dispatchScheduledSms(row, row.metadata, async () => result)).toMatchObject({ sent: true, deduped: true });
+  expect(row.created_at).toEqual(visibleAt);
+  expect(updates[0].patch.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
+  expect(updates[0].patch.metadata.bindings).toContain(visibleAt);
+});
+
+test('wrapper invoice replay saves original Email and Text times for restart and finalize-only recovery', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  const textAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+    } };
+  await dispatchScheduledSms(row, row.metadata, async () => result);
+  expect(row.created_at).toEqual(textAt);
+  const stamp = updates[0].patch.metadata;
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, textAt, true, true, emailAt, true, true, textAt]);
+});
+
+test('a deferred completion decline persists old App and Email rail evidence without mark_invoice_delivery', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  const emailAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Your payment failed — pay here: https://portal.test/pay';
+  row.metadata = { entry_point: 'autopay_completion_decline_deferred', invoice_id: 'inv-1' };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deduped: true,
+    deliveryOutcome: 'accepted', channelResults: {
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+    },
+  }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.metadata.mark_invoice_delivery).toBeUndefined();
+  expect(row.created_at).toEqual(emailAt);
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, emailAt, true, true, emailAt, true, true, appAt]);
+});
+
+test('fresh Email beside an old Text does not persist an all-old invoice witness', async () => {
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: new Date('2026-09-08T14:00:00Z') },
+    } }));
+  expect(updates[0].patch.metadata.sql).toContain("'invoice_prior_delivery_deduped', ?::boolean");
+  expect(updates[0].patch.metadata.bindings[1]).toBe(false);
+  expect(row.created_at).toEqual(new Date());
+});
+
+test('legacy wrapper saves old App rail time beside a fresh Email without marking the aggregate old', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  // Historical wrapper rows have no hasEmailLeg flag, so Email can be a
+  // newly delivered sibling of an App bell that was already visible.
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+    } }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.created_at).toEqual(new Date());
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, false, null, true, false, null, true, true, appAt]);
+});
+
+test('legacy wrapper also saves old Email time beside a fresh Text leg', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deliveryOutcome: 'accepted' },
+    } }));
+  expect(row.created_at).toEqual(new Date());
+  expect(updates[0].patch.metadata.bindings).toEqual([null, false, null, true, true, emailAt, true, false, null]);
+});
+
 test.each(['recent', 'history', 'busy'])('completion durably arms its stripped review fallback through finalization: %s', async kind => {
   const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
   row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
@@ -212,6 +306,95 @@ test.each(['recent', 'history', 'busy'])('completion durably arms its stripped r
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
   expect(await require('../services/dispatch-completion-deferred').finalizeDeferredCompletionSend(meta)).toEqual({ ok: true });
   expect(reviewRequest).toMatchObject({ status: 'pending', sms_sent_at: null, scheduled_for: new Date(expectedRetryMs) });
+});
+
+test('a tracked click since the visit drops ONLY the bundled review suffix: the completion text still sends, and the ask is suppressed, not re-armed', async () => {
+  const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
+  row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockResolvedValueOnce(true);
+  const meta = row.metadata;
+  const send = jest.fn(async () => {
+    expect(row.message_body).toBe(completion);
+    expect(row.message_body).not.toMatch(/portal\.test\/rate|quick review/);
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' };
+  });
+  expect(await dispatchScheduledSms(row, meta, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(reviewUpdates).toEqual([{ status: 'suppressed', scheduled_for: null }]);
+  expect(reviewRequest).toMatchObject({ id: 'review-1', status: 'suppressed', scheduled_for: null });
+  expect(history.lastDeliveredAskAt).not.toHaveBeenCalled(); // no review-ask spacing dispatch: it is not an ask anymore
+  // judged by the bundled request id while the review-send lock was held
+  expect(require('../services/review-click-guard').askIdSuppressedByClick).toHaveBeenCalledWith('review-1');
+});
+
+test('the completion suffix is built from the same sentence the strip matches', () => {
+  const { COMPLETION_REVIEW_INVITE } = require('../services/scheduled-sms-delivery');
+  const src = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  expect(src).toContain("require('./scheduled-sms-delivery').COMPLETION_REVIEW_INVITE");
+  expect(src).not.toContain(COMPLETION_REVIEW_INVITE);
+});
+
+test('a tapped customer whose review line was edited still gets the completion once, with no review link (Codex #5367 r8 P2): the ask is suppressed, never held or re-dispatched', async () => {
+  const logger = require('../services/logger');
+  logger.warn.mockClear();
+  const edited = 'Your service is complete: https://portal.test/report/abc\n\nLoved it? Leave us a quick review: https://portal.test/rate/review1';
+  row.message_body = edited;
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockResolvedValueOnce(true);
+  history.lastDeliveredAskAt.mockResolvedValue(new Date()); // the ask path would hold this row
+  const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' }));
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(row).toMatchObject({ status: 'sent', message_body: 'Your service is complete: https://portal.test/report/abc' });
+  expect(row.metadata.bundled_review_request_id).toBeUndefined();
+  expect(row.metadata.review_hold_reason).toBeUndefined();
+  expect(reviewUpdates).toEqual([{ status: 'suppressed', scheduled_for: null }]);
+  expect(reviewRequest).toMatchObject({ status: 'suppressed', scheduled_for: null });
+  expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
+  expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('review paragraphs and links removed, bundled ask suppressed'));
+});
+
+test('an unreadable click lookup fails closed: the review line is stripped and re-armed, never sent blind', async () => {
+  const logger = require('../services/logger');
+  logger.warn.mockClear();
+  const completion = 'Your service is complete: https://portal.test/report/abc';
+  row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockRejectedValueOnce(new Error('lookup unavailable'));
+  const send = jest.fn(async () => {
+    expect(row.message_body).toBe(completion);
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' };
+  });
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(history.lastDeliveredAskAt).not.toHaveBeenCalled(); // no blind review-ask dispatch
+  // re-armed (not suppressed) for the standalone sender, which re-checks the click
+  expect(reviewUpdates).toEqual([{ scheduled_for: new Date(Date.now() + 15 * 60000) }]);
+  expect(reviewRequest).toMatchObject({ status: 'pending', sms_sent_at: null });
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('click-state read failed'));
+});
+
+test('an unreadable click lookup with a line that cannot be stripped holds the text instead of sending the link', async () => {
+  row.message_body = 'Your service is complete: https://portal.test/report/abc\n\nLoved it? Leave us a quick review: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockRejectedValueOnce(new Error('lookup unavailable'));
+  const send = jest.fn();
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete'))
+    .toMatchObject({ code: 'REVIEW_CLICK_STATE_UNAVAILABLE', scheduledHold: true });
+  expect(send).not.toHaveBeenCalled();
+  expect(row).toMatchObject({ status: 'scheduled', scheduled_for: new Date(Date.now() + 15 * 60000) });
+  expect(row.metadata.review_hold_reason).toBe('REVIEW_CLICK_STATE_UNAVAILABLE');
+  expect(reviewUpdates).toEqual([]);
 });
 
 test('an unpersisted completion rewrite never dispatches a stale bundled ask', async () => {
@@ -435,4 +618,33 @@ test('a provider error after the reservation was set still holds the full 72h un
   expect(row.status).toBe('scheduled');
   expect(row.metadata.review_ask_reservation).toBe(true);
   expect(row.scheduled_for.getTime()).toBe(Date.now() + 72 * 3600000);
+});
+
+test('retiring an earlier billing event keeps the original queue time and mints no provider proof', async () => {
+  const queuedAt = new Date(Date.now() - 86400000);
+  const visibleAt = new Date(queuedAt.getTime() + 1000);
+  row.created_at = queuedAt;
+  row.message_body = 'Billing event';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true, queued_at: queuedAt.toISOString() };
+  const send = jest.fn(async () => ({ sent: true, deduped: true, deliveryOutcome: 'accepted', reason: 'app_event_already_visible', eventVisibleAt: visibleAt }));
+  const result = await dispatchScheduledSms(row, row.metadata, send, 'billing');
+  expect(result.deduped).toBe(true);
+  const final = updates.find(({ patch }) => patch.status === 'sent').patch;
+  expect(new Date(final.created_at)).toEqual(visibleAt);
+  expect(final.metadata.bindings).toEqual([null, visibleAt, true, visibleAt, false, false, null, true, true, visibleAt]);
+  expect(final.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
+  expect(row.status).toBe('sent');
+});
+
+test('a tapped customer whose edited review ask shares the completion paragraph loses only the review link', async () => {
+  const edited = 'Your service is complete: https://portal.test/report/abc Loved it? Review us: https://portal.test/rate/review1';
+  row.message_body = edited;
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockResolvedValueOnce(true);
+  const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' }));
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(row.message_body).toBe('Your service is complete: https://portal.test/report/abc Loved it? Review us:');
+  expect(row.message_body).not.toMatch(/\/rate\//);
 });

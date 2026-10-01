@@ -1546,6 +1546,14 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) is retryable (collection_hold), never charge_failed — and the recap flow still alerts the office', async (code) => {
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code }));
+    const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
+    expect(r.reason).toBe('collection_hold');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1); // the recap flow has no pay-link fallback — silence would strand the visit
+  });
+
   it('does NOT charge a re-completed NOT-performed visit — routes to review', async () => {
     stubDb([HELD]); // heldCard, then the priorNonPerformed gate fires before any lookup
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1', priorNonPerformed: true });
@@ -1665,14 +1673,16 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
   });
 
-  it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
-    // The fee was charged — a receipt has to land somewhere (codex P1 on
-    // d040aa76; deposit twin).
+  it('email-only channel still sends the email fee receipt with the portal-wide email switch off', async () => {
+    // Owner ruling 2026-09-26: payment emails cannot be turned off, so the
+    // portal-wide switch never blocks this receipt (deposit twin).
     stubDb([null, { payment_receipt_channel: 'email', email_enabled: false }, { first_name: 'Sam' }]);
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceiptEmail).not.toHaveBeenCalled();
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({
+      billingDeliveryCategory: 'payment_receipt',
+    }));
+    expect(mockSendReceipt).not.toHaveBeenCalled();
   });
 
   it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {
@@ -1680,7 +1690,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
 
     // Transient provider failure: stays email-preferring, invoice unstamped
     // for the admin needs-receipt path — no surprise text.

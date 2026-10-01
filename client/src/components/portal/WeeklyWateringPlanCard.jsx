@@ -79,9 +79,11 @@ export default function WeeklyWateringPlanCard({ customerId, targetCustomerId, o
             Through {formatETDateOnly(plan.validThrough, { weekday: 'long', month: 'short', day: 'numeric' })}
           </div>
           <p style={{ margin: '0 0 16px' }}>{plan.summary}</p>
-          <div style={{ background: '#FFF8E5', borderLeft: `4px solid ${B.gold}`, padding: 16, marginBottom: 16 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{plan.title}</div>
-            <div>{plan.instruction}</div>
+          <div data-glass="soft" style={{ padding: 16, marginBottom: 16 }}>
+            <div style={{ borderLeft: `4px solid ${B.yellow}`, paddingLeft: 12 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{plan.title}</div>
+              <div>{plan.instruction}</div>
+            </div>
           </div>
           {plan.note && <p>{plan.note}</p>}
           {plan.forecast && <p>{plan.forecast}</p>}

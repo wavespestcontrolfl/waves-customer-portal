@@ -547,6 +547,33 @@ describe('POST /admin/communications/reschedule-link', () => {
     }
   });
 
+  test('a moved street-level hold (voice_agent, confirmed, customer_confirmed false) is never picked: the next visit is, or none', async () => {
+    const hold = {
+      id: 'svc-hold', customer_id: CUSTOMER_UUID, scheduled_date: '2099-07-29', window_start: '08:00:00', window_end: '10:00:00',
+      service_type: 'pest control', status: 'confirmed', source_action: 'voice_agent', customer_confirmed: false,
+    };
+    const next = {
+      id: 'svc-next', customer_id: CUSTOMER_UUID, scheduled_date: '2099-07-30', window_start: '09:00:00', window_end: '11:00:00',
+      service_type: 'pest control', status: 'confirmed', source_action: null, customer_confirmed: true,
+    };
+    wireDb({ customers: soloCustomer(), services: makeServicesBuilder([[hold, next]]) });
+    buildRescheduleLink.mockResolvedValue(GOOD_LINK);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).appointment.id).toBe('svc-next');
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-next', { customerId: CUSTOMER_UUID });
+    });
+    buildRescheduleLink.mockClear();
+    wireDb({ customers: soloCustomer(), services: makeServicesBuilder([[hold]]) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(404);
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+    });
+  });
+
   test('pages past a full batch of unusable placeholders instead of reporting no appointment', async () => {
     jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-07-28T20:00:00Z') });
     try {
@@ -604,6 +631,33 @@ describe('POST /admin/communications/reschedule-link', () => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/no reschedule link/);
+    });
+  });
+
+  // Independent-reviewer finding on PR #5308: a dead-link-guard refusal
+  // (C3/C6 — the visit itself starts inside the move-notice window) is a
+  // DIFFERENT problem than "no reschedule link at all", and must not be
+  // reported as one to the office.
+  test('409 (not 404) when the visit is eligible but too soon to move online — a distinct reason from "no link"', async () => {
+    const customers = soloCustomer();
+    const services = makeServicesBuilder([[{
+      id: 'svc-soon',
+      customer_id: CUSTOMER_UUID,
+      scheduled_date: '2099-08-04',
+      window_start: '09:00:00',
+      window_end: '10:00:00',
+      service_type: 'pest control',
+      status: 'confirmed',
+    }]]);
+    wireDb({ customers, services });
+    buildRescheduleLink.mockResolvedValue({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe('too_close_to_move_online');
+      expect(body.error).toMatch(/too close to move online/i);
+      expect(body.error).not.toMatch(/no reschedule link/);
     });
   });
 

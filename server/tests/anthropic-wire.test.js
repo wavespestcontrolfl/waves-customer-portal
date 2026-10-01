@@ -9,8 +9,8 @@ const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortFor, anthropicEffortConfig, THINKING_FLOOR_TOKENS } = require('../services/llm/anthropic-wire');
 
 describe('anthropicMaxTokens', () => {
-  test('raises the cap to the floor on models that think by default (Opus 5+, Fable, Mythos)', () => {
-    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+  test('raises the cap to the floor on models that think by default (Opus 5+, Sonnet 5.5+, Fable, Mythos)', () => {
+    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
       expect(anthropicMaxTokens(model, 200)).toBe(THINKING_FLOOR_TOKENS);
       expect(anthropicMaxTokens(model, 20000)).toBe(20000);
       expect(anthropicMaxTokens(model, undefined)).toBe(THINKING_FLOOR_TOKENS);
@@ -56,6 +56,44 @@ describe('anthropicEffortFor / anthropicEffortConfig', () => {
     expect({ model: 'claude-opus-5-5', ...anthropicEffortConfig('claude-opus-5-5'), max_tokens: anthropicMaxTokens('claude-opus-5-5', 500) })
       .toEqual({ model: 'claude-opus-5-5', output_config: { effort: 'high' }, max_tokens: THINKING_FLOOR_TOKENS });
   });
+
+  describe('a per-call requested effort (e.g. a DEEP yes/no check asking for "medium")', () => {
+    test('wins over the pin on a fully effort-capable model', () => {
+      MODELS.ANTHROPIC_EFFORT = 'high';
+      expect(anthropicEffortFor('claude-opus-5-5', 'medium')).toBe('medium');
+      expect(anthropicEffortConfig('claude-opus-5-5', 'medium')).toEqual({ output_config: { effort: 'medium' } });
+    });
+
+    test('applies even with no pin set at all', () => {
+      expect(anthropicEffortFor('claude-opus-5-5', 'medium')).toBe('medium');
+    });
+
+    test('is honored on a partial-levels model only when it is in that model\'s allowed set', () => {
+      // Opus 4.6 accepts low/medium/high/max, not xhigh.
+      expect(anthropicEffortFor('claude-opus-4-6', 'max')).toBe('max');
+      expect(anthropicEffortFor('claude-opus-4-6', 'xhigh')).toBeUndefined();
+      // Opus 4.5 accepts low/medium/high only.
+      expect(anthropicEffortFor('claude-opus-4-5', 'medium')).toBe('medium');
+      expect(anthropicEffortFor('claude-opus-4-5', 'max')).toBeUndefined();
+    });
+
+    test('falls back to the pin when the served model does not accept the requested level — never a bare unsupported field', () => {
+      MODELS.ANTHROPIC_EFFORT = 'high';
+      // Haiku 4.5 accepts no effort levels at all.
+      expect(anthropicEffortFor('claude-haiku-4-5-20251001', 'medium')).toBeUndefined();
+      expect(anthropicEffortConfig('claude-haiku-4-5-20251001', 'medium')).toEqual({});
+    });
+
+    test('falls back to undefined (no pin, unsupported model) rather than sending the request anyway', () => {
+      expect(anthropicEffortFor('claude-haiku-4-5-20251001', 'medium')).toBeUndefined();
+    });
+
+    test('an empty/falsy requested effort is a no-op — the pin (or its absence) governs as before', () => {
+      MODELS.ANTHROPIC_EFFORT = 'high';
+      expect(anthropicEffortFor('claude-opus-5-5', undefined)).toBe('high');
+      expect(anthropicEffortFor('claude-opus-5-5', '')).toBe('high');
+    });
+  });
 });
 
 describe('a registry mocked without the patterns', () => {
@@ -65,6 +103,9 @@ describe('a registry mocked without the patterns', () => {
       const wire = require('../services/llm/anthropic-wire');
       expect(wire.anthropicMaxTokens('claude-opus-5-5', 200)).toBe(200);
       expect(wire.anthropicEffortConfig('claude-opus-5-5')).toEqual({});
+      // No anthropicAcceptsEffort export on this mock — a requested effort
+      // must never throw, just fall through to the (also absent) pin logic.
+      expect(() => wire.anthropicEffortFor('claude-opus-5-5', 'medium')).not.toThrow();
     });
   });
 });

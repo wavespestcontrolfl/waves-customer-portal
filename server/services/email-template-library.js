@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { redactEmailAddresses } = require('../utils/redact-contact');
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const {
@@ -17,6 +18,8 @@ const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
+const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
+const { resolveEmailLinks } = require('./email-lead-links');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -90,9 +93,6 @@ function safeUrl(url) {
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
 // provider error before it is persisted or audited (SendGrid 4xx bodies can
 // echo the recipient address).
-function redactEmailAddresses(text) {
-  return String(text || '').replace(/[^\s@:<>()"']+@[^\s@:<>()"']+\.[^\s@:<>()"']+/g, '[redacted-email]');
-}
 
 function textFor(payload, key) {
   const value = payload?.[key];
@@ -618,12 +618,13 @@ function readStoredBillingReplayContext(message) {
   });
 }
 
-function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+function payloadSnapshotForSend(payload, billingReplayContext, facts, { replayDeclared = false } = {}) {
   const snapshot = redactedPayloadSnapshot(payload || {});
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
   delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
   const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
   if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  else if (replayDeclared) snapshot[BILLING_REPLAY_CONTEXT_KEY] = null;
   return snapshot;
 }
 
@@ -638,6 +639,13 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   return template.suppression_group_key || template.send_stream || null;
 }
 
+// Suppression types that block EVERY stream regardless of which group_key
+// the row carries (a bounce/complaint/do-not-email is a fact about the
+// address, not a single mailing list) — the one classification other
+// suppression-aware callers (email-division/eligibility.js) must reuse
+// rather than re-derive, per AGENTS.md's "extend existing mechanisms".
+const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
+
 // ALL suppressions that would block this send. The schema permits several
 // active rows per address (a bounce AND a do_not_email), and which one
 // "the" suppression is depends on the caller: the send path only needs any
@@ -649,16 +657,15 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
-  const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
-    return rows.filter((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase()));
+    return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
   }
   return rows.filter((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
-    globalTypes.has(String(row.suppression_type || '').toLowerCase())
+    GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
   ));
 }
 
@@ -778,8 +785,14 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // is still a commercial email — the visible unsubscribe link must survive
   // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream
   // sends, so plain service emails are unaffected.
+  // The label stays scope-neutral: asmGroupIdFor() sends EVERY marketing_*
+  // stream (newsletter, referral, nurture) through the one newsletter ASM
+  // group, so this link unsubscribes from all of them at SendGrid — naming
+  // one stream ("referral emails", "these follow-ups") would understate it.
+  // Only an admin preview/test passes a link for a service-stream template.
+  const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
   const unsubFooterHtml = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from referral emails.`
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
   const footerNote = mode === 'marketing'
     ? null
@@ -1032,6 +1045,19 @@ const ANNUAL_OFFER_WITHHELD = Symbol('annual_offer_withheld');
 // abortGuardFailedBeforeDispatch (below) can report it verbatim.
 const ANNUAL_OFFER_GUARD_FAILED = Symbol('annual_offer_guard_failed');
 
+// A caller authority veto occurs after the durable marker reaches started,
+// but before any provider request. Keep that definite-unsent outcome distinct
+// from provider errors and the annual-offer guard sentinels.
+const PROVIDER_BOUNDARY_BLOCKED = Symbol('provider_boundary_blocked');
+
+// The caller's boundary check itself could not run (its own read threw — DB
+// unavailable, etc.). sendOne awaits the check BEFORE building or sending the
+// provider request, so this is a definite non-send exactly like a veto, but
+// it is an infrastructure failure, not a policy verdict: the abort result
+// carries `boundaryCheckFailed` so the caller retries it instead of treating
+// it as refused. Tagged by the caller with err.providerBoundaryCheckFailed.
+const PROVIDER_BOUNDARY_CHECK_FAILED = Symbol('provider_boundary_check_failed');
+
 // The caller's locked handoff around one provider request, as a state
 // machine of its own: the request either ran (its result, or its error to
 // classify), was refused before it ran (abort before dispatch), or the
@@ -1042,9 +1068,9 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   let result;
   let verdict;
   try {
-    verdict = await withProviderHandoff(async (database) => {
+    verdict = await withProviderHandoff(async (database, providerBoundaryCheck) => {
       dispatchStarted = true;
-      result = await dispatchToProvider(database);
+      result = await dispatchToProvider(database, providerBoundaryCheck);
     });
   } catch (err) {
     if (dispatchStarted && result === undefined) throw err;
@@ -1054,6 +1080,11 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   if (result !== undefined) return { result };
   if (verdict?.ok !== true || !dispatchStarted) return { abortedBeforeDispatch: true };
   throw new Error('provider handoff returned without a provider result');
+}
+
+async function dispatchWithoutCallerHandoff(dispatch) {
+  await dispatch();
+  return { ok: true };
 }
 
 function queuedRowInFlight(message, now = Date.now()) {
@@ -1132,6 +1163,13 @@ function clearedProviderRetryState(message) {
   };
 }
 
+// The explicit estimate id(s) a send hands the annual-offer guard — shared by
+// sendTemplate and preflightTemplateSend so the live send and shadow
+// preflight guard the same ids.
+function guardEstimateIdsFor({ estimateId = null, estimateIds = null } = {}) {
+  return Array.isArray(estimateIds) && estimateIds.length ? estimateIds : (estimateId ? [estimateId] : []);
+}
+
 function assertTemplateSendable(template, { test = false } = {}) {
   if (test) return;
   const status = String(template?.status || 'active').toLowerCase();
@@ -1140,6 +1178,212 @@ function assertTemplateSendable(template, { test = false } = {}) {
   err.status = 409;
   err.code = 'EMAIL_TEMPLATE_DISABLED';
   throw err;
+}
+
+// A deterministic send refusal from the shared pre-dispatch steps below
+// (resolveTemplateForSend / prepareTemplateSend): the template, version,
+// payload or compliance state means THIS send cannot go out as asked. The
+// symbol carries sendTemplate's audit record for it (eventType null = the
+// check never audited) and marks it as a verdict, distinct from an
+// infrastructure error (a DB read throwing) that carries no tag. Symbol
+// keys stay out of the error's enumerable/JSON shape.
+const SEND_REFUSAL = Symbol('email_send_refusal');
+function sendRefusal(err, audit = {}) {
+  err[SEND_REFUSAL] = { eventType: null, ...audit };
+  return err;
+}
+
+async function auditSendRefusal(err, context = {}) {
+  const refusal = err && err[SEND_REFUSAL];
+  if (!refusal || !refusal.eventType) return;
+  await auditEmailTemplateIssue({
+    ...context,
+    templateKey: refusal.templateKey || context.templateKey,
+    versionId: Object.prototype.hasOwnProperty.call(refusal, 'versionId') ? refusal.versionId : context.versionId,
+    eventType: refusal.eventType,
+    reason: err.message,
+    ...(refusal.missingVariables ? { missingVariables: refusal.missingVariables } : {}),
+  });
+}
+
+// Step 1 of the send guard chain, shared by sendTemplate and
+// preflightTemplateSend (codex P2 round 6 on #5154: the preflight had been a
+// parallel re-implementation that kept missing one live guard per round):
+// resolve the template + version, the reviewed-content hash, sendable
+// status, and an active version.
+async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false, database = db } = {}) {
+  let template;
+  let version;
+  if (versionId) {
+    const row = await loadVersion(versionId);
+    if (!row) {
+      throw sendRefusal(Object.assign(new Error('template version not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+        eventType: 'missing_version',
+      });
+    }
+    template = row.template;
+    version = row;
+  } else {
+    const loaded = await loadTemplateByKey(templateKey, database);
+    if (!loaded?.template) {
+      throw sendRefusal(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+        eventType: 'missing_template', versionId: undefined,
+      });
+    }
+    template = loaded.template;
+    version = loaded.activeVersion;
+  }
+  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
+    throw sendRefusal(new Error('The reviewed email content changed. Review the message again before sending.'));
+  }
+  try {
+    assertTemplateSendable(template, { test });
+  } catch (err) {
+    throw sendRefusal(err, { eventType: 'disabled_template', templateKey: template?.template_key || templateKey });
+  }
+  if (!version) {
+    throw sendRefusal(Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
+      eventType: 'missing_active_version', templateKey: template?.template_key || templateKey,
+    });
+  }
+  return { template, version };
+}
+
+// Refusal code for a marketing-stream send from a caller that must not send
+// marketing directly (codex P1 round 7 on #5154): the email division's
+// marketing lanes (e.g. nurture.expired_1 on marketing_nurture) send ONLY
+// through email-division/ledger.js sendWithLedger, which owns eligibility,
+// frequency caps, reservation idempotency and the final recipient/consent
+// fence.
+const LEDGER_REQUIRED_CODE = 'EMAIL_DIVISION_LEDGER_REQUIRED';
+
+// Step 2 of the shared guard chain: the effective suppression stream, the
+// SendGrid ASM group and unsubscribe URL, the marketing-compliance guard
+// (a marketing send needs an unsubscribe URL or ASM group), the render,
+// required variables, and the production placeholder guards. Pure (no I/O).
+// marketingRequiresLedger: refuse (LEDGER_REQUIRED_CODE, no audit row) when
+// the send classifies as marketing by the library's own isMarketingSend —
+// set by the automation executor, which is not the ledger.
+function prepareTemplateSend({
+  template, version, payload, suppressionGroupKey, unsubscribeUrl = null, test = false, marketingRequiresLedger = false,
+} = {}) {
+  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  if (marketingRequiresLedger && isMarketingSend(template, effectiveSuppressionGroupKey)) {
+    const err = new Error('marketing-stream sends must go through the email division ledger (email-division/ledger.js sendWithLedger), not the automation executor');
+    err.status = 409;
+    err.code = LEDGER_REQUIRED_CODE;
+    throw sendRefusal(err);
+  }
+  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
+  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
+    template,
+    unsubscribeUrl,
+    asmGroupId,
+    suppressionGroupKey: effectiveSuppressionGroupKey,
+  });
+  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
+    const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
+    err.status = 400;
+    err.code = 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED';
+    throw sendRefusal(err);
+  }
+
+  // A template may pin service chrome while riding a marketing_* suppression
+  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
+  // via marketing_referral, rendered like the service emails). The pin is
+  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
+  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
+  // above are untouched (they key on isMarketingSend, not the wrapper).
+  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
+  // A pin must FORCE 'service' (not just skip the marketing override):
+  // renderTemplate falls back to template.mode, and a pinned template may
+  // carry mode 'marketing' from its seed (referral.invite does).
+  const rendered = renderTemplate({
+    template,
+    version,
+    payload,
+    unsubscribeUrl: effectiveUnsubscribeUrl,
+    modeOverride: pinsServiceChrome
+      ? 'service'
+      : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
+  });
+  const renderedAudit = { templateKey: template.template_key, versionId: version.id };
+  if (rendered.missingPayload.length) {
+    const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
+    err.status = 400;
+    throw sendRefusal(err, { ...renderedAudit, eventType: 'missing_payload', missingVariables: rendered.missingPayload });
+  }
+  if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
+    if (placeholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
+      throw sendRefusal(err, { ...renderedAudit, eventType: 'placeholder_payload', missingVariables: placeholderFields });
+    }
+    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
+    if (renderedPlaceholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
+      throw sendRefusal(err, { ...renderedAudit, eventType: 'placeholder_rendered', missingVariables: renderedPlaceholderFields });
+    }
+  }
+  return { effectiveSuppressionGroupKey, asmGroupId, effectiveUnsubscribeUrl, rendered };
+}
+
+// NO-PROVIDER preflight for email-template-automation-executor.js's shadow
+// mode: would the identical live sendTemplate attempt reach the provider?
+// Built from the SAME guard chain sendTemplate runs (codex P2 rounds on
+// #5154), never a mirror of it: resolveTemplateForSend, prepareTemplateSend
+// (ASM group / unsubscribe URL / marketing-compliance guard, render,
+// required variables, placeholders), the recipient suppression lookup
+// sendTemplate blocks on, and the annual-offer guard sendOne runs at the
+// provider boundary (sendgrid-mail.js applyAnnualOfferGuard, fed the same
+// estimate ids via guardEstimateIdsFor and the same template key). Never
+// writes an email_messages row, never audits (that table records real send
+// attempts), never calls the provider. The one live step intentionally
+// skipped is the message-level idempotency lookup against email_messages
+// (shadow inserts no message, so "would this collide" has no meaning).
+//
+// A deterministic refusal (a sendRefusal, a suppression, a withheld annual
+// offer) returns { ok:false, reason, code }; an infrastructure error (a DB
+// read failing, the annual guard's own lookup failing) is rethrown for the
+// caller to handle — it is not a verdict.
+async function preflightTemplateSend({
+  templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey,
+  unsubscribeUrl = null, estimateId = null, estimateIds = null, withheldLinkPolicy = null,
+  marketingRequiresLedger = false,
+} = {}) {
+  if (!to) return { ok: false, reason: 'recipient email required' };
+  let template;
+  let version;
+  let prepared;
+  try {
+    ({ template, version } = await resolveTemplateForSend({ templateKey, versionId, expectedContentHash }));
+    prepared = prepareTemplateSend({ template, version, payload, suppressionGroupKey, unsubscribeUrl, marketingRequiresLedger });
+  } catch (err) {
+    if (err && err[SEND_REFUSAL]) return { ok: false, reason: err.message, ...(err.code ? { code: err.code } : {}) };
+    throw err;
+  }
+  const { rendered } = prepared;
+  const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
+  if (suppression) {
+    return { ok: false, reason: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}` };
+  }
+  try {
+    await sendgrid.applyAnnualOfferGuard({
+      html: rendered.html,
+      text: rendered.text,
+      estimateIds: guardEstimateIdsFor({ estimateId, estimateIds }),
+      templateKey,
+      ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
+    });
+  } catch (err) {
+    if (err?.annualOfferWithheld) return { ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' };
+    throw err;
+  }
+  return { ok: true, template, version, rendered };
 }
 
 async function sendTemplate({
@@ -1159,6 +1403,10 @@ async function sendTemplate({
   attachments = [],
   suppressionGroupKey,
   billingReplayContext = null,
+  // Preserve a fail-closed marker when a registered producer cannot build a
+  // valid replay context. Legacy billing templates that do not declare the
+  // contract continue without the marker and keep their existing retry path.
+  billingReplayDeclared,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1176,11 +1424,13 @@ async function sendTemplate({
   // The email twin of the SMS sender's locked handoff: called with a
   // `dispatch` that performs the actual provider request. The caller holds
   // whatever authority rows it needs and awaits `dispatch()` while they are
-  // held. A refusal without dispatching aborts the queued attempt
+  // held. `dispatch(database, providerBoundaryCheck)` can install a final
+  // authority check inside sendOne after its provider guards. A refusal
+  // without dispatching aborts the queued attempt
   // pre-provider (ABORTED_BEFORE_DISPATCH), a throw after dispatch began is
   // the provider outcome, and a caller failure after acceptance keeps the
   // acceptance.
-  withProviderHandoff = null,
+  withProviderHandoff = dispatchWithoutCallerHandoff,
   // Delivery-guards slice (re-cut of #4569): the estimate(s) this send is
   // about. When present, passed through to sendgrid.sendOne as an explicit
   // addition to its own content derivation. Codex round 3 on #4608
@@ -1203,78 +1453,28 @@ async function sendTemplate({
   // pricing-authority CTA swap for the same reason (the deposit is owed
   // regardless of the offer's own state).
   withheldLinkPolicy = null,
+  // Refuse a marketing-stream send before any email_messages row (the
+  // automation executor's email-division ledger fence; see
+  // prepareTemplateSend).
+  marketingRequiresLedger = false,
+  // Provenance only (email_messages.lead_id / estimate_id, recorded by
+  // resolveEmailLinks; never affects delivery, guards or dedupe): the estimate
+  // the mail concerns when the caller has no `estimateId` to hand the
+  // annual-offer guard (a deposit receipt). The lead is derived from
+  // recipient_id or the estimate's owner; no caller passes one directly.
+  linkEstimateId = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
+  const auditRefusal = (err) => auditSendRefusal(err, {
+    templateKey, versionId, recipientType, recipientId, triggerEventId, automationRunId, idempotencyKey,
+  });
   let template;
   let version;
-  if (versionId) {
-    const row = await loadVersion(versionId);
-    if (!row) {
-      await auditEmailTemplateIssue({
-        templateKey,
-        versionId,
-        eventType: 'missing_version',
-        reason: 'template version not found',
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-      });
-      throw Object.assign(new Error('template version not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
-    }
-    template = row.template;
-    version = row;
-  } else {
-    const loaded = await loadTemplateByKey(templateKey);
-    if (!loaded?.template) {
-      await auditEmailTemplateIssue({
-        templateKey,
-        eventType: 'missing_template',
-        reason: 'template not found',
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-      });
-      throw Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
-    }
-    template = loaded.template;
-    version = loaded.activeVersion;
-  }
-  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
-    throw new Error('The reviewed email content changed. Review the message again before sending.');
-  }
   try {
-    assertTemplateSendable(template, { test });
+    ({ template, version } = await resolveTemplateForSend({ templateKey, versionId, expectedContentHash, test }));
   } catch (err) {
-    await auditEmailTemplateIssue({
-      templateKey: template?.template_key || templateKey,
-      versionId,
-      eventType: 'disabled_template',
-      reason: err.message,
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-    });
+    await auditRefusal(err);
     throw err;
-  }
-  if (!version) {
-    await auditEmailTemplateIssue({
-      templateKey: template?.template_key || templateKey,
-      versionId,
-      eventType: 'missing_active_version',
-      reason: 'active template not found',
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-    });
-    throw Object.assign(new Error('active template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' });
   }
 
   let retryMessage = null;
@@ -1296,96 +1496,26 @@ async function sendTemplate({
     retryMessage = existing || null;
   }
 
-  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
-  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
-    template,
-    unsubscribeUrl,
-    asmGroupId,
-    suppressionGroupKey: effectiveSuppressionGroupKey,
-  });
-  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
-    const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
-    err.status = 400;
-    throw err;
+  // Outside links in prep guides route through /go/<code> for click logging
+  // (GATE_OUTLINK_TRACKING; no-op unless the gate is on and this is a prep.*
+  // send). Render-time only: the stored version is never edited, and the
+  // helper fails open to the original version.
+  if (!test) {
+    version = await withOutlinkTrackingForEmail({
+      template, version, payload, recipientType, recipientId,
+    });
   }
 
-  // A template may pin service chrome while riding a marketing_* suppression
-  // stream (referral.invite — owner directive 2026-07-06: user-unsubscribable
-  // via marketing_referral, rendered like the service emails). The pin is
-  // layout_wrapper_id === 'service_pinned_v1'; every other template keeps the
-  // stream-driven newsletter wrapper, and the unsubscribe/ASM requirements
-  // above are untouched (they key on isMarketingSend, not the wrapper).
-  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
-  // A pin must FORCE 'service' (not just skip the marketing override):
-  // renderTemplate falls back to template.mode, and a pinned template may
-  // carry mode 'marketing' from its seed (referral.invite does).
-  const rendered = renderTemplate({
-    template,
-    version,
-    payload,
-    unsubscribeUrl: effectiveUnsubscribeUrl,
-    modeOverride: pinsServiceChrome
-      ? 'service'
-      : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
-  });
-  if (rendered.missingPayload.length) {
-    const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
-    err.status = 400;
-    await auditEmailTemplateIssue({
-      templateKey: template.template_key,
-      versionId: version.id,
-      eventType: 'missing_payload',
-      reason: err.message,
-      recipientType,
-      recipientId,
-      triggerEventId,
-      automationRunId,
-      idempotencyKey,
-      missingVariables: rendered.missingPayload,
+  let prepared;
+  try {
+    prepared = prepareTemplateSend({
+      template, version, payload, suppressionGroupKey, unsubscribeUrl, test, marketingRequiresLedger,
     });
+  } catch (err) {
+    await auditRefusal(err);
     throw err;
   }
-  if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
-    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
-    if (placeholderFields.length) {
-      const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
-      err.status = 400;
-      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
-      await auditEmailTemplateIssue({
-        templateKey: template.template_key,
-        versionId: version.id,
-        eventType: 'placeholder_payload',
-        reason: err.message,
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-        missingVariables: placeholderFields,
-      });
-      throw err;
-    }
-    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
-    if (renderedPlaceholderFields.length) {
-      const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
-      err.status = 400;
-      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
-      await auditEmailTemplateIssue({
-        templateKey: template.template_key,
-        versionId: version.id,
-        eventType: 'placeholder_rendered',
-        reason: err.message,
-        recipientType,
-        recipientId,
-        triggerEventId,
-        automationRunId,
-        idempotencyKey,
-        missingVariables: renderedPlaceholderFields,
-      });
-      throw err;
-    }
-  }
+  const { effectiveSuppressionGroupKey, asmGroupId, rendered } = prepared;
 
   const fromName = template.from_name || 'Waves Pest Control';
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
@@ -1394,6 +1524,10 @@ async function sendTemplate({
   // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
   // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
   const sendAttemptToken = crypto.randomUUID();
+  // The single chokepoint for tying prospect mail to its lead / estimate.
+  const links = await resolveEmailLinks({
+    recipientType, recipientId, estimateId, estimateIds, linkEstimateId, payload, test,
+  });
   const messageSnapshot = {
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -1405,6 +1539,8 @@ async function sendTemplate({
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
     recipient_id: recipientId || null,
+    lead_id: links.lead_id,
+    estimate_id: links.estimate_id,
     recipient_email_snapshot: to,
     from_name_snapshot: fromName,
     from_email_snapshot: fromEmail,
@@ -1419,7 +1555,7 @@ async function sendTemplate({
       triggerEventId: triggerEventId || null,
       idempotencyKey: idempotencyKey || null,
       categories: allCategories,
-    })),
+    }, { replayDeclared: billingReplayDeclared })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the
@@ -1560,6 +1696,21 @@ async function sendTemplate({
       error: err.message, message: failed || { ...message, status: 'failed', error_message: reason }, rendered,
     };
   };
+  const abortProviderBoundaryBeforeDispatch = async ({ checkFailed = false } = {}) => {
+    const reason = checkFailed ? 'provider_boundary_check_failed' : 'provider_boundary_blocked';
+    const [failed] = await db('email_messages')
+      .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+        provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+        provider_handoff_attempt_token: sendAttemptToken })
+      .update({ status: 'failed', error_message: reason,
+        provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+        provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
+    if (!failed) throw inFlightCollisionError(idempotencyKey || message.id);
+    return {
+      sent: false, aborted: true, ...(checkFailed ? { boundaryCheckFailed: true } : { boundaryBlocked: true }),
+      reason, providerAttempted: false, message: failed, rendered,
+    };
+  };
   if (typeof onQueued === 'function') {
     let keep = true;
     try {
@@ -1572,7 +1723,7 @@ async function sendTemplate({
 
   let providerAccepted = false;
   let providerHandoffStarted = false;
-  let markerWriteFailed = false;
+  let providerRequestDefinitelyUnsent = false;
   let result;
   const recordAcceptance = () => db('email_messages')
     .where({ id: message.id, send_attempt_token: sendAttemptToken,
@@ -1599,7 +1750,7 @@ async function sendTemplate({
     // directly with no caller opinion of their own. This library forwards
     // `withheldLinkPolicy` only when a caller explicitly passed one (an
     // override); otherwise sendOne's template-keyed default governs.
-    const sendToProvider = (html, text, guardIds, database) => sendgrid.sendOne({
+    const sendToProvider = (html, text, guardIds, database, providerBoundaryCheck) => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1619,6 +1770,7 @@ async function sendTemplate({
         estimateIds: guardIds,
         templateKey,
         ...(database ? { database } : {}),
+        ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
         ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
       });
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
@@ -1626,8 +1778,7 @@ async function sendTemplate({
     // (and any future sender) can carry an estimate link without ever
     // passing an id. sendOne's own content derivation covers that; this is
     // only the explicit addition.
-    const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
-      ? estimateIds : (estimateId ? [estimateId] : []);
+    const guardEstimateIds = guardEstimateIdsFor({ estimateId, estimateIds });
     // dispatchToProvider is composed so a caller's own withProviderHandoff
     // (outermost) has already acquired its lock by the time sendOne's guard
     // reads a fresh row, whether or not a caller handoff is present at all
@@ -1639,7 +1790,7 @@ async function sendTemplate({
     // have produced) both resolve to their own sentinel instead, so
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
-    const dispatchToProvider = async (database) => {
+    const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Durable immediately before entering sendOne. A dedicated connection
       // keeps the marker visible even when the caller is holding authority
       // locks on its own transaction through the provider request.
@@ -1649,13 +1800,15 @@ async function sendTemplate({
           provider_handoff_attempt_token: sendAttemptToken })
         .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
           provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
-        .catch((err) => { markerWriteFailed = true; throw err; });
+        .catch((err) => { providerRequestDefinitelyUnsent = true; throw err; });
       if (Number(marked) !== 1) {
         throw inFlightCollisionError(idempotencyKey || message.id);
       }
       providerHandoffStarted = true;
       try {
-        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds, database);
+        const providerResult = await sendToProvider(
+          rendered.html, rendered.text, guardEstimateIds, database, providerBoundaryCheck,
+        );
         if (providerResult?.withheldLinksRewritten?.length) {
           // Pre-push audit P1 (b49be57b12 round 4), still true under the
           // round 9 structural move: the STORED row should match what
@@ -1689,17 +1842,34 @@ async function sendTemplate({
       } catch (err) {
         if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
         if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+        if (err?.providerBoundaryBlocked) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_BLOCKED;
+        }
+        if (err?.providerBoundaryCheckFailed) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_CHECK_FAILED;
+        }
         throw err;
       }
     };
-    if (typeof withProviderHandoff === 'function') {
-      const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
-      if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
-      result = handoff.result;
-    } else {
-      result = await dispatchToProvider();
-    }
+    const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
+    if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
+    result = handoff.result;
     if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
+    if (result === PROVIDER_BOUNDARY_BLOCKED) {
+      // The final callback ran after preparation but refused before fetch.
+      // If its settlement write fails, recover either visible marker state as
+      // definitely unsent rather than leaving a started row ambiguous.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch();
+    }
+    if (result === PROVIDER_BOUNDARY_CHECK_FAILED) {
+      // The boundary check threw before any provider request existed: a
+      // definite non-send, settled 'rejected' so a retry is allowed.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch({ checkFailed: true });
+    }
     // Pre-push audit P1: both the withProviderHandoff branch and the direct
     // branch above assign `result` from the SAME dispatchToProvider, so this
     // one check covers either caller shape.
@@ -1751,7 +1921,7 @@ async function sendTemplate({
     const expectedFailurePhase = providerHandoffStarted
       ? PROVIDER_HANDOFF_STARTED
       : PROVIDER_HANDOFF_PENDING;
-    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+    const expectedFailurePhases = providerRequestDefinitelyUnsent && !providerHandoffStarted
       ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
     const recordedFailurePhase = definiteRejection
       ? PROVIDER_HANDOFF_REJECTED
@@ -1845,7 +2015,10 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  resolveTemplateForSend,
   activeSuppressionsFor,
+  isMarketingSend,
+  GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,
   renderVersion,
   loadTemplateByKey,
@@ -1859,4 +2032,6 @@ module.exports = {
   createDraftVersion,
   publishVersion,
   sendTemplate,
+  preflightTemplateSend,
+  LEDGER_REQUIRED_CODE,
 };

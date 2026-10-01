@@ -102,6 +102,45 @@ describe('createDeepMessage', () => {
     expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-opus-4-8').output_config).toBeUndefined();
   });
 
+  test('the raw path honors a per-call effort option on a capable model, never sends it as a bare param, and omits it on a non-capable model', () => {
+    const { wireParams } = require('../services/llm/deep')._test;
+    const withEffort = wireParams({ max_tokens: 10, messages: [] }, 'claude-opus-5-5', 'medium');
+    expect(withEffort.output_config).toEqual({ effort: 'medium' });
+    expect(withEffort.effort).toBeUndefined();
+    // Sonnet 4.6 (pre-5) accepts no effort field at all — the request is
+    // byte-identical to omitting `effort`, never a 400-triggering field.
+    expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-sonnet-4-6', 'medium').output_config).toBeUndefined();
+  });
+
+  test('createDeepMessage destructures `effort` out of the params object it hands the SDK', async () => {
+    const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
+    await createDeepMessage(client, { model: 'claude-opus-5-5', effort: 'medium', max_tokens: 100, messages: [] });
+    const req = client.messages.create.mock.calls[0][0];
+    expect(req.effort).toBeUndefined();
+    expect(req.output_config).toEqual({ effort: 'medium' });
+  });
+
+  test('a per-call effort still falls back to the MODEL_ANTHROPIC_EFFORT pin when the served model does not accept it', () => {
+    const MODELS = require('../config/models');
+    const { wireParams } = require('../services/llm/deep')._test;
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      // Haiku 4.5 accepts no effort levels — the requested 'medium' is
+      // rejected AND the pin can't apply either (Haiku isn't effort-capable).
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-haiku-4-5-20251001', 'medium').output_config).toBeUndefined();
+      // A capable model with no per-call effort still gets the pin, unchanged.
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-opus-4-8').output_config).toEqual({ effort: 'high' });
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+  });
+
+  test('a caller-placed output_config.effort still wins over a per-call effort option', () => {
+    const { wireParams } = require('../services/llm/deep')._test;
+    const req = wireParams({ max_tokens: 10, messages: [], output_config: { effort: 'low' } }, 'claude-opus-5-5', 'medium');
+    expect(req.output_config).toEqual({ effort: 'low' });
+  });
+
   test('respects an explicit params.model (per-feature env overrides)', async () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
     await createDeepMessage(client, { model: 'custom-model', max_tokens: 100, messages: [] });

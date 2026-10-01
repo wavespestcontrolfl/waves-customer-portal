@@ -47,6 +47,27 @@ const logger = require('./logger');
 const { isSmsReaction } = require('./sms-intent');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { etDateString } = require('../utils/datetime-et');
+// The SAME customer-originated first_contact_channel allowlist the
+// collections consent-provenance module uses (codex pre-push r4 P1 on PR
+// #5012): a staff-created lead row (admin manual entry, tech field
+// observation, tech-run lawn diagnostic) proves a staffer typed a number,
+// never that its owner contacted Waves — reused verbatim, never a second
+// allowlist that could drift from it.
+const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('./collections/consent-provenance');
+// Canonical "not a real lead engagement" set (codex pre-push r7 P1): the
+// same array the dashboard KPIs and lead-attribution's conversion-rate
+// scoping already use to keep spam/duplicate/cancelled rows out of the
+// prospect population — reused verbatim here so a lead marked spam or a
+// duplicate-wizard repeat can never stand in as prior-contact evidence.
+// NANP-vs-international identity (codex pre-push r7 P1): the SAME rule the
+// repo already uses everywhere else two phone strings are compared for
+// "same contact" (smsThreadKey, the blocked-numbers query) — a non-NANP
+// number never collapses to a bare last-10 (codex #4213: a shared-suffix
+// international number wrongly matched an unrelated NANP customer). Used
+// ONLY inside hasPriorContact below; the file's other probes keep last10()
+// unchanged — they were reviewed and approved in earlier rounds and are out
+// of scope for this fix.
+const { phoneIdentityKey } = require('../utils/phone');
 
 const REASONS = Object.freeze({
   QUOTE_REQUEST: 'quote_request',
@@ -71,11 +92,54 @@ const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_num
 // Natures that mean "not a customer or prospect contacting us about service"
 // — returning such a call never earns a text (owner ruling 2026-09-09).
 const NON_SERVICE_NATURES = new Set([...NON_CONTACT_NATURES, 'other', 'job_applicant']);
+// The call natures that POSITIVELY mean a customer or prospect called us
+// about service (the schema's call_nature enum). hasPriorContact's call
+// probe is an allowlist of these (codex r8 P1): a null nature (indeterminate),
+// silent_or_noise, voicemail_message, other, and every non-service nature
+// fail closed, so a call we can't positively classify never grants implied
+// consent.
+const SERVICE_CONTACT_NATURES = Object.freeze(['new_lead', 'existing_customer_service', 'existing_customer_scheduling', 'billing_question']);
+// call_log.disposition non-service verdicts (codex pre-push r6 P1): an
+// OLDER inbound row from before V2 call_nature extraction shipped has no
+// nature at all (COALESCE above reads it as '', which passes the nature
+// filter) but can still carry a DEFINITIVE terminal disposition from
+// server/services/call-disposition.js's decideDisposition ruling it a
+// non-service contact. No exported subset of TERMINAL_DISPOSITIONS exists
+// there (call-self-audit.js's own local LEAD_LOSING list is the closest
+// precedent — same pattern, a different purpose, and it also lists
+// voicemail_processed/cancellation_processed, which ARE service contacts,
+// so it is not reusable here). This module's own test file cross-checks
+// every literal below against the live TERMINAL_DISPOSITIONS enum so a
+// rename there fails a test instead of drifting silently.
+const NON_SERVICE_DISPOSITIONS = ['vendor_logged', 'wrong_number_closed', 'spam_discarded', 'no_action_needed'];
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 function last10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+// hasPriorContact's evidence probes match a STORED column against a NANP
+// identityKey by last-10 suffix — codex pre-push r7 P1 (second finding):
+// the last-10 suffix alone lets a stored INTERNATIONAL number whose full
+// digit string merely ENDS in the same 10 digits as identityKey pass, the
+// exact shared-suffix collision phoneIdentityKey exists to prevent (codex
+// #4213), just on the stored side instead of the requested side. Requiring
+// the stored column's own full digit string to be NANP-shaped too (bare 10
+// digits, or 11 starting with 1) closes that — an international row can
+// never satisfy it, whatever its suffix. This is an ADDED AND'd condition
+// on the SAME `right(regexp_replace(...),10) = ?` expression migration
+// 20260927000006's indexes were built for, so those indexes are still used
+// for the equality half; no new migration is required.
+function nanpStoredPhoneClause(column) {
+  // {0,1} not a bare `?` (codex pre-push r7 P1, on push): knex's raw-query
+  // binding parser counts every `?` character in the SQL TEXT as a
+  // positional placeholder, including one sitting inside a quoted regex
+  // literal — it is not quote-aware. A literal `?` here would make knex
+  // expect 2 bindings for this single-binding clause and throw
+  // "Expected 1 bindings, saw 2" on every real compile, which the JS mock
+  // (which never actually compiles SQL) could not catch.
+  return `right(regexp_replace(${column}, '\\D', '', 'g'), 10) = ? AND regexp_replace(${column}, '\\D', '', 'g') ~ '^1{0,1}\\d{10}$'`;
 }
 
 function parseMetadata(metadata) {
@@ -175,6 +239,208 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
   )
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
+}
+
+// Call-derived first_contact_channel values (codex pre-push r5 P1): the
+// call pipeline (call-recording-processor.js Step 4b, lead-attribution.js's
+// attributeInboundContact) writes 'call' for EVERY phone-call-minted lead —
+// voicemail-sourced leads included, per call-recording-processor.js's own
+// comment ("first_contact_channel stays 'call'") — regardless of the call's
+// DIRECTION. A lead minted from a COLD OUTBOUND call we placed gets the
+// exact same 'call' value as one from a genuine inbound call, so it would
+// otherwise pass CUSTOMER_ORIGINATED_LEAD_CHANNELS and wrongly count as
+// "the person contacted us". Verified exhaustively (grep
+// `first_contact_channel:` across server/): 'call' is the ONLY value any
+// call/voicemail source writes anywhere in the repo — no separate
+// 'voicemail' or 'phone_call' variant exists. Phone calls count as prior
+// contact ONLY through existsQualifyingInboundCall above, which is
+// direction-aware (`.where('direction', 'inbound')`) — never through a
+// lead row here.
+const CALL_DERIVED_LEAD_CHANNELS = new Set(['call']);
+// The lead-evidence allowlist for THIS module: customer-originated (reused
+// from consent-provenance.js) MINUS anything call-derived — computed once,
+// not per query.
+const LEAD_EVIDENCE_CHANNELS = CUSTOMER_ORIGINATED_LEAD_CHANNELS.filter(
+  (channel) => !CALL_DERIVED_LEAD_CHANNELS.has(channel)
+);
+
+// Any CUSTOMER-ORIGINATED, NON-CALL-DERIVED lead row for this phone (not
+// scoped to the form/quote channels latestQuoteFormLead checks) — "a lead
+// record" in the owner's own list of what counts as prior contact
+// (2026-09-26, outbound return-message gate).
+async function anyLeadRecord({ phoneLast10, before, conn = db }) {
+  if (!phoneLast10) return null;
+  return conn('leads')
+    .whereNull('deleted_at')
+    .where('created_at', '<', before)
+    .whereRaw(nanpStoredPhoneClause('phone'), [phoneLast10])
+    // Customer-originated AND non-call-derived (codex pre-push r4 P1 + r5
+    // P1): a lead this module counted before included 'manual' /
+    // 'field_observation' / 'lawn_diagnostic' rows (staffer typed a
+    // number) and 'call' rows minted from a COLD OUTBOUND call (see
+    // CALL_DERIVED_LEAD_CHANNELS above) — neither proves the number's
+    // owner ever contacted Waves. whereIn also fails closed on a NULL or
+    // unrecognized channel (it matches no IN list, never a wildcard).
+    .whereIn('first_contact_channel', LEAD_EVIDENCE_CHANNELS)
+    // Exclude only confirmed spam (codex r9 P2). Status is lifecycle, not
+    // provenance: a customer-originated lead later cancelled, or auto-filed
+    // as a duplicate of another real lead, still proves the person contacted
+    // Waves first. Spam is the one status that says the "contact" was never
+    // a person reaching out. whereNot also fails closed on a NULL status
+    // (SQL's three-valued logic excludes it), as elsewhere in this file.
+    .whereNot('status', 'spam')
+    .orderBy('created_at', 'desc')
+    .first('id', 'created_at');
+}
+
+// EXISTS-style probes for hasPriorContact below — UNBOUNDED, unlike
+// latestInboundCall/latestInboundText above (codex pre-push r1 P2 on PR
+// #5012): those cap at 5 calls / 25 texts and filter for quality IN JS
+// AFTER that cap, which is fine for "the single best evidence inside a 48h
+// window" (resolveOutboundCallReason's own job) but wrong for an unbounded
+// lookback — a genuine contact from months ago sitting behind a wall of
+// newer spam calls or reminder acknowledgements would never surface. The
+// SIMPLE qualifying filters (call nature; text type + "has a letter") move
+// into the SQL WHERE clause instead of a row cap, so the query itself
+// narrows the candidate set — `.first('id')` with no ORDER BY is a plain
+// `LIMIT 1`, i.e. EXISTS-style, for the call probe. The harder text
+// classifier (isSubstantiveText's emoji/reaction regexes) still runs in JS,
+// REUSED rather than reimplemented in SQL, over that now-narrowed set —
+// with no `.limit()` this time.
+async function existsQualifyingInboundCall({ phoneLast10, before, conn = db }) {
+  if (!phoneLast10) return false;
+  // SERVICE_CONTACT_NATURES, an ALLOWLIST (codex r8 P1). The earlier
+  // NON_SERVICE_NATURES denylist let through a null (indeterminate) nature
+  // and silent_or_noise; only a positively service-classified call counts
+  // now. A NULL nature fails the IN() test by SQL semantics, so no COALESCE.
+  // Plus voicemail_message, gated below on a linked lead (codex r9 P1): a
+  // prospect whose first contact was a service voicemail did reach out.
+  const natures = [...SERVICE_CONTACT_NATURES, 'voicemail_message'];
+  // NON_SERVICE_DISPOSITIONS (codex pre-push r6 P1): an OLDER inbound row
+  // predating V2 call_nature extraction has no nature at all — the
+  // COALESCE above reads it as '', which PASSES the nature filter — but it
+  // can still carry a DEFINITIVE terminal call_log.disposition
+  // (server/services/call-disposition.js) ruling it a non-service contact.
+  // Both exclusions apply together; neither alone is sufficient for every
+  // call's vintage.
+  const dispositions = [...NON_SERVICE_DISPOSITIONS];
+  const row = await whereNotSandboxCall(conn('call_log')
+    .where('direction', 'inbound')
+    .where('created_at', '<', before))
+    .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
+    // v2_extraction_status = 'valid' (codex pre-push r7 P1): a row the V2
+    // pipeline never classified — no run yet, a parse failure, or a
+    // pre-V2 legacy row with only call_outcome / processing_status /
+    // ai_extraction.call_type set — is NOT positively known to be a
+    // service contact and must fail closed here rather than pass on an
+    // empty COALESCE. This also drops any need to read those legacy
+    // fields: a row that never reached 'valid' never qualifies, full stop.
+    .where('v2_extraction_status', 'valid')
+    .whereRaw(
+      `lower(trim(ai_extraction_enriched->>'call_nature')) IN (${natures.map(() => '?').join(',')})`,
+      natures,
+    )
+    // A voicemail counts only when the pipeline tied it to a live, non-spam
+    // lead, found by the call's own sid or the lead id stamped on the call
+    // (a fresh lead links only through leads.twilio_call_sid). A voicemail
+    // no one turned into a lead is not evidence of a service contact.
+    .whereRaw(`(lower(trim(ai_extraction_enriched->>'call_nature')) <> 'voicemail_message'
+      OR EXISTS (SELECT 1 FROM leads l WHERE l.deleted_at IS NULL AND l.status <> 'spam'
+        AND (l.twilio_call_sid = call_log.twilio_call_sid OR l.id::text = call_log.metadata->>'lead_id')))`)
+    .whereRaw(
+      `COALESCE(disposition, '') NOT IN (${dispositions.map(() => '?').join(',')})`,
+      dispositions,
+    )
+    .first('id');
+  return !!row;
+}
+
+async function existsQualifyingInboundText({ phoneLast10, before, conn = db }) {
+  if (!phoneLast10) return false;
+  const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+  const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+  const rows = await conn('sms_log')
+    .where('direction', 'inbound')
+    .where('created_at', '<', before)
+    .whereRaw(nanpStoredPhoneClause('from_phone'), [phoneLast10])
+    // NOT IN excludes NULL rows entirely (SQL's three-valued logic) —
+    // message_type is nullable, and isSubstantiveText's own JS check
+    // (IGNORED_TEXT_TYPES.has(String(row.message_type || ''))) treats a
+    // null type as '' (never ignored), so a null-typed substantive text
+    // must still qualify (codex pre-push r2 P1).
+    .where(function excludeIgnoredMessageType() {
+      this.whereNull('message_type').orWhereNotIn('message_type', [...IGNORED_TEXT_TYPES]);
+    })
+    .whereRaw("message_body ~* '[a-z]'")
+    // Exclude an enforced solicitation verdict (codex pre-push r7 P1) — the
+    // exact fragment twilio-webhook.js's own unanswered-digest exclusion
+    // uses (metadata->'spam_verdict'->>'enforced'): that row was silently
+    // screened as spam, not a real inbound conversation, and must not
+    // stand in as evidence the sender contacted Waves first.
+    .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
+    .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
+    // Inbound rows are never send reservations, so this changes nothing
+    // today. It's here because every sms_log reader goes through the shared
+    // exclusion (sms-log-general-reader-source-guard).
+    .modify(excludeUnresolvedSendReservations)
+    .select('id', 'message_body', 'message_type');
+  return rows.some(isSubstantiveText);
+}
+
+/**
+ * Did this phone (or customer) EVER contact Waves before `before`? UNBOUNDED
+ * — unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above, which
+ * answers a different question ("why did we place THIS call") and is too
+ * narrow for "did they ever reach out first" (owner ruling 2026-09-26, the
+ * outbound return-message gate: GATE_CALL_OUTBOUND_RETURN_MESSAGES). Reuses
+ * the same qualifying rules this file already applies for the voicemail
+ * text-back reason — an inbound call, an inbound text, or a lead record —
+ * plus an existing customer link, through the EXISTS-style probes above
+ * (never the capped latestInboundCall/latestInboundText, which would miss
+ * an old genuine contact behind newer spam/acknowledgements).
+ *
+ * `conn` (codex #5018 pre-push P1) threads a caller's own held connection —
+ * a transaction, or the same pool slot a phone-locked handoff already
+ * occupies — through every probe below instead of opening a fresh one on
+ * the shared pool. Required under the supported DB_POOL_MAX=2: a caller
+ * that already holds the pool's other slot (a cron's exclusive lock, a
+ * handoff transaction) would otherwise starve these probes into a
+ * connection-acquire timeout. Defaults to the shared pool for a caller with
+ * no transaction of its own.
+ *
+ * Deliberately does NOT catch a probe failure here and fold it into `false`
+ * — this used to fail closed on ANY error, but a starved-pool timeout is an
+ * infrastructure hiccup, not a genuine "no prior contact" answer, and
+ * folding the two together made an outage indistinguishable from a real
+ * negative — permanently refusing an otherwise-eligible send instead of
+ * letting the caller's own retry/defer path (every current caller has one:
+ * call-booking-link-text.js's staging/dispatch/neverSendRecheck rails,
+ * call-recording-processor.js's own wrapping try/catch) pick it back up. A
+ * caller that genuinely wants fail-closed-on-error keeps that as its own
+ * explicit try/catch.
+ */
+async function hasPriorContact({ customerId = null, phone = null, before = new Date(), conn = db } = {}) {
+  if (customerId) return true;
+  // NANP-only evidence matching (codex pre-push r7 P1): phoneIdentityKey
+  // returns the bare 10-digit form ONLY for a NANP (+1) number; anything
+  // else comes back `+<fullDigits>` (or null for no digits at all). The
+  // probes below all match on last-10 suffix, which is exactly the
+  // collision phoneIdentityKey exists to prevent for a non-NANP number
+  // (codex #4213 — a shared-suffix international caller wrongly matched an
+  // unrelated NANP customer). Waves is SWFL-only, so a non-NANP destination
+  // is rare; it fails closed here rather than risk that collision. This
+  // keeps the last10() expression — and the frozen migration
+  // 20260927000006 indexes built for it — unchanged for every NANP number.
+  const identityKey = phoneIdentityKey(phone);
+  if (!identityKey || !/^\d{10}$/.test(identityKey)) return false;
+  const phoneLast10 = identityKey;
+  const at = new Date(before);
+  const [inboundCall, inboundText, leadRow] = await Promise.all([
+    existsQualifyingInboundCall({ phoneLast10, before: at, conn }),
+    existsQualifyingInboundText({ phoneLast10, before: at, conn }),
+    anyLeadRecord({ phoneLast10, before: at, conn }),
+  ]);
+  return !!(inboundCall || inboundText || leadRow);
 }
 
 /**
@@ -328,11 +594,21 @@ module.exports = {
   QUOTE_FORM_CHANNELS,
   NON_CONTACT_NATURES,
   NON_SERVICE_NATURES,
+  SERVICE_CONTACT_NATURES,
+  NON_SERVICE_DISPOSITIONS,
   VISIT_IN_PROGRESS_WINDOW_MS,
   TEXT_SCAN_LIMIT,
   resolveOutboundCallReason,
   visitInProgress,
   nonServiceCaller,
   isSubstantiveText,
-  _private: { last10, callNature, parseMetadata },
+  hasPriorContact,
+  // Promoted to a real export (codex #5018 r15 P2): call-booking-link-
+  // text.js's own unlinked-customer phone match reuses this SAME SQL-side
+  // NANP matcher rather than hand-roll a second regex — a private,
+  // test-only export is the wrong way to share it across modules.
+  nanpStoredPhoneClause,
+  _private: {
+    last10, callNature, parseMetadata, existsQualifyingInboundCall, existsQualifyingInboundText,
+  },
 };

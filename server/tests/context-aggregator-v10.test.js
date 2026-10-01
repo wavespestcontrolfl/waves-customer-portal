@@ -70,17 +70,124 @@ describe('redactAccessCodes — deterministic code masking', () => {
 });
 
 describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () => {
+  // One rule for every customer render of the note (owner ruling
+  // 2026-10-01: customers see only the report text, never the tech's raw
+  // note): it reads the service record, not the note alone.
+  const REVIEWED = 'WHAT WE DID:\nTreated the exterior perimeter and swept eaves.\nWHAT WE FOUND:\nLight ant activity near the lanai.';
+  const record = (overrides = {}) => ({
+    technician_notes: REVIEWED, structured_notes: null, service_data: null, completion_source: null, ...overrides,
+  });
+  const gate = process.env.GATE_REPORT_WRITER_RULES;
+  afterEach(() => {
+    if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+    else process.env.GATE_REPORT_WRITER_RULES = gate;
+  });
+
   test('a valid WHAT WE DID / WHAT WE FOUND note returns the vetted body (codex r5 — did/found read discarded every note)', () => {
-    const notes = 'WHAT WE DID:\nTreated the exterior perimeter and swept eaves.\nWHAT WE FOUND:\nLight ant activity near the lanai.';
-    const out = customerSafeVisitNotes(notes);
-    expect(out).toContain('Treated the exterior perimeter');
-    expect(out).toContain('Light ant activity near the lanai');
+    const out = customerSafeVisitNotes(record());
+    expect(out).toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');
   });
 
   test('free-text notes (access codes, candid remarks) return null — never raw', () => {
-    expect(customerSafeVisitNotes('gate code 4545, customer grumpy, treated exterior')).toBeNull();
-    expect(customerSafeVisitNotes('')).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: 'gate code 4545, customer grumpy, treated exterior' }))).toBeNull();
+    // A note typed under the reviewed report is not reviewed copy either.
+    expect(customerSafeVisitNotes(record({ technician_notes: `${REVIEWED}\ngate code 4545` }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: '' }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: null }))).toBeNull();
+  });
+
+  test('a bare note with no record is no notes (fails closed)', () => {
+    expect(customerSafeVisitNotes(REVIEWED)).toBeNull();
     expect(customerSafeVisitNotes(null)).toBeNull();
+  });
+
+  test('a code inside the reviewed text is never shown', () => {
+    const notes = REVIEWED.replace('near the lanai.', 'near the lanai, gate code 4545.');
+    expect(customerSafeVisitNotes(record({ technician_notes: notes })) || '').not.toContain('4545');
+  });
+
+  test('a body the completion rejected, or service data that cannot be read, shows nothing', () => {
+    expect(customerSafeVisitNotes(record({ service_data: { technicianReportBodyRejected: 'trade_name' } }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ service_data: '{not json' }))).toBeNull();
+  });
+
+  test('a typed report held from customers shows nothing', () => {
+    expect(customerSafeVisitNotes(record({ structured_notes: { typedReportDelivery: 'internal_only' } }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }) }))).toBeNull();
+  });
+
+  test("the trapping screens hold, as on the web report: a declared trap setup refuses a body claiming traps were checked", () => {
+    const trapping = (overrides = {}) => ({
+      service_data: {
+        companionReportSnapshots: [{
+          type: 'rodent_trapping', delivery: 'auto_send', visitSequence: 1,
+          values: { trap_visit_type: 'Initial setup' },
+          todaysResult: { bodySource: 'technician_report', ...overrides },
+        }],
+      },
+    });
+    const checked = 'WHAT WE DID:\nWe set traps in the attic and garage.\nWHAT WE FOUND:\nWe checked 8 traps and found no captures.';
+    const set = 'WHAT WE DID:\nWe set traps in the attic and garage.\nWHAT WE FOUND:\nWe saw droppings near the water heater.';
+    expect(customerSafeVisitNotes(record({ technician_notes: checked, ...trapping() }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: set, ...trapping() }))).toBe(
+      'We set traps in the attic and garage. We saw droppings near the water heater.',
+    );
+    // A person who confirmed the reconciliation prompt keeps the body.
+    expect(customerSafeVisitNotes(record({ technician_notes: checked, ...trapping({ reconcileConfirmed: true }) }))).toContain('We checked 8 traps');
+  });
+
+  test("projectLine keeps a project completion's line: it is the project's own title and recommendations", () => {
+    const notes = 'Project completed: Rodent exclusion\n\nSeal the gap under the garage door.';
+    expect(customerSafeVisitNotes(record({ technician_notes: notes, completion_source: 'project_completion' }), { projectLine: true })).toBe(notes);
+    expect(customerSafeVisitNotes(record({ technician_notes: notes, structured_notes: { projectCompletion: true } }), { projectLine: true })).toBe(notes);
+    // Without it (the AI contexts and the voice agent), the reviewed parse alone.
+    expect(customerSafeVisitNotes(record({ technician_notes: notes, completion_source: 'project_completion' }))).toBeNull();
+  });
+
+  test('every customer render goes through it: the parse is called directly only where the note is screened, not shown', () => {
+    // A new customer render of technician_notes uses customerSafeVisitNotes;
+    // only completion-time screening, the web report (which runs the same
+    // technicianReportDrivesSummary) and this rule call the parse (Codex
+    // #5522: the legacy public report and its PDF went through it directly).
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '../..');
+    const callers = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (!['node_modules', 'tests'].includes(entry.name)) walk(full);
+        } else if (entry.name.endsWith('.js') && fs.readFileSync(full, 'utf8').includes('technicianReportCustomerCopy(')) {
+          callers.push(path.relative(root, full).split(path.sep).join('/'));
+        }
+      }
+    };
+    walk(path.join(root, 'server'));
+    callers.sort();
+    expect(callers).toEqual([
+      'server/routes/admin-schedule.js',
+      'server/services/complete-scheduled-service.js',
+      'server/services/context-aggregator.js',
+      'server/services/service-report/report-data.js',
+      'server/services/service-report/report-reconciliation.js',
+      'server/services/service-report/technician-report-copy.js',
+    ]);
+  });
+
+  test('a four-section report shows only while the writer rules are on, like the web report', () => {
+    const fourSection = [
+      'WHAT WE FOUND', 'Ghost ants were trailing at the kitchen counter.',
+      'WHAT WE DID AND WHY', 'We placed bait along the counter edge.',
+      'WHAT TO EXPECT', 'You may see more ants for a few days.',
+      "WHAT'S NEXT", 'If ants are still trailing, let us know.',
+    ].join('\n');
+    delete process.env.GATE_REPORT_WRITER_RULES;
+    expect(customerSafeVisitNotes(record({ technician_notes: fourSection }))).toBeNull();
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(customerSafeVisitNotes(record({ technician_notes: fourSection }))).toBe(
+      'Ghost ants were trailing at the kitchen counter. We placed bait along the counter edge. You may see more ants for a few days. If ants are still trailing, let us know.',
+    );
   });
 });
 
@@ -221,5 +328,33 @@ describe('buildSummary billing-lane fact', () => {
     );
     expect(s).toContain('Billing lane: monthly membership');
     expect(s).not.toContain('98.50');
+  });
+});
+
+// pg hands DATE columns over as local-midnight Dates. On the UTC prod host
+// that is 00:00Z, which an ET toLocaleDateString shows as the day before: a
+// Thu Oct 1 visit read "Next: WDO Inspection Service 9/30/2026".
+describe('buildSummary visit dates', () => {
+  const ContextAggregator = require('../services/context-aggregator');
+  const c = { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer' };
+
+  // Built the way pg builds them (local midnight). CI runs in UTC, so this
+  // case catches the shift there; the string case catches it in any zone.
+  test('Next and Last keep the stored calendar day on a UTC host', () => {
+    const s = ContextAggregator.buildSummary(
+      c, [],
+      { service_type: 'Pest Control', service_date: new Date(2026, 8, 1) },
+      [{ service_type: 'WDO Inspection Service', scheduled_date: new Date(2026, 9, 1) }],
+      0, null,
+    );
+    expect(s).toContain('Next: WDO Inspection Service 10/1/2026');
+    expect(s).toContain('Last: Pest Control 9/1/2026');
+  });
+
+  test('a YYYY-MM-DD string keeps its day too', () => {
+    const s = ContextAggregator.buildSummary(
+      c, [], null, [{ service_type: 'WDO Inspection Service', scheduled_date: '2026-10-01' }], 0, null,
+    );
+    expect(s).toContain('Next: WDO Inspection Service 10/1/2026');
   });
 });

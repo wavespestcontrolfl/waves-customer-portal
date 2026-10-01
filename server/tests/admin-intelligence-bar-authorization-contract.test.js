@@ -19,11 +19,14 @@ const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
-// The create_appointment billing verdict (ADMIN-BUG-R12): null = the booking
-// bills, so these proposals reach their card; the refusal cases set their own.
-const mockIbBookingBillingRefusalFor = jest.fn(async () => null);
+// The create_appointment price + billing verdict (ADMIN-BUG-R12, owner
+// 2026-09-27): unpriced and billable by default, so these proposals reach
+// their card; the priced and refusal cases set their own.
+const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
+const mockComputeCancelImpact = jest.fn();
+const CARD_CANCEL_REFUSED_MESSAGE_MOCK = 'TEST: not a simple visit, cancel it from Dispatch.';
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -64,7 +67,11 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
-  ibBookingBillingRefusalFor: (...args) => mockIbBookingBillingRefusalFor(...args),
+  ibBookingProposal: (...args) => mockIbBookingProposal(...args),
+  CARD_CANCEL_REFUSED_MESSAGE: CARD_CANCEL_REFUSED_MESSAGE_MOCK,
+}));
+jest.mock('../services/appointment-cancel-impact', () => ({
+  computeCancelAppointmentImpact: (...args) => mockComputeCancelImpact(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -290,6 +297,189 @@ describe('W0B cancel_appointment is not card-confirmable', () => {
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.error).toMatch(/Dispatch screen/);
       expect(toolResult.error).toMatch(/Nothing was changed/);
+    });
+  });
+});
+
+/**
+ * PR B of the ib-cancel-pinned-effects lane (owner ruling 2026-09-28): the
+ * refusal above is gate-OFF behavior only (GATE_IB_CANCEL_APPOINTMENT unset
+ * in every other suite in this file). With the gate live, the proposal
+ * computes the SAME deterministic impact tools.js's commit path recomputes
+ * (appointment-cancel-impact.js, mocked wholesale here — its own
+ * orchestration is covered by appointment-cancel-impact.test.js), refuses a
+ * non-simple visit or an unreadable/missing one, and otherwise pins the
+ * impact for the card and the contract hash. Confirm dispatches only a
+ * pending row that actually carries that pin.
+ */
+describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () => {
+  const APPOINTMENT_ID = 'appt-synthetic-1';
+  const SIMPLE_IMPACT = {
+    appointment: { id: APPOINTMENT_ID, status: 'confirmed', scheduled_date: '2026-10-05', service_type: 'pest_control', customer_name: 'Synthia Tester' },
+    fee: { applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false },
+    invoices: [],
+    inspection_credit_reversal: [],
+    card_cancel_refusals: [],
+  };
+  const NON_SIMPLE_IMPACT = { ...SIMPLE_IMPACT, card_cancel_refusals: ['card_payment_on_invoice'] };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_CANCEL_APPOINTMENT = 'true';
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'cancel_appointment', summary: 's', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+  afterEach(() => { delete process.env.GATE_IB_CANCEL_APPOINTMENT; });
+
+  test('a simple visit proposes with preview.cancellation + the frozen pin, and the contract hash covers it', async () => {
+    mockComputeCancelImpact.mockResolvedValue(SIMPLE_IMPACT);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, reason: 'rain' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      // actorId threads the proposing operator so technician_notice reads
+      // consistently at confirm (same admin, common case).
+      expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1' });
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._frozen_cancellation_impact).toEqual(SIMPLE_IMPACT);
+      // The exact structured effect set rides the contract (and so its
+      // hash) — tools.js's commit path recomputes and compares this same
+      // shape, so two different impacts can never hash alike.
+      expect(stored.contract.pinned_cancellation).toEqual(SIMPLE_IMPACT);
+      expect(stored.contract.effects.some((e) => /Cancel pest_control/.test(e.label))).toBe(true);
+      const card = body.pendingActions[0];
+      expect(card.id).toBe(PENDING_ID);
+      // `_`-prefixed pins are server-side execution guards, never shown.
+      expect(card.params._frozen_cancellation_impact).toBeUndefined();
+    });
+  });
+
+  test('appointment not found → refused, nothing proposed', async () => {
+    mockComputeCancelImpact.mockResolvedValue(null);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: 'missing', reason: 'x' } }],
+      [{ type: 'text', text: 'gone' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toBe('Appointment not found — nothing was proposed.');
+    });
+  });
+
+  test.each([
+    ['completed', 'completed'],
+    ['cancelled (already cancelled — a NEW proposal is not the replay path)', 'cancelled'],
+    ['skipped', 'skipped'],
+    ['no_show', 'no_show'],
+  ])('a terminal appointment (%s) is refused at proposal, before minting a pending action', async (_label, status) => {
+    mockComputeCancelImpact.mockResolvedValue({ ...SIMPLE_IMPACT, appointment: { ...SIMPLE_IMPACT.appointment, status } });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, reason: 'x' } }],
+      [{ type: 'text', text: 'already terminal' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status: httpStatus } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(httpStatus).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toBe(`This appointment is already ${status} and can't be cancelled.`);
+    });
+  });
+
+  test('an impact that throws → refused, nothing proposed', async () => {
+    mockComputeCancelImpact.mockRejectedValue(new Error('rail read failed'));
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, reason: 'x' } }],
+      [{ type: 'text', text: 'gone' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/could not be verified/);
+    });
+  });
+
+  test('a non-simple visit (card_cancel_refusals non-empty) is refused with the Dispatch message, nothing minted', async () => {
+    mockComputeCancelImpact.mockResolvedValue(NON_SIMPLE_IMPACT);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, reason: 'x' } }],
+      [{ type: 'text', text: 'go to dispatch' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(status).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      // Shares tools.js's CARD_CANCEL_REFUSED_MESSAGE wording exactly —
+      // no second copy of that sentence at the proposal site.
+      expect(toolResult.error).toBe(CARD_CANCEL_REFUSED_MESSAGE_MOCK);
+    });
+  });
+
+  test('/confirm-action dispatches with the pin reaching cancelAppointment as _frozen_cancellation_impact', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'cancel_appointment', params: { appointment_id: APPOINTMENT_ID, reason: 'rain', _frozen_cancellation_impact: SIMPLE_IMPACT } },
+    });
+    mockExecuteTool.mockResolvedValue({ success: true, appointment_id: APPOINTMENT_ID });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+      const [toolName, input] = mockExecuteTool.mock.calls[0];
+      expect(toolName).toBe('cancel_appointment');
+      expect(input._frozen_cancellation_impact).toEqual(SIMPLE_IMPACT);
+      expect(input.appointment_id).toBe(APPOINTMENT_ID);
+    });
+  });
+
+  test('a legacy pending row with no frozen pin is refused — never dispatched unpinned', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'cancel_appointment', params: { appointment_id: APPOINTMENT_ID, reason: 'rain' } },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.error).toMatch(/Dispatch screen/);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ error: expect.stringMatching(/Dispatch screen/) }));
+    });
+  });
+
+  test('gate off refuses even a pinned row (covers rows minted while the gate was on, then turned off)', async () => {
+    delete process.env.GATE_IB_CANCEL_APPOINTMENT;
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'cancel_appointment', params: { appointment_id: APPOINTMENT_ID, reason: 'rain', _frozen_cancellation_impact: SIMPLE_IMPACT } },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.error).toMatch(/Dispatch screen/);
+      expect(mockExecuteTool).not.toHaveBeenCalled();
     });
   });
 });

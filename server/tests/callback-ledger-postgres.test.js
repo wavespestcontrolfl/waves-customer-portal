@@ -4,7 +4,11 @@ const run = process.env.CALLBACK_LEDGER_POSTGRES === '1' ? describe : describe.s
 jest.setTimeout(30000);
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+// The real done-state helpers (callback-cards closes the reminder as done through them).
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => null),
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 // audit-log is real: the card's callback_reopen event is the reopen boundary fulfillment reads.
 
 
@@ -157,6 +161,9 @@ run('callback ledger on PostgreSQL', () => {
     await cards.actOnCallback(trx, row.id, { action: 'snooze', actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
     const after = await trx('notifications').where({ id: bell.id }).first();
     expect(after.read_at).not.toBeNull();
+    // Staff acting on the card is the work done, not just a read.
+    expect(after.done_at).not.toBeNull();
+    expect(after.done_by).toBe(`callback:${staff.id}`); // a workflow close: not reopenable
     // The identity itself is re-armed by the versioned watchdog refresh
     // (tests/callback-alerts-postgres.test.js), so the key is left intact.
     expect(after.metadata.dedupeKey).toBe(key);
@@ -196,6 +203,8 @@ run('callback ledger on PostgreSQL', () => {
   // non-voicemail extraction.
   const returnedCall = (at, callId) => trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
     status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+    // Placed through the staff bridge (the shared personCallBack rule reads the source).
+    source: 'admin-callback',
     metadata: { relatedCallId: callId, customer_leg: { status: 'completed', duration_seconds: 120, ended_at: at.toISOString() } },
     created_at: at, updated_at: at });
 

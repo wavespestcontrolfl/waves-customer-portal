@@ -68,13 +68,27 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
+const { recordPageView } = require('../services/customer-page-views');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
   reserviceSelfServeEnabled,
   reserviceLanesForCustomer,
   openReserviceCallbacks,
+  reserviceLaneAvailability,
 } = require('../services/reservice-scheduler');
+const {
+  RESERVICE_PEST_CHOICES,
+  normalizeRequestPests,
+  pestLabels,
+} = require('../services/reservice-request');
+
+// GATE_RESERVICE_PEST_CHIPS (nested inside reserviceSelfServe — see
+// feature-gates.js): GET's optional pestChoices key and POST's `pests`
+// normalization. Off = byte-identical to before this gate existed.
+function pestChipsEnabled() {
+  return require('../config/feature-gates').isEnabled('reservicePestChips');
+}
 
 // Token-keyed customer data (name, availability around their address) —
 // never cacheable.
@@ -93,6 +107,7 @@ const TOKEN_RE = /^[a-f0-9]{64}$/;
 // Customer-facing note length cap ("what's going on") — flows into the
 // visit's dispatch notes via createSelfBooking's customer_notes handling.
 const MAX_DETAILS_LENGTH = 400;
+const LOCATION_REVIEW_ERROR = 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.';
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -127,8 +142,48 @@ async function loadByToken(token) {
     .whereNull('deleted_at')
     .first(
       'id', 'first_name', 'last_name', 'active', 'waveguard_tier', 'monthly_rate',
-      'address_line1', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone'
+      'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone'
     );
+}
+
+// createSelfBooking consults the address-bound staff review only when a
+// returning customer's stored coordinate pair is missing. Mirror that exact
+// boundary on this surface: a matching permanent review block must not be
+// turned into another list of slots that commit will refuse, while a complete
+// stored pair and the dark review gate retain the existing flow.
+async function reserviceLocationReviewRequired(customer) {
+  const hasStoredPair = ['latitude', 'longitude'].every((field) => customer?.[field] != null
+    && String(customer[field]).trim() !== ''
+    && Number.isFinite(Number(customer[field]))
+    && Number(customer[field]) !== 0);
+  if (hasStoredPair) return false;
+  const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({
+    customer_id: customer.id,
+    service_address_line1: customer.address_line1 || null,
+    service_address_line2: customer.address_line2 || null,
+    service_address_city: customer.city || null,
+    service_address_state: customer.state || null,
+    service_address_zip: customer.zip || null,
+  });
+  return reviewed?.permanent === true
+    && !reviewed.location
+    && reviewed.reason === 'address_review_required';
+}
+
+function locationReviewFailure() {
+  return { error: LOCATION_REVIEW_ERROR, code: 'LOCATION_REVIEW_REQUIRED' };
+}
+
+function serviceLocationFingerprint(customer) {
+  return [
+    customer?.address_line1,
+    customer?.address_line2,
+    customer?.city,
+    customer?.state,
+    customer?.zip,
+    customer?.latitude,
+    customer?.longitude,
+  ].map(value => String(value ?? '').trim()).join('|');
 }
 
 // The booking window mirrors the public /book funnel's config-driven range —
@@ -181,27 +236,21 @@ async function loadLaneCatalog() {
   return byLane;
 }
 
-// Route-aware availability around the CUSTOMER's property — the coords
-// resolution mirrors reschedule-public's buildAvailabilityForService (stored
-// coords first, geocode of the address text as fallback).
+// Route-aware availability around the CUSTOMER's property, built on the
+// pin the re-service commit books at (booking's customerBookingLocation:
+// the stored pin, else a staff-verified pin or the canonical geocode) — an
+// offer made anywhere else would be for a location the commit never uses
+// (Codex #4992 P1). Nothing resolvable, no offers.
 async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
   const booking = require('./booking');
-  const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
+  const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
 
-  let lat = customer.latitude != null ? parseFloat(customer.latitude) : null;
-  let lng = customer.longitude != null ? parseFloat(customer.longitude) : null;
-  if (!lat || !lng) {
-    const address = [customer.address_line1, customer.city, customer.state, customer.zip]
-      .filter(Boolean).join(', ');
-    const resolved = await resolveBookingCoords({ address: address || null, city: customer.city || null });
-    lat = resolved.lat;
-    lng = resolved.lng;
-  }
-  if (!lat || !lng) return null;
+  const location = await customerBookingLocation(customer);
+  if (!location) return null;
 
   return buildBookingAvailability({
-    lat,
-    lng,
+    lat: location.lat,
+    lng: location.lng,
     duration,
     serviceKey: lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+'),
     rangeFrom,
@@ -218,6 +267,22 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     // filters the offered slot set, so the commit-time re-validation below
     // still accepts exactly what days[].slots offers.
     rankProfile: 'reservice',
+    // This route's commit (line ~533 below) is createSelfBooking — while
+    // bookInsertionOffersLive() is live it re-verifies with traffic and
+    // persists the certified route order, so an inserted offer here is safe
+    // to commit at the position it was offered (see the capacityPlacement
+    // comment inside buildBookingAvailability, booking.js). This callback
+    // flow skips the signed-offer HMAC (its anti-forgery proof is a fresh
+    // rebuild in the same request, a few lines before createSelfBooking) —
+    // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
+    // and the commit's own preparedCapacity gate reading the same env.
+    capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
@@ -248,8 +313,9 @@ function reserviceAvailabilityPayload(availability, range) {
 async function resolveLaneState(customer, laneCatalog) {
   // Churned/deactivated rows keep their token but lose eligibility — the
   // page renders the friendly not-eligible state with the office contacts.
-  const eligible = customer.active === false ? [] : await reserviceLanesForCustomer(customer);
-  const open = eligible.length ? await openReserviceCallbacks(customer.id) : {};
+  // Codex round-11 P2 (PR #5336): the SAME shared computation the SMS promise
+  // validators use (reservice-scheduler.reserviceLaneAvailability).
+  const { eligible, open } = await reserviceLaneAvailability(customer);
   const lanes = eligible
     .filter((lane) => laneCatalog[lane])
     .map((lane) => ({
@@ -271,6 +337,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const customer = await loadByToken(req.params.token);
     if (!customer) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'reservice', customerId: customer.id, subjectType: 'customer', subjectId: customer.id });
 
     const laneCatalog = await loadLaneCatalog();
     const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);
@@ -281,11 +349,16 @@ router.get('/:token', async (req, res, next) => {
         : (bookableLanes.length === 0 ? 'already_booked' : 'bookable'),
       customerFirstName: customer.first_name || null,
       lanes,
+      // Gate off: key omitted entirely — byte-identical to before this gate
+      // existed (Codex-review contract other reservice payload fields use,
+      // e.g. `rank_profile` above).
+      ...(pestChipsEnabled() && bookableLanes.length
+        ? { pestChoices: Object.fromEntries(bookableLanes.map((key) => [key, RESERVICE_PEST_CHOICES[key]])) }
+        : {}),
     };
     if (bookableLanes.length === 0) {
       return res.json({ ...base, availability: null });
     }
-
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -300,6 +373,9 @@ router.get('/:token', async (req, res, next) => {
     const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
     if (capacityEnabled() && browseLanes.length > 1) {
       return res.json({ ...base, availability: null });
+    }
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.json({ ...base, availability: null, location_review_required: true });
     }
     const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
 
@@ -348,6 +424,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     if (capacityEnabled() && browseLanes.length > 1) {
       return res.status(400).json({ error: 'Choose a service before searching for times.' });
     }
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.status(409).json(locationReviewFailure());
+    }
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -357,19 +436,17 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, searchParseOpts(config));
 
-    let availability = null;
-    try {
-      availability = await buildAvailabilityForCustomer(customer, {
-        rangeFrom: when.dateFrom,
-        rangeTo: when.dateTo,
-        config,
-        duration: browseDuration,
-        lanes: browseLanes,
-        timeOfDay: when.timeOfDay,
-      });
-    } catch (err) {
+    const availability = await buildAvailabilityForCustomer(customer, {
+      rangeFrom: when.dateFrom,
+      rangeTo: when.dateTo,
+      config,
+      duration: browseDuration,
+      lanes: browseLanes,
+      timeOfDay: when.timeOfDay,
+    }).catch((err) => {
       logger.error(`[reservice-public] find-slots availability failed for customer ${customer.id}: ${err.message}`);
-    }
+      return null;
+    });
     if (!availability) {
       return res.status(503).json({ error: 'Slot search is unavailable right now. Please pick from the times below.' });
     }
@@ -404,6 +481,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const details = typeof req.body?.details === 'string'
     ? req.body.details.trim().slice(0, MAX_DETAILS_LENGTH)
     : '';
+  // Gate off: ignored outright, regardless of what a crafted body sends.
+  const requestedPests = pestChipsEnabled() ? normalizeRequestPests(req.body?.pests, lane) : null;
+  const requestedPestLabels = requestedPests ? pestLabels(requestedPests, lane) : [];
 
   try {
     const customer = await loadByToken(req.params.token);
@@ -428,6 +508,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       });
     }
     const catalog = laneCatalog[lane];
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.status(409).json(locationReviewFailure());
+    }
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -473,9 +556,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       slot_start: slot.start_time,
       slot_end: slot.end_time,
       technician_id: slot.technician_id || null,
-      customer_notes: details
-        ? `Re-service request: ${details}`
-        : 'Re-service requested via self-serve link',
+      // Pest chips (gated) fold into the same customer-visible line the
+      // details box always produced; the plain no-pests fallbacks are
+      // untouched.
+      customer_notes: requestedPestLabels.length
+        ? (details
+          ? `Re-service request (${requestedPestLabels.join(', ')}): ${details}`
+          : `Re-service request: ${requestedPestLabels.join(', ')}`)
+        : (details
+          ? `Re-service request: ${details}`
+          : 'Re-service requested via self-serve link'),
       source: 'reservice_link',
       // Server-resolved trust context — the token IS the identity proof
       // (same bearer posture as /reschedule). No pricing, no funnel gates.
@@ -487,6 +577,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         serviceId: catalog.serviceId,
         serviceType: catalog.serviceType,
         durationMinutes: catalog.durationMinutes,
+        // Clean re-service request storage (migration 20260927100000) — the
+        // customer's own words (or null), always stamped from the details
+        // box; `pests` is null unless GATE_RESERVICE_PEST_CHIPS is live.
+        // createSelfBooking only writes these columns when they exist
+        // (hasColumn guard), so a deploy ahead of the migration is inert.
+        ...(details || requestedPestLabels.length ? {
+          customerRequest: { text: details || null, source: 'picker', pests: requestedPests },
+        } : {}),
       },
     });
 
@@ -504,6 +602,31 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           error: result.error,
           code: 'ALREADY_BOOKED',
           alreadyBooked: booked,
+        });
+      }
+      // An address, pin, review, or contact can change after the pre-check or
+      // while the transaction waits on its fences. Reload the token row so a
+      // retired link stays indistinguishable. A genuine location/review change
+      // enters address recovery; a contact-only race can safely rebuild times
+      // from the current row and keep the customer in the scheduling flow.
+      if (result.code === 'LOCATION_CHANGED_RETRY' || result.code === 'CUSTOMER_CHANGED_RETRY') {
+        const currentCustomer = await loadByToken(req.params.token);
+        if (!currentCustomer) return res.status(404).json({ error: 'Not found' });
+        const locationChanged = result.code === 'LOCATION_CHANGED_RETRY'
+          || serviceLocationFingerprint(currentCustomer) !== serviceLocationFingerprint(customer);
+        if (locationChanged || await reserviceLocationReviewRequired(currentCustomer)) {
+          return res.status(409).json(locationReviewFailure());
+        }
+        let refreshed = null;
+        try {
+          refreshed = await buildAvailabilityForCustomer(currentCustomer, {
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
+          });
+        } catch { /* answer without the refresh; the client reloads */ }
+        return res.status(409).json({
+          error: 'Your account details changed while we were booking. Please choose a time again.',
+          code: 'SLOT_TAKEN',
+          availability: refreshed ? reserviceAvailabilityPayload(refreshed, range) : null,
         });
       }
       // Any other 409 out of the transaction is a slot-level race
@@ -563,6 +686,8 @@ router._test = {
   loadLaneCatalog,
   resolveLaneState,
   buildAvailabilityForCustomer,
+  reserviceLocationReviewRequired,
+  serviceLocationFingerprint,
 };
 
 module.exports = router;

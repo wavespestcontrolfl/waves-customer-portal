@@ -393,6 +393,36 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
     expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'pest' }, knex)).signature).toBe('');
   });
 
+  // GATE_LAWN_REPORT_LEAD changes the lawn web report and PDF content, so the
+  // cache key must change when the lead is live and stay as it was when it is not.
+  test('the lead gate re-keys lawn PDFs only while it is live (both assessment and no-assessment keys)', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const withAssessment = () => makeKnex([
+      { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1', ai_summary: 'x' },
+    ]);
+    const keyOf = async (gate, knex) => {
+      const previous = process.env.GATE_LAWN_REPORT_LEAD;
+      if (gate === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = gate;
+      try { return (await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex)).signature; } finally {
+        if (previous === undefined) delete process.env.GATE_LAWN_REPORT_LEAD; else process.env.GATE_LAWN_REPORT_LEAD = previous;
+      }
+    };
+    for (const make of [withAssessment, () => makeKnex([])]) {
+      const off = await keyOf(undefined, make());
+      const on = await keyOf('true', make());
+      expect(on).not.toBe(off);
+      expect(on.startsWith(`-la${LAWN_RENDER_STRATEGY}`)).toBe(true);
+      // Same inputs, same gate: the key is stable; an explicit false is the same as unset.
+      expect(await keyOf('true', make())).toBe(on);
+      expect(await keyOf('false', make())).toBe(off);
+    }
+    // Tree & shrub and every other line are untouched.
+    process.env.GATE_LAWN_REPORT_LEAD = 'true';
+    try {
+      expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'tree_shrub' }, withAssessment())).signature).toBe('');
+    } finally { delete process.env.GATE_LAWN_REPORT_LEAD; }
+  });
+
   test('resolveCanonicalLawnRender: pin and signature describe the SAME row', async () => {
     const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
     const knex = makeKnex([

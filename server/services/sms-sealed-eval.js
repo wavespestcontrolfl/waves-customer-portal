@@ -40,6 +40,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const {
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
+} = require('./sms-company-facts');
+const { LABEL_FACTS_MARKER } = require('./sms-label-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -108,6 +112,155 @@ const EXAM_LEGS = Object.freeze(Object.keys(EXAM_LEG_ROUTES));
 // auto-baselines these (and only these). The gemini leg runs manually.
 const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 
+// Codex r3: existing active sealed items were frozen before GATE_SMS_REAL_
+// ANSWERS existed and therefore lack the v12-only OPEN TIMES / FOLLOW-UP SLA
+// RIGHT NOW facts — replaying those frozen (inbound, facts_block) pairs
+// through the CURRENT v12 prompt and grading the result as v12 evidence
+// scores scheduling/cancellation/handoff items under instructions whose
+// required inputs are simply absent. FOLLOW-UP SLA RIGHT NOW is the marker:
+// buildFactsBlock (sms-shadow-drafter.js) stamps that line into EVERY gate-on
+// facts block unconditionally, so its absence means the item predates the
+// gate. v11 runs never carry this line either (the gate was off when they
+// drafted) and are unaffected — this only excludes items being graded AS v12
+// evidence that were never given v12 facts.
+const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+// Free re-service eligibility (Codex r6 P1) used to render ONLY with
+// GATE_SMS_AGENT_COMPLAINTS also on, so it lived in CATEGORY_FACT_MARKERS
+// below keyed to that category's 'c' tag. Decoupled 2026-09-29 (owner
+// ruling: a pest report is not a complaint, so the PEST REPORTS rule needs
+// this fact with that gate OFF) — sms-shadow-drafter.js's buildFactsBlock
+// now renders it on EVERY v12 real-answers facts block unconditionally,
+// same as V12_FACTS_MARKER, so it is required by the numeric identity token (see below).
+const RESERVICE_FACTS_MARKER = 'FREE RE-SERVICE:';
+
+function isV12PromptVersion(promptVersion) {
+  return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
+}
+
+// Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
+// prompt version, not just the base v12 lines.
+//
+// Codex round-20 P2 (PR #5336): FREE RE-SERVICE joined the BASE contract only
+// with the identity minted for that change — the numeric token "2"
+// (house_voice_v12_real_answers2, then 2_cf). Every earlier v12 identity (the
+// bare house_voice_v12_real_answers and _cf, tagged or not) keeps its
+// HISTORICAL contract: SLA line always; FREE RE-SERVICE only with the
+// complaints ("c") tag, and ABSENT otherwise — so an exam created before the
+// deploy and resumed after it still grades the frozen items it was compatible
+// with, instead of having them all marked ungradable.
+const CATEGORY_FACT_MARKERS = Object.freeze({ c: RESERVICE_FACTS_MARKER });
+// Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
+// identity carries a suffix token for every per-draft fact section a later
+// revision added ('_cf' = COMPANY FACTS, '_cfl' = COMPANY FACTS + LABEL FACTS; a
+// numeric token >= 2 = the unconditional FREE RE-SERVICE line). A suffix token
+// REQUIRES its marker, and — since the contract is exact — versions without the
+// token FORBID it, so items frozen before the section existed never grade a
+// suffixed version and suffixed items never grade an older one. A future fact
+// section is one more row here plus its suffix in the drafter's
+// REAL_ANSWERS_PROMPT_VERSION. A suffix is CUMULATIVE: '_cfl' (LABEL FACTS)
+// carries the COMPANY FACTS section too. LABEL FACTS can be a required marker
+// because the drafter ALWAYS renders its header gate-on ("none on file" when
+// the last visit has no verified label timing), so its absence always means
+// "frozen before the section existed".
+const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: [COMPANY_FACTS_HEADER], cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER] });
+// the markers one suffix token requires (a list)
+function suffixTokenMarkers(token) {
+  if (/^\d+$/.test(token)) return Number(token) >= 2 ? [RESERVICE_FACTS_MARKER] : [];
+  return VERSION_SUFFIX_FACT_MARKERS[token] || [];
+}
+function versionSuffixTokens(promptVersion) {
+  const base = String(promptVersion).split('+')[0];
+  if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
+  // "2_cf" → ["2", "cf"]; a token glued to the base ("answers2") is split off first.
+  return base.slice(REAL_ANSWERS_BASE_VERSION.length).replace(/^(\d+)/, '$1_').split('_').filter(Boolean);
+}
+function requiredFactMarkers(promptVersion) {
+  if (!isV12PromptVersion(promptVersion)) return [];
+  const tags = String(promptVersion).split('+')[1] || '';
+  return [...new Set([
+    V12_FACTS_MARKER,
+    ...versionSuffixTokens(promptVersion).flatMap(suffixTokenMarkers),
+    ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
+  ])];
+}
+// The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
+// carry must be ABSENT too — an item frozen while complaints were on carries
+// FREE RE-SERVICE, which live gate-off drafts never receive, so it must not
+// grade the plain v12 prompt after a rollback or switch. Every version has
+// one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
+// replay items frozen with the v12 SLA, re-service, company-facts or label
+// lines either.
+const CONTRACT_FACT_MARKERS = Object.freeze([...new Set([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS).flat(), RESERVICE_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)])]);
+function forbiddenFactMarkers(promptVersion) {
+  const required = new Set(requiredFactMarkers(promptVersion));
+  return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
+}
+// "carry "A" + "B" and lack "C"" — the contract in words, for exclusion
+// notes and the run-creation refusal.
+function contractLabel(promptVersion) {
+  const quote = (list) => list.map((m) => `"${m}"`).join(' + ');
+  const required = requiredFactMarkers(promptVersion);
+  const forbidden = forbiddenFactMarkers(promptVersion);
+  return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
+}
+// Does a frozen facts block carry this marker? COMPANY FACTS, LABEL FACTS and FREE RE-SERVICE are TRUSTED only at
+// their fixed rendered position (Codex #5392 r3 P2; #5336 round-24 P2): buildFactsBlock renders
+// "...FOLLOW-UP SLA RIGHT NOW: <phrase>\nFREE RE-SERVICE: <fact>\n[COMPANY FACTS section][LABEL FACTS section]BILLING:", so
+// the text before the FIRST "BILLING:" line must end with the exact company (+ label) structure (when those sections are
+// claimed) and, beneath it, the SLA line followed directly by the re-service line. A header or marker typed into a
+// multi-line SMS (the thread rides later in the block, verbatim) proves nothing. Every other marker is a
+// server-rendered line and stays a substring check.
+const RESERVICE_SECTION_RE = /(?:^|\n)FOLLOW-UP SLA RIGHT NOW:[^\n]*\nFREE RE-SERVICE:[^\n]*$/;
+function hasRenderedReserviceFact(factsBlock) {
+  const facts = String(factsBlock || '');
+  const at = facts.indexOf(BILLING_DELIMITER);
+  if (at < 0) return false;
+  // the exact company (+ label) structure, when the block ends with it, is peeled off; the re-service line sits directly above it
+  const before = facts.slice(0, at).replace(new RegExp(exactStructureRegexSource('optional')), '');
+  return RESERVICE_SECTION_RE.test(before);
+}
+function factPresent(facts, marker) {
+  if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
+  if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
+  return facts.includes(marker);
+}
+function itemCompatibleWith(factsBlock, promptVersion) {
+  const facts = String(factsBlock || '');
+  return requiredFactMarkers(promptVersion).every((m) => factPresent(facts, m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !factPresent(facts, m));
+}
+// SQL for "this row matches the exact contract" (wrap in NOT (...) for the
+// complement), parameterized: required markers present, forbidden absent.
+// Mirrors factPresent: LIKE for ordinary markers, the exact-suffix test for
+// COMPANY FACTS (text before the first BILLING: line ends with the exact
+// render). Bindings follow clause order.
+function compatibleWhereRaw(markers, forbidden = []) {
+  const col = "COALESCE(facts_block, '')";
+  const clauses = [];
+  const bindings = [];
+  const add = (marker, negate) => {
+    if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
+      // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
+      // text before the first BILLING: line matches the same regex source.
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND split_part(${col}, ?::text, 1) ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource(marker === LABEL_FACTS_MARKER ? 'required' : 'optional'));
+    } else if (marker === RESERVICE_FACTS_MARKER) {
+      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company (+ label)
+      // structure when it ends with it, must end with the SLA line + the re-service line
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND regexp_replace(split_part(${col}, ?::text, 1), ?::text, '') ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source);
+    } else {
+      clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
+      bindings.push(`%${marker}%`);
+    }
+  };
+  markers.forEach((m) => add(m, false));
+  forbidden.forEach((m) => add(m, true));
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
+}
+
 /* ── Freezer ──────────────────────────────────────────────────────────── */
 
 /**
@@ -117,18 +270,87 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
  * recent first within each intent) so one chatty intent can't crowd out the
  * exam's coverage of the others.
  */
+// Retire (active=false, never delete) the OLDEST items outside the current
+// fact contract beyond the target; rows and every historical result stay.
+// Returns the count retired.
+async function retireIncompatibleItems({ dbi, overflow, markers, forbidden }) {
+  if (!(overflow > 0)) return 0;
+  const compat = compatibleWhereRaw(markers, forbidden);
+  const retired = await dbi('sms_sealed_eval_items')
+    .whereIn('id', dbi('sms_sealed_eval_items')
+      .select('id')
+      .where('active', true)
+      .whereRaw(`NOT (${compat.sql})`, compat.bindings)
+      .orderBy('sealed_at', 'asc')
+      .limit(overflow))
+    .update({ active: false });
+  if (retired) logger.info(`[sealed-eval] seal: retired ${retired} item(s) outside the current fact contract`);
+  return Number(retired) || 0;
+}
+
+// Restore (active=true) up to `remaining` RETIRED items the current fact
+// contract matches, newest first (Codex #5194 r5): a category-gate rollback
+// (complaints on, then off) makes the plain-v12 items retired under +c
+// compatible again, and the candidate anti-join never re-seals a row, so
+// without this the pool stays short of compatible items for good. Safe to
+// automate: retireIncompatibleItems is the only writer of active=false,
+// so every retired row was displaced by a contract, never set aside by a
+// person. Returns the count restored.
+async function restoreCompatibleItems({ dbi, remaining, markers, forbidden }) {
+  if (!(remaining > 0)) return 0;
+  const compat = compatibleWhereRaw(markers, forbidden);
+  const restored = await dbi('sms_sealed_eval_items')
+    .whereIn('id', dbi('sms_sealed_eval_items')
+      .select('id')
+      .where('active', false)
+      .whereRaw(compat.sql, compat.bindings)
+      .orderBy('sealed_at', 'desc')
+      .limit(remaining))
+    .update({ active: true });
+  if (restored) logger.info(`[sealed-eval] seal: reactivated ${restored} previously-retired item(s) matching the current fact contract`);
+  return Number(restored) || 0;
+}
+
 async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const startedAt = Date.now();
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
     .where('active', true)
     .count('* as count');
-  const remaining = target - Number(activeCount);
+  // Compatibility-aware replenishment (pre-push audit P1 on Codex r3): the
+  // exam grades under the current prompt version, and examOneItem excludes
+  // every item frozen outside that version's fact contract. A pool full of
+  // items frozen under another contract would otherwise never top up — the
+  // target counts only COMPATIBLE items, only compatible drafts are sealed,
+  // and the oldest incompatible items beyond the target are retired
+  // (active=false; rows and every historical result stay put). Every
+  // version has a contract (Codex #5194 r7 P1): a rollback to v11 counts,
+  // restores and seals items WITHOUT the v12 lines.
+  const sealVersion = require('./sms-shadow-drafter').currentPromptVersion();
+  const markers = requiredFactMarkers(sealVersion);
+  const forbidden = forbiddenFactMarkers(sealVersion);
+  const compat = compatibleWhereRaw(markers, forbidden);
+  const [{ count: compatibleCount }] = await dbi('sms_sealed_eval_items')
+    .where('active', true)
+    .whereRaw(compat.sql, compat.bindings)
+    .count('* as count');
+  let remaining = target - Number(compatibleCount);
+  // retired items the current contract matches come back before any new
+  // draft is sealed; only the rest of the shortfall is sourced fresh
+  const reactivated = await restoreCompatibleItems({ dbi, remaining, markers, forbidden });
+  remaining -= reactivated;
+  const activeAfterRestore = Number(activeCount) + reactivated;
   if (remaining <= 0) {
-    return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
+    // Codex r4: a prior run may have inserted compatible rows and then
+    // failed before retiring the displaced pre-v12 ones, leaving an
+    // oversized active pool that would otherwise never shrink (and trips
+    // the auto-exam spend cap). Prune here too, so the two steps need not
+    // be atomic to converge.
+    const retired = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore - target, markers, forbidden });
+    return { sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt };
   }
 
   const cutoff = new Date(Date.now() - SEALED_EVAL_MIN_AGE_DAYS * 86400 * 1000);
-  const candidates = await dbi({ md: 'message_drafts' })
+  const candidateQuery = dbi({ md: 'message_drafts' })
     .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
     .leftJoin({ si: 'sms_sealed_eval_items' }, 'si.source_draft_id', 'md.id')
     .leftJoin({ inbound_sms: 'sms_log' }, 'md.sms_log_id', 'inbound_sms.id')
@@ -141,7 +363,10 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     // ...and must NOT be a backfill row: backfill facts are TODAY's context
     // pasted onto a months-old inbound — sealing one would freeze the drift.
     .whereRaw("md.prompt_version NOT LIKE '%backfill'")
-    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''")
+    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''");
+  // only drafts frozen under the current fact contract are representative
+  const candidates = await candidateQuery
+    .whereRaw(compat.sql.replace(/COALESCE\(facts_block, ''\)/g, 'md.facts_block'), compat.bindings)
     .where('md.created_at', '<', cutoff)
     .select(
       'md.id as source_draft_id', 'md.customer_id', 'md.intent',
@@ -171,7 +396,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
 
   if (!picked.length) {
     logger.info('[sealed-eval] seal: no new eligible candidates');
-    return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
+    return { sealed: 0, reactivated, activeCount: activeAfterRestore, ms: Date.now() - startedAt };
   }
 
   const rows = picked.map((c) => ({
@@ -188,8 +413,11 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     schema_version: SCHEMA_VERSION,
   }));
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
+  // Keep the active pool at the target: retire the OLDEST pre-v12 items that
+  // the new compatible ones displaced (never delete — results reference them).
+  const retired = await retireIncompatibleItems({ dbi, overflow: activeAfterRestore + rows.length - target, markers, forbidden });
 
-  const summary = { sealed: rows.length, activeCount: Number(activeCount) + rows.length, ms: Date.now() - startedAt };
+  const summary = { sealed: rows.length, retired, reactivated, activeCount: activeAfterRestore + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
   return summary;
 }
@@ -300,8 +528,31 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   const drafter = require('./sms-shadow-drafter');
   const judge = require('./sms-shadow-judge');
 
+  // Codex r3: a run replaying an item frozen under a different fact contract
+  // would grade it against instructions whose facts the frozen snapshot
+  // lacks (a v12 run on a pre-v12 item: OPEN TIMES, the FOLLOW-UP SLA RIGHT
+  // NOW handoff wording) or carries facts the live prompt never sees (a v11
+  // rollback run on a v12 item, Codex #5194 r7) — never call the drafter or
+  // judge for it; record it as excluded (an 'ungradable' sentinel, same
+  // shape as the terminal no-progress rule above) so it holds the item's
+  // completion slot without counting as a pass, a fail, or staying pending
+  // forever.
+  if (!itemCompatibleWith(item.facts_block, run.prompt_version)) {
+    await dbi('sms_sealed_eval_results')
+      .insert({
+        run_id: run.id,
+        item_id: item.id,
+        verdict: 'ungradable',
+        notes: `excluded: frozen facts_block is outside the fact contract of ${run.prompt_version} (items must ${contractLabel(run.prompt_version)}) — not representative (Codex r3/r7, #5194 r7)`,
+      })
+      .onConflict(['run_id', 'item_id'])
+      .ignore();
+    logger.warn(`[sealed-eval] item ${String(item.id).slice(0, 8)} excluded from run ${String(run.id).slice(0, 8)}: frozen facts_block outside the fact contract of ${run.prompt_version}`);
+    return true;
+  }
+
   const intent = { intent: item.intent || 'GENERAL' };
-  const { parsed, passes, converged, model, voiceProfileVersion } = await drafter.generateGroundedDraft({
+  const { parsed, passes, converged, model, voiceProfileVersion, promptVersion } = await drafter.generateGroundedDraft({
     client,
     inboundMessage: item.inbound_message,
     intent,
@@ -322,6 +573,20 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // text is static per run, so this fails the sitting fast rather than mixing.
   if ((voiceProfileVersion ?? null) !== (run.voice_profile_version ?? null)) {
     logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under profile ${voiceProfileVersion ?? 'none'} but run ${String(run.id).slice(0, 8)} is pinned to ${run.voice_profile_version ?? 'none'} — refusing result`);
+    return false;
+  }
+  // Same "static per run" rule, for the prompt version itself (pre-push
+  // audit P1): generateGroundedDraft reads GATE_SMS_REAL_ANSWERS LIVE on
+  // every call, so a gate flip mid-sitting (rare, but the createExamRun/
+  // resume guards above already treat it as a real event) could otherwise
+  // draft a later item under a DIFFERENT version than the run's own stamped
+  // `prompt_version` — mixing v11 and v12 evidence inside one run, which is
+  // exactly "counting an exam pass as evidence for the wrong version," just
+  // at the per-item grain instead of the whole-run grain. Refuse rather
+  // than record a mismatched result; the item stays pending for a resume,
+  // which (via the same guard) retires the run instead of continuing to mix.
+  if (promptVersion !== run.prompt_version) {
+    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under prompt ${promptVersion} but run ${String(run.id).slice(0, 8)} is pinned to ${run.prompt_version} — refusing result`);
     return false;
   }
 
@@ -439,7 +704,11 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 
 /**
  * Create one exam-run row (no processing). Stamps the RUNNING drafter's
- * PROMPT_VERSION — an exam always examines the code that is live; "comparing
+ * EFFECTIVE prompt version (currentPromptVersion(), not the static
+ * PROMPT_VERSION — see that function's own comment: PROMPT_VERSION stays
+ * house_voice_v11 forever once GATE_SMS_REAL_ANSWERS goes live, so pinning
+ * to it would stamp every run "v11" even while the drafter is actually
+ * examining v12) — an exam always examines the code that is live; "comparing
  * versions" means comparing two runs recorded before and after a prompt
  * bump, on the same frozen items. Refuses while any run is status='running':
  * exam processing is serialized behind one advisory lock, so a second row
@@ -449,6 +718,10 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
   if (!EXAM_LEG_ROUTES[providerLeg]) throw new Error(`unknown sealed-eval provider leg: ${providerLeg}`);
   const drafter = require('./sms-shadow-drafter');
+  // The version THIS run examines — currentPromptVersion(), not the static
+  // PROMPT_VERSION (see the docstring above and currentPromptVersion's own
+  // comment in sms-shadow-drafter.js).
+  const currentVersion = drafter.currentPromptVersion();
 
   const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id', 'provider_leg');
   if (inFlight) {
@@ -459,6 +732,25 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   }
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   if (!Number(activeCount)) throw new Error('no active sealed items — seal the eval set first');
+  // Codex r3: fail fast rather than start a run that will grade nothing —
+  // every active item outside the version's fact contract gets excluded item
+  // by item in examOneItem, so a run with no compatible items would
+  // otherwise sit at 'running' with every item landing as an 'ungradable'
+  // sentinel and finish with no evidence at all. The pool is small (sealed
+  // to SEALED_EVAL_TARGET, ~100) so this reads facts_block in JS rather than
+  // pushing a LIKE clause down — same cost, one shared check with examOneItem.
+  // Every version (Codex #5194 r7 P1), a v11 rollback included.
+  const activeItems = await dbi('sms_sealed_eval_items').where('active', true).select('facts_block');
+  // Same bar the exam gate applies to a finished run (evaluateExamGate: at
+  // least half the pool graded). Starting below it would complete a run
+  // that can never pass, and the nightly sweep would then report the version
+  // already examined while the pool is still replenishing (pre-push audit
+  // P1) — so refuse until the freezer has caught up.
+  const compatible = activeItems.filter((i) => itemCompatibleWith(i.facts_block, currentVersion)).length;
+  const needed = Math.max(1, Math.ceil(activeItems.length / 2));
+  if (compatible < needed) {
+    throw new Error(`no sealed coverage for ${currentVersion}: only ${compatible} of ${activeItems.length} active items ${contractLabel(currentVersion)} (need ${needed}); the rest were frozen under a different fact contract. Seal fresh items under ${currentVersion} before running this exam`);
+  }
 
   // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
   // SAME leg — a failed/partial baseline would compare against a fragment,
@@ -488,7 +780,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
-      .whereNot('prompt_version', drafter.PROMPT_VERSION)
+      .whereNot('prompt_version', currentVersion)
       .orderBy('started_at', 'desc')
       .first('id');
     baseline = prior?.id || null;
@@ -514,7 +806,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
-        prompt_version: drafter.PROMPT_VERSION,
+        prompt_version: currentVersion,
         provider_leg: providerLeg,
         status: 'running',
         items_total: Number(activeCount),
@@ -661,9 +953,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       throw new Error(`sealed-eval run ${runId} is ${run.status}, not resumable`);
     }
     // A run only ever contains ONE drafter version. Resuming after a prompt
-    // bump would draft the remaining items under the NEW code and record
-    // them beneath the old label — refuse and start a fresh run instead.
-    const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+    // bump — OR a GATE_SMS_REAL_ANSWERS flip, which currentPromptVersion()
+    // reflects the same way a code-level bump would — would draft the
+    // remaining items under the NEW version and record them beneath the old
+    // label; refuse and start a fresh run instead.
+    const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
     if (run.prompt_version !== currentVersion) {
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
@@ -877,7 +1171,12 @@ function shapeRun(run) {
  */
 async function getSealedExamSummary({ dbi = db } = {}) {
   const drafter = require('./sms-shadow-drafter');
-  const currentVersion = drafter.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): the headline run this function picks out per leg — the one
+  // evaluateExamGate accepts as GRAD_REQUIRE_SEALED_EXAM evidence — must
+  // match whichever prompt is ACTUALLY live, or a stale v11 run would keep
+  // satisfying the gate forever after GATE_SMS_REAL_ANSWERS flips to v12.
+  const currentVersion = drafter.currentPromptVersion();
   // Voice-profile pin (Codex r2): a leg's HEADLINE run — the one
   // evaluateExamGate accepts and the auto-sweep short-circuits on — must
   // have been drafted under the CURRENTLY effective profile, not merely the
@@ -987,7 +1286,12 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
   const drafterMod = require('./sms-shadow-drafter');
-  const currentVersion = drafterMod.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): with it pinned to v11, this sweep would keep confirming v11 is
+  // "already examined" forever and never create a v12 exam once
+  // GATE_SMS_REAL_ANSWERS goes live — the live version would simply never
+  // get swept.
+  const currentVersion = drafterMod.currentPromptVersion();
   // Profile-aware coverage (Codex r2): "already examined" means a complete
   // run under the current (version, effective-profile) pair — after a weekly
   // profile approval the sweep re-baselines both legs under the new profile,
@@ -1160,6 +1464,11 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
 }
 
 module.exports = {
+  requiredFactMarkers,
+  forbiddenFactMarkers,
+  itemCompatibleWith,
+  hasRenderedReserviceFact,
+  RESERVICE_SECTION_RE,
   sealEvalItems,
   createExamRun,
   runSealedExam,
@@ -1181,5 +1490,6 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
+    compatibleWhereRaw,
   },
 };

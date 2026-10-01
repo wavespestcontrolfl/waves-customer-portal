@@ -8,12 +8,7 @@ const { noStore } = require('../middleware/no-store');
 // Token-keyed review pages carry the customer's name and service history —
 // keep them out of caches and search indexes.
 router.use(noStore);
-const {
-  WAVES_LOCATIONS,
-  resolveReviewLocation: resolveReviewLocationCanonical,
-} = require('../config/locations');
-const MODELS = require('../config/models');
-const { dispatchWithFallback } = require('../services/llm/call');
+const { resolveReviewLocation: resolveReviewLocationCanonical } = require('../config/locations');
 
 // The GBP profile this ask points at. Delegates to the ONE review-routing
 // resolver in config/locations.js (city → zip → nearest office → the id stored
@@ -24,16 +19,6 @@ function resolveReviewLocation(request, customer) {
   return resolveReviewLocationCanonical(customer || {}, {
     storedLocationId: request?.location_id || null,
   });
-}
-
-// Admin alert recipient — must be a real cell, never one of our own Twilio
-// numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
-const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
-
-function categorizeScore(score) {
-  if (score >= 8) return 'promoter';
-  if (score >= 4) return 'passive';
-  return 'detractor';
 }
 
 // Direct-link redirects are cheap and unauthenticated — cap per IP so the
@@ -52,7 +37,9 @@ const directLinkLimiter = rateLimit({
   // (codex #3285 r5).
   handler: (req, res) => {
     const { publicPortalUrl } = require('../utils/portal-url');
-    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}`);
+    // ?retry=1: this is a failure fallback, and the rate page's only control
+    // is /go — the page says "try again in a minute" instead of looping silently.
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}?retry=1`);
   },
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
@@ -75,9 +62,9 @@ router.param('token', (req, res, next, token) => {
   return res.status(404).json({ error: 'Review link not found or expired' });
 });
 
-// The page GET and the score/submit writes had no per-route limiter
-// (security review 2026-08-07) — same probing exposure as /go, but these
-// DO touch the DB per hit. 30/min per IP matches directLinkLimiter.
+// The page GET had no per-route limiter (security review 2026-08-07) — same
+// probing exposure as /go, but it DOES touch the DB per hit. 30/min per IP
+// matches directLinkLimiter.
 const reviewPageLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -88,8 +75,9 @@ const reviewPageLimiter = rateLimit({
 });
 
 // GET /api/rate/:token/go — tracked redirect straight to the Google review
-// form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
-// here via a /l/ short link). Stamps the open + click on the review_requests
+// form (the SMS/email {review_url} resolves here via a /l/ short link when
+// GATE_REVIEW_DIRECT_LINK is on, and the /rate page's Open Google button always
+// does). Stamps the open + click on the review_requests
 // row, stops the customer's active cadence (they acted — no Day-3/4 chasers),
 // bells the owner so an unmatched review can be manually attributed, and 302s
 // to the location's GBP review URL. Every failure path degrades to the /rate
@@ -102,14 +90,17 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
   // audit). publicPortalUrl() is the canonical public origin serving the SPA.
   const { publicPortalUrl } = require('../utils/portal-url');
   const ratePageFallback = `${publicPortalUrl()}/rate/${encodeURIComponent(token)}`;
+  // Failure fallbacks (a DB error on the stamp / claim) carry ?retry=1 so the
+  // page tells the customer to try again; finality and already-reviewed
+  // fallbacks do not — there is nothing to retry.
+  const retryFallback = `${ratePageFallback}?retry=1`;
   try {
-    // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
-    // with the gate off, /go behaves as a plain alias of the rate page — no
-    // click stamping, no cadence stop, no Google redirect — so unsetting
-    // GATE_REVIEW_DIRECT_LINK rolls the whole direct flow back even for
-    // links sitting in old texts.
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
+    // The tracked flow runs whatever GATE_REVIEW_DIRECT_LINK says (that gate
+    // only decides whether ask texts/emails link HERE or to the /rate thank-you
+    // page). With the 1-10 rating retired there is no old flow for a gate-off
+    // alias to fall back to, and the /rate page's own button points here — a
+    // gate-off bounce back to /rate would be a loop and would skip the click
+    // stamp and the cadence stop.
     // Shared review-token shape, NOT 64-hex-only (codex #3287 r1): live
     // tokens are 32-64 url-safe (prod-verified incl. one legacy 32-char
     // row), and the Track CTA + tech-trigger now emit /go for those rows
@@ -127,7 +118,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // rendered while the ask was live, tapped after the customer finalized
     // through another link.
     const requestFinalized = Boolean(request.rated_at)
-      || ['submitted', 'reviewed', 'rated'].includes(request.status);
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase());
     if (requestFinalized) return res.redirect(302, ratePageFallback);
     if (request.expires_at && new Date(request.expires_at) < new Date()) {
       // Expired-but-real UNANSWERED link (review audit 2026-08-07): a
@@ -170,16 +161,13 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     }
 
     // The route contract: a customer only reaches Google AFTER the click is
-    // recorded and their cadence is stopped. If any required write fails
-    // (transient Postgres outage), fall back to the rate page instead of
-    // proceeding — otherwise the still-active sequence would keep chasing a
-    // customer who already reached the review form (Codex P2, r3).
-    // Ordering (Codex P2, r4): the base stamp (SQL-side counter, no stale
-    // read) and the cadence stop both land BEFORE the first-click claim, and
-    // the claim itself is a conditional UPDATE ... WHERE redirected_at IS
-    // NULL — so overlapping requests can't double-notify or lose an
-    // open_count increment, and a stamp-ok/stop-failed request leaves the
-    // claim unconsumed for the retry to notify on.
+    // recorded. If the stamp or the first-click claim fails (transient
+    // Postgres outage), fall back to the rate page instead of proceeding.
+    // Ordering: the base stamp (SQL-side counter, no stale read) lands first,
+    // then the first-click claim (a conditional UPDATE ... WHERE redirected_at
+    // IS NULL, so overlapping requests can't double-notify or lose an
+    // open_count increment) — redirected_at is what every review sender's
+    // send-time guard reads — and only then the best-effort stop below.
     try {
       const updates = {
         open_count: db.raw('COALESCE(open_count, 0) + 1'),
@@ -198,27 +186,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       await db('review_requests').where({ id: request.id }).update(updates);
     } catch (err) {
       logger.warn(`[review-gate] direct-link click stamp failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
-    }
-
-    // They acted on the ask — stop the cadence so no further touches chase
-    // a customer who already visited the review form. A one-off/legacy link
-    // has no sequence_id, but the CUSTOMER may still have an active cadence
-    // (older unexpired link clicked mid-cadence) — stop that one too
-    // (Codex P2, r1).
-    try {
-      const ReviewService = require('../services/review-request');
-      if (request.sequence_id) {
-        await ReviewService.stopReviewSequence(request.sequence_id, 'clicked');
-      } else {
-        const activeSeq = await db('review_sequences')
-          .where({ customer_id: request.customer_id, status: 'active' })
-          .first();
-        if (activeSeq) await ReviewService.stopReviewSequence(activeSeq.id, 'clicked');
-      }
-    } catch (err) {
-      logger.warn(`[review-gate] cadence stop on click failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
+      return res.redirect(302, retryFallback);
     }
 
     // Atomic first-click claim: only the request that flips redirected_at
@@ -235,7 +203,30 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       firstClick = claimed > 0;
     } catch (err) {
       logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
+      return res.redirect(302, retryFallback);
+    }
+
+    // They acted on the ask — stop what we can find that would ask them again
+    // (ReviewService.stopFutureAsks: the clicked request's cadence and any other
+    // active / deferred cadence, a cadence parked for summary recovery, queued
+    // asks, due Day-3 follow-ups), under the send lock with a bounded wait.
+    // BEST-EFFORT: the click is already recorded above (the first-click claim
+    // stamps redirected_at), and every sender re-checks that at SEND time
+    // (services/review-click-guard.js, inside the per-customer review-send
+    // lock) — so a state this stop cannot see or reach (a redeeming cadence, a
+    // stranded 'sending' row, an uncertain summary that enrolls later) is
+    // suppressed when its ask is about to leave. The customer is NEVER kept
+    // from Google over it. Accepted race: a send already past its guard when
+    // the click lands can still deliver that one in-flight text.
+    try {
+      const stop = await require('../services/review-request').stopFutureAsks(request.customer_id, {
+        reason: 'clicked',
+      });
+      if (!stop || stop.stopped !== true) {
+        logger.info(`[review-gate] click stop incomplete (requestId=${request.id} outstanding=${(stop?.outstanding || ['unknown']).join(',')}) — send-time guard covers it`);
+      }
+    } catch (err) {
+      logger.warn(`[review-gate] stopping later asks on click failed (send-time guard covers it): ${err.message}`);
     }
 
     // Owner bell (first click only): Google won't tell us who reviewed, so
@@ -264,28 +255,50 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       }
     }
 
+    // Referral invite email (owner ruling 2026-09-29): sent right after the
+    // customer taps through to Google. First click only (this request won the
+    // atomic claim above); the helper's customer-scoped idempotency keeps it to
+    // once per customer. Fire-and-forget — it never delays or breaks the
+    // redirect. A bare, untracked office Google URL never reaches /go, so those
+    // taps send nothing.
+    if (firstClick && request.customer_id) {
+      try {
+        const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+        // The helper never rejects today, but a detached promise must never be
+        // able to go unhandled.
+        Promise.resolve(sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'google_review_click' }))
+          .catch((err) => logger.warn(`[review-gate] referral invite failed: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[review-gate] referral invite failed: ${err.message}`);
+      }
+    }
+
     // Latest-click stamp for the auto-link correlation, recorded ONLY once
     // every pre-redirect step has succeeded — a failed attempt falls back to
     // the rate page and must not become "latest click" evidence (pre-push P1;
     // redirected_at is the immutable first-click claim above and never
-    // moves). Best-effort: a stamp failure must not cost the redirect.
+    // moves). On a REPEAT click this stamp is the only durable evidence the
+    // send-time guard reads for a newer visit (Codex #5367 r8 P2), so its
+    // failure falls back to /rate?retry=1 like the claim's; a first click
+    // already holds redirected_at and still goes to Google.
     try {
       await db('review_requests').where({ id: request.id }).update({
         last_redirected_at: new Date(),
         last_google_location: loc.id,
       });
     } catch (err) {
-      logger.warn(`[review-gate] last-click stamp failed: ${err.message}`);
+      logger.warn(`[review-gate] last-click stamp failed (firstClick=${Boolean(firstClick)}): ${err.message}`);
+      if (!firstClick) return res.redirect(302, retryFallback);
     }
 
     return res.redirect(302, loc.googleReviewUrl);
   } catch (err) {
     logger.error(`[review-gate] direct-link redirect failed: ${err.message}`);
-    return res.redirect(302, ratePageFallback);
+    return res.redirect(302, retryFallback);
   }
 });
 
-// GET /api/rate/:token — public page data for the review funnel
+// GET /api/rate/:token — public page data for the thank-you + Google button page
 router.get('/:token', reviewPageLimiter, async (req, res, next) => {
   try {
     const request = await db('review_requests')
@@ -323,7 +336,7 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
     // legacy row must not reopen the form (pre-push audit r5b).
     if (request.rated_at
       || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
-      return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
+      return res.status(200).json({ alreadySubmitted: true, message: 'Thank you!' });
     }
 
     // Look up customer name — prefer the beneficiary (service contact) when
@@ -358,406 +371,24 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
       }
     }
 
+    // The page is a thank-you plus ONE tap to Google (owner ruling 2026-09-29:
+    // the 1-10 rating is retired). The button ALWAYS points at the tracked /go
+    // redirect (stamps the click, stops the cadence, sends the referral invite),
+    // whatever GATE_REVIEW_DIRECT_LINK says. A customer already marked as a
+    // reviewer gets no button (same finality /go enforces).
+    const { publicPortalUrl } = require('../utils/portal-url');
+    const reviewUrl = customer?.has_left_google_review === true
+      ? null
+      : `${publicPortalUrl()}/api/rate/${encodeURIComponent(request.token)}/go`;
+
     res.json({
       firstName: contact.name || customer?.first_name || 'there',
       techName: request.tech_name || 'your technician',
       techPhotoUrl,
-      serviceType: request.service_type || 'pest control service',
-      hasServiceType: Boolean(request.service_type),
       serviceDate: request.service_date,
       locationName: loc.name,
-      googleReviewUrl: loc.googleReviewUrl,
+      reviewUrl,
     });
-  } catch (err) { next(err); }
-});
-
-// POST /api/rate/:token/score — persist score taps without final submission.
-// This protects bounce cases while leaving the customer free to correct their
-// score before committing to feedback or the Google-review path. The request
-// status is intentionally left alone so reminder and low-score workflows still
-// run only from the final /submit path.
-router.post('/:token/score', reviewPageLimiter, async (req, res, next) => {
-  try {
-    const { score, highlights } = req.body;
-
-    if (!score || score < 1 || score > 10) {
-      return res.status(400).json({ error: 'Score must be between 1 and 10' });
-    }
-
-    const request = await db('review_requests')
-      .where({ token: req.params.token })
-      .first();
-
-    if (!request) {
-      return res.status(404).json({ error: 'Review link not found' });
-    }
-
-    if (request.expires_at && new Date(request.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This review link has expired' });
-    }
-
-    // Same finality predicate as /go, the page GET, and submitRating —
-    // a status-only 'rated' legacy row must not accept score mutation
-    // (pre-push audit r5b).
-    if (request.rated_at
-      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
-      return res.status(409).json({ error: 'Feedback already submitted' });
-    }
-
-    const category = categorizeScore(score);
-    await db('review_requests')
-      .where({ id: request.id })
-      // NULL-safe grouped guard (NULL NOT IN (...) is UNKNOWN in Postgres) —
-      // mirrors the conditional-update guard on the submit handler.
-      .where(function () {
-        this.whereNull('status').orWhereNotIn('status', ['submitted', 'reviewed', 'rated']);
-      })
-      .whereNull('rated_at')
-      .update({
-        score,
-        highlights: highlights ? JSON.stringify(highlights) : null,
-        category,
-      });
-
-    res.json({ saved: true, category });
-  } catch (err) { next(err); }
-});
-
-// POST /api/rate/:token/submit — submit NPS score + feedback
-router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
-  try {
-    const { score, feedback, highlights } = req.body;
-
-    if (!score || score < 1 || score > 10) {
-      return res.status(400).json({ error: 'Score must be between 1 and 10' });
-    }
-
-    const request = await db('review_requests')
-      .where({ token: req.params.token })
-      .first();
-
-    if (!request) {
-      return res.status(404).json({ error: 'Review link not found' });
-    }
-
-    if (request.expires_at && new Date(request.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This review link has expired' });
-    }
-
-    if (request.rated_at || ['submitted', 'reviewed', 'rated'].includes(request.status)) {
-      return res.status(409).json({ error: 'Feedback already submitted' });
-    }
-
-    // Categorize by NPS score
-    const category = categorizeScore(score);
-
-    // Update the review request record. Atomic claim (NULL-safe status
-    // check): a concurrent double-submit must not double-fire the
-    // referral/activity side effects below. rated_at is stamped too — it is
-    // the LEGACY endpoint's finality marker, and without it a request
-    // submitted here stayed replayable through /api/review/:token.
-    const claimed = await db('review_requests')
-      .where({ id: request.id })
-      .whereNull('rated_at')
-      .where(function notFinal() {
-        this.whereNull('status').orWhereNotIn('status', ['submitted', 'reviewed', 'rated']);
-      })
-      .update({
-        score,
-        feedback: feedback || null,
-        highlights: highlights ? JSON.stringify(highlights) : null,
-        category,
-        status: 'submitted',
-        submitted_at: db.fn.now(),
-        rated_at: db.fn.now(),
-      });
-    if (!claimed) {
-      return res.status(409).json({ error: 'Feedback already submitted' });
-    }
-
-    // If this came from a multi-touch cadence, stop it now — the customer has
-    // engaged, so no further Day-3/7 review asks should go out. (The cadence
-    // runner also re-checks this before each send; this just stops it sooner.)
-    if (request.sequence_id) {
-      try {
-        await require('../services/review-request').stopReviewSequence(request.sequence_id, 'responded');
-      } catch (err) {
-        logger.warn(`[review-gate] cadence stop-on-submit failed: ${err.message}`);
-      }
-    }
-
-    // Create activity log entry
-    await db('activity_log').insert({
-      customer_id: request.customer_id,
-      action: 'review_submitted',
-      description: `NPS ${score}/10 (${category}) — ${request.service_type || 'service'} at ${request.location_id}`,
-      metadata: JSON.stringify({ score, category, feedback: (feedback || '').slice(0, 200), highlights }),
-    });
-
-    // Look up location for Google review URL — closest-GBP by customer
-    // geocode, fallback to the request's tagged location.
-    const customerForLoc = await db('customers').where({ id: request.customer_id }).first();
-    const loc = resolveReviewLocation(request, customerForLoc);
-
-    // Referral invite email on the warmest moment we have (owner trigger
-    // call 2026-07-06) — same hook and same >=7 bar as the legacy
-    // /api/review submit path (a 7 is 'passive' here but still
-    // invite-grade). Fire-and-forget; the helper's customer-scoped
-    // idempotency key keeps repeat submitters from being re-invited.
-    if (score >= 7 && request.customer_id) {
-      try {
-        const { sendReferralInviteEmail } = require('../services/referral-invite-email');
-        void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'positive_review' });
-      } catch (err) {
-        logger.error(`[review-gate] referral invite failed: ${err.message}`);
-      }
-    }
-
-    // Handle by category
-    if (category === 'promoter') {
-      // Score 8-10: redirect to Google review
-
-      // Fire-and-forget: trigger referral nudge workflow
-      try {
-        const referralNudge = require('../services/workflows/referral-nudge');
-        if (referralNudge.triggerAfterPositiveReview) {
-          referralNudge.triggerAfterPositiveReview(request.customer_id, score).catch(err =>
-            logger.error(`[review-gate] Referral nudge failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[review-gate] Referral nudge require failed: ${err.message}`);
-      }
-
-      // Fire-and-forget: update customer health score
-      try {
-        const customerHealth = require('../services/customer-health');
-        if (customerHealth.scoreCustomer) {
-          customerHealth.scoreCustomer(request.customer_id).catch(err =>
-            logger.error(`[review-gate] Health score update failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[review-gate] Customer health require failed: ${err.message}`);
-      }
-
-      return res.json({
-        category: 'promoter',
-        redirect: loc.googleReviewUrl,
-        message: 'Thank you! We\'d love if you could share that on Google too.',
-      });
-    }
-
-    if (category === 'passive') {
-      // Score 4-7: thank them, save feedback
-      return res.json({
-        category: 'passive',
-        message: 'Thank you for your feedback! We\'re always working to improve.',
-      });
-    }
-
-    // Detractor (1-3): alert admin via SMS
-    try {
-      const customer = await db('customers').where({ id: request.customer_id }).first();
-      const customerName = customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown';
-
-      const TwilioService = require('../services/twilio');
-      await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-        `⚠️ Low NPS alert: ${customerName} rated ${score}/10 for ${request.service_type || 'service'} (${loc.name}).\n\nFeedback: "${(feedback || 'No comment').slice(0, 150)}"\n\nFollow up ASAP.`,
-        { messageType: 'internal_alert' }
-      );
-    } catch (smsErr) {
-      logger.error(`Detractor SMS alert failed: ${smsErr.message}`);
-    }
-
-    // Fire-and-forget: create health alert for detractor
-    try {
-      const healthAlerts = require('../services/health-alerts');
-      if (healthAlerts.generateAlerts) {
-        healthAlerts.generateAlerts(request.customer_id, {
-          overall: 0,
-          satisfaction: 0,
-          satisfactionDetails: { avgRating: score / 2 },
-          churnRisk: 'high',
-          churnSignals: [{ signal: 'low_nps', severity: 'high', message: `NPS score ${score}/10 (detractor)` }],
-          grade: 'F',
-        }).catch(err => logger.error(`[review-gate] Health alert failed: ${err.message}`));
-      }
-    } catch (err) {
-      logger.error(`[review-gate] Health alerts require failed: ${err.message}`);
-    }
-
-    // Fire-and-forget: update customer health score for detractor
-    try {
-      const customerHealth = require('../services/customer-health');
-      if (customerHealth.scoreCustomer) {
-        customerHealth.scoreCustomer(request.customer_id).catch(err =>
-          logger.error(`[review-gate] Detractor health score update failed: ${err.message}`)
-        );
-      }
-    } catch (err) {
-      logger.error(`[review-gate] Customer health require failed: ${err.message}`);
-    }
-
-    return res.json({
-      category: 'detractor',
-      message: 'Thank you for letting us know. A manager will reach out to make things right.',
-    });
-  } catch (err) { next(err); }
-});
-
-// POST /api/rate/:token/generate-review — AI-powered review writer
-// Caps for AI prompt inputs — prevent prompt-injection / runaway prompt size.
-const MAX_LIST_ITEMS = 12;
-const MAX_LIST_ITEM_CHARS = 60;
-const MAX_PERSONAL_NOTE_CHARS = 500;
-
-const sanitizeList = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .filter((v) => typeof v === 'string')
-    .slice(0, MAX_LIST_ITEMS)
-    .map((v) => v.trim().slice(0, MAX_LIST_ITEM_CHARS))
-    .filter(Boolean);
-};
-
-// Review generation is a paid model call with no other spend control — a
-// promoter legitimately regenerates a handful of times, not dozens.
-const generateReviewLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many drafts — give it a minute and try again.' },
-});
-const generateReviewDailyLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many drafts today — please try again tomorrow.' },
-});
-
-router.post('/:token/generate-review', generateReviewLimiter, generateReviewDailyLimiter, async (req, res, next) => {
-  try {
-    const { services, highlights, personalNote } = req.body;
-
-    const request = await db('review_requests')
-      .where({ token: req.params.token })
-      .first();
-
-    if (!request) {
-      return res.status(404).json({ error: 'Review link not found' });
-    }
-
-    if (request.expires_at && new Date(request.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This review link has expired' });
-    }
-
-    // Review writer is the promoter branch only — the client submits the NPS
-    // score first and only then calls this endpoint, so a missing score means
-    // the request is hitting us out of the intended order.
-    if (request.score == null) {
-      return res.status(400).json({ error: 'Submit your rating before generating a review' });
-    }
-    if (request.score < 8) {
-      return res.status(403).json({ error: 'Review writer is available for high-rating responses only' });
-    }
-
-    const customer = await db('customers').where({ id: request.customer_id }).first();
-    const firstName = customer?.first_name || 'there';
-
-    const safeServices = sanitizeList(services);
-    const safeHighlights = sanitizeList(highlights);
-    const safePersonalNote = (typeof personalNote === 'string' ? personalNote : '')
-      .trim()
-      .slice(0, MAX_PERSONAL_NOTE_CHARS);
-
-    // Build the prompt
-    const serviceList = safeServices.length > 0
-      ? safeServices.join(', ')
-      : (request.service_type || 'pest control');
-
-    const highlightList = safeHighlights.length > 0
-      ? safeHighlights.join(', ')
-      : '';
-
-    const personalDetail = safePersonalNote;
-
-    // Vary opening style so Google's dup-detection doesn't flag a pattern
-    // of "Adam was…" across every generated review. One is sampled per call.
-    const OPENING_STYLES = [
-      'start mid-thought, as if the customer is finishing a conversation',
-      'lead with the specific result they got',
-      'lead with the technician\'s behavior',
-      'lead with a short reaction word (e.g. "Really happy", "Super impressed", "Honestly great")',
-      'lead with how the experience compared to expectations',
-      'lead with the service type',
-    ];
-    const style = OPENING_STYLES[Math.floor(Math.random() * OPENING_STYLES.length)];
-
-    const prompt = `Write a genuine Google review for Waves Pest Control (Southwest Florida) from the customer's perspective. Sound like a real SWFL homeowner wrote it on their phone — casual, short, specific.
-
-Context:
-- Customer first name: ${firstName}
-- Services received: ${serviceList}
-${highlightList ? `- What stood out: ${highlightList}` : ''}
-${personalDetail ? `- Customer's own words: "${personalDetail}"` : ''}
-${request.tech_name ? `- Technician: ${request.tech_name}` : ''}
-
-Opening style for this review: ${style}
-
-Rules:
-- 2 to 4 sentences. Vary the length between reviews — sometimes tight, sometimes chattier.
-- No emojis, no hashtags, no star ratings.
-- Do NOT start with "I", "My", "We", or the technician's name.
-- At most one exclamation mark in the whole review; preferably zero.
-- Weave in at least one specific trait or detail; avoid generic filler like "great service" or "highly recommend".
-- Don't say "Waves Pest Control" more than once; never use "WPC" or other abbreviations.
-- No marketing phrases like "5 stars" or "best company ever".
-
-Return ONLY the review body. No quotes, no preamble, no sign-off.`;
-
-    // VOICE-tier customer-voice copy — a warm natural voice beats raw
-    // reasoning for a real Google review — with cross-provider failover;
-    // deterministic template last.
-    let reviewText = '';
-    try {
-      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
-        laneId: 'review_gate_text',
-        text: prompt,
-        jsonMode: false,
-        maxTokens: 256,
-      });
-      if (!result.ok) throw new Error('both AI providers unavailable');
-      reviewText = result.text?.trim() || '';
-      // Strip accidental quotes or "Review:" preambles
-      reviewText = reviewText.replace(/^["']+|["']+$/g, '').replace(/^(Review|My review):\s*/i, '').trim();
-    } catch (aiErr) {
-      logger.error(`[review-gate] AI review generation failed: ${aiErr.message}`);
-      // Fallback: generate a simple template
-      const parts = [];
-      if (highlightList) parts.push(`They were ${highlightList.toLowerCase()}`);
-      if (request.tech_name) parts.push(`${request.tech_name} did a great job`);
-      parts.push(`Really happy with the ${serviceList.toLowerCase()} service from Waves Pest Control`);
-      if (personalDetail) parts.push(personalDetail);
-      parts.push('Would definitely recommend them to anyone in Southwest Florida.');
-      reviewText = parts.join('. ') + (parts[parts.length - 1].endsWith('.') ? '' : '.');
-    }
-
-    // Persist so we can audit variation + iterate the prompt. Soft-fail:
-    // if the column isn't present yet (pre-migration env) the API still
-    // returns the draft.
-    try {
-      await db('review_requests').where({ id: request.id }).update({
-        generated_review_text: reviewText.slice(0, 2000),
-        generated_at: db.fn.now(),
-      });
-    } catch (persistErr) {
-      logger.warn(`[review-gate] generated_review_text persist skipped: ${persistErr.message}`);
-    }
-
-    res.json({ review: reviewText });
   } catch (err) { next(err); }
 });
 

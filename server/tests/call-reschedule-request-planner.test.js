@@ -21,13 +21,14 @@ const PHONE = '+15555550101';
 const PROPOSED = '2099-09-10T14:00:00-04:00';
 const CONFIRMED = '2099-09-11T16:00:00-04:00';
 const CONFIRMED_QUOTE = 'We will see you on Friday September 11 at 4 PM.';
+const ACCEPT = 'Yes, that works.';
 
 const call = {
   customer_id: CUSTOMER_ID,
   direction: 'inbound',
   from_phone: PHONE,
   created_at: NOW,
-  transcription: `Agent: ${CONFIRMED_QUOTE}\nCaller: Thank you.`,
+  transcription: `Agent: ${CONFIRMED_QUOTE}\nCaller: ${ACCEPT}`,
 };
 const customer = {
   id: CUSTOMER_ID,
@@ -93,14 +94,18 @@ describe('reviewed request planner', () => {
 
   test('the automatic path keeps confirmed_start_at authoritative', () => {
     const v2 = {
-      ...requestExtraction({ agent_committed_booking: true, confirmed_start_at: CONFIRMED }),
+      ...requestExtraction({
+        agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: CONFIRMED,
+        definite_commitment: true, relative_date_used: false, moved_appointment_relative_date_used: false,
+        agreed_slot_words: { day: 'Friday September 11', hour: '4', period: 'PM' },
+      }),
       confidence: { scheduling_window: 0.99 },
       service_request: { specific_service_name: 'Quarterly Pest Control Service' },
-      evidence: [{
-        field_path: '/scheduling/agent_committed_booking',
-        speaker: 'agent',
-        quote: CONFIRMED_QUOTE,
-      }],
+      evidence: [
+        { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: CONFIRMED_QUOTE },
+        { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: CONFIRMED_QUOTE },
+        { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },
+      ],
     };
     const automaticVisit = candidate({
       service_id: 'quarterly-pest',

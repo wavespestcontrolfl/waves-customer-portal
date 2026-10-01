@@ -43,7 +43,7 @@ import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
@@ -51,10 +51,11 @@ import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
-import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { ACH_CONSENT_TEXT, AFTER_VISIT_CARD_CONSENT_TEXT, AFTER_VISIT_CONSENT_VERSION, CARD_CONSENT_TEXT, CONSENT_VERSION, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
+import { FIRST_INVOICE_AT_CONFIRM_COPY, captureTimingProps, resolvePaymentTiming } from '../lib/paymentTiming';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { isNativeApp } from '../native/platform';
@@ -62,6 +63,8 @@ import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
+import { useWavesShell } from '../components/brand/WavesShellContext';
+import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -70,7 +73,8 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
-import EstimateProposalDocument from './EstimateProposalDocument';
+import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
+import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
@@ -79,6 +83,7 @@ import {
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassOneTimeHeroOverlay,
+  glassPackWithoutGuarantee,
   glassPackWithOneTimeHero,
   glassServiceSlug,
   glassTierDisplay,
@@ -104,6 +109,7 @@ import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_FONT, docTransition } from '../theme-doc';
 import { CustomerColumn } from '../components/brand';
@@ -933,7 +939,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 
       {satelliteUrl ? (
         <img
-          src={satelliteUrl}
+          src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
           style={{
@@ -1565,17 +1571,23 @@ function germanRoachVisitPhrase(visits) {
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
-export function oneTimePriceCopy(breakdown = {}) {
+export function oneTimePriceCopy(breakdown = {}, { noGuarantee = false } = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
   if (germanRoachItem) {
-    return `${germanRoachVisitPhrase(germanRoachItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule. 100% guaranteed with the Waves Guarantee.`;
+    const visitTerms = `${germanRoachVisitPhrase(germanRoachItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`;
+    // This card prices every one-time row, so on a noGuaranteeClaims
+    // estimate (termite work beside the cleanout) it makes no guarantee.
+    return noGuarantee ? visitTerms : `${visitTerms} 100% guaranteed with the Waves Guarantee.`;
   }
   const fleaItems = items.filter(isFleaBreakdownItem);
   if (fleaItems.length > 0) {
     const hasEliminationPackage = fleaItems.some((item) => item.offerKey === 'flea_elimination_two_visit' || Number(item.visits) === 2);
     if (hasEliminationPackage) {
-      return 'Includes two interior treatments scheduled about 10-21 days apart. Retreat guarantee applies to treated areas when prep, pet-source, and follow-up requirements are met.';
+      const visits = 'Includes two interior treatments scheduled about 10-21 days apart.';
+      return noGuarantee
+        ? visits
+        : `${visits} Retreat guarantee applies to treated areas when prep, pet-source, and follow-up requirements are met.`;
     }
     return 'One interior flea treatment for active flea pressure. No retreat warranty included.';
   }
@@ -1618,8 +1630,16 @@ export function oneTimePriceCopy(breakdown = {}) {
   const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
     && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
   if (rodentGuaranteeOnly) {
-    return 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
+    // On a noGuaranteeClaims estimate (termite work on an authored proposal)
+    // the card states no warranty terms; the row label still names the plan.
+    return noGuarantee
+      ? 'Annual rodent plan renewal. No service visit to schedule: accept below and we send your invoice.'
+      : 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
   }
+  // A callback period is a guarantee term: an estimate the server marks
+  // noGuaranteeClaims (termite, or work it can't classify) states the visit
+  // terms without it.
+  if (noGuarantee) return 'One visit, pay on service day. No recurring schedule, no tier discount.';
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
@@ -1937,7 +1957,7 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
 // one-time total but no billable breakdown rows must still show its price
 // (pre-push P0 on #3521). Every itemized estimate renders
 // OneTimeBreakdownCard instead (owner 2026-08-27).
-export function OneTimePriceCard({ oneTimePrice, breakdown }) {
+export function OneTimePriceCard({ oneTimePrice, breakdown, noGuarantee = false }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
@@ -1947,7 +1967,7 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
         <span style={{ fontSize: 16, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
-        {oneTimePriceCopy(breakdown)}
+        {oneTimePriceCopy(breakdown, { noGuarantee })}
       </div>
     </div>
   );
@@ -1958,19 +1978,65 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
 // shape the recurring PriceCard rows carry, so a one-time service reads
 // like a plan card (owner 2026-09-03). Shared by the standalone
 // OneTimeBreakdownCard and the rows embedded in a service section.
-function OneTimeRowCopy({ copy }) {
+function oneTimeOutcomeWithoutGuarantee(text, scope = 'none') {
+  if (!text) return null;
+  // The shipped German-roach outcome appends its guarantee to otherwise
+  // useful visit/scope copy in the same sentence. Remove that suffix first,
+  // then discard any remaining sentence whose whole point is a guarantee.
+  const withoutSuffix = String(text)
+    .replace(/,\s*100%\s+guaranteed(?:\s+with the Waves Guarantee)?(?=[.!?]|$)/gi, '')
+    .trim();
+  const sentences = withoutSuffix.match(/[^.!?]+[.!?]?/g) || [];
+  return sentences
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence && copyAllowedInScope(sentence, scope))
+    .join(' ')
+    .trim() || null;
+}
+
+// A row copy under the estimate's guarantee scope ('none' or 'satisfaction';
+// shared/estimate-copy-claims.cjs): the claims the scope does not allow are
+// removed, the sold scope stays, and a purchased trenching warranty bullet
+// is kept.
+function oneTimeCopyWithoutGuarantee(copy, item = {}, scope = 'none') {
   if (!copy) return null;
+  const retainPurchasedWarranty = hasPurchasedTrenchingWarranty(item);
+  return {
+    ...copy,
+    outcome: copyAllowedInScope(copy.outcome, scope) ? copy.outcome : oneTimeOutcomeWithoutGuarantee(copy.outcome, scope),
+    includes: Array.isArray(copy.includes)
+      ? copy.includes.filter((line) => (
+        retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
+      ) || copyAllowedInScope(line, scope))
+      : [],
+    assurance: scope !== 'none' && copyAllowedInScope(copy.assurance, scope) ? copy.assurance : null,
+    terms: copyAllowedInScope(copy.terms, scope) ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
+  };
+}
+
+// The scope a component uses: its guaranteeScope prop, else the older
+// noGuarantee boolean (true means 'none').
+function resolvedGuaranteeScope(scope, noGuarantee) {
+  return scope || (noGuarantee ? 'none' : 'all');
+}
+
+function OneTimeRowCopy({ copy, item, noGuarantee = false, guaranteeScope: scopeProp = null }) {
+  if (!copy) return null;
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
+  const visibleCopy = scope === 'all' ? copy : oneTimeCopyWithoutGuarantee(copy, item, scope);
   return (
     <>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
-        {copy.outcome}
-      </div>
-      {Array.isArray(copy.includes) && copy.includes.length ? (
-        <RowInclusions items={copy.includes} collapsible />
+      {visibleCopy.outcome ? (
+        <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+          {visibleCopy.outcome}
+        </div>
       ) : null}
-      {copy.terms ? (
+      {Array.isArray(visibleCopy.includes) && visibleCopy.includes.length ? (
+        <RowInclusions items={visibleCopy.includes} collapsible />
+      ) : null}
+      {visibleCopy.terms ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 10, lineHeight: 1.5 }}>
-          {copy.terms}
+          {visibleCopy.terms}
         </div>
       ) : null}
     </>
@@ -1993,7 +2059,19 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null }) {
+// One-time lawn specialty rows (engine keys from estimate-one-time-copy.json:
+// one_time_lawn, plugging, dethatching, top_dressing) carry the lawn prep &
+// service guide too. The server's service-details routes accept 'lawn_care'
+// for an estimate carrying any of these rows (estimate-public.js
+// ONE_TIME_LAWN_GUIDE_SERVICES) — keep the two lists in step.
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+export function oneTimeLawnGuideOffered(breakdown) {
+  return (Array.isArray(breakdown?.items) ? breakdown.items : [])
+    .some((item) => item && ONE_TIME_LAWN_GUIDE_SERVICES.has(item.service));
+}
+
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false, guaranteeScope: scopeProp = null, serviceDetailsRequest = null }) {
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
@@ -2040,6 +2118,11 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
+          // Each row states its own service's terms (server termsScope).
+          const rowScope = serviceGuaranteeScope(scope, item.termsScope);
+          const visibleDetail = copyAllowedInScope(item.detail, rowScope)
+            ? item.detail
+            : withoutClaimsOutsideScope(item.detail, rowScope, preSlabSelectedWarrantyPart(item));
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -2050,12 +2133,12 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
                   {customerOneTimeLabel(item)}
                 </div>
-                {item.detail ? (
+                {visibleDetail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
-                    {item.detail}
+                    {visibleDetail}
                   </div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
                 {quoteNote ? (
                   <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -2101,6 +2184,21 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
         </div>
+      ) : null}
+      {/* Lawn prep & service guide for one-time lawn lines (no lawn service
+          section renders these rows, so the section's own row never shows).
+          Only when the caller opted in — callers skip it when a recurring
+          lawn section already carries the row. */}
+      {serviceDetailsRequest && oneTimeLawnGuideOffered({ items }) ? (
+        <ServiceDetailsRequestRow
+          token={serviceDetailsRequest.token}
+          serviceKey="lawn_care"
+          customerEmail={serviceDetailsRequest.customerEmail}
+          customerPhone={serviceDetailsRequest.customerPhone}
+          disabled={serviceDetailsRequest.disabled === true}
+          preview={serviceDetailsRequest.preview === true}
+          scope="one_time"
+        />
       ) : null}
     </div>
   );
@@ -2951,7 +3049,10 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
 // method" after a capture already succeeded — the parent retires the saved
 // intent and remounts this modal with a fresh one.
-function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false }) {
+// afterVisit (GATE_PAF_EXISTING_CUSTOMERS): existing customer on the
+// pay-after-first-visit card rail — the checkbox renders the after_visit_card
+// (v12) authorization, the variant the accept records.
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false, afterVisit = false, paused = false, autopayOff = false, firstInvoiceNow = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
   const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
@@ -3045,7 +3146,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
       // Consent was ticked for the tender the server told us is saved; the
       // accept gate re-verifies the intent against Stripe regardless.
       setSubmitting(true);
-      onSuccess(intent.setupIntentId);
+      onSuccess(intent.setupIntentId, bank ? 'us_bank_account' : 'card');
       return;
     }
     if (!stripeRef.current || !elementsRef.current) return;
@@ -3070,7 +3171,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           setSubmitting(false);
           return;
         }
-        onSuccess(existing.setupIntent.id);
+        onSuccess(existing.setupIntent.id, bank ? 'us_bank_account' : 'card');
         return;
       }
       const result = await stripeRef.current.confirmSetup({
@@ -3086,7 +3187,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
       }
       const si = result.setupIntent;
       if (si && si.status === 'succeeded') {
-        onSuccess(si.id);
+        onSuccess(si.id, bank ? 'us_bank_account' : 'card');
         return;
       }
       // Instant-verified banks land 'succeeded' like cards; there is no
@@ -3123,7 +3224,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
             ? 'Payment method already saved'
             : prepay
               ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
-              : 'Set up Auto Pay'}
+              // Held cohorts (Auto Pay paused / explicitly off) keep the method
+              // on file but are never auto-charged: "Set up Auto Pay" would
+              // contradict the body copy below (GitHub Codex #5481 r3 P2).
+              : ((paused || autopayOff) ? 'Save a payment method' : 'Set up Auto Pay')}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           {replay
@@ -3134,9 +3238,13 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
               ? (bank
                 ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
                 : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-              : (bank
-                ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
-                : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
+              : ((paused || autopayOff)
+                // Paused / explicitly-off Auto Pay: the method is kept on file
+                // but never charged automatically — a pay link follows each visit.
+                ? `Save your ${bankOffered ? 'card or bank account' : 'card'} on file to confirm your plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}${paused ? 'Your Auto Pay is paused, so we' : 'We'} send you a pay link after each completed service.`
+                : (bank
+                  ? `Save your bank account to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.`
+                  : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. ${firstInvoiceNow ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : ''}After each completed service, your card is charged that service’s amount automatically.`))}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -3150,7 +3258,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {prepay
               ? (bank ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT)
-              : (bank ? ACH_CONSENT_TEXT : CARD_CONSENT_TEXT)}
+              : (bank ? ACH_CONSENT_TEXT : (afterVisit ? AFTER_VISIT_CARD_CONSENT_TEXT : CARD_CONSENT_TEXT))}
           </span>
         </label>
         {error ? (
@@ -3714,7 +3822,102 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+// Missing-contact capture (owner ruling 2026-09-27): rendered in the same
+// card as the Accept button, right above it, only for whichever field(s)
+// contactGaps actually says are missing. Last name is required — the
+// caller gates confirmDisabled on it and this shows the inline error once
+// the field has been touched; email is optional/skippable (format is only
+// validated when something was typed, which is the caller's job via the
+// server's own 400 — this component just collects the value).
+export function ContactGapFields({
+  gaps = null,
+  firstName = '',
+  onFirstNameChange,
+  onFirstNameBlur,
+  firstNameTouched = false,
+  lastName = '',
+  onLastNameChange,
+  onLastNameBlur,
+  lastNameTouched = false,
+  email = '',
+  onEmailChange,
+  onEmailBlur,
+  emailInvalid = false,
+  disabled = false,
+}) {
+  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email)) return null;
+  const firstNameMissing = gaps.firstName && firstNameTouched && !firstName.trim();
+  const lastNameMissing = gaps.lastName && lastNameTouched && !lastName.trim();
+  return (
+    <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+      {gaps.firstName ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>First name</span>
+          <input
+            type="text"
+            value={firstName}
+            onChange={(e) => onFirstNameChange?.(e.target.value)}
+            onBlur={onFirstNameBlur}
+            autoComplete="given-name"
+            maxLength={50}
+            disabled={disabled}
+            aria-required="true"
+            aria-invalid={firstNameMissing || undefined}
+            placeholder="First name"
+            style={{ ...softExitInputStyle, ...(firstNameMissing ? { borderColor: W.red } : {}) }}
+          />
+          {firstNameMissing ? (
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please enter your first name.</span>
+          ) : null}
+        </label>
+      ) : null}
+      {gaps.lastName ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Last name</span>
+          <input
+            type="text"
+            value={lastName}
+            onChange={(e) => onLastNameChange?.(e.target.value)}
+            onBlur={onLastNameBlur}
+            autoComplete="family-name"
+            maxLength={50}
+            disabled={disabled}
+            aria-required="true"
+            aria-invalid={lastNameMissing || undefined}
+            placeholder="Last name"
+            style={{ ...softExitInputStyle, ...(lastNameMissing ? { borderColor: W.red } : {}) }}
+          />
+          {lastNameMissing ? (
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please enter your last name.</span>
+          ) : null}
+        </label>
+      ) : null}
+      {gaps.email ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Email (for your service reports and receipts)</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => onEmailChange?.(e.target.value)}
+            onBlur={onEmailBlur}
+            aria-invalid={emailInvalid || undefined}
+            autoComplete="email"
+            inputMode="email"
+            maxLength={150}
+            disabled={disabled}
+            placeholder="you@example.com (optional)"
+            style={{ ...softExitInputStyle, ...(emailInvalid ? { borderColor: W.red } : {}) }}
+          />
+          {emailInvalid ? (
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please check your email address, or leave it blank.</span>
+          ) : null}
+        </label>
+      ) : null}
+    </div>
+  );
+}
+
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3756,7 +3959,13 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
         : 'No payment needed now. Your account manager confirms the exact price on a quick site visit, then sends your first invoice.')
     : usingExistingAppointment
       ? recurringPayPerApplication
-        ? `${existingApptLede} Next step creates your invoice and makes secure payment available.`
+        // The one payment-timing answer (lib/paymentTiming.js): an after-visit
+        // first invoice is neither created nor payable at this step.
+        ? (paymentTiming?.firstInvoice === 'after_visit'
+          ? `${existingApptLede} Nothing is charged today — ${paymentTiming.held
+            ? 'we send you a pay link after your first visit.'
+            : 'your payment method on file is billed for your first visit after it is completed.'}`
+          : `${existingApptLede} Next step creates your invoice and makes secure payment available.`)
         : paymentPreference === 'prepay_annual'
           ? (prepayInLane
             // Tender-accurate (Codex #3492 r10): the auto-satisfy lane
@@ -3817,6 +4026,7 @@ export function ReviewPhase({ website = false, slotId, slotMeta = null, existing
       </div>
       {autoPaySlot}
       {acceptanceTermsSlot}
+      {contactSlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
@@ -4317,7 +4527,7 @@ function ReviewBeforeBookingCard({ reason }) {
       </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
         {isTrenching
-          ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
+          ? 'Your price is set from the measured treatment path. A Waves specialist confirms the treatment plan, access, exact footage, and product with you before scheduling your visit, so it can’t be self-booked online.'
           : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
       </div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
@@ -4451,7 +4661,11 @@ const DETAILS_ACTION_STYLE = (disabled) => ({
   pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
 });
 
-function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false }) {
+// `scope="one_time"` (the one-time breakdown card's lawn row) asks the server
+// for the one-time variant of the guide; the server honors it only when a
+// one-time lawn row is on the estimate, so a lawn toggle estimate in one-time
+// mode never serves the recurring program guide under the one-time row.
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false, scope = null }) {
   const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
   if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
   const send = async (channel) => {
@@ -4464,7 +4678,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
       const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service: serviceKey, channel }),
+        body: JSON.stringify({ service: serviceKey, channel, ...(scope === 'one_time' ? { scope } : {}) }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body.ok) {
@@ -4500,7 +4714,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               carry the action name. */}
           <a
             className="gc-section-cta"
-            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
+            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf${scope === 'one_time' ? '?scope=one_time' : ''}`}
             target={preview ? undefined : '_blank'}
             rel={preview ? undefined : 'noopener noreferrer'}
             onClick={preview ? (e) => e.preventDefault() : undefined}
@@ -4563,7 +4777,8 @@ function customerOneTimeLabel(item = {}) {
   return label || 'One-time service';
 }
 
-function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
+function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false, guaranteeScope: scopeProp = null }) {
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   const items = Array.isArray(contribution?.items)
     ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
     : [];
@@ -4583,17 +4798,22 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
+          // Each row states its own service's terms (server termsScope).
+          const rowScope = serviceGuaranteeScope(scope, item.termsScope);
+          const visibleDetail = copyAllowedInScope(item.detail, rowScope)
+            ? item.detail
+            : withoutClaimsOutsideScope(item.detail, rowScope, preSlabSelectedWarrantyPart(item));
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
-                {item.detail ? (
-                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                {visibleDetail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
               </div>
             );
           }
@@ -4601,10 +4821,10 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
-                {item.detail ? (
-                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                {visibleDetail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}
@@ -4853,6 +5073,10 @@ export function ServiceSection({
   waveGuardTier,
   afterPrice = null,
   showGetServiceCta = false,
+  noGuarantee = false,
+  // The estimate's guarantee scope ('all' | 'satisfaction' | 'none'); older
+  // callers pass the noGuarantee boolean instead.
+  guaranteeScope: guaranteeScopeProp = null,
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
@@ -4875,6 +5099,12 @@ export function ServiceSection({
   // gate on) when the plan is recurring, else null.
   lawnCalendar = null,
 }) {
+  // The estimate's scope governs lines that cover the whole estimate, such
+  // as the approve CTA below (its approval covers every service, one-time
+  // work included). The section's own rows state its own terms (server
+  // termsScope) within it: a pest section beside rodent work keeps them.
+  const estimateGuaranteeScope = resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee);
+  const sectionGuaranteeScope = serviceGuaranteeScope(estimateGuaranteeScope, section?.termsScope);
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
   // in flow instead. Hook must precede the early return (rules of hooks).
@@ -4980,7 +5210,7 @@ export function ServiceSection({
             the monitoring price so the two figures read as ONE plan. */}
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
-            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" guaranteeScope={sectionGuaranteeScope} />
             <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
@@ -5060,6 +5290,7 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
+            guaranteeScope={sectionGuaranteeScope}
             // Guarantee line off under glass (owner 2026-07-23) — the approve
             // CTA's glass micro line states the same money-back guarantee
             // immediately below, so the in-card line read twice. Non-glass
@@ -5181,7 +5412,7 @@ export function ServiceSection({
             box — multi-service plans no longer detach it into a separate card
             (owner 2026-07-10). Termite renders its install ABOVE the price
             (lead variant above); everything else trails the price block. */}
-        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} />}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} guaranteeScope={sectionGuaranteeScope} />}
 
         {serviceDetailsRequest ? (
           <ServiceDetailsRequestRow
@@ -5317,6 +5548,7 @@ export function ServiceSection({
               Array.isArray(section.memberKeys) && section.memberKeys.length
                 ? section.memberKeys
                 : [section.key || section.label],
+              { scope: estimateGuaranteeScope },
             )}
           />
         ) : null}
@@ -5386,11 +5618,12 @@ function AnnualOfferClosedCard() {
 
 export default function EstimateViewPage() {
   const { token } = useParams();
+  const { setFooterNoGuarantee } = useWavesShell();
   const websiteMode = new URLSearchParams(window.location.search).get('website') === '1';
-  return <EstimateViewPageInner key={token || 'no-token'} websiteMode={websiteMode} />;
+  return <EstimateViewPageInner key={token || 'no-token'} websiteMode={websiteMode} setFooterNoGuarantee={setFooterNoGuarantee} />;
 }
 
-function EstimateViewPageInner({ websiteMode = false }) {
+function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = null }) {
   const { token } = useParams();
   // Root subscription to the module-global glass-copy flag: a change
   // (setGlassDefault from a /data load) re-renders this tree, so every
@@ -5444,6 +5677,20 @@ function EstimateViewPageInner({ websiteMode = false }) {
       return null;
     }
   });
+  // The footer's "Backed by the Waves Guarantee" covers the whole estimate,
+  // so it needs every service to carry the plan terms: the server's
+  // noEstimateWideGuarantee (a rodent, commercial, termite or unknown service
+  // anywhere). The document it renders reads the same scope as its own terms
+  // line (proposalGuaranteeScope, which also honors the page's decision).
+  const footerNoGuaranteeClaims = data === null
+    ? null
+    : (pdfDocumentMode && data?.documentRender === true
+        ? proposalGuaranteeScope(data) !== 'all'
+        : data?.estimate?.noGuaranteeClaims === true || data?.estimate?.noEstimateWideGuarantee === true);
+  useLayoutEffect(() => {
+    setFooterNoGuarantee?.(footerNoGuaranteeClaims);
+    return () => setFooterNoGuarantee?.(false);
+  }, [footerNoGuaranteeClaims, setFooterNoGuarantee]);
 
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
@@ -5494,6 +5741,18 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
+  // Missing-contact capture (owner ruling 2026-09-27): rendered only when
+  // the server's contactGaps says a field is actually missing. Last name is
+  // required client-side (Accept stays disabled / shows an inline error
+  // until filled); email is optional and skippable. contactLastNameTouched
+  // gates the inline error to after the customer has actually left the
+  // field, so it doesn't render red on first paint.
+  const [contactFirstName, setContactFirstName] = useState('');
+  const [contactFirstNameTouched, setContactFirstNameTouched] = useState(false);
+  const [contactLastName, setContactLastName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
+  const [contactEmailTouched, setContactEmailTouched] = useState(false);
   // Acceptance deposit (flat $49/$99). depositIntent holds the live
   // POST /deposit-intent response while the Payment Element modal is open;
   // the ref carries the paid PI id into accept (server live-verifies it —
@@ -5519,6 +5778,38 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // resolve-time check needs the live modal state, not its closure snapshot.
   const recurringCardIntentOpenRef = useRef(false);
   const recurringCardSetupIntentIdRef = useRef(null);
+  // GitHub Codex #5481 r3: the collection promise the capture UI RENDERED for
+  // the captured intent — { tender, variant, version } — recorded at the moment
+  // of capture, never recomputed at accept (a plan switch after the capture must
+  // not change what the customer is said to have seen). afterVisitRenderedRef
+  // is the render-time promise the capture surfaces are currently showing.
+  const recurringCardRenderedConsentRef = useRef(null);
+  const afterVisitRenderedRef = useRef({ afterVisit: false, version: AFTER_VISIT_CONSENT_VERSION });
+  // The accept's in-transaction promise can be narrower than /data's best
+  // case for reasons the page cannot see (an existing customer whose series
+  // already exists gets an UNATTACHED first invoice, paid by link at accept).
+  // A CONSENT_VARIANT_STALE 409 returns that promise; remember it for THIS
+  // selection so the next capture renders the base text instead of looping.
+  // The accept's per-selection timing answer from a refused confirm:
+  // { key, deferred } (lib/paymentTiming.js). Honored for that selection only.
+  const [timingAnswer, setTimingAnswer] = useState(null);
+  const afterVisitSelectionKeyRef = useRef('');
+  // Whether THIS render shows "billed after your first visit" payment timing;
+  // attested on /accept, which refuses (PAYMENT_TIMING_REFRESH) when the
+  // standard invoice would actually go out payable at accept.
+  const afterVisitTimingShownRef = useRef(false);
+  const noteRenderedRecurringConsent = useCallback((tender) => {
+    const t = tender === 'us_bank_account' ? 'us_bank_account' : 'card';
+    const cur = afterVisitRenderedRef.current;
+    const afterVisit = cur.afterVisit === true && t === 'card';
+    recurringCardRenderedConsentRef.current = {
+      tender: t,
+      variant: afterVisit ? 'after_visit_card' : null,
+      // The base card / ACH text this bundle rendered carries its own version
+      // (GitHub Codex #5481 r5 P1), attested like the after-visit one.
+      version: afterVisit ? cur.version : CONSENT_VERSION,
+    };
+  }, []);
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
   // requirement (flag flipped mid-session, or an exemption changed between
   // /data and /accept) — force the capture branch on the next confirm so the
@@ -5697,6 +5988,10 @@ function EstimateViewPageInner({ websiteMode = false }) {
         // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
         recurringCardSetupIntentIdRef.current = siFromRedirect;
+        // The tender the customer rendered is unknown after a redirect; the
+        // attestation falls back to the current render (card) and the server
+        // verifies it against the intent's real tender.
+        recurringCardRenderedConsentRef.current = null;
       }
       if (piFromRedirect || siFromRedirect) {
         ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
@@ -6811,11 +7106,47 @@ function EstimateViewPageInner({ websiteMode = false }) {
     setSlotsRefreshSignal((v) => v + 1);
   }, [services, comboAxisKeys, comboModeActive]);
 
+  // contactGaps is booleans-only (server never sends the linked customer's
+  // real name/email) — lastName is REQUIRED (Accept stays disabled and shows
+  // an inline error until filled); email is optional/skippable, so a blank
+  // field never blocks the confirm.
+  const contactFirstNameGap = !!data?.contactGaps?.firstName;
+  const contactFirstNameMissing = contactFirstNameGap && !contactFirstName.trim();
+  const contactLastNameGap = !!data?.contactGaps?.lastName;
+  const contactEmailGap = !!data?.contactGaps?.email;
+  const contactLastNameMissing = contactLastNameGap && !contactLastName.trim();
+  // A typed-but-malformed email blocks Accept HERE, before handleConfirm can
+  // mint a card hold / prepay charge — the server's 400 would otherwise land
+  // after that step. Same shape as the server's EMAIL_RE; blank stays fine.
+  const contactEmailInvalid = contactEmailGap && !!contactEmail.trim()
+    && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(contactEmail.trim());
+
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
     // blocks the flow before review, and the server 409s a draft accept.
     if (readOnlyPreview) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
+      return;
+    }
+    // Required-field guard mirrors confirmDisabled below (defense in depth —
+    // the button is disabled while this is true, but a stale disabled-state
+    // read should never let a request through with a required field blank).
+    if (contactFirstNameMissing) {
+      setContactFirstNameTouched(true);
+      setError('Please enter your first name to continue.');
+      return;
+    }
+    if (contactLastNameGap && !contactLastName.trim()) {
+      setContactLastNameTouched(true);
+      setError('Please enter your last name to continue.');
+      return;
+    }
+    // Same boundary check for a typed-but-malformed optional email: the
+    // annual-prepay "Confirm & pay" button reaches here without the review
+    // button's disabled state (codex #5102 r3 P2).
+    if (contactEmailInvalid) {
+      setContactEmailTouched(true);
+      setError('Please check your email address, or leave it blank.');
       return;
     }
     // Synchronous single-flight guard: React state (`processing`-style flags)
@@ -6907,6 +7238,34 @@ function EstimateViewPageInner({ websiteMode = false }) {
           // Never for annual prepay: the line is not shown for that lane (paid
           // up front), so nothing is attested and nothing is recorded.
           termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
+          // Attests which card-authorization copy THIS TAB RENDERED for the
+          // captured intent (GATE_PAF_EXISTING_CUSTOMERS) — {variant, version,
+          // tender}, taken from what the capture UI showed when the card was
+          // saved: the after_visit_card (v12) text only for a CARD tender when
+          // the promise held (never prepay, never the paused / Auto-Pay-off
+          // cohorts, never a setup-only invoice), the tender-specific base text
+          // otherwise. The server recomputes the promise in the accept
+          // transaction and 409s CONSENT_VARIANT_STALE on any difference.
+          ...(() => {
+            // Every after-visit cohort attests what its capture rendered — the
+            // held ones (Auto Pay paused / off) their base card / ACH text too
+            // (GitHub Codex #5481 r7). Gate-off policies carry none of these.
+            const pol = data?.recurringCardPolicy;
+            if (paymentPreference === 'prepay_annual'
+              || !(pol?.afterVisitConsent === true || pol?.afterVisitPaused === true || pol?.afterVisitAutopayOff === true)) return {};
+            const rendered = recurringCardSetupIntentIdRef.current ? recurringCardRenderedConsentRef.current : null;
+            const cur = afterVisitRenderedRef.current;
+            const tender = rendered ? rendered.tender : 'card';
+            const afterVisit = rendered ? rendered.variant === 'after_visit_card' : cur.afterVisit === true;
+            const version = rendered ? rendered.version : (afterVisit ? cur.version : CONSENT_VERSION);
+            return {
+              recurringCardConsentVariant: afterVisit ? 'after_visit_card' : undefined,
+              // Sent with every attested capture, the base text's version too.
+              recurringCardConsentVersion: (afterVisit || recurringCardSetupIntentIdRef.current) ? version : undefined,
+              recurringCardConsentTender: recurringCardSetupIntentIdRef.current ? tender : undefined,
+            };
+          })(),
+          afterVisitTimingShown: (paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef.current) ? true : undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -6921,6 +7280,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
           // Attests the quote step's authorization checkbox was checked
           // (auto-satisfy accepts — Codex #3492 r11); server-enforced.
           prepayChargeConsentAccepted: prepayChargeAckRef.current?.consentAccepted === true ? true : undefined,
+          // Missing-contact capture: only sent when the field was actually
+          // rendered (a real contactGaps gap) and the customer typed
+          // something — email is optional/skippable, so a blank field sends
+          // nothing rather than an empty string.
+          contactFirstName: contactFirstNameGap && contactFirstName.trim() ? contactFirstName.trim() : undefined,
+          contactLastName: contactLastNameGap && contactLastName.trim() ? contactLastName.trim() : undefined,
+          contactEmail: contactEmailGap && contactEmail.trim() ? contactEmail.trim() : undefined,
         }),
       });
       if (!r.ok) {
@@ -6995,6 +7361,43 @@ function EstimateViewPageInner({ websiteMode = false }) {
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'PAYMENT_TIMING_REFRESH') {
+            // The server bills this selection now (afterVisitDeferred false) or
+            // after the visit (true): show that timing for it, drop the
+            // captured intent (its checkbox was for the other terms) and refetch.
+            setTimingAnswer({ key: afterVisitSelectionKeyRef.current, deferred: body.afterVisitDeferred === true });
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
+          if (body.code === 'CONSENT_VARIANT_STALE' || body.code === 'ACCEPT_BILLING_CHANGED') {
+            // The base card / ACH copy lives in this bundle: when the server
+            // would record a newer version of it, only a full reload shows
+            // that text (a /data refetch would re-render the old wording).
+            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.version
+              && body.collectionPromise.version !== (body.collectionPromise.variant ? AFTER_VISIT_CONSENT_VERSION : CONSENT_VERSION)) {
+              recurringCardSetupIntentIdRef.current = null;
+              window.location.reload();
+              throw new Error(body.error || 'Your payment terms were updated — reloading the page.');
+            }
+            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.tender === 'card') {
+              // Only an explicit "first invoice goes out now" changes the
+              // timing; a base-consent answer alone (e.g. Auto Pay paused since
+              // the capture) keeps it.
+              if (body.collectionPromise.deferred === false) {
+                setTimingAnswer({ key: afterVisitSelectionKeyRef.current, deferred: false });
+              }
+            }
+            // The card-authorization text (or the account's billing cohort) moved
+            // since this tab loaded — refetch so the capture UI renders exactly
+            // what the server will record, drop the captured intent (its
+            // checkbox was for the old text) and keep the plan selections.
+            recurringCardSetupIntentIdRef.current = null;
+            setInlineCardIntent(null);
+            await loadEstimate({ preserveSelection: true });
+            throw new Error(body.error || 'Your payment terms were updated — please review them and confirm again.');
+          }
           if (body.code === 'TERMS_VERSION_STALE') {
             // The acceptance copy changed since this tab loaded — refetch so
             // the line above Accept is the one the server will record, keep
@@ -7099,7 +7502,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -7198,6 +7601,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         return;
       }
       recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
+      noteRenderedRecurringConsent(cardResult.methodType);
       track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
       // Auto-extend trigger 2/3: the inline seamless capture just spent real
       // time confirming the SetupIntent. Awaited, and a definitive answer
@@ -7333,7 +7737,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -7405,8 +7809,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // Unlike the card-hold success (which goes straight to accept — the hold
   // supersedes the deposit), the Auto Pay card rides ALONGSIDE the deposit:
   // re-enter handleConfirm so the deposit preflight runs next.
-  const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
+  const handleRecurringCardSuccess = useCallback(async (setupIntentId, renderedTender) => {
     recurringCardSetupIntentIdRef.current = setupIntentId;
+    noteRenderedRecurringConsent(renderedTender);
     recurringCardIntentOpenRef.current = false;
     setRecurringCardIntent(null);
     track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
@@ -7438,7 +7843,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     if (ctaPhaseRef.current !== 'review'
       || (reservationRef.current?.scheduledServiceId || null) !== holdBeforeExtend) return;
     await handleConfirm();
-  }, [data, handleConfirm, extendHoldAndSettle]);
+  }, [data, handleConfirm, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleRecurringCardCancel = useCallback(() => {
     recurringCardIntentOpenRef.current = false;
@@ -7846,8 +8251,19 @@ function EstimateViewPageInner({ websiteMode = false }) {
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
-  const baseGlassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
+  // The claims this page may make, from the server's two decisions:
+  // 'none' (noGuaranteeClaims — termite work, or a service it can't
+  // classify, anywhere on the estimate), 'satisfaction'
+  // (noEstimateWideGuarantee — a rodent or commercial service) or 'all'.
+  // Every copy surface reads it; under 'none' the one-time hero drops
+  // "satisfaction guaranteed" too.
+  const pageGuaranteeScope = guaranteeScope(estimate || {});
+  const categoryGlassPack = estimate.isOneTimeOnly === true
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), {
+      reviewBeforeBooking,
+      preserveServiceHero: serviceSpecificOneTimeHero,
+      noGuarantee: pageGuaranteeScope === 'none',
+    })
     : glassEstimateCopyFor(serviceCategory);
   // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
   // roach cleanout, flea, wasp, bed bug, …): its hero names the service
@@ -7859,7 +8275,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
     : null;
   // Applied with or without the category glass pack — the server-rendered
   // page applies the service hero unconditionally (codex #3823 deferred P2).
-  const glassPack = glassPackWithOneTimeHero(baseGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
+  const heroGlassPack = glassPackWithOneTimeHero(categoryGlassPack, oneTimeServiceCopy, { reviewBeforeBooking });
+  // Apply the estimate-wide rule last: an authored proposal can add termite
+  // work while stale engine pricing still supplies a guaranteed one-time
+  // service hero, and that overlay must not restore the removed claim.
+  const glassPack = glassPackWithoutGuarantee(heroGlassPack, pageGuaranteeScope);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -7993,6 +8413,37 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
     ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
     : [];
+  // The after-visit card promise the capture surfaces render (GitHub Codex #5481
+  // r3): the server's best-case promise (/data afterVisitConsent + version) AND
+  // an invoice shape that is actually deferred to the first visit — a setup-only
+  // invoice goes out as a pay link at accept, so the "billed after your first
+  // visit" text must not render for it. The accept re-checks all of it.
+  const afterVisitInvoiceShape = standardInvoiceShape({
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+  });
+  const afterVisitSelectionKey = `${paymentPreference || ''}|${selectedFrequency || ''}|${JSON.stringify(serviceCadences || null)}`;
+  afterVisitSelectionKeyRef.current = afterVisitSelectionKey;
+  // The ONE payment-timing answer every surface below renders from.
+  const paymentTiming = resolvePaymentTiming({
+    policy: data?.recurringCardPolicy,
+    paymentPreference,
+    serviceMode,
+    invoiceShape: afterVisitInvoiceShape,
+    selectionKey: afterVisitSelectionKey,
+    timingAnswer,
+  });
+  const captureTiming = captureTimingProps(paymentTiming);
+  const afterVisitRendered = captureTiming.afterVisit;
+  afterVisitTimingShownRef.current = paymentTiming?.attestTiming === true;
+  afterVisitRenderedRef.current = {
+    afterVisit: afterVisitRendered,
+    // The version of the text THIS BUNDLE renders (AFTER_VISIT_CARD_CONSENT_TEXT
+    // ships with it), never the server's: an older tab must not attest newer
+    // copy it never showed (GitHub Codex #5481 r6 audit).
+    version: AFTER_VISIT_CONSENT_VERSION,
+  };
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -8050,6 +8501,17 @@ function EstimateViewPageInner({ websiteMode = false }) {
     const prepayWaivedServices = feeList
       .filter((fee) => fee?.waivedWithPrepay === true)
       .map((fee) => fee.service);
+    // Guide row for one-time lawn lines, under the one-time breakdown card.
+    // `lawnSectionCarriesRow` = a recurring lawn_care section is rendered
+    // (recurring mode) and already shows its own row — skip so the page never
+    // offers the same guide twice. The staff draft preview mirrors the row
+    // inert, same as the section rows.
+    const oneTimeLawnGuideRequest = (lawnSectionCarriesRow) => (
+      renderFlags.showServiceDetailsRequest && !readOnly
+      && !(lawnSectionCarriesRow && services.some((s) => s?.isRecurring && s.key === 'lawn_care'))
+        ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: readOnlyPreview }
+        : null
+    );
     if (mode === 'recurring') {
       return (
         <>
@@ -8078,6 +8540,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
+                    guaranteeScope={pageGuaranteeScope}
                     // Only exclude fees that actually render their own
                     // SetupFeeCard — a glass-suppressed card must stay in
                     // this list or the one-time total understates itself
@@ -8086,6 +8549,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                       .filter((fee) => !(glassContent && fee.waivedWithPrepay && section.isPest === true))
                       .map((fee) => fee.service)}
                     prepayWaivedServices={prepayWaivedServices}
+                    serviceDetailsRequest={oneTimeLawnGuideRequest(true)}
                   />
                 ) : null}
               </>
@@ -8158,6 +8622,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                   : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
+                guaranteeScope={pageGuaranteeScope}
                 // Glass removes the customize section everywhere — including
                 // this accepted read-only recap (owner directive; the booked
                 // add-ons still price into the totals shown).
@@ -8332,7 +8797,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               code in prod (glass active for all categories) and contradicted
               the standing dedupe ruling. */}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             // Tier-aware fee state on the plan-level card too (codex r24 P2):
@@ -8358,6 +8823,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
           {services.length > 1 && !estimate.showOneTimeOption ? (
             <OneTimeBreakdownCard
               breakdown={pricing.oneTimeBreakdown}
+              guaranteeScope={pageGuaranteeScope}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
               // Items embedded inside their own service box
@@ -8385,6 +8851,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                   .map((item) => oneTimeRowIdentityKey(item))),
               ]}
               prepayWaivedServices={prepayWaivedServices}
+              serviceDetailsRequest={oneTimeLawnGuideRequest(true)}
             />
           ) : null}
 
@@ -8400,11 +8867,15 @@ function EstimateViewPageInner({ websiteMode = false }) {
     return (
       <>
         {hasOneTimeRows
-          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} guaranteeScope={pageGuaranteeScope} serviceDetailsRequest={oneTimeLawnGuideRequest(false)} />
           : (
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
               breakdown={pricing.oneTimeBreakdown}
+              // Its copy (the 30-day callback) covers every one-time row, so it
+              // follows the page-wide decision: rodent or commercial work
+              // carries no callback term.
+              noGuarantee={pageGuaranteeScope !== 'all'}
             />
           )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
@@ -8714,6 +9185,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                paymentTiming={paymentTiming}
               />
             </>
           ) : null}
@@ -8818,6 +9290,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
           })() : null}
           <ReviewPhase
             website={websiteMode}
+            paymentTiming={paymentTiming}
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}
@@ -8869,7 +9342,14 @@ function EstimateViewPageInner({ websiteMode = false }) {
                       ? (inlineCardState.methodType === 'us_bank_account'
                         ? 'Bank transfers have no added card surcharge.'
                         : CARD_SURCHARGE_DISCLOSURE)
-                      : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`))
+                      : (() => {
+                        // Read from the one timing answer (null outside the
+                        // existing-customer cohort: today's sentence).
+                        const firstNow = paymentTiming?.firstInvoice === 'at_confirm' ? `${FIRST_INVOICE_AT_CONFIRM_COPY} ` : '';
+                        if (paymentTiming?.held === 'paused') return `Nothing is charged today. ${firstNow}Your Auto Pay is paused, so we keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                        if (paymentTiming?.held === 'off') return `Nothing is charged today. ${firstNow}We keep your card on file and send you a pay link after each completed service. ${CARD_SURCHARGE_DISCLOSURE}`;
+                        return `Nothing is charged today. ${firstNow}Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`;
+                      })()))
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
@@ -8887,10 +9367,32 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
+                {...captureTiming}
               />
             ) : null}
             acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
               <AcceptanceTermsLine terms={data.acceptanceTerms} />
+            ) : null}
+            contactSlot={data?.contactGaps ? (
+              <ContactGapFields
+                gaps={data.contactGaps}
+                firstName={contactFirstName}
+                onFirstNameChange={setContactFirstName}
+                onFirstNameBlur={() => setContactFirstNameTouched(true)}
+                firstNameTouched={contactFirstNameTouched}
+                lastName={contactLastName}
+                onLastNameChange={setContactLastName}
+                onLastNameBlur={() => setContactLastNameTouched(true)}
+                lastNameTouched={contactLastNameTouched}
+                email={contactEmail}
+                onEmailChange={setContactEmail}
+                onEmailBlur={() => setContactEmailTouched(true)}
+                emailInvalid={contactEmailTouched && contactEmailInvalid}
+                // Locked for the whole confirm, including the inline card
+                // confirmSetup() wait (ctaPhase stays 'review' there) — the
+                // running confirm already captured these values.
+                disabled={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
+              />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual'
@@ -8902,6 +9404,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
+              || contactFirstNameMissing
+              || contactLastNameMissing
+              || contactEmailInvalid
               || (inlineAutoPayActive && inlineCardIntent
                 ? !(inlineCardState.ready && inlineCardState.agreed)
                 : false)}
@@ -8958,6 +9463,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               onCancel={handleRecurringCardCancel}
               onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
+              {...captureTiming}
             />
           ) : null}
           {websiteMode ? null : aiPanelBlock}
@@ -9029,6 +9535,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 cardHold={data?.cardHoldPolicy || null}
                 prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
                 prepayCardCapture={!!data?.recurringCardPolicy?.required}
+                paymentTiming={paymentTiming}
               />
             </div>
           ) : null

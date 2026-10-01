@@ -48,6 +48,7 @@ const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 // bearer token, so a shorten failure must fail closed — never fall back to
 // putting the long tokenized URL in an SMS body. See the call site.
 const { createShortCode } = require('./short-url');
+const { autoTextHoldReason } = require('./messaging/auto-text-holds');
 
 const MESSAGE_TYPE = 'voicemail_quote_link';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -161,7 +162,23 @@ async function clearLeadClaim(leadId) {
   }
 }
 
-async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone } = {}) {
+// The shared hold check's options for this voicemail (the early check and
+// the recheck at the provider boundary): its own call opens the
+// recent-conversation window and is read by id (the text may go to a spoken
+// callback number that call's row does not carry), and the lane's own texts
+// are its one-shot's business, not a conversation.
+function holdOptions(call) {
+  return {
+    callAt: call.created_at ? new Date(call.created_at) : new Date(),
+    originCallId: call.id || null,
+    excludeMessageTypes: [MESSAGE_TYPE],
+  };
+}
+
+// The provider-boundary hold refusal's code, read back off the send result.
+const HELD_AT_BOUNDARY = 'VOICEMAIL_TEXT_HELD';
+
+async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone, doNotContactRequested = false } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
     return { sent: false, skipped: 'gate_off' };
@@ -171,7 +188,12 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
 
   // Belt-and-suspenders history check: pre-claim-table sends (or hand-sent
   // rows tagged with the message_type) also consume the one-shot. Advisory
-  // only for ordering — the ATOMIC gate is the claim insert below.
+  // only for ordering — the ATOMIC gate is the claim insert below. Every
+  // quote-link row counts, whatever its status: a queued replay that ended
+  // 'blocked' cannot be proven never sent from the row (a retry-exhausted
+  // provider timeout ends 'blocked' too), so a replay held or refused at
+  // 8 AM uses up the number's one automated quote link just like a sent
+  // one. A hold on the immediate path writes no row and consumes nothing.
   try {
     const prior = await db('sms_log')
       .where({ to_phone: phone, message_type: MESSAGE_TYPE })
@@ -183,6 +205,27 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     // A failed dedupe read must not fire a possibly-duplicate automated text.
     logger.warn(`[voicemail-sms] sms_log dedupe read failed — skipping (fail closed): ${e.message}`);
     return { sent: false, skipped: 'dedupe_read_failed' };
+  }
+
+  // Who never gets this automated text (owner rulings 2026-09-27): someone
+  // who asked in this voicemail not to be contacted, or — per the shared
+  // messaging/auto-text-holds.js — who already has a quote or estimate, has
+  // an open lead a staff member is working, asked on an earlier call not to
+  // be contacted, showed on an earlier call to be a salesperson / vendor /
+  // robocall / wrong number / job applicant, or texted with us in the last 7
+  // days. Checked BEFORE the claim, so a hold never consumes the one-shot;
+  // an unreadable check fails closed. A deferred send re-runs the same check
+  // at replay (deferred-replay-registry.js voicemail_lead_sms_deferred).
+  if (doNotContactRequested) return { sent: false, skipped: 'asked_not_to_be_contacted' };
+  try {
+    const hold = await autoTextHoldReason(phone, holdOptions(call));
+    if (hold) {
+      logger.info(`[voicemail-sms] Text-back held for lead ${leadId}: ${hold}`);
+      return { sent: false, skipped: hold };
+    }
+  } catch (e) {
+    logger.warn(`[voicemail-sms] hold check failed — skipping (fail closed): ${e.message}`);
+    return { sent: false, skipped: 'hold_check_failed' };
   }
 
   // One text per phone number, EVER — DB-atomic: phone is the PRIMARY KEY of
@@ -332,6 +375,23 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     return { sent: false, skipped: 'template_disabled' };
   }
 
+  // Recheck the holds at the provider boundary — Twilio runs this after
+  // every other await, immediately before its request: the claims, the
+  // landline lookup, the short link, the render and the pipeline's own
+  // checks all awaited since the first check, and a text exchanged, a lead
+  // assigned or an estimate sent meanwhile still stops it. Which hold fired
+  // is kept here; an unreadable check fails closed.
+  const boundary = { hold: null };
+  const providerPreSendCheck = async ({ dbi } = {}) => {
+    try {
+      boundary.hold = await autoTextHoldReason(phone, { ...holdOptions(call), ...(dbi ? { dbi } : {}) });
+    } catch (e) {
+      logger.warn(`[voicemail-sms] boundary hold recheck failed — holding the text (fail closed): ${e.message}`);
+      boundary.hold = 'hold_check_failed';
+    }
+    return boundary.hold ? { ok: false, code: HELD_AT_BOUNDARY, reason: boundary.hold } : { ok: true };
+  };
+
   const result = await sendCustomerMessage({
     to: phone,
     body,
@@ -342,11 +402,20 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
     entryPoint: 'voicemail_lead_sms',
+    providerPreSendCheck,
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
     },
   });
+
+  // A hold at the boundary never consumed the one-shot — release both claims.
+  if (!result.sent && result.code === HELD_AT_BOUNDARY) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[voicemail-sms] Text-back held at the provider boundary for lead ${leadId}: ${boundary.hold}`);
+    return { sent: false, skipped: boundary.hold || 'held' };
+  }
 
   if (result.sent && !isRealProviderSend(result)) {
     // Upstream suppression sentinel (SMS gate off, template disabled, owner
@@ -392,6 +461,11 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
+          // The originating call, for the replay's hold recheck: read by id
+          // (the text may go to a spoken callback number its row does not
+          // carry), and its time opens the recent-conversation window.
+          call_log_id: call.id || null,
+          call_created_at: call.created_at || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,
           // and an anonymous-lead transactional send only clears the consent

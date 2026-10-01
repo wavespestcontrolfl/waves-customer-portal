@@ -103,6 +103,7 @@
     "ajv-formats": "^3.0.1",
     "archiver": "^7.0.1",
     "csv-parse": "^6.2.1",
+    "fontkit": "^2.0.4",
     "google-ads-api": "^23.0.0",
     "googleapis": "^171.4.0",
     "imapflow": "^1.2.18",

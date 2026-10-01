@@ -91,8 +91,8 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
-  test('explicitPushOnly + null recipient: a push failure is reported as an app-side outcome, never a Twilio send', async () => {
-    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' });
+  test.each(['no_fresh_device', 'app_event_already_visible'])('explicitPushOnly + null recipient: %s stays an app-side outcome', async (reason) => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason });
 
     const result = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
       explicitPushOnly: true,
@@ -103,7 +103,7 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     });
 
     expect(mockAttemptPushFirst).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ success: false, appUnavailable: true });
+    expect(result).toMatchObject({ success: false, appUnavailable: true, error: reason });
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
@@ -120,4 +120,48 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     expect(mockAttemptPushFirst).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no recipient'));
   });
+
+  test('explicitPushOnly: a persisted bell with no accepting device is reported as bellPersisted', async () => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', bellPersisted: true });
+    const result = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(result).toMatchObject({ success: false, appUnavailable: true, bellPersisted: true });
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' });
+    const bare = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(bare.bellPersisted).toBeUndefined();
+  });
+
+  test.each([
+    ['push in flight', { pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' }, { appPending: true }],
+    ['native retry', { retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable', retryAfterMs: 900000 }, { appRetryable: true, retryAfterMs: 900000 }],
+  ])('explicitPushOnly: %s carries only a real persisted-bell witness', async (_label, pushed, expected) => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, ...pushed, bellPersisted: true });
+    const witnessed = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(witnessed).toMatchObject({ success: false, deliveryOutcome: 'uncertain', bellPersisted: true, ...expected });
+
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, ...pushed });
+    const stale = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(stale).toMatchObject({ success: false, deliveryOutcome: 'uncertain', ...expected });
+    expect(stale.bellPersisted).toBeUndefined();
+  });
+  test('an earlier visible App event retains its time without a fresh bell or native proof', async () => {
+    const visibleAt = new Date(Date.now() - 86400000);
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent',
+      reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    const result = await TwilioService.sendSMS(null, 'Changed billing copy', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(result).toMatchObject({ success: false, appUnavailable: true,
+      error: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(result.bellPersisted).toBeUndefined();
+    expect(result.sid).toBeUndefined();
+  });
+
 });

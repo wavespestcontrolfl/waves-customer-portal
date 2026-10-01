@@ -21,6 +21,18 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   providerPreSendCheck(claimMeta) — returns the replay's predicate at the
+ *                          TRUE provider boundary: twilio.js runs it after
+ *                          every other await (the executor's own work, the
+ *                          pipeline's fresh checks), immediately before its
+ *                          request, on the connection it holds.
+ *   providerHandoff(claimMeta, dispatch) / billingEmailPreSendCheck(claimMeta, ctx)
+ *                          — the invoice-delivery pair the canonical sender
+ *                          already takes from an immediate invoice send
+ *                          (withProviderHandoff for the Text/App provider,
+ *                          billingEmailPreSendCheck under the Email
+ *                          authority's lock), for a replay that must hold the
+ *                          same invoice lock through its provider request.
  *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
  *                          guarded canonical send. It must return the same
  *                          canonical send outcome as the default dispatcher;
@@ -63,6 +75,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./scheduled-sms-limits');
 
 // Sequence-ending states a customer REPLY produces — 'completed' is the
 // final step's own natural advance (it marks completed right after queueing
@@ -107,6 +120,12 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
     return { refusal: { eligible: false, reason: `application-${status || 'unknown'}` } };
   }
   return { app };
+}
+
+// A deferred invoice-followup SMS that was a bank-verification re-nudge
+// (invoice-followups mdPending), not an overdue reminder.
+function followupReplayIsVerification(meta) {
+  return meta?.original_message_type === 'bank_verification_incomplete' || meta?.billingDeliveryCategory === 'payment_issue';
 }
 
 // Stage supersession: for the interview stages only, the application must
@@ -173,6 +192,121 @@ function checkRecruitingBookingVersion(meta, app, stage) {
   if (!pinned || pinned !== current) return { eligible: false, reason: 'interview-rebooked' };
   if ((meta.interview_mode || null) !== (app.interview_mode || null)) return { eligible: false, reason: 'interview-mode-changed' };
   return null;
+}
+
+// A dispute-hold withhold that could not queue its invoice onto the
+// scheduled-invoice sender: a durable office alert (best-effort itself - a
+// failed alert is logged, and the caller still retries the queue write).
+async function raiseHeldInvoiceQueueAlert({ invoiceId, customerId, error }) {
+  try {
+    await require('../dispatch-alerts').createAlert({
+      type: 'collection_hold_invoice_queue_failed',
+      severity: 'warn',
+      payload: {
+        invoiceId: String(invoiceId),
+        customerId: customerId ? String(customerId) : null,
+        error: String(error?.message || error).slice(0, 300),
+        action: 'A dispute hold withheld this invoice\'s pay link but the invoice could not be queued to send once the hold ends. Send it from the invoice page after the hold is released.',
+      },
+    });
+  } catch (alertErr) {
+    logger.error(`[deferred-replay] office alert for the un-queued held invoice ${invoiceId} also failed: ${alertErr.message}`);
+  }
+}
+
+// A completion replay that died terminally (attempt cap, terminal block) while
+// the customer's dispute hold stands and its invoice is still an unqueued
+// draft: the replay's own strip-and-queue never landed (a persistent queue
+// write failure walks the row to the cap), so nothing will ever send that
+// invoice after the hold is released. Raise the same durable office alert the
+// other queue-failure exits raise, once per invoice (the terminal hook can
+// re-run from the sweep). Never throws - the hook's own restore must not fail
+// because an alert could not be written.
+async function alertHeldInvoiceNeverQueued(meta) {
+  try {
+    if (!meta.invoice_id || !meta.pay_url) return;
+    const inv = await db('invoices').where({ id: meta.invoice_id }).first('id', 'status', 'customer_id', 'payer_id');
+    if (!inv || inv.status !== 'draft' || inv.payer_id) return;
+    const customerId = meta.customer_id || inv.customer_id;
+    if (!await require('../collections/collection-hold').shouldWithholdPayLink(customerId)) return;
+    const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+      .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(inv.id)]).first('id');
+    if (open) return;
+    await raiseHeldInvoiceQueueAlert({
+      invoiceId: inv.id, customerId,
+      error: new Error('the deferred completion text ran out of attempts before its invoice could be queued behind the dispute hold'),
+    });
+  } catch (err) {
+    logger.error(`[deferred-replay] could not check/alert the never-queued held invoice ${meta.invoice_id || 'unknown'}: ${err.message}`);
+  }
+}
+
+// A deferred decline notice that died terminally (attempt cap after failed hold
+// lookups, or any terminal block): when the completion text was disabled or
+// already handled it was the invoice's ONLY pay-link delivery, and
+// terminalDeferredDeclineNotice only resets the record's notice status, so the
+// invoice would stay an unqueued draft forever. Hand it to the scheduled-invoice
+// sender (queueHeldInvoiceForSender is guarded to an unpaid, unsent, self-pay
+// draft; the sender then applies its own live dispute-hold check, consent and
+// suppression rules, so this is safe with a hold standing). A queue failure
+// raises the collection_hold_invoice_queue_failed office alert (once per
+// invoice) and rethrows so the terminal sweep retries the hook.
+async function queueInvoiceOfDeadDeclineNotice(meta) {
+  if (!meta.invoice_id) return;
+  try {
+    // The queue write AND the completion's `invoiceSenderOwnsPayLinkFor` ownership marker land in ONE
+    // transaction (handOverHeldInvoiceToSender, the same pairing every completion hand-over uses): a
+    // retried closeout then sees the sender owns the pay link and goes report-only instead of
+    // texting a second one (Codex #5424 r15 P1).
+    await require('../dispatch-completion-deferred').handOverHeldInvoiceToSender({
+      invoiceId: meta.invoice_id, serviceRecordId: meta.service_record_id || null,
+      // the deferred sms_log row carries the one-time re-arm grant for a recordless hand-over (Codex #5459 r6 P2)
+      smsLogId: meta.deferred_sms_log_id || null,
+    });
+  } catch (err) {
+    try {
+      const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+        .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(meta.invoice_id)]).first('id');
+      if (!open) await raiseHeldInvoiceQueueAlert({ invoiceId: meta.invoice_id, customerId: meta.customer_id, error: err });
+    } catch (alertErr) {
+      logger.error(`[deferred-replay] could not check/raise the queue-failure alert for invoice ${meta.invoice_id}: ${alertErr.message}`);
+    }
+    throw err;
+  }
+}
+
+// A delayed pay-link text/email queued BEFORE a customer's collections dispute
+// hold was placed must wait, not send, while it stands (owner ruling
+// 2026-09-30). A recheck answer with a named retry time: the scheduler
+// reschedules to it and REFUNDS the claimed attempt, so a hold that outlasts the
+// bounded ladder never terminates the row - it sends after the release. Fail
+// closed: an unanswerable lookup waits the same way. Null = no hold.
+//
+// A row queued for a notice the customer's OWN action produced (meta.customer_initiated === true,
+// the marker the scheduler forwards to sendCustomerMessage as customerInitiated) is exempt from the
+// DISPUTE part, the same way the live send boundary exempts it: the recheck must not delay it for the
+// whole dispute. A fallback hold still waits.
+async function disputeHoldRecheck(customerId, meta = null) {
+  // The customer-initiated marker skips a plain dispute hold only; a wrong-number / wrong-party
+  // fallback hold (an all-channel outreach block) still waits (Codex #5424 r13).
+  const held = await require('../collections/collection-hold').messagingHeldByCollectionHold(customerId, undefined,
+    { ignoreDisputeHold: Boolean(meta && meta.customer_initiated === true) });
+  if (!held.held) return null;
+  return {
+    eligible: false,
+    reason: held.reason === 'lookup_failed' ? 'collection-hold-lookup-failed' : 'collection-hold',
+    retryable: true,
+    retryAt: new Date(Date.now() + require('../collections/collection-hold').HOLD_DEFER_MS),
+  };
+}
+
+// True when the completion's service record carries the `invoiceSenderOwnsPayLinkFor` marker for
+// this text's invoice (see dispatch-completion-deferred markInvoiceSenderOwnsPayLink).
+async function completionInvoiceOwnedBySender(meta, database = db) {
+  const row = await database('service_records').where({ id: meta.service_record_id })
+    .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'invoiceSenderOwnsPayLinkFor' = ?", [String(meta.invoice_id)])
+    .first('id');
+  return Boolean(row);
 }
 
 const REGISTRY = {
@@ -249,12 +383,63 @@ const REGISTRY = {
   },
 
   invoice_send_deferred: {
+    // The row's own recipient is only ever the SMS/App sub-leg's — the
+    // replay re-enters the canonical billing router (billingDeliveryCategory
+    // 'invoice'), which already falls back to the customer's explicit
+    // Email/App selection with no phone, exactly like an immediate send.
+    // A queued row for a phone-less customer's pending App leg (invoice.js
+    // sendViaSMS, Codex round-3 P1 #4963) is queued blank on purpose
+    // (requires_registered_dispatch marks that intent) — the executor's
+    // recipient gate must not read the blank phone as a failed lookup and
+    // park the row on the bounded retry-then-blocked ladder forever.
+    replayWithoutPhone: true,
+    // Pass-through: a phone-less row is marked requires_registered_dispatch,
+    // which dispatchDeferredReplay refuses without a registered hook. Every
+    // row still replays through the executor's default dispatch.
+    //
+    // Pre-push audit P1 #A: billingDispatchOutcome (billing-channel-
+    // routing.js) deliberately lets an unfinished TEXT leg outrank an
+    // earlier acceptance (Email accepted, Text still retrying reports
+    // Text's own pending state as the representative outcome) but has no
+    // equivalent for the reverse — Email retryable, TEXT accepted — so it
+    // reports the WHOLE fan-out sent:true/accepted. Passed straight
+    // through, dispatchScheduledSms would mark the sole replay row 'sent'
+    // and the scheduler would finalize it, permanently dropping the Email
+    // obligation. partialFanoutReplayOutcome inspects the fan-out's own
+    // channelResults and overrides only that exact overshadow shape.
+    async dispatch(meta, defaultDispatch) {
+      return partialFanoutReplayOutcome(meta, await defaultDispatch());
+    },
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
+    // The recheck above reads the invoice before recipient resolution and
+    // provider preparation, so a void, payment or Bill-To change can commit
+    // after it (Codex r5 P1 on #4963). Each leg re-runs the invoice checks at
+    // its own provider boundary, under the invoice lock the immediate send
+    // holds: Text/App (and a plain queued text) inside the invoice handoff,
+    // Email under the Email authority's lock on the same row.
+    providerHandoff: (meta, dispatch) => require('../invoice').withDeferredInvoiceProviderHandoff(meta, dispatch),
+    billingEmailPreSendCheck: (meta, ctx) => require('../invoice').checkDeferredInvoiceEmailDelivery(meta, ctx),
     async finalize(meta) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta);
+      const result = await finalizeDeferredCompletionSend(meta);
+      // A partial_fanout_retry row (invoice.js's queuePendingChannelReplay)
+      // carries neither mark_invoice_delivery nor bundled_review_request_id/
+      // etc, so the call above is a no-op for it — finalizeDeferredCompletionSend
+      // only stamps SMS-only invoice delivery for the WRAPPER's own
+      // pre-existing completion-send rows (mark_invoice_delivery===true,
+      // always sms:true). Stamp from DURABLE evidence instead (Codex r4-C,
+      // r5 P1 #1+#2 pre-push audit) — never the scheduler's own transient
+      // dispatch result: a finalize_only retry re-invokes this hook with no
+      // dispatch result at all (only providerMessageId), so a ctx-based
+      // stamp would silently no-op on that retry path. Both durable checks
+      // below key off this row's own persisted identity (invoice_id,
+      // notificationEventKey), so recomputing them on any retry is
+      // idempotent by construction — no successor chain, no attempt count,
+      // nothing to lose between attempts.
+      if (meta.partial_fanout_retry !== true || !meta.invoice_id) return result;
+      return stampPartialFanoutDeliveryDurably(meta);
     },
     durableFinalize: true,
   },
@@ -263,6 +448,16 @@ const REGISTRY = {
     async recheck(meta) {
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) return collectible;
+      // A dispute hold placed after this reminder queued: wait, send after
+      // release (the customer is resolved once and reused below).
+      let followupCustomerId;
+      try {
+        followupCustomerId = await resolveFollowupCustomerId(meta);
+        const holdWait = followupCustomerId ? await disputeHoldRecheck(followupCustomerId, meta) : null;
+        if (holdWait) return holdWait;
+      } catch (err) {
+        return failClosed('invoice-followup-hold', meta.invoice_id, err);
+      }
       // Collections policy re-consult at ACTUAL delivery time (codex
       // 2026-08-14 P1): a do_not_text/collection_hold flag or a live
       // conversation landing during the quiet-hours hold must suppress the
@@ -276,7 +471,7 @@ const REGISTRY = {
       // byte-identical replay.
       if (!gateOn && !meta.ledger_reservation_key) return { eligible: true };
       try {
-        const customerId = await resolveFollowupCustomerId(meta);
+        const customerId = followupCustomerId;
         if (!customerId) return { eligible: false, reason: 'customer-unresolved' };
         if (gateOn) {
           const { collectionsChannelPermitted } = require('../collections/rail-guard');
@@ -285,6 +480,15 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
+            // Shadow spacing only: a deferred bank-verification re-nudge is
+            // not an overdue reminder (Codex #5189 r6), so it names no rail;
+            // an overdue replay excludes its own standing reservation and
+            // the rest of its touch (the delivered email sibling).
+            ...(followupReplayIsVerification(meta) ? {} : {
+              source: 'invoice_followup_replay',
+              ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
+              ...(meta.notificationEventKey ? { spacingExcludeEventKey: meta.notificationEventKey } : {}),
+            }),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };
@@ -312,6 +516,11 @@ const REGISTRY = {
               followup_sequence_id: meta.followup_sequence_id || null,
               original_block_code: meta.original_block_code || null,
               replay: true,
+              // The touch this leg belongs to, so spacing groups it with its
+              // delivered email sibling (Codex #5189 r6).
+              ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+              // Spacing evidence skips a verification re-nudge (Codex #5189 r7).
+              ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
             },
           });
         }
@@ -346,6 +555,8 @@ const REGISTRY = {
           followup_sequence_id: meta.followup_sequence_id || null,
           original_block_code: meta.original_block_code || null,
           replay: true,
+          ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+          ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
         },
       });
     },
@@ -365,6 +576,44 @@ const REGISTRY = {
       // Most completion replays carry no pay link at all (report-only,
       // already-paid completions) — cheap no-op before any DB read.
       if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
+      // A dispute hold that landed after this text was frozen (owner ruling
+      // 2026-09-30): the report still goes, the pay link does not. Fail
+      // closed - shouldWithholdPayLink answers true when its lookup fails.
+      // Checked BEFORE invoice collectibility.
+      // A hold-LOOKUP (or customer-resolution) failure is not a confirmed hold: strip is one-way, so a
+      // DB hiccup on the first attempt must not permanently drop a pay link
+      // the customer is entitled to. Hold the row for the rail's bounded
+      // 15-minute retry (fresh read each time) and fail closed to a strip
+      // only on the last attempt - never a pay link sent unverified.
+      const holdReader = require('../collections/collection-hold');
+      try {
+        // The scheduler enriches meta.customer_id from sms_log.customer_id; a
+        // row with neither must not read as "no hold" - resolve the customer
+        // from the invoice the pay link belongs to.
+        // The scheduled-invoice SENDER already owns this invoice's pay link once a completion
+        // attempt handed it over (the service-record marker handOverInvoiceToSender /
+        // persistStrippedPayLink write in the SAME transaction as the queue write). A frozen
+        // link-bearing text that survived a crash between the hand-over and its own terminal
+        // update (or a retried closeout) must go report-only whether or not the hold has since
+        // been released: the sender sends the one pay link (Codex #5424 r13). No hand-over here -
+        // the sender already owns it.
+        if (meta.service_record_id && await completionInvoiceOwnedBySender(meta)) {
+          return { eligible: true, stripPayLink: true, reason: 'invoice-sender-owns-pay-link' };
+        }
+        const holdCustomerId = meta.customer_id || await resolveFollowupCustomerId(meta);
+        // ANY active hold (dispute or wrong-number / wrong-party fallback) withholds the link.
+        if (await holdReader.customerHasActiveMessagingHoldChecked(holdCustomerId)) {
+          return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+        }
+      } catch (err) {
+        const attempts = Number(meta.scheduled_sms_attempts) || 1;
+        if (attempts < SCHEDULED_SMS_MAX_ATTEMPTS) {
+          logger.warn(`[deferred-replay] completion hold recheck failed for customer ${meta.customer_id || 'unknown'} (attempt ${attempts}/${SCHEDULED_SMS_MAX_ATTEMPTS}, holding for retry): ${err.message}`);
+          return { eligible: false, reason: 'hold-recheck-failed', retryable: true };
+        }
+        logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id || 'unknown'} at the attempt cap - sending report-only: ${err.message}`);
+        return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+      }
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) {
         // A transient read failure (DB outage mid-recheck) is NOT a
@@ -447,6 +696,7 @@ const REGISTRY = {
         restoreErr = err;
         logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'} — will retry via terminal sweep: ${err.message}`);
       }
+      await alertHeldInvoiceNeverQueued(meta);
       // The completion text (and the bundled review link inside it) will
       // never deliver — arm the standalone review sender. Armed ONLY here,
       // never on a timer, so it can't race a still-retryable replay.
@@ -494,6 +744,29 @@ const REGISTRY = {
         if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
           return { eligible: false, reason: 'payer-billed-withdrawn' };
         }
+        // A dispute hold that landed after this notice was queued (owner
+        // ruling 2026-09-30): the customer was told all billing follow-up is
+        // on hold, and the notice IS a pay-link billing text - suppress it
+        // whole (terminalDeferredDeclineNotice restores the record's status;
+        // the completion route re-arms nothing while the hold stands). A
+        // lookup failure throws the coded refusal into failClosed below:
+        // retryable, then suppressed at the attempt cap.
+        if (await require('../collections/collection-hold').customerHasActiveMessagingHoldChecked(meta.customer_id || inv.customer_id)) {
+          // The suppressed notice was the invoice's only pay-link delivery:
+          // queue the invoice onto the scheduled-invoice sender (owner ruling
+          // 2026-09-30). The sender defers it while the hold stands and sends
+          // it on the first tick after the release. The suppression is
+          // terminal, so a queue write that fails must not be swallowed:
+          // raise a durable office alert and rethrow into failClosed (retried
+          // on the bounded ladder before the notice is suppressed for good).
+          try {
+            await require('../collections/collection-hold').queueHeldInvoiceForSender(inv.id);
+          } catch (queueErr) {
+            await raiseHeldInvoiceQueueAlert({ invoiceId: inv.id, customerId: meta.customer_id || inv.customer_id, error: queueErr });
+            throw queueErr;
+          }
+          return { eligible: false, reason: 'collections-dispute-hold' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('decline-notice', meta.invoice_id, err);
@@ -505,7 +778,17 @@ const REGISTRY = {
     },
     async onTerminal(meta) {
       const { terminalDeferredDeclineNotice } = require('../dispatch-completion-deferred');
-      await terminalDeferredDeclineNotice(meta);
+      // Restore the record's status FIRST, then hand the invoice to the sender;
+      // whichever fails is rethrown after the other ran so the terminal sweep
+      // retries the hook without losing either half.
+      let restoreErr = null;
+      try {
+        await terminalDeferredDeclineNotice(meta);
+      } catch (err) {
+        restoreErr = err;
+      }
+      await queueInvoiceOfDeadDeclineNotice(meta);
+      if (restoreErr) throw restoreErr;
     },
     durableFinalize: true,
   },
@@ -655,6 +938,9 @@ const REGISTRY = {
         if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
           return { eligible: false, reason: resolution.reason };
         }
+        // The failure notice carries the pay link: wait out a dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
+        if (holdWait) return holdWait;
         return { eligible: true };
       } catch (err) {
         return failClosed('billing-failure', meta.payment_id, err);
@@ -807,7 +1093,12 @@ const REGISTRY = {
           }
           return { eligible: true };
         }
-        return invoiceStillCollectible({ invoice_id: invoiceId });
+        const collectibleVerdict = await invoiceStillCollectible({ invoice_id: invoiceId });
+        if (collectibleVerdict?.eligible === false) return collectibleVerdict;
+        // An ACH failure / action-required notice for this invoice points the
+        // customer at paying it: wait out a collections dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
+        return holdWait || collectibleVerdict;
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }
@@ -917,22 +1208,71 @@ const REGISTRY = {
     },
   },
   voicemail_lead_sms_deferred: {
-    async recheck(meta) {
+    async recheck(meta, { conn = db } = {}) {
       // The quote link is a speed play for a fresh voicemail — a lead
       // deleted, converted, or already contacted overnight makes the 8 AM
       // bearer link stale (and possibly wrong-audience).
       try {
-        if (!meta.lead_id) return { eligible: true };
-        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
-        if (!lead) return { eligible: false, reason: 'lead-deleted' };
-        const status = String(lead.status || '').toLowerCase();
-        if (status && !['new', 'pending', 'started'].includes(status)) {
-          return { eligible: false, reason: `lead-${status}` };
+        if (meta.lead_id) {
+          const lead = await conn('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
+          if (!lead) return { eligible: false, reason: 'lead-deleted' };
+          const status = String(lead.status || '').toLowerCase();
+          if (status && !['new', 'pending', 'started'].includes(status)) {
+            return { eligible: false, reason: `lead-${status}` };
+          }
+        }
+        // The same holds the immediate send ran (messaging/auto-text-holds.js):
+        // a quote sent, a lead assigned, a do-not-contact or not-a-prospect
+        // call, or a conversation since the voicemail stops the queued text.
+        if (meta.voicemail_phone) {
+          // A row queued before the originating call's id and time rode
+          // along carries only its sid: resolve it, so the voicemail's own
+          // call is still read by id (its text may go to a spoken callback
+          // number that call's row does not carry) and still opens the
+          // window.
+          let originCallId = meta.call_log_id || null;
+          let callAt = meta.call_created_at ? new Date(meta.call_created_at) : null;
+          if ((!originCallId || !callAt) && meta.call_sid) {
+            const origin = await conn('call_log').where({ twilio_call_sid: meta.call_sid }).first('id', 'created_at');
+            originCallId = originCallId || origin?.id || null;
+            callAt = callAt || (origin?.created_at ? new Date(origin.created_at) : null);
+          }
+          const { autoTextHoldReason } = require('./auto-text-holds');
+          const hold = await autoTextHoldReason(meta.voicemail_phone, {
+            callAt: callAt || undefined,
+            originCallId,
+            excludeMessageTypes: ['voicemail_quote_link'],
+            dbi: conn,
+          });
+          if (hold) return { eligible: false, reason: hold };
         }
         return { eligible: true };
       } catch (err) {
         return failClosed('voicemail-text-back', meta.lead_id, err);
       }
+    },
+    // The same recheck at the true provider boundary: the executor runs
+    // recheck early, then its own recipient and policy work, and the
+    // pipeline its fresh contact / suppression / consent checks — a hold
+    // that lands during any of those awaits (a text, a lead assigned, an
+    // estimate sent, a do-not-contact correction) still stops the queued
+    // text here, run by twilio.js immediately before its request. A
+    // confirmed hold or stale lead is a terminal refusal (onTerminal
+    // releases both claims); a read that failed (recheck fails closed as
+    // retryable) stays retryable, so the executor puts the row back on its
+    // bounded retry rail instead.
+    providerPreSendCheck(meta) {
+      return async ({ dbi } = {}) => {
+        const again = await REGISTRY.voicemail_lead_sms_deferred.recheck(meta, { conn: dbi || db });
+        if (again && again.eligible !== false) return { ok: true };
+        const retryable = again?.retryable === true;
+        return {
+          ok: false,
+          code: retryable ? 'VOICEMAIL_TEXT_CHECK_FAILED_AT_BOUNDARY' : 'VOICEMAIL_TEXT_STALE_AT_BOUNDARY',
+          reason: (again && again.reason) || 'ineligible',
+          ...(retryable ? { retryable: true } : {}),
+        };
+      };
     },
     async finalize(meta) {
       // Claim settlement (lead stamp 'sent' + phone-claim outcome 'sent') —
@@ -1491,6 +1831,185 @@ async function contactSlotStillAuthorized(meta, label) {
   }
 }
 
+// Pre-push audit P1 #A (#4963 split PR 2): the fan-out's own channelResults
+// is the only trustworthy per-leg truth — billingDispatchOutcome's single
+// "representative" outcome can report sent:true/accepted while another
+// SELECTED leg is still pending (see the dispatch() hook above for the
+// exact overshadow shape). Never trust that representative directly for a
+// partial fan-out: inspect channelResults ourselves and decide whether the
+// scheduler may finish this row.
+async function partialFanoutReplayOutcome(meta, result) {
+  const channelResults = result?.channelResults;
+  const { billingLegDeliveryState } = require('./billing-channel-routing');
+  const entries = channelResults && typeof channelResults === 'object' ? Object.entries(channelResults) : [];
+  const legs = entries.map(([, leg]) => leg);
+  if (!legs.length) return result;
+  const accepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
+  // A leg accepted on THIS attempt needs its durable stamp NOW: the
+  // override below can report the row still retryable while another
+  // selected leg is pending, and finalize() (the other stamping path,
+  // Codex r4-C/r5 P1 #1+#2) only runs once the scheduler marks the WHOLE
+  // row sent. Idempotent (COALESCE-guarded) — stamping again at eventual
+  // finalize is harmless. Never let a stamp-read failure surface as a
+  // dispatch error — the send itself already succeeded.
+  if (meta.partial_fanout_retry === true && meta.invoice_id && entries.some(([channel, leg]) => billingLegDeliveryState(channel, leg || {}))) {
+    try {
+      await stampPartialFanoutDeliveryDurably(meta);
+    } catch (err) {
+      logger.warn(`[deferred-replay] partial-fanout in-flight stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
+    }
+  }
+  const { isReplayHold } = require('./billing-channel-routing');
+  const pending = entries.filter(([channel, leg]) => !billingLegDeliveryState(channel, leg || {})).map(([, leg]) => leg);
+  // An uncertain leg means we don't know whether it already went out — the
+  // SAME rule invoice.js's own enqueue-time check follows (a whole-notice
+  // replay would retry it too, risking a double-send): ANY uncertain leg
+  // blocks auto-retry, whatever the representative outcome says. Checked
+  // BEFORE the representative early return below: an uncertain Email next
+  // to a retryable Text failure is represented by the retryable Text, and
+  // passing that through would retry the whole notice, uncertain leg
+  // included. A replay hold (PUSH_IN_FLIGHT, APP_PROVIDER_RETRY,
+  // APP_DELIVERY_HOLD) is labelled uncertain but is a deliberate retry the
+  // push dedupe protects, so it does not count.
+  const uncertain = pending.filter((leg) => leg?.deliveryOutcome === 'uncertain' && !isReplayHold(leg));
+  if (uncertain.length) {
+    logger.warn(`[deferred-replay] invoice ${meta.invoice_id} partial-fanout replay leg outcome uncertain (${uncertain.map((leg) => leg.code || leg.channel).join(', ')}) — not auto-retried (a replay would retry it too, risking a double-send)`);
+    // An accepted representative finishes the row (its accepted legs were
+    // stamped above). Anything else must never reach the scheduler as
+    // retryable; this non-retryable outcome lands on its blocked/terminal
+    // path for staff review.
+    if (accepted(result)) return result;
+    return {
+      channelResults,
+      notificationEventKey: result.notificationEventKey,
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'uncertain',
+      retryable: false,
+      code: 'PARTIAL_FANOUT_LEG_UNCERTAIN',
+      reason: `Billing leg delivery is uncertain, so the notice is not auto-retried: ${uncertain.map((leg) => leg.code || leg.channel).join(', ')}`,
+    };
+  }
+  // Otherwise only intervene in the exact overshadow shape described above:
+  // every other outcome (a genuinely fully-accepted fan-out, a replay hold,
+  // an unfinished Text's own retryable state) already passes through
+  // billingDispatchOutcome correctly and must keep its own code/reason/retry
+  // timing (e.g. APP_PROVIDER_RETRY's retryAfterMs).
+  if (!accepted(result)) return result;
+  if (!pending.length) return result;
+  const retryable = pending.filter((leg) => leg?.retryable === true || leg?.deferred === true);
+  if (!retryable.length) return result;
+  return {
+    channelResults,
+    notificationEventKey: result.notificationEventKey,
+    sent: false,
+    blocked: false,
+    deliveryOutcome: 'not_sent',
+    retryable: true,
+    code: 'PARTIAL_FANOUT_LEG_RETRY',
+    reason: `Selected billing leg(s) still need a retry: ${retryable.map((leg) => leg.code || leg.channel).join(', ')}`,
+  };
+}
+
+// Codex r4-C, r5 P1 #1+#2 pre-push audit (#4963): stamp durably, never from
+// the scheduler's own transient dispatch result — a finalize_only retry
+// re-invokes finalize() with no dispatch result at all, so a value threaded
+// through ctx would silently vanish on that path. Every check below keys
+// off this row's own persisted identity, so re-running them on any retry
+// (finalize_only or otherwise) recomputes the SAME answer — idempotent by
+// construction, no state to carry between attempts.
+async function stampPartialFanoutDeliveryDurably(meta) {
+  const notificationEventKey = meta.notificationEventKey || (meta.invoice_id ? `invoice:${meta.invoice_id}:sent` : null);
+  const [emailAccepted, textAccepted, appAccepted] = await Promise.all([
+    billingEmailDurablyAccepted(notificationEventKey),
+    billingTextDurablyAccepted(notificationEventKey),
+    billingAppDurablyAccepted(notificationEventKey),
+  ]);
+  const smsOrAppAccepted = textAccepted || appAccepted;
+  if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
+  try {
+    // A voided invoice is never re-stamped, even if a delayed replay
+    // landed. COALESCE makes each stamp idempotent — a retry that lands
+    // twice (this hook re-running after a transient DB error) never
+    // clobbers an earlier stamp with a later timestamp.
+    await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
+      ...(emailAccepted ? { email_sent_at: db.raw('COALESCE(email_sent_at, now())') } : {}),
+      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, ?::timestamptz, now())', [textAccepted ? null : appAccepted?.created_at || null]) } : {}),
+      updated_at: new Date(),
+    });
+    return { ok: true };
+  } catch (err) {
+    logger.warn(`[deferred-replay] partial-fanout replay stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
+    return { ok: false };
+  }
+}
+
+// Durable evidence for the Email leg: an ACCEPTED row in email_messages
+// keyed by the SAME idempotency key billing-channel-email.js stamps
+// (billing_channel_email:${notificationEventKey}:email) — the exact
+// mechanism that already makes replaying the whole notice safe for Email.
+// 'sent'/'delivered'/'opened'/'clicked' match email-template-library.js's
+// own dedupedResultForExistingMessage sent computation; every other status
+// (blocked/dropped/bounced/queued/failed/…) is never accepted.
+async function billingEmailDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  const row = await db('email_messages')
+    .where({ idempotency_key: `billing_channel_email:${notificationEventKey}:email` })
+    .first('status');
+  return !!row && ['sent', 'delivered', 'opened', 'clicked'].includes(String(row.status || '').toLowerCase());
+}
+
+// Pre-push audit P1 #B (#4963 split PR 2): the OLD check read this
+// replay's own queue row (the marker sms_log row invoice.js's
+// queuePendingChannelReplay inserts, matched by metadata.entry_point +
+// invoice_id) for a twilio_sid/to_phone it never receives — that row is
+// only ever written by this file's own INSERT, never touched by Twilio or
+// the push router. The REAL provider evidence lives on a SEPARATE sms_log
+// row: twilio.js stamps metadata.notificationEventKey (and
+// scheduled_sms_log_id, back to the queue row) on the row it inserts
+// alongside every real Twilio handoff, with the actual twilio_sid; a hard
+// carrier/API rejection never gets one. notificationEventKey is stable
+// across every replay attempt (forwarded from this row's own metadata into
+// every dispatch, and re-derived identically here), so this is a pure,
+// idempotent read keyed off durable identity, exactly like the Email check
+// above — never the queue row, never scheduler ctx.
+async function billingTextDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  // Status-scoped to queued/sent/delivered (matches acceptedScheduledSms's
+  // own shape), AND the Twilio SID is required in SQL rather than read off
+  // whichever row .first() returns: once markScheduledSmsSent marks this
+  // replay's own queue row 'sent', it carries the same notificationEventKey
+  // with a NULL twilio_sid, as does an App push proof, and an unordered
+  // .first() could return either of those instead of the provider row.
+  const row = await db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereNotNull('twilio_sid')
+    .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+    .first('id');
+  return Boolean(row);
+}
+
+// Durable evidence for the App leg: the push proof row push-channel-
+// routing.js's persistPushProof writes on an accepted push —
+// from_phone:'push', twilio_sid:null always (App never has a Twilio SID),
+// metadata.notificationEventKey stamped the same way the Text row above
+// is. Never the queue row's own blank to_phone, which only ever proves
+// this replay runs phone-less, not that App delivered.
+async function billingAppDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  const row = await db('sms_log')
+    .where({ from_phone: 'push' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+    .first('twilio_sid');
+  if (row && !row.twilio_sid) return true;
+  // A visible billing bell settles its event even without native acceptance.
+  return await db('notifications').where({ recipient_type: 'customer' })
+    .whereIn('category', ['invoice', 'payment_issue', 'billing', 'payment_receipt'])
+    .whereRaw("metadata->>'dedupeKey' = ?", [notificationEventKey]).first('created_at') || false;
+}
+
 // Shared: deferred invoice pay-link/dunning replays must confirm the
 // invoice is still collectible and (for dunning) the sequence not stopped.
 async function invoiceStillCollectible(meta, database = db) {
@@ -1588,6 +2107,26 @@ function deferredSmsHandoff(entryPoint, claimMeta = {}) {
   return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
 }
 
+// undefined = no provider-boundary predicate registered for this entry.
+function deferredProviderPreSendCheck(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  return typeof entry?.providerPreSendCheck === 'function' ? entry.providerPreSendCheck(claimMeta) : undefined;
+}
+
+// undefined = no invoice-delivery handoff registered (see the providerHandoff
+// hook above): the sender dispatches normally.
+function deferredProviderHandoff(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry?.providerHandoff) return undefined;
+  return (dispatch) => entry.providerHandoff(claimMeta, dispatch);
+}
+
+function deferredBillingEmailPreSendCheck(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry?.billingEmailPreSendCheck) return undefined;
+  return (ctx) => entry.billingEmailPreSendCheck(claimMeta, ctx);
+}
+
 // null = no finalize registered. { ok:false } rides the durable
 // finalize_only retry rail for durableFinalize entry points.
 async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
@@ -1642,7 +2181,8 @@ async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}, { alrea
       logger.warn(`[deferred-replay] terminal_pending stamp failed for ${msgId}: ${err.message}`);
     });
   }
-  const res = await onTerminalDeferredReplay(entryPoint, claimMeta);
+  // The hook learns which sms_log row it is finishing, so it can persist one-time grants on that row.
+  const res = await onTerminalDeferredReplay(entryPoint, msgId ? { ...claimMeta, deferred_sms_log_id: msgId } : claimMeta);
   if (res.ok && msgId) {
     await db('sms_log').where({ id: msgId }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', false)"),
@@ -1735,6 +2275,14 @@ function requiresDurableFinalize(entryPoint) {
 // for these (same contract as finalize_pending: the obligation must be
 // durable BEFORE the hook runs, or a crash/throw between the flip and the
 // hook loses it where no sweep can see it).
+// True for any entry point this registry owns — the deferred-replay executor
+// drives the row, whether or not it registers an onTerminal hook (an
+// invoice_send_deferred row, for one, holds its invoice's send claim). The
+// Intelligence Bar never cancels such a row itself.
+function isDeferredReplayEntryPoint(entryPoint) {
+  return !!entryFor(entryPoint);
+}
+
 function requiresTerminalHook(entryPoint) {
   const entry = entryFor(entryPoint);
   return !!(entry && typeof entry.onTerminal === 'function');
@@ -1759,12 +2307,16 @@ module.exports = {
   dispatchDeferredReplay,
   replaysWithoutPhone,
   deferredSmsHandoff,
+  deferredProviderPreSendCheck,
+  deferredProviderHandoff,
+  deferredBillingEmailPreSendCheck,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,
   sweepPendingTerminalHooks,
   requiresDurableFinalize,
   requiresTerminalHook,
+  isDeferredReplayEntryPoint,
   DURABLE_FINALIZE_ENTRY_POINTS,
   TERMINAL_HOOK_ENTRY_POINTS,
   _registry: REGISTRY,

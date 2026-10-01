@@ -15,6 +15,11 @@ const SOURCE_NAMES = {
   domain_website: 'Domain Sites',
   waves_website: 'Waves Website',
   google_business: 'Google Business',
+  // Technically-observed AI-answer-engine referral (lead-source-classify.js,
+  // owner-approved 2026-09-27) — a visitor who asked ChatGPT/Perplexity/
+  // Gemini/Copilot/Claude/etc. and followed its citation link. Distinct from
+  // the self-reported `heard_about` lead field.
+  ai_assistant: 'AI Assistant',
   facebook: 'Facebook',
   facebook_organic: 'Facebook (organic)',
   nextdoor: 'Nextdoor',

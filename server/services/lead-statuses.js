@@ -4,11 +4,16 @@
 // and didn't close, and excluding them would inflate rates. Shared by the
 // dashboard KPIs (routes/admin-dashboard.js) and the alerts service
 // (services/dashboard-alerts.js) so the definitions can't drift.
-const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate'];
+// `handled` (owner ruling 2026-10-01): a /book "Can't find a time?" request
+// that closed itself because the customer then booked online. Neither won
+// nor lost, so it is out of every prospect denominator too: counting it
+// would dilute the conversion rate with a row that already converted through
+// the booking's own attribution.
+const NON_ENGAGED_LEAD_STATUSES = ['cancelled', 'spam', 'duplicate', 'handled'];
 
 // Statuses still being WORKED — the Pipeline table's default view and the
 // population every "needs action" queue draws from. The inverse of the
-// closed set (won/lost/unresponsive/disqualified + non-engaged): a queue
+// closed set (won/lost/unresponsive/disqualified/handled + non-engaged): a queue
 // built as whereNotIn(closed-ish) silently re-includes any status it forgot
 // (codex P2 on the builder-warranty queue — unresponsive/disqualified leads
 // were nagging as action items). Positive membership can't drift that way.
@@ -143,8 +148,47 @@ function scopeToProspects(qb, alias = 'leads') {
   return qb.whereNotIn(`${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));
 }
 
+// 'handled' is system-set only (a /book request the customer's own booking closed).
+// A staff status write is refused when it would SET it (codex #5477 r9), or when the
+// booking closed the request after staff loaded it, so a change made from that stale
+// open view would reopen it (codex #5477 r13). Reopening a request staff SAW handled
+// stays possible, but only when the caller says so (`seen` = the status its page
+// showed; absent counts as not handled) AND it is the same close the page showed:
+// `seenAt` / `nowAt` = the lead's updated_at then and now (codex #5477 r16), so a
+// request reopened and closed again by a later booking is not overwritten from a
+// view of the earlier close. `now` = the status under the row lock.
+// Returns the refusal (status code + message) or null.
+const sameInstant = (a, b) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
+function handledStatusRefusal(requested, seen, now, seenAt = null, nowAt = null) {
+  if (requested === undefined) return null;
+  // Setting it is judged on the LOCKED status only (a client-supplied `seen` must
+  // never unlock it): allowed solely as a no-op re-save of a lead already handled.
+  if (requested === 'handled') {
+    return now === 'handled' ? null : { code: 400, error: "'handled' is set automatically when the customer books online" };
+  }
+  if (now === 'handled' && (seen !== 'handled' || !sameInstant(seenAt, nowAt))) {
+    return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
+  }
+  return null;
+}
+
+// The same rule re-asserted inside a status write (a knex where-callback): the row is
+// not handled, or it is the very close the caller saw (handled, updated_at to the
+// millisecond the client got; codex #5477 r16). A close that lands between a route's
+// check and its UPDATE then makes the UPDATE match nothing.
+function unlessHandledSince(seen, seenAt) {
+  return (q) => q.where((w) => {
+    w.whereNot('status', 'handled');
+    if (seen === 'handled' && seenAt) {
+      w.orWhereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(seenAt).toISOString()]);
+    }
+  });
+}
+
 module.exports = {
   NON_ENGAGED_LEAD_STATUSES,
+  handledStatusRefusal,
+  unlessHandledSince,
   OPEN_LEAD_STATUSES,
   applyOpenLeadPredicate,
   isOpenLeadRow,

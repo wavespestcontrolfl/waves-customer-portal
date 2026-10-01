@@ -12,6 +12,12 @@
 // caught that the guard breaks the standard `npm test` command on any
 // non-UTC host — removed here since the fix under test no longer depends
 // on process.env.TZ).
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
@@ -33,6 +39,22 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
+}));
+// The follow-up email rides the shared billing email authority (owner ruling
+// 2026-09-27); its locks and rechecks are pinned in its own suites. Here it
+// authorizes the same billing recipient the customer-contact mock returns.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(async () => ({
+    category: 'invoice',
+    recipient: { email: 'billing@example.com', name: 'Taylor' },
+    recipientEmail: 'billing@example.com',
+  })),
+  dispatchUnderBillingEmailAuthority: jest.fn(async ({ dispatch, state }) => {
+    state.handoffStarted = true;
+    await dispatch();
+    state.providerAccepted = true;
+    return { ok: true };
+  }),
 }));
 
 const db = require('../models/db');
@@ -57,6 +79,7 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
+    if ((!queue || !queue.length) && table === 'customer_dunning_schedules') return chain({ result: [] });
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
@@ -87,6 +110,9 @@ describe('audit r1-timezone-2: follow-up touch service date', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-09-29T14:16:00.000Z')); // Tue 10:16 ET
     jest.clearAllMocks();
     db.transaction = jest.fn(async (fn) => fn(db));
+    // fireStep takes the customer's dunning key (SHARED) and reads ownership
+    // (customer_dunning_schedules) under it; no schedule rows here.
+    db.raw = jest.fn(async () => ({ rows: [] }));
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
   afterEach(() => jest.useRealTimers());

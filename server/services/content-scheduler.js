@@ -609,13 +609,20 @@ const ContentScheduler = {
           // duplicate pictures) are properties of the content too — and each
           // retry would pay for image generations again.
           'BLOG_BODY_IMAGES_FAILED',
+          // Owner competitor list (named off-list company on the final text):
+          // edit-required. A company-check OUTAGE (BLOG_OWNER_LIST_UNVERIFIED)
+          // stays on the transient retry fork below.
+          'BLOG_OWNER_LIST_BLOCKED',
         ]);
         // Only release a claim WE hold — if the claim update itself failed
         // (or another instance holds it), writing here would stomp the
         // active attempt's 'publishing' state (hence the publish_status
         // guard on every branch).
         if (claimed) {
-          if (terminalFailure || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
+          // A company-check failure that is NOT an outage (the post is over
+          // the extraction input bound) fails the same way every attempt.
+          const terminalOwnerListCheck = err.code === 'BLOG_OWNER_LIST_UNVERIFIED' && err.retryable !== true;
+          if (terminalFailure || terminalOwnerListCheck || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
             await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
               .update({
                 publish_status: 'failed',

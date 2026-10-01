@@ -7,11 +7,12 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": "Toxic enough to make a pet vomit or act ill if eaten; call your vet if that happens. Its defensive foam can also irritate skin and eyes — wear gloves if you handle it.",
+    "safety_line": "Toxic enough to make a pet vomit or act ill if eaten; call your vet if that happens. Its defensive foam can also irritate skin and eyes — avoid handling it and keep pets away.",
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "4c66507e402791893cab21bece0c8a2a5b79bb1a3809e955e52c9456becd0ccf"
     },
     "slug": "lubber-grasshopper",
     "common_name": "Eastern Lubber Grasshopper",
@@ -24,7 +25,7 @@
     "scientific_name": "Romalea microptera",
     "rank": "species",
     "group": "crickets-grasshoppers",
-    "subgroup": null,
+    "subgroup": "lubber-grasshoppers",
     "site_category": "Lawn",
     "traits": [
       "Huge — up to 3 inches — slow-moving, and can barely fly",
@@ -36,7 +37,7 @@
       {
         "slug": "katydid",
         "difference": "Lubbers are heavy-bodied, slow, and can barely fly; katydids are slender, leaf-green, and jump or fly readily.",
-        "next_photo": "A side-on photo showing body shape and wing length relative to the body.",
+        "next_photo": "From a safe distance, photograph the body shape and wing length relative to the body from the side.",
         "photo_can_confirm": true
       }
     ],
@@ -84,7 +85,7 @@
     "copy": {
       "what_it_means": "Its bold colors are a warning label — lubbers carry chemicals toxic enough that most predators spit them out, and a dog or cat that eats one can get sick. They chew ornamentals but rarely at damaging scale in a typical yard; the bigger concern where pets have yard access is keeping them from eating one.",
       "fact": "Its colors are a warning label — lubbers are toxic enough that most predators spit them back out, and the same chemicals can make a pet ill if it eats one.",
-      "blurb": "They chew ornamentals but rarely at damaging scale in yards. Keep pets from eating them, and wear gloves if you remove any by hand."
+      "blurb": "They chew ornamentals but rarely at damaging scale in yards. Keep pets from eating them, and skip handling them yourself — call a technician if removal is needed."
     },
     "tech_notes": "Not a lawn-turf pest; ornamental nibbling only. If hand removal is needed, use gloves — the defensive foam can irritate skin/eyes and the insect is toxic if a pet eats it. Spot treatment on high-value ornamentals if numerous.",
     "sources": [
@@ -112,7 +113,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "aba825f8548064add950162d42990af15403cc44e9aacb7f64c0cfd000148b24"
     },
     "slug": "mole-cricket",
     "common_name": "Mole Cricket",
@@ -208,6 +210,358 @@
     "risk": "low",
     "action": "specialist",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "field-cricket",
+    "kind": "organism",
+    "common_name": "Field Cricket",
+    "aka": [],
+    "aliases": [
+      "field cricket",
+      "field crickets",
+      "gryllus"
+    ],
+    "scientific_name": "Gryllus spp.",
+    "rank": "genus",
+    "group": "crickets-grasshoppers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large (up to 1.25 inches), dark brown to black, with long thread-like antennae",
+      "Loud, steady chirping at night, often from a burrow, crack, or under outdoor debris",
+      "Drawn to outdoor lights and sometimes wanders into garages in nuisance numbers",
+      "Can chew small holes in fabric, paper or cardboard while passing through, not for food"
+    ],
+    "look_alikes": [
+      {
+        "slug": "camel-cricket",
+        "difference": "Field cricket has wings and chirps loudly; camel cricket is wingless, silent, and noticeably humpbacked with much longer legs",
+        "next_photo": "A side-on close-up checking for wings covering the back and whether the back has a humped shape",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "mole-cricket",
+        "difference": "Field cricket has normal legs and lives above ground; mole cricket has shovel-like front legs built for tunneling and damages lawns from below",
+        "next_photo": "A close-up of the front legs, checking for a shovel-like shape versus ordinary thin legs",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "lawn-garden",
+      "lights-windows"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Mostly a noisy, occasional nuisance rather than a real threat. Numbers wandering into a garage or chewing the odd hole in stored fabric are worth keeping an eye on, but this one rarely causes serious problems in Florida homes.",
+      "fact": "Only males chirp, and each of Florida's several field cricket species has its own distinct song used to attract mates."
+    },
+    "tech_notes": "Confirm wings present and chirping to distinguish from camel cricket; exterior perimeter treatment and reducing light attraction/harborage near entry points usually resolves nuisance numbers.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN222"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "15a9a03a5ca452b1c29b1db6f1e6248a86845d433ac4e7e009e5a220349c2694"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "camel-cricket",
+    "kind": "organism",
+    "common_name": "Camel Cricket",
+    "aka": [
+      "Cave Cricket",
+      "Spider Cricket"
+    ],
+    "aliases": [
+      "camel cricket",
+      "camel crickets",
+      "cave cricket",
+      "spider cricket",
+      "rhaphidophoridae"
+    ],
+    "scientific_name": "Rhaphidophoridae",
+    "rank": "family",
+    "group": "crickets-grasshoppers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Humpbacked, wingless, light tan to brown body with very long, thin legs and long antennae",
+      "Jumps erratically and surprisingly high when startled",
+      "Silent; never chirps or sings the way field crickets do",
+      "Found in damp, dark places: garages, crawl spaces, mulch beds, and under boxes or leaf litter"
+    ],
+    "look_alikes": [
+      {
+        "slug": "field-cricket",
+        "difference": "Camel cricket is wingless, silent, and humpbacked with much longer legs; field cricket has wings and chirps loudly",
+        "next_photo": "A side-on close-up checking for wings on the back and whether the back has a humped shape",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "attic-walls",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its high jump can startle people, though it poses no bite, sting, or disease risk.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless scavenger that just wants a damp, dark hideout, most often a garage, crawl space or mulch bed. Its startling jump is the main complaint; it doesn't damage the home or bite people.",
+      "fact": "It relies entirely on its extra-long antennae and legs to feel its way around in the dark, since it has poor eyesight."
+    },
+    "tech_notes": "Confirm humpbacked, wingless body and long legs; drying out damp harborage areas (garages, crawl spaces) reduces numbers more than any single treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Rhaphidophoridae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Re-searched this session specifically for a UF/IFAS Featured Creatures page or EDIS document on camel crickets (Ceuthophilus/Rhaphidophoridae, including the general 'Crickets' EDIS document, ENY-230/IG146, which covers only field and house crickets); none exists. Rather than guess a seasonal peak, peak_months is set equal to active_months (present year-round, tied more to indoor moisture/harborage than season) and season_basis is set to 'year_round'. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "7bb8b12c5ddf7c37e7977d0020f99ebdfbeebf4b90522875e10e844adfb0bcb7"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "katydid",
+    "kind": "organism",
+    "common_name": "Katydid",
+    "aka": [],
+    "aliases": [
+      "katydid",
+      "katydids",
+      "tettigoniidae"
+    ],
+    "scientific_name": "Tettigoniidae",
+    "rank": "family",
+    "group": "crickets-grasshoppers",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bright green (occasionally brown or pink), with wings shaped and veined like a leaf",
+      "Very long, thread-like antennae, often longer than its whole body",
+      "Found resting on leaves and shrubs by day, calling loudly ('katy-did, katy-didn't') from vegetation at night",
+      "Chews small, ragged holes in leaves but rarely in large numbers"
+    ],
+    "look_alikes": [
+      {
+        "slug": "field-cricket",
+        "difference": "Katydid is green with leaf-shaped wings and antennae longer than its body; field cricket is dark brown/black with much shorter antennae",
+        "next_photo": "A close-up of the head showing antenna length compared to the body, and overall color",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A camouflaged, leaf-eating insect that's part of a healthy yard's night chorus. The occasional chewed leaf isn't worth treating, and many katydids are just as likely to be eating small insects as your plants.",
+      "fact": "Its leaf-shaped wings, complete with vein patterns, make it one of the best plant mimics in the insect world."
+    },
+    "tech_notes": "No treatment usually indicated; distinguish from grasshoppers by antenna length (longer than body) and from field crickets by green color and leaf-like wings.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Tettigoniidae",
+      "https://edis.ifas.ufl.edu/in1109"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months narrowed to June-August, the general adult-katydid abundance window (Capinera, Scott & Walker 2004) cited directly in UF/IFAS EDIS EENY638/IN1109 (Oblong-Winged Katydid), now added to sources. IN1109 also documents the Florida false katydid (Amblycorypha floridana, the species relevant to SWFL yards) as 'commonly encountered throughout its range in Florida.' This remains a general entomological reference rather than a species- or SWFL-specific study, so season_basis moves from 'unverified' to 'observed' rather than asserting a precisely-confirmed SWFL curve. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "a5d5b98378bce4cb4e3132a359aa0ae091dd65f614f4c0a67cb6bdb99f56665b"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
     "verification": []
   }
 ]

@@ -5,14 +5,20 @@
 process.env.GATE_AGENT_ACTIVITY = 'true';
 
 const mockTableErrors = {};
+const mockOps = {};
 
 // Minimal chainable knex stand-in: every builder method returns the builder,
 // awaiting it resolves [] or rejects with the error registered for the table.
 function mockMakeBuilder(table) {
   const name = String(table).split(' ')[0];
   const builder = {};
-  for (const m of ['select', 'where', 'whereIn', 'leftJoin', 'orderBy', 'orderByRaw', 'limit']) {
-    builder[m] = () => builder;
+  for (const m of ['select', 'where', 'orWhere', 'whereIn', 'whereNull', 'andWhere', 'whereRaw', 'andWhereRaw', 'orWhereRaw', 'leftJoin', 'orderBy', 'orderByRaw', 'limit']) {
+    builder[m] = (...args) => {
+      (mockOps[name] ||= []).push([m, ...args.map((a) => (typeof a === 'function' ? 'fn' : a))]);
+      // Grouped clauses run against the same builder so nested ones are recorded too.
+      if (typeof args[0] === 'function') args[0](builder);
+      return builder;
+    };
   }
   builder.then = (resolve, reject) => {
     const err = mockTableErrors[name];
@@ -31,6 +37,7 @@ const { getActivity, MISSING_TABLE_SQLSTATE } = require('../services/agent-activ
 
 afterEach(() => {
   for (const k of Object.keys(mockTableErrors)) delete mockTableErrors[k];
+  for (const k of Object.keys(mockOps)) delete mockOps[k];
 });
 
 describe('getActivity loader', () => {
@@ -58,5 +65,15 @@ describe('getActivity loader', () => {
   it('propagates any other database error instead of returning an empty feed', async () => {
     mockTableErrors.job_health = Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' });
     await expect(getActivity({ windowHours: 24 })).rejects.toThrow('connection refused');
+  });
+
+  it('digest history: a row marked done inside the window qualifies and orders by done_at; a done row is never pinned', async () => {
+    await getActivity({ windowHours: 24 });
+    const ops = mockOps.notifications || [];
+    // Pinned query (first): done rows are history, never pinned.
+    expect(ops).toContainEqual(['whereNull', 'done_at']);
+    // Windowed query: created_at, resolvedAt OR done_at inside the window, newest of the three first.
+    expect(ops.some((o) => o[0] === 'orWhere' && o[1] === 'done_at' && o[2] === '>=')).toBe(true);
+    expect(ops.some((o) => o[0] === 'orderByRaw' && /GREATEST\(created_at,.*done_at\) DESC/.test(o[1]))).toBe(true);
   });
 });

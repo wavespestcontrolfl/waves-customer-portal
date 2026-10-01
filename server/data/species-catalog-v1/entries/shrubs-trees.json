@@ -1,0 +1,3091 @@
+[
+  {
+    "slug": "hibiscus",
+    "kind": "host_plant",
+    "common_name": "Hibiscus",
+    "aka": [
+      "tropical hibiscus",
+      "chinese hibiscus"
+    ],
+    "aliases": [
+      "hibiscus",
+      "tropical hibiscus",
+      "chinese hibiscus",
+      "hibiscus rosa-sinensis"
+    ],
+    "scientific_name": "Hibiscus rosa-sinensis",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large single or double trumpet-shaped flowers in red, pink, yellow, orange or white, each usually lasting a day",
+      "Glossy, alternate leaves with toothed (serrated) edges",
+      "Many-branched evergreen shrub, from low and spreading to a small tree form",
+      "Flower has a long central column of fused stamens protruding from the center"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ixora",
+        "difference": "When not flowering, hibiscus has larger toothed leaves on an open branching shrub; ixora has smaller glossy leaves in a denser, more compact hedge form.",
+        "next_photo": "A close-up of the leaf edge (toothed vs. smooth) and a wide shot of the overall branching habit.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bougainvillea",
+        "difference": "Hibiscus has one large true flower with no thorns; bougainvillea's color is papery bracts around a tiny flower, on thorny stems.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several papery bracts.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A widely planted flowering shrub grown for its large, colorful blooms, each usually lasting only a day before the next opens. Aphids, whiteflies and mealybugs are the most common problems, showing up as sticky honeydew or sooty mold; a technician can tell which pest is present and how far it has spread.",
+      "fact": "Individual hibiscus flowers typically open for just a single day, but a healthy plant keeps producing new blooms for months at a stretch.",
+      "blurb": "A large-flowered landscape shrub prone to aphids, whiteflies and mealybugs, which show up as honeydew and sooty mold."
+    },
+    "tech_notes": "Chilli thrips can distort and blacken new growth and flower buds on hibiscus in this region; aphids, whiteflies and mealybugs produce honeydew and sooty mold. Product choice, coverage and timing are a technician's call, since some common pesticides are known to injure hibiscus foliage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/hibiscus/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Chilli thrips is well documented as a hibiscus pest in UF/IFAS entomology literature, though the specific host-plant line wasn't confirmed on the fetched gardening-solutions hibiscus page (which named only aphids, whiteflies and mealybugs).",
+      "approval_hash": "c667c3019f47edb38c6670a350faa2a3a6f971c7fd3bfa28b67691c44027a8af"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Large trumpet-shaped flower with five overlapping petals and a long protruding central column",
+        "Glossy leaves with toothed (serrated) edges",
+        "Many-branched evergreen shrub habit"
+      ],
+      "common_problems": [
+        "aphid",
+        "mealybug",
+        "pink-hibiscus-mealybug",
+        "spiraling-whitefly",
+        "sooty-mold",
+        "chilli-thrips"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "ixora",
+    "kind": "host_plant",
+    "common_name": "Ixora",
+    "aka": [
+      "flame of the woods"
+    ],
+    "aliases": [
+      "ixora",
+      "flame of the woods",
+      "ixora coccinea"
+    ],
+    "scientific_name": "Ixora coccinea",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Dense clusters of small four-petaled flowers in red, orange, yellow, pink or white, blooming nearly year-round",
+      "New leaves emerge bronze and mature to glossy dark green",
+      "Compact, densely-branching evergreen shrub, often kept as a hedge",
+      "Each flower cluster can stay showy for six to eight weeks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "hibiscus",
+        "difference": "When not in bloom, ixora has small glossy leaves in a dense compact hedge; hibiscus has larger toothed leaves on a more open, upright shrub.",
+        "next_photo": "A wide shot of the overall shrub shape and a close-up of a single leaf edge.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "firebush",
+        "difference": "Ixora flowers are dense rounded clusters of small four-petaled blooms; firebush flowers are loose clusters of narrow tubular red-orange blooms.",
+        "next_photo": "A close-up of a single flower cluster showing petal shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A compact, densely-flowering hedge shrub popular across Central and South Florida landscapes. Sooty mold on the leaves usually points to aphids or scale feeding above, and pale new growth often points to a nutrient issue on our alkaline soils; a technician can tell the two apart and check the roots and soil.",
+      "fact": "A single ixora flower cluster can stay colorful for six to eight weeks, which is part of why it flowers so heavily almost all year.",
+      "blurb": "A compact, heavy-flowering hedge shrub; sooty mold points to aphids or scale, pale new growth often points to soil nutrition."
+    },
+    "tech_notes": "Sooty mold on ixora usually follows honeydew from aphids or scale rather than being a disease itself. Chlorotic new growth suggests iron or manganese tie-up in alkaline soil; purplish spotting on older leaves suggests a potassium/phosphorus imbalance. A technician checks pests and soil conditions before recommending anything, and any nutrition correction stays within the local timing rules.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/ixora/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f47dd5a62726c50635b28b8012ef7a81987b1d9967b213770f00fa5ad594357a"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Dense rounded clusters of small four-petaled flowers",
+        "New leaves bronze, aging to glossy dark green",
+        "Compact, densely-branching hedge form"
+      ],
+      "common_problems": [
+        "aphid",
+        "mealybug",
+        "sooty-mold",
+        "spider-mites"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "croton",
+    "kind": "host_plant",
+    "common_name": "Croton",
+    "aka": [
+      "garden croton"
+    ],
+    "aliases": [
+      "croton",
+      "garden croton",
+      "codiaeum variegatum"
+    ],
+    "scientific_name": "Codiaeum variegatum",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Bold, leathery leaves in a wide range of shapes, from narrow straps to broad lobed 'oak leaf' forms",
+      "Leaf color mottled in reds, oranges, yellows, pinks, purples and greens on the same plant",
+      "Milky sap where a leaf or stem is cut or torn",
+      "Full, bushy evergreen shrub, usually clustered for color impact"
+    ],
+    "look_alikes": [
+      {
+        "slug": "copperleaf",
+        "difference": "Croton leaves are thick and leathery in very variable shapes with milky sap when cut; copperleaf has softer, wavy-edged heart-shaped leaves without milky sap.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape; keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "The sap can irritate skin and mouth, and UF/IFAS advises keeping children and pets from chewing the leaves.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A colorful foliage shrub grown for its wildly variable, brightly mottled leaves. It's usually pest and disease free, but mealybugs, scale, mites or thrips can turn up; sticky honeydew and sooty mold point to one of the sap-feeders rather than a disease, and a technician can tell which is present.",
+      "fact": "No two croton varieties look quite alike — the same species can produce leaves shaped like narrow straps, broad oak leaves, or twisted spirals, all with different color mottling.",
+      "blurb": "A brightly mottled foliage shrub, usually trouble-free; watch for mealybugs, scale or mites causing honeydew and sooty mold."
+    },
+    "tech_notes": "Croton is generally pest- and disease-resistant; when problems appear they're usually mealybugs, scale, spider mites or thrips, sometimes with a fungal leaf spot in wet conditions. Outdoor washing helps with mite buildup; a technician chooses product, coverage and timing for anything beyond that.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/crotons/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "UF/IFAS gardening-solutions text calls croton leaves 'irritating and poisonous' and warns to keep children and pets from nibbling them, which supports the toxic_to_pets flag; a dedicated ASPCA page for croton could not be loaded to confirm the exact toxic principle and clinical signs.",
+      "approval_hash": "6f1796331375e7a110e5f6c376a414ce9c836bd37d0154e19c98ef83c0d6b0fe"
+    },
+    "role": "landscape_plant",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Thick leathery leaves in highly variable shapes on the same plant",
+        "Bright mottled color patterns of red, orange, yellow, pink, purple and green",
+        "Milky sap from a cut leaf or stem"
+      ],
+      "common_problems": [
+        "mealybug",
+        "florida-wax-scale",
+        "spider-mites",
+        "aphid",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "bougainvillea",
+    "kind": "host_plant",
+    "common_name": "Bougainvillea",
+    "aka": [],
+    "aliases": [
+      "bougainvillea"
+    ],
+    "scientific_name": "Bougainvillea spp.",
+    "rank": "genus",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Sharp, recurved thorns along woody, climbing or sprawling stems",
+      "Brilliant color from papery bracts surrounding a small, inconspicuous true flower",
+      "Blooms most heavily with full sun and drier soil",
+      "Can be trained as a shrub, over a trellis or fence, or as a hanging cascade"
+    ],
+    "look_alikes": [
+      {
+        "slug": "hibiscus",
+        "difference": "Bougainvillea's color is papery bracts around a tiny true flower, on thorny climbing stems; hibiscus has one large true flower on a thornless shrub.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several bracts.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A thorny, vining shrub grown for its brilliant papery bracts, which put on the best show in full sun with drier soil. Sparse blooming is usually a light or watering issue rather than a pest, while sticky leaves and sooty mold point to aphids, mealybugs or scale; a technician can check both.",
+      "fact": "The bright color people call the flower is actually a set of modified leaves called bracts — the true flower is the tiny, easy-to-miss white or cream structure at their center.",
+      "blurb": "A thorny, sun-loving vining shrub whose bright color comes from bracts, not petals; sparse bloom usually means shade or too much water."
+    },
+    "tech_notes": "Bougainvillea flowers best with strong direct sun and soil kept on the dry side; overwatering or too much shade reduces blooming without being a disease. Watch for the sharp recurved thorns when inspecting or pruning. Aphids, mealybugs and scale can cause honeydew and sooty mold.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/bougainvillea/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Bougainvillea looper caterpillar is a well-known defoliator in Florida but has no matching catalog slug, so it isn't listed in common_problems.",
+      "approval_hash": "5c088b096ec3dfe51f4b8c2d839e7fed3f42c10fec20848dd3c232c3b68c5e79"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "vine",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Sharp recurved thorns on woody stems",
+        "Papery colorful bracts surrounding a tiny true flower",
+        "Sprawling, climbing or trained woody vine habit"
+      ],
+      "common_problems": [
+        "aphid",
+        "mealybug",
+        "sooty-mold",
+        "spider-mites"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "sweet-viburnum",
+    "kind": "host_plant",
+    "common_name": "Sweet Viburnum",
+    "aka": [],
+    "aliases": [
+      "sweet viburnum",
+      "viburnum odoratissimum"
+    ],
+    "scientific_name": "Viburnum odoratissimum",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large, glossy, broad evergreen leaves 4-8 inches long",
+      "Fragrant white flower clusters in spring, followed by red-to-black berries",
+      "Dense, fast-growing hedge or trained into a small multi-trunk tree",
+      "Opposite leaf arrangement along the stem"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ligustrum",
+        "difference": "Sweet viburnum has pleasantly fragrant flower clusters and larger, glossier leaves; ligustrum's clusters smell unpleasant, on smaller pointed leaves.",
+        "next_photo": "A close-up comparing leaf size and gloss, plus (if flowering) a smell test of the flower cluster.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-growing, generally trouble-free hedge shrub prized for glossy foliage and fragrant spring flowers. Sudden shoot or branch dieback usually follows a stress event such as drought, a pruning wound or a nutrition gap; a technician checks the plant and site together before naming a cause.",
+      "fact": "Sweet viburnum is considered an ironclad landscape shrub — most specimens grow for years free of significant insect or disease trouble.",
+      "blurb": "A fast-growing, usually trouble-free hedge shrub with fragrant spring flowers; sudden dieback often follows a stress event."
+    },
+    "tech_notes": "Shoot or section dieback on sweet viburnum is frequently linked to a fungal pathogen (Botryosphaeria) that follows a stress event — drought, pruning wounds, or a nutrient gap — rather than attacking a healthy plant outright. Downy mildew and fungal leaf spots also occur in wet, humid conditions; a technician distinguishes these from simple honeydew and sooty mold from aphids or whitefly.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/charlotteco/2024/05/02/one-sweet-shrub-the-sweet-viburnum/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Botryosphaeria dieback ('Bot rot') is a confirmed, common cause of sweet viburnum dieback per a UF/IFAS Extension blog post but has no matching catalog slug.",
+      "approval_hash": "60acae7006c8d2a98d4d9757cdb4e8f8d9636b30660451af0810e735088145b7"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Large glossy opposite leaves, 4-8 inches long",
+        "Fragrant white spring flower clusters, then red-to-black berries",
+        "Dense hedge form or small multi-trunk tree shape"
+      ],
+      "common_problems": [
+        "viburnum-downy-mildew",
+        "aphid",
+        "sooty-mold",
+        "leaf-spot-fungi",
+        "spiraling-whitefly"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "ficus-hedge",
+    "kind": "host_plant",
+    "common_name": "Ficus Hedge",
+    "aka": [
+      "ficus",
+      "green island ficus",
+      "weeping fig hedge"
+    ],
+    "aliases": [
+      "ficus hedge",
+      "ficus",
+      "green island ficus",
+      "weeping fig hedge"
+    ],
+    "scientific_name": "Ficus spp.",
+    "rank": "genus",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Milky white latex sap where a leaf or stem is cut",
+      "Small to medium glossy oval leaves, densely branched",
+      "Usually sheared into a tight, solid hedge or privacy wall",
+      "Rapid regrowth after pruning"
+    ],
+    "look_alikes": [
+      {
+        "slug": "clusia",
+        "difference": "Ficus hedge has smaller glossy leaves and milky sap from any cut; clusia has thick, leathery paddle-shaped leaves and no milky sap.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky white sap; keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists ficus (weeping fig) as toxic to dogs and cats if eaten; keep pets from chewing on the leaves.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A dense, fast-growing hedge plant sheared into privacy screens across the region. Ficus whitefly is the main concern — it feeds on leaf undersides and can cause heavy leaf drop on a hedge that looked fine weeks earlier; a technician checks the leaf undersides and extent of dieback first.",
+      "fact": "A ficus hedge can drop most of its leaves within weeks of a ficus whitefly infestation taking hold, then push back new growth if the infestation subsides.",
+      "blurb": "A dense, fast-growing hedge plant; ficus whitefly is the main concern, causing heavy leaf drop that can look sudden."
+    },
+    "tech_notes": "Ficus whitefly (Singhiella simplex) feeds on leaf undersides, producing honeydew, sooty mold, yellowing, heavy leaf drop, and branch dieback; severe or repeated infestations can stunt or kill a hedge. A technician checks leaf undersides for nymphs and assesses how much of the hedge has thinned before recommending an approach.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1203",
+      "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/weeping-fig"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Cuban laurel thrips is a well-documented ficus pest but has no matching catalog slug.",
+      "approval_hash": "7bff1939a2587705a2ee8f2151b115ec3cad6fa581ca69eae6526da6543f540a"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Milky white sap from a cut leaf or stem",
+        "Small glossy oval leaves, densely branched",
+        "Sheared into a tight solid hedge form"
+      ],
+      "common_problems": [
+        "ficus-whitefly",
+        "sooty-mold",
+        "spider-mites"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "podocarpus",
+    "kind": "host_plant",
+    "common_name": "Podocarpus",
+    "aka": [
+      "yew podocarpus",
+      "buddhist pine"
+    ],
+    "aliases": [
+      "podocarpus",
+      "yew podocarpus",
+      "buddhist pine",
+      "podocarpus macrophyllus"
+    ],
+    "scientific_name": "Podocarpus macrophyllus",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Narrow, linear, spirally-arranged leaves with a leathery texture and glossy dark green color",
+      "Upright, densely-foliaged, columnar growth habit",
+      "Usually sheared into a dense hedge or screen; left unpruned it becomes a narrow tree",
+      "Seeds sit on a fleshy purple receptacle, resembling a small berry"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ligustrum",
+        "difference": "Podocarpus has narrow, needle-like leaves spirally arranged on the stem; ligustrum has broader oval leaves growing in opposite pairs.",
+        "next_photo": "A close-up of the leaf shape and arrangement on the stem.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists podocarpus (Buddhist pine) as toxic to dogs, cats and horses; the fleshy seed cones are most often involved and can cause vomiting or diarrhea.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A dense, narrow-leaved evergreen used as a screen or hedge; in shade it grows more slowly and loosely than in full sun. It's generally a tough, low-problem plant; a technician checks for scale or a fungal leaf spot if the foliage looks off, since the seed cones are also mildly toxic to pets.",
+      "fact": "Left unsheared, podocarpus can grow into a narrow tree 35 to 50 feet tall — most landscape specimens are kept far shorter by regular pruning.",
+      "blurb": "A dense, narrow-leaved hedge or screen plant; generally tough, with mildly toxic-to-pets seed cones."
+    },
+    "tech_notes": "Podocarpus is a comparatively low-problem hedge plant; when foliage looks off, a technician checks for scale insects, mealybugs or a fungal leaf spot before recommending anything. It is best hand-pruned rather than sheared for the cleanest look, though most landscapes keep it sheared.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/mastergardener/resources/plantid/ornamentals/podocarpus/",
+      "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/buddhist-pine"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "The fetched UF/IFAS plant-ID page did not name specific pests or diseases; mealybug, aphid, sooty mold and fungal leaf spot are listed as common general problems for broadleaf hedge shrubs in this climate, not a podocarpus-specific citation.",
+      "approval_hash": "109f84a2c90154211a8847f194189540a294d43674571d01646d6e44761cd571"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Narrow, linear, spirally arranged needle-like leaves",
+        "Dense, upright columnar growth",
+        "Fleshy purple seed receptacle resembling a small berry"
+      ],
+      "common_problems": [
+        "mealybug",
+        "aphid",
+        "sooty-mold",
+        "leaf-spot-fungi"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "sea-grape",
+    "kind": "host_plant",
+    "common_name": "Sea Grape",
+    "aka": [],
+    "aliases": [
+      "sea grape",
+      "seagrape",
+      "coccoloba uvifera"
+    ],
+    "scientific_name": "Coccoloba uvifera",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large, round, leathery leaves up to 10 inches across with a reddish primary vein",
+      "Grape-like clusters of round fruit, green ripening to deep purple",
+      "Irregularly branched trunk with a rounded, loosely spreading canopy",
+      "Can be grown as a sprawling shrub or trained into a small tree"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cocoplum",
+        "difference": "Sea grape has large round leaves up to 10 inches across; cocoplum's leaves are much smaller and oval, only a couple inches long.",
+        "next_photo": "A close-up of a single leaf next to a hand or a common object for scale.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A salt- and drought-tolerant coastal native grown for its large round leaves and grape-like fruit clusters. A hard freeze can brown and drop leaves, and a fungal leaf spot can appear in wet conditions; a technician can tell cold injury, a leaf spot and a young tree's transplant stress apart.",
+      "fact": "Dune plantings of sea grape near the immediate shoreline may be protected by state or county rules, so check before trimming — landscape plantings away from the shoreline usually aren't restricted the same way.",
+      "blurb": "A salt- and drought-tolerant coastal native with large round leaves; a hard freeze or wet-weather leaf spot are the main concerns."
+    },
+    "tech_notes": "Sea grape is sensitive to frost and freeze, which can brown or drop foliage on an otherwise healthy plant. Young, newly planted specimens can also show transplant stress. A leaf-galling insect and a twig-boring moth are known minor pests in the literature but are cosmetic rather than serious.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/seagrape/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Sea grape gall midge / nipple gall and sea grape borer moth are confirmed by UF/IFAS as real, mostly cosmetic problems but neither has a matching catalog slug.; Hedged in customer copy, not asserted as settled: Regulatory/permit status of dune sea grape plantings near the immediate shoreline — Gardening Solutions describes coastal dune protection generally; the exact permit requirement and which shoreline zones it applies to were not confirmed against a specific state or county regulatory source, so the copy is worded as a caution rather than a settled legal claim.",
+      "approval_hash": "4d59aec213ee6974cbaacba9fd1ef01606da4a7f77f09bc93514027fb977c84c"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Very large, round, leathery leaves with a reddish main vein",
+        "Grape-like fruit clusters, green ripening to purple",
+        "Irregularly branched trunk with a loose rounded canopy"
+      ],
+      "common_problems": [
+        "cold-damage",
+        "transplant-shock",
+        "leaf-spot-fungi"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "cocoplum",
+    "kind": "host_plant",
+    "common_name": "Cocoplum",
+    "aka": [],
+    "aliases": [
+      "cocoplum",
+      "chrysobalanus icaco"
+    ],
+    "scientific_name": "Chrysobalanus icaco",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, rounded, glossy oval leaves, often tinged reddish when new",
+      "Small white flowers followed by white-to-purple plum-like fruit",
+      "Coastal form is a low spreading shrub; inland form grows taller and more upright",
+      "Dense, fine-textured hedge or screen form"
+    ],
+    "look_alikes": [
+      {
+        "slug": "clusia",
+        "difference": "Cocoplum has small rounded leaves a couple inches long in a fine-textured hedge; clusia has much larger, thick, leathery paddle-shaped leaves.",
+        "next_photo": "A close-up of a single leaf next to a hand or a common object for scale.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A hardy Florida-native hedge shrub with few serious problems. Lobate lac scale and weevils are the main pest concerns, usually showing up with sooty mold from the scale's honeydew or notched leaf edges from weevil feeding; a technician can tell which is present and how far it's spread.",
+      "fact": "Cocoplum's coastal form naturally stays a low, spreading shrub under 6 feet, while the same species growing further inland can reach 15 to 25 feet if left unpruned.",
+      "blurb": "A hardy native hedge shrub with few serious problems; lobate lac scale and weevils are the main things to watch for."
+    },
+    "tech_notes": "Lobate lac scale produces heavy honeydew and sooty mold on cocoplum; weevils leave notched leaf margins. A fungal or algal leaf spot and Botryosphaeria canker are known but less common issues, particularly on stressed plants with poor root health.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/shrubs/cocoplum/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Algal leaf spot (Cephaleuros virescens) and Botryosphaeria canker are named by UF/IFAS as occasional cocoplum problems but neither has a matching catalog slug.",
+      "approval_hash": "4fe259f3a9bba731abb06a8e9e0c9552b645835d2bc962f1956e5729b5678dab"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Small, rounded, glossy oval leaves",
+        "Fine-textured, dense hedge form",
+        "Small white-to-purple plum-like fruit"
+      ],
+      "common_problems": [
+        "lobate-lac-scale",
+        "sri-lankan-weevil",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "crape-myrtle",
+    "kind": "host_plant",
+    "common_name": "Crape Myrtle",
+    "aka": [
+      "crapemyrtle"
+    ],
+    "aliases": [
+      "crape myrtle",
+      "crapemyrtle",
+      "lagerstroemia indica"
+    ],
+    "scientific_name": "Lagerstroemia indica",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large showy flower clusters in summer, in shades from white to pink, lavender or coral",
+      "Smooth, mottled, peeling bark that adds winter interest",
+      "Deciduous, from dwarf 3-4 foot forms to tree-sized specimens over 20 feet",
+      "Long narrow seed capsules persist after flowering"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ligustrum",
+        "difference": "Crape myrtle has smooth peeling bark, is deciduous, flowers in large summer clusters; ligustrum has rougher bark, stays evergreen, small white flowers.",
+        "next_photo": "A close-up of the bark texture and whether the plant has dropped its leaves.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A summer-flowering landscape tree or shrub with attractive peeling bark and low feeding needs. A white powdery coating on leaves and buds points to powdery mildew, while sticky leaves and black sooty mold usually point to aphids or scale; a technician checks which is present before recommending anything.",
+      "fact": "Some crape myrtle varieties are bred specifically to resist powdery mildew, which shows up as a white powdery coating rather than true dust.",
+      "blurb": "A summer-flowering tree or shrub with peeling bark; powdery mildew and aphid-driven sooty mold are the main things to watch."
+    },
+    "tech_notes": "Powdery mildew shows as a white powdery coating on new leaves, buds and shoot tips, worse in shade with poor air circulation. Aphids are common and their honeydew supports sooty mold. A white, felted scale insect newly established in Florida is also worth checking for on the bark, though it's not yet in this catalog by name.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/crapemyrtle/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Crape myrtle bark scale is confirmed established in Florida by a UF/IFAS pest alert but has no matching catalog slug.",
+      "approval_hash": "2846c02be8599b9cd0062881221d405864d81873b8c8248e135405a353689814"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Smooth, mottled, peeling bark",
+        "Large showy flower clusters in summer",
+        "Deciduous habit, bare in winter"
+      ],
+      "common_problems": [
+        "powdery-mildew",
+        "aphid",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "gardenia",
+    "kind": "host_plant",
+    "common_name": "Gardenia",
+    "aka": [
+      "cape jasmine"
+    ],
+    "aliases": [
+      "gardenia",
+      "cape jasmine",
+      "gardenia jasminoides"
+    ],
+    "scientific_name": "Gardenia jasminoides",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Waxy, intensely fragrant white flowers, sometimes pale yellow with mottling as they age",
+      "Glossy, dark-green, oval leaves in mounding evergreen form",
+      "Mounded shrub form, 2 to 15 feet depending on the variety",
+      "Requires good air circulation and acidic soil to perform well"
+    ],
+    "look_alikes": [
+      {
+        "slug": "confederate-jasmine",
+        "difference": "Gardenia is a rounded shrub with thick waxy white flowers on woody stems; confederate jasmine is a twining vine with small, thin, pinwheel-shaped flowers.",
+        "next_photo": "A wide shot showing whether the plant is a free-standing shrub or a vine climbing a structure.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists gardenia as toxic to dogs and cats, usually causing mild vomiting, diarrhea or hives if eaten; keep pets from chewing on it.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fragrant flowering shrub that needs good air circulation and the right soil pH to thrive. Sooty mold usually points to mealybugs, aphids, scale or whitefly feeding on the leaves, while bud drop or yellowing can point to soil pH, watering or a root problem; a technician can sort out which.",
+      "fact": "Gardenias need fairly acidic soil, roughly pH 5.0 to 6.5 — in naturally alkaline soil common in parts of this region, the plant often struggles no matter how well it's watered.",
+      "blurb": "A fragrant flowering shrub needing acidic soil and airflow; sooty mold points to sap-feeders, and bud drop often points to soil or water."
+    },
+    "tech_notes": "Mealybugs, aphids, scale and whitefly all produce honeydew and sooty mold on gardenia. Root-knot nematodes are a known, harder-to-treat problem in sandy soil; nematode-resistant grafted varieties are one option a technician can discuss for a struggling plant. Alkaline soil pH is a common underlying cause of chronic decline.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/gardenias/",
+      "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/gardenia"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Iron/manganese chlorosis and root-knot nematode are real UF/IFAS-named gardenia problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species); tea scale is a well-known gardenia pest, but the fetched UF/IFAS page named only 'scales' generically, so it's left out of common_problems.",
+      "approval_hash": "ffccf449bea4d49a4ab8463f282ebde1c8ac84b6b7f85131f95058a8222054f5"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Waxy, intensely fragrant white flowers",
+        "Glossy dark-green oval leaves",
+        "Mounded evergreen shrub form"
+      ],
+      "common_problems": [
+        "mealybug",
+        "aphid",
+        "spiraling-whitefly",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "oleander",
+    "kind": "host_plant",
+    "common_name": "Oleander",
+    "aka": [],
+    "aliases": [
+      "oleander",
+      "nerium oleander"
+    ],
+    "scientific_name": "Nerium oleander",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Long, narrow, dark-green leaves usually arranged in whorls of three",
+      "Clusters of single or double five-petaled funnel-shaped flowers in white, pink, red, yellow or purple",
+      "Fast-growing, rounded evergreen shrub or small tree, 10-18 feet",
+      "Often planted in long rows as a screen along roads and property lines"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ixora",
+        "difference": "Oleander has narrow leaves in whorls of three and funnel flowers; ixora has broader opposite leaves and dense clusters of small flowers.",
+        "next_photo": "A close-up of the leaf arrangement on the stem and of a single flower's petal count.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "All parts of oleander are toxic to people and pets if eaten, and the sap can irritate skin on contact; UF/IFAS and ASPCA both list it as poisonous (cardiac glycosides).",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tough, fast-growing flowering screen plant, popular along roads and property lines, where every part of the plant is poisonous if eaten and the sap can irritate skin. Oleander caterpillar can strip a plant of leaves within a couple weeks; a technician checks how far it's spread before recommending anything.",
+      "fact": "Oleander is so easy to grow in poor soil and heat that it's planted along highways and interstates throughout Florida, despite every part of the plant being poisonous if eaten.",
+      "blurb": "A tough, fast-growing flowering screen plant; every part is poisonous if eaten, and oleander caterpillar can defoliate it quickly."
+    },
+    "tech_notes": "Oleander caterpillar (Syntomeida epilais) can defoliate a plant within one to two weeks and is common in Central and South Florida. Scale insects are the other main pest. Never burn oleander trimmings — the smoke carries the same toxins as the plant. Oleander leaf scorch (Xylella fastidiosa) is a separate, more serious disease a technician distinguishes by pattern and spread.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST412",
+      "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/oleander"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "5e070285ee59dae8182639796b564c51ffb556afb983736512a2e937ee372043"
+    },
+    "role": "landscape_plant",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Long narrow leaves in whorls of three",
+        "Clusters of five-petaled funnel-shaped flowers",
+        "Fast-growing rounded evergreen habit"
+      ],
+      "common_problems": [
+        "oleander-caterpillar",
+        "oleander-leaf-scorch",
+        "aphid",
+        "sooty-mold",
+        "florida-wax-scale"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "plumbago",
+    "kind": "host_plant",
+    "common_name": "Plumbago",
+    "aka": [
+      "cape plumbago",
+      "sky flower",
+      "leadwort"
+    ],
+    "aliases": [
+      "plumbago",
+      "cape plumbago",
+      "sky flower",
+      "leadwort",
+      "plumbago auriculata"
+    ],
+    "scientific_name": "Plumbago auriculata",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Clusters of phlox-like, five-petaled sky-blue (or white) flowers",
+      "Soft, oval, bright-green leaves on sprawling, mounding stems",
+      "Blooms nearly year-round in South and Central Florida",
+      "Loose, cascading habit, often used along walls or in mixed beds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bougainvillea",
+        "difference": "Plumbago has soft oval leaves and no thorns, with small tubular blue or white flower clusters; bougainvillea has thorny stems and large papery colorful bracts.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the flower structure.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A low-maintenance, nearly year-round flowering shrub. Curled, stunted new growth is the classic sign of chilli thrips, a common problem on blue plumbago; a technician can confirm this and check how far it's spread before recommending anything.",
+      "fact": "Blue plumbago can flower almost continuously in South and Central Florida, pausing mainly after a hard frost.",
+      "blurb": "A low-maintenance, nearly year-round flowering shrub; curled, stunted new growth usually points to chilli thrips."
+    },
+    "tech_notes": "Chilli thrips cause the classic curled, stunted new growth on blue plumbago. Cotton cushion scale and spider mites are occasional secondary problems. Alkaline soil can cause yellowing from mineral tie-up rather than a pest.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/plumbago/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Cotton cushion scale is named by UF/IFAS as an occasional plumbago pest but has no matching catalog slug.; Unverified (not asserted in customer copy): Plumbago sap causing skin irritation or contact dermatitis (plumbagin) — Reported by non-UF/IFAS, non-ASPCA sources (e.g. a state poison information center); could not be confirmed against this catalog's approved source list, so no irritant flag is set here.",
+      "approval_hash": "ae5124187d0b3ec40f513e3c6300cf67607a14fa8164f42f8e4a1cf6b619ab91"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Clusters of phlox-like sky-blue or white flowers",
+        "Soft oval bright-green leaves",
+        "Loose, sprawling, mounding stems"
+      ],
+      "common_problems": [
+        "chilli-thrips",
+        "spider-mites"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "confederate-jasmine",
+    "kind": "host_plant",
+    "common_name": "Confederate Jasmine",
+    "aka": [
+      "star jasmine"
+    ],
+    "aliases": [
+      "confederate jasmine",
+      "star jasmine",
+      "trachelospermum jasminoides"
+    ],
+    "scientific_name": "Trachelospermum jasminoides",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, star- or pinwheel-shaped, intensely fragrant white flowers in spring",
+      "Glossy, dark green, opposite leaves on a twining vine",
+      "Sticky sap that can stain clothing",
+      "Used as a groundcover or trained on a trellis, arbor or fence"
+    ],
+    "look_alikes": [
+      {
+        "slug": "gardenia",
+        "difference": "Confederate jasmine is a twining vine with small white flowers; gardenia is a rounded shrub with big waxy flowers (downy jasmine looks similar, fuzzy leaves).",
+        "next_photo": "A wide shot showing whether the plant is a free-standing shrub or a vine climbing a structure, plus a close-up of leaf texture.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-growing, fragrant, twining vine that's relatively pest-free in most landscapes. When problems do show up they're usually sap-feeders like aphids or mealybugs, seen as sticky leaves and sooty mold; a technician checks the vine's density and the extent of any dieback.",
+      "fact": "Despite the name, confederate jasmine isn't a true jasmine and isn't native to the American South — it's native to China.",
+      "blurb": "A fast-growing, fragrant twining vine, relatively pest-free; occasional aphids or mealybugs cause sticky leaves and sooty mold."
+    },
+    "tech_notes": "Confederate jasmine is noted by UF/IFAS as relatively pest-free. When it does have trouble it's most often a sap-feeder such as aphids, mealybugs or scale, producing honeydew and sooty mold, rather than a specific named disease.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/star-jasmine/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "84ef1ce5bd407d704703f3ea95185ec79b92ee9533effac1ef1a4b0247774946"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "vine",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Small pinwheel-shaped, intensely fragrant white flowers",
+        "Glossy dark green opposite leaves",
+        "Twining vine habit, sap can stain clothing"
+      ],
+      "common_problems": [
+        "aphid",
+        "mealybug",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "arboricola",
+    "kind": "host_plant",
+    "common_name": "Arboricola",
+    "aka": [
+      "dwarf schefflera"
+    ],
+    "aliases": [
+      "arboricola",
+      "dwarf schefflera",
+      "schefflera arboricola"
+    ],
+    "scientific_name": "Schefflera arboricola",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Glossy, dark green, palmately compound leaves with 5-9 leaflets fanning out like fingers",
+      "Rounded, densely-branching evergreen shrub, can be pruned into a small patio tree",
+      "Occasional small orange-yellow fruit clusters in winter",
+      "Tolerates low light and salt spray, common near pools"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ficus-hedge",
+        "difference": "Arboricola has glossy palmate leaves, 5-9 leaflets like fingers; ficus hedge has simple oval leaves, milky sap (umbrella tree looks similar, larger leaflets).",
+        "next_photo": "A close-up of a single leaf to count leaflets and, wearing gloves, check for a milky sap when broken; keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "The leaves contain calcium oxalate crystals that can irritate the mouth and cause drooling or vomiting if chewed by a pet; ASPCA lists schefflera as toxic to dogs and cats.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A low-maintenance hedge and patio shrub often planted near pools for its salt tolerance. Sticky leaves and sooty mold usually point to scale, mealybugs or aphids; a technician checks the leaf undersides and stems for these before recommending anything, since the leaves can also irritate a pet's mouth if chewed.",
+      "fact": "Arboricola's leaflets fan out from a central point like fingers on a hand, which is where its common name 'umbrella plant' comes from in some nurseries.",
+      "blurb": "A low-maintenance pool-friendly hedge shrub; scale, mealybugs or aphids cause honeydew and sooty mold, and the leaves can irritate pets."
+    },
+    "tech_notes": "Scale insects, mealybugs, aphids and spider mites are the common sap-feeders on arboricola, producing honeydew, sooty mold or stippled leaves. A bacterial or fungal leaf spot can also appear in wet, crowded conditions.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/poolside-plants/",
+      "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/schefflera"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Scale, mealybug, aphid and spider mite susceptibility is common knowledge for this plant family, but the UF/IFAS fact sheets fetched for arboricola either redirected or were no longer available, so the pest list is general knowledge rather than a page-specific citation.; Hedged in customer copy, not asserted as settled: ASPCA toxicity listing applies specifically to Schefflera arboricola vs. S. actinophylla — The ASPCA page is titled generically 'Schefflera' and does not distinguish between the two commonly planted species; both share the same calcium-oxalate mechanism, but the exact page covers the genus rather than naming arboricola specifically.",
+      "approval_hash": "cf0764d41986f7ba8fb362f6ed67139e5275f37a63eb4ac87a77e60ff59b9b04"
+    },
+    "role": "landscape_plant",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Palmately compound leaves with 5-9 glossy leaflets",
+        "Rounded, densely-branching shrub form",
+        "Small orange-yellow fruit clusters in winter"
+      ],
+      "common_problems": [
+        "aphid",
+        "mealybug",
+        "spider-mites",
+        "sooty-mold",
+        "leaf-spot-fungi"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "copperleaf",
+    "kind": "host_plant",
+    "common_name": "Copperleaf",
+    "aka": [
+      "jacob's coat"
+    ],
+    "aliases": [
+      "copperleaf",
+      "jacobs coat",
+      "acalypha wilkesiana"
+    ],
+    "scientific_name": "Acalypha wilkesiana",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large, soft, heart-shaped leaves, 4-8 inches, mottled in bronze-red, green, purple, yellow, pink or white",
+      "Upright, fast-growing evergreen shrub, 10-15 feet",
+      "Continuous color from the foliage rather than from flowers",
+      "Leaves have a soft, slightly wavy edge rather than a leathery texture"
+    ],
+    "look_alikes": [
+      {
+        "slug": "croton",
+        "difference": "Copperleaf has soft, wavy-edged heart-shaped leaves with no milky sap; croton has thick leathery leaves in very variable shapes with milky sap when cut.",
+        "next_photo": "Wearing gloves, a close-up of a broken leaf or stem to check for milky sap, plus a wide shot of overall leaf shape; keep any sap away from your eyes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-growing accent shrub grown for its continuously colorful mottled foliage rather than flowers. Aphids, mites and scale are the named problems, usually showing up as stippled or sticky leaves and sooty mold; a technician can tell which is present.",
+      "fact": "Copperleaf's color comes entirely from its foliage, not its flowers, and a single leaf can carry several colors at once depending on the cultivar.",
+      "blurb": "A fast-growing accent shrub grown for colorful mottled foliage; aphids, mites and scale are the main things to watch for."
+    },
+    "tech_notes": "Aphids, spider mites and scale insects are the named problems on copperleaf, producing stippled leaves, honeydew or sooty mold depending on which is present. It is frost-tender and hardy only in the warmest parts of this region.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/fp006"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Whether copperleaf sap is irritating like some Euphorbiaceae relatives (e.g. croton) is not confirmed by the fetched EDIS FP006 fact sheet, which lists only aphids, mites and scale as problems; no irritant claim is made in this entry.",
+      "approval_hash": "0c0f2ce45c0d6ade700bbbf7364db01450ba075a76a915d9ead5e6906b26967a"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Large soft heart-shaped leaves with mottled color",
+        "Upright fast-growing shrub form",
+        "Continuous foliage color rather than showy flowers"
+      ],
+      "common_problems": [
+        "aphid",
+        "spider-mites",
+        "florida-wax-scale",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "firebush",
+    "kind": "host_plant",
+    "common_name": "Firebush",
+    "aka": [
+      "scarlet bush"
+    ],
+    "aliases": [
+      "firebush",
+      "scarlet bush",
+      "hamelia patens"
+    ],
+    "scientific_name": "Hamelia patens",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Clusters of narrow, tubular, red-orange flowers that attract hummingbirds and butterflies",
+      "Reddish-tinged, pointed, whorled leaves",
+      "Fast-growing, semi-woody evergreen shrub, up to 15 feet in South Florida",
+      "Flowers from late spring until the first frost"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ixora",
+        "difference": "Firebush has loose clusters of narrow tubular red-orange flowers; ixora has dense rounded clusters of small four-petaled flowers.",
+        "next_photo": "A close-up of a single flower cluster showing petal or tube shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A heat- and drought-tolerant flowering shrub grown for its hummingbird- and butterfly-attracting blooms. UF/IFAS lists it as having no serious insect or disease problems; occasional aphids or sooty mold are usually minor, and a technician can confirm that before recommending anything.",
+      "fact": "In North Florida, firebush often dies back to the roots after the season's first freeze, then regrows and flowers again the following spring.",
+      "blurb": "A heat- and drought-tolerant flowering shrub with essentially no serious insect or disease problems."
+    },
+    "tech_notes": "UF/IFAS notes firebush has no serious insect or disease problems; any aphids or sooty mold seen are typically minor and don't require an aggressive approach.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/firebush/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "7e192ccac4db420e7d97daab9ff0966d1ca0740bdaeb47dd68817dfe9ed7ace9"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Clusters of narrow tubular red-orange flowers",
+        "Reddish-tinged, pointed, whorled leaves",
+        "Fast-growing semi-woody evergreen shrub"
+      ],
+      "common_problems": [
+        "aphid",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "clusia",
+    "kind": "host_plant",
+    "common_name": "Clusia",
+    "aka": [
+      "autograph tree",
+      "pitch apple"
+    ],
+    "aliases": [
+      "clusia",
+      "autograph tree",
+      "pitch apple",
+      "clusia spp"
+    ],
+    "scientific_name": "Clusia spp.",
+    "rank": "genus",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Thick, leathery, glossy, paddle-shaped leaves",
+      "Dense, rounded evergreen form, commonly clipped into a privacy hedge",
+      "Pink-and-white flowers and fleshy fruit that splits to reveal red seeds when left unclipped",
+      "High salt and drought tolerance"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cocoplum",
+        "difference": "Clusia has much larger, thick, leathery paddle-shaped leaves; cocoplum's leaves are small and oval, only a couple inches long.",
+        "next_photo": "A close-up of a single leaf next to a hand or a common object for scale.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tough, salt- and drought-tolerant hedge plant with thick leathery leaves. It's largely disease-free; scale insects are the main pest concern, usually showing up as sticky leaves and sooty mold, and a technician can confirm that before recommending anything.",
+      "fact": "Clusia's thick, leathery leaves were historically scratched with a stylus by visitors leaving messages, which is how one species earned the common name 'autograph tree.'",
+      "blurb": "A tough, salt- and drought-tolerant hedge plant, largely disease-free; scale is the main pest to watch for."
+    },
+    "tech_notes": "Scale insects are the primary pest concern named for clusia; UF/IFAS notes no diseases of major concern for the related pitch apple. Sooty mold following scale honeydew is the most likely visible symptom.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST172"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "The fetched UF/IFAS fact sheet (ST172) covers Clusia rosea (pitch apple); a dedicated fact sheet for the smaller-leaved hedge species (Clusia guttifera) commonly planted here could not be located, so this entry generalizes from the related species.",
+      "approval_hash": "d7f376b0e6ec516aa527f20c85df9ef10ed1731100772a016f1af7df742d1a03"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Thick, leathery, glossy paddle-shaped leaves",
+        "Dense rounded hedge form",
+        "Fleshy fruit splitting to reveal red seeds when unclipped"
+      ],
+      "common_problems": [
+        "florida-wax-scale",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "ligustrum",
+    "kind": "host_plant",
+    "common_name": "Ligustrum",
+    "aka": [
+      "japanese privet"
+    ],
+    "aliases": [
+      "ligustrum",
+      "japanese privet",
+      "ligustrum japonicum"
+    ],
+    "scientific_name": "Ligustrum japonicum",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Small, glossy, dark-green oval leaves in opposite pairs",
+      "Small white flower clusters with an unpleasant (malodorous) scent, followed by blue-black berries",
+      "Multiple curved trunks when trained as a small tree, or a sheared dense hedge",
+      "Berries persist on the plant most of the year"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sweet-viburnum",
+        "difference": "Ligustrum's flower clusters smell unpleasant, on smaller pointed leaves; sweet viburnum has pleasantly fragrant flowers and larger, glossier leaves.",
+        "next_photo": "A close-up comparing leaf size and gloss, plus (if flowering) a smell test of the flower cluster.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists ligustrum (privet) as toxic to dogs and cats, most often causing stomach upset if eaten; keep pets from chewing on it.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A tough, generally pest-resistant hedge and small-tree plant. Mites are the pest UF/IFAS names most often, along with soil nematodes on sandy sites; a technician can check the roots and soil if a plant is declining rather than just showing surface damage.",
+      "fact": "Japanese privet's small white flowers are famously unpleasant-smelling up close — a useful clue when telling it apart from the similar, sweetly fragrant sweet viburnum.",
+      "blurb": "A tough, generally pest-resistant hedge or small tree; mites and, on sandy soil, root nematodes are the main concerns."
+    },
+    "tech_notes": "Thrips and mites are named as occasional ligustrum problems; soil nematodes are a more serious, harder-to-diagnose cause of decline in sandy soil, and Verticillium wilt is also documented. A technician distinguishes root-level decline from simple surface pest damage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/st352",
+      "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/privet"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Soil nematodes and Verticillium wilt are named generically by UF/IFAS as ligustrum problems but have no matching catalog slug (sting-nematode is a different, lawn-specific species).; Unverified (not asserted in customer copy): Mealybug and sooty mold as common ligustrum problems — General knowledge for broadleaf hedge shrubs in this climate; the fetched UF/IFAS fact sheet named only thrips and mites specifically.",
+      "approval_hash": "b577dfc7a5bb6294516e1f019c587ef3051cbb4b1dbbf3a53ad51a943a1dd048"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "n/a"
+      ],
+      "id_cues": [
+        "Small glossy dark-green oval leaves in opposite pairs",
+        "Small white flower clusters, unpleasant scent",
+        "Blue-black berries persisting most of the year"
+      ],
+      "common_problems": [
+        "spider-mites",
+        "mealybug",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "live-oak",
+    "kind": "host_plant",
+    "common_name": "Live Oak",
+    "aka": [
+      "southern live oak"
+    ],
+    "aliases": [
+      "live oak",
+      "southern live oak",
+      "quercus virginiana"
+    ],
+    "scientific_name": "Quercus virginiana",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Elliptic to oval evergreen leaves with slightly rolled-under (revolute) margins and a whitish-gray underside",
+      "Massive spreading canopy, often wider than it is tall, with low, winding branches",
+      "Thick, furrowed gray-brown bark",
+      "Drops old leaves and pushes new ones at roughly the same time, so it's never fully bare"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-magnolia",
+        "difference": "Live oak has small leaves, pale undersides; magnolia has much larger glossy leaves, rust-felted undersides (laurel oak looks similar, narrower, glossier).",
+        "next_photo": "A close-up of a single leaf showing its size, shape and underside color.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A long-lived, wind-resistant native shade tree that can stand for centuries in a good spot. Young trees are hurt most often — by a string trimmer nicking the bark, mulch piled against the trunk, or drought stress while roots establish; a technician checks the trunk base and root zone on a newly planted tree.",
+      "fact": "A healthy live oak in a good spot can live for hundreds of years, and its wide-spreading canopy is often broader than the tree is tall.",
+      "blurb": "A long-lived native shade tree; young trees are most often hurt by trimmer damage, mulch volcanoes or drought while establishing."
+    },
+    "tech_notes": "Live oak is a tough, generally low-problem species; most damage seen on young or newly planted trees is cultural — trimmer or mower wounds at the base, mulch piled against the trunk, or drought stress before roots establish — rather than disease. Fungal leaf spots and anthracnose can appear on foliage in cool, wet weather but are usually cosmetic on an established tree.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST564"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "A live-oak-specific citation for foliar disease or galls (moss, lichen, oak leaf blister) could not be fetched (two UF/IFAS pages returned no usable content); common_problems reflects general, well-documented cultural issues for young landscape trees instead.",
+      "approval_hash": "860f8b5a19c0685ffcaaf2c1e8c5d59628f1a310502d7ec0bf57897d55c57fa5"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Elliptic leaves with rolled-under margins and a pale gray-white underside",
+        "Wide, low-branching, spreading canopy",
+        "Thick furrowed bark"
+      ],
+      "common_problems": [
+        "anthracnose",
+        "leaf-spot-fungi",
+        "trimmer-bark-damage",
+        "deep-planting-mulch-volcano",
+        "transplant-shock",
+        "drought-irrigation-stress"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "citrus",
+    "kind": "host_plant",
+    "common_name": "Citrus",
+    "aka": [
+      "orange tree",
+      "lemon tree",
+      "grapefruit tree"
+    ],
+    "aliases": [
+      "citrus",
+      "orange tree",
+      "lemon tree",
+      "grapefruit tree",
+      "citrus spp"
+    ],
+    "scientific_name": "Citrus spp.",
+    "rank": "genus",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Glossy, aromatic evergreen leaves, often with a winged leaf stalk (petiole)",
+      "Fragrant white flowers followed by round-to-oval citrus fruit",
+      "Some varieties have thorns along younger branches",
+      "Rounded, densely-branched small to medium tree"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mango",
+        "difference": "Citrus has smaller glossy oval leaves, often on a winged stalk, and round citrus fruit; mango has long narrow leaves and large single-seeded oval fruit.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists citrus as toxic to dogs, cats and horses; the peel and leaves can cause vomiting, diarrhea or skin irritation if pets chew on them.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      9,
+      10,
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A backyard fruit tree facing serious, well-documented disease pressure in Florida. Blotchy yellow leaf mottling can be an early sign of citrus greening, which has no cure once a tree is infected; a technician or your local Extension office can help confirm what's going on and what options exist.",
+      "fact": "Citrus greening symptoms can be seen year-round but are most visible from September through March, and are easier to spot in shade or on an overcast day.",
+      "blurb": "A backyard fruit tree under serious disease pressure in Florida; blotchy leaf mottling can be an early sign of incurable citrus greening."
+    },
+    "tech_notes": "Citrus greening (HLB), spread by the Asian citrus psyllid, has no cure and eventually makes a tree unproductive; management focuses on psyllid control and tree care to extend productive life, decided with Extension guidance. Citrus canker causes raised, corky lesions on leaves, stems and fruit and also has no cure, though small infections can sometimes be pruned out with sanitation. Leafminer and sooty mold from scale/whitefly are common cosmetic issues by comparison.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/pests-and-diseases/diseases/citrus-greening-faq/",
+      "https://www.aspca.org/pet-care/animal-poison-control/toxic-and-non-toxic-plants/orange"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b71e38f3d71317ea20b003bd058119785afe87000813cd117c5c2dbf8a6a1e1"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Glossy aromatic leaves, sometimes with a winged leaf stalk",
+        "Fragrant white flowers",
+        "Round-to-oval citrus fruit"
+      ],
+      "common_problems": [
+        "citrus-greening",
+        "citrus-canker",
+        "asian-citrus-psyllid",
+        "citrus-leafminer",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "mango",
+    "kind": "host_plant",
+    "common_name": "Mango",
+    "aka": [],
+    "aliases": [
+      "mango",
+      "mangifera indica"
+    ],
+    "scientific_name": "Mangifera indica",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Long, narrow, dark-green, leathery leaves",
+      "Large, fast-growing shade tree, 30-60 feet tall and wide",
+      "Showy flower panicles in late winter to early spring, then large oval fruit",
+      "Fruit ripens through shades of green, yellow, orange and red depending on variety"
+    ],
+    "look_alikes": [
+      {
+        "slug": "citrus",
+        "difference": "Mango has long narrow leaves and large single-seeded fruit on a much bigger tree; citrus has smaller glossy oval leaves and round citrus fruit.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Mango is a poison-ivy relative, and contact can cause an allergic skin reaction in sensitive people; wear gloves when pruning or handling the plant.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      12,
+      1,
+      2,
+      3
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A large, fast-growing backyard fruit tree. Anthracnose is the main disease concern here, showing up as dark spots on leaves, flowers and fruit and sometimes causing fruit to drop early; sticky leaves and sooty mold usually point to scale insects instead. A technician can tell the two apart.",
+      "fact": "A mango tree can reach 30 to 60 feet tall and wide, so UF/IFAS recommends planting it well away from the house, other trees and power lines.",
+      "blurb": "A large, fast-growing backyard fruit tree; anthracnose is the main disease concern, while scale drives sticky leaves and sooty mold."
+    },
+    "tech_notes": "Anthracnose is a serious mango disease affecting leaves, flowers and fruit, worse in wet weather. Scale insects and their sooty mold are the other main issue named. UF/IFAS identifies mango as a poison-ivy relative that may cause allergic reactions, so minimize bare-skin contact when pruning or handling the plant.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/ST404",
+      "https://ask.ifas.ufl.edu/publication/EP220"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "UF/IFAS EP220 confirms that mango is a poison-ivy relative that may cause allergic reactions. Set safety.allergen and safety.irritant true, changed risk to irritant, and added a contact precaution; the source does not specifically attribute the reaction to sap or peel, so those unsupported details were removed.",
+      "approval_hash": "a32d597f171fbe2cee4d6379ddada8090e7d7ff636a2f9b173dafc9dd6cf522c"
+    },
+    "role": "landscape_plant",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Long narrow leathery dark-green leaves",
+        "Large spreading shade-tree canopy",
+        "Large oval fruit ripening through green, yellow, orange or red"
+      ],
+      "common_problems": [
+        "anthracnose",
+        "powdery-mildew",
+        "mealybug",
+        "sooty-mold"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "sago-palm",
+    "kind": "host_plant",
+    "common_name": "Sago Palm",
+    "aka": [
+      "king sago",
+      "sago cycad"
+    ],
+    "aliases": [
+      "sago palm",
+      "king sago",
+      "sago cycad",
+      "cycas revoluta"
+    ],
+    "scientific_name": "Cycas revoluta",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Stiff, glossy, dark-green, feather-like leaflets radiating from a central rib",
+      "Shaggy, squat trunk, usually low and unbranched",
+      "Not a true palm — a cycad, an ancient group of cone-bearing plants",
+      "New leaves emerge as a circle of soft fronds that stiffen as they mature"
+    ],
+    "look_alikes": [
+      {
+        "slug": "pygmy-date-palm",
+        "difference": "Sago palm has stiff, glossy leaflets on a shaggy trunk; pygmy date palm has drooping, spiny fronds on a slender trunk (cardboard palm looks similar, no trunk).",
+        "next_photo": "From a safe distance (zoom in, don't reach toward spines), a photo of the leaflets: stiff and glossy with rolled-under edges (sago) or soft and drooping (pygmy date palm).",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "All parts of sago palm are toxic to dogs, cats and horses, the seeds most of all, and can cause liver failure; call your vet right away if a pet chews any part.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A slow-growing, ancient-looking cycad, not a true palm, that is seriously toxic to pets if any part is eaten, especially the seeds. Asian cycad scale is a major pest here that can coat the leaves in white and kill the plant if untreated; a technician checks how far it has spread before recommending anything.",
+      "fact": "Sago palm isn't a palm at all — it's a cycad, a much older group of plants that produces cones instead of true flowers, and has changed little in over 200 million years.",
+      "blurb": "A slow-growing ornamental cycad, seriously toxic to pets if eaten; Asian cycad scale is a major pest that can kill an untreated plant."
+    },
+    "tech_notes": "Cycad aulacaspis scale (Asian cycad scale) can coat leaflets in white and kill a sago within a season or two if left untreated; it is one of the most serious pests of this plant in Florida. Manganese deficiency ('frizzle top') shows first on the newest leaves as weak, frizzled yellow growth, and is a separate, non-pest cause of distorted new growth; older leaves stay normal until the plant is severely deficient. Never let pets or children access the seeds.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/sago-palm"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "0140a1b685744603510e82a3c54019840af856aed34e59250b0a59dc3d802b21"
+    },
+    "role": "landscape_plant",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "cycad",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "offsets"
+      ],
+      "id_cues": [
+        "Stiff, glossy, dark-green feather-like leaflets in a radiating circle",
+        "Shaggy, squat, usually unbranched trunk",
+        "New leaves emerge as a soft circular flush before stiffening"
+      ],
+      "common_problems": [
+        "manganese-deficiency-palm",
+        "cycad-aulacaspis-scale",
+        "sooty-mold",
+        "mealybug"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "bird-of-paradise",
+    "kind": "host_plant",
+    "common_name": "Bird of Paradise",
+    "aka": [
+      "crane flower"
+    ],
+    "aliases": [
+      "bird of paradise",
+      "crane flower",
+      "strelitzia reginae"
+    ],
+    "scientific_name": "Strelitzia reginae",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large, stiff, paddle-shaped gray-green leaves in a fan-like clump",
+      "Distinctive orange-and-blue, crane-head-shaped flowers on tall stalks",
+      "Clumping, non-woody perennial with no true trunk",
+      "Spreads slowly into a wider clump by rhizome offsets"
+    ],
+    "look_alikes": [
+      {
+        "slug": "clusia",
+        "difference": "Bird of paradise has paddle leaves in a leafy fan clump, no trunk; clusia is woody with thick leathery paddle leaves (banana/traveler palm look similar).",
+        "next_photo": "A wide shot of the whole plant showing leaf arrangement and whether there's a woody stem or trunk.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "ASPCA lists this plant as toxic to pets, mainly the fruit and seeds, causing mild nausea or vomiting — not the more toxic plant also called 'bird of paradise' (Caesalpinia).",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A clumping, non-woody accent plant grown for its distinctive crane-shaped flowers. Stippled or bronzed leaves usually point to spider mites, and dark spots to a fungal leaf spot; a technician can tell them apart, since the fruit and seeds can also cause mild stomach upset in pets.",
+      "fact": "The plant's common name 'bird of paradise' is shared with a different, considerably more toxic plant (Caesalpinia) — this one, Strelitzia reginae, causes only mild GI upset if eaten.",
+      "blurb": "A clumping accent plant with distinctive crane-shaped flowers; spider mites and fungal leaf spot are the main things to watch for."
+    },
+    "tech_notes": "Spider mites and a fungal leaf spot are the common general problems reported for this plant in humid landscapes; a technician distinguishes stippled, bronzed mite damage from a true leaf spot before recommending anything.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants/bird-paradise-flower"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "No UF/IFAS pest page specific to Strelitzia reginae was fetched, so the spider-mite/leaf-spot list is general knowledge rather than a page-specific citation; typical bloom season/peak months were also not confirmed by a fetched source, so peak_months is left empty.",
+      "approval_hash": "727d9483975d3cdf9ba5300addd7da4683a7b196931a796fa2a41091a8b84a0c"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": [],
+    "plant": {
+      "type": "shrub",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "offsets"
+      ],
+      "id_cues": [
+        "Large stiff paddle-shaped gray-green leaves in a fan clump",
+        "Orange-and-blue crane-head-shaped flowers on tall stalks",
+        "Clumping non-woody habit with no trunk"
+      ],
+      "common_problems": [
+        "spider-mites",
+        "leaf-spot-fungi"
+      ],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "southern-magnolia",
+    "kind": "host_plant",
+    "common_name": "Southern Magnolia",
+    "aka": [],
+    "aliases": [
+      "southern magnolia",
+      "magnolia grandiflora"
+    ],
+    "scientific_name": "Magnolia grandiflora",
+    "rank": "species",
+    "group": "shrubs-trees",
+    "subgroup": null,
+    "site_category": "Shrubs & trees",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large, stiff, glossy dark-green leaves, often with a rusty-brown felted underside",
+      "Huge, creamy-white, lemon-scented flowers up to a dinner plate in size",
+      "Large upright evergreen tree, up to 90 feet depending on cultivar",
+      "Cone-like fruit clusters with bright red seeds in fall"
+    ],
+    "look_alikes": [
+      {
+        "slug": "live-oak",
+        "difference": "Southern magnolia has huge, thick, glossy leaves, often rust-felted underneath; live oak has much smaller elliptic leaves with a plain pale-gray underside.",
+        "next_photo": "A close-up of a single leaf showing its size and underside color/texture.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "shrub-tree"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A large, stately evergreen shade tree grown for its huge fragrant flowers and glossy foliage. Sticky leaves and black sooty mold usually point to a scale insect feeding on the foliage; a technician checks the leaf undersides and stems to confirm before recommending anything.",
+      "fact": "A southern magnolia flower can open as wide as a dinner plate and carries a distinct lemony fragrance.",
+      "blurb": "A large stately shade tree with huge fragrant flowers; sticky leaves and sooty mold usually point to a scale insect."
+    },
+    "tech_notes": "A scale insect and the sooty mold that follows its honeydew are the most commonly reported problem on southern magnolia; an algal leaf spot can also appear on foliage in humid, still conditions. The species is otherwise considered comparatively low-problem.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/plants/trees-and-shrubs/trees/southern-magnolia/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Magnolia scale (Neolecanium cornuparvum) is well documented nationally as the characteristic scale species on southern magnolia but has no matching catalog slug; florida-wax-scale is not used here to avoid a false species-specific claim.",
+      "approval_hash": "46e65e5b02eda221ddd73e3f087219f5ccc4acfbcf9b234ed9a17d99d9db1ac4"
+    },
+    "role": "landscape_plant",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "tree",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Large glossy leaves, often rust-felted underneath",
+        "Huge creamy-white lemon-scented flowers",
+        "Large upright evergreen canopy"
+      ],
+      "common_problems": [
+        "sooty-mold",
+        "leaf-spot-fungi"
+      ],
+      "frond_pattern_note": null
+    }
+  }
+]

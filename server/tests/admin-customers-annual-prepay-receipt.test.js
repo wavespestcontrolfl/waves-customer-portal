@@ -104,6 +104,7 @@ function table(rows, name) {
   };
   q.onConflict = () => q;
   q.ignore = () => q;
+  q.merge = () => q;
   q.returning = async () => result;
   q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   q.catch = (reject) => Promise.resolve(result).catch(reject);

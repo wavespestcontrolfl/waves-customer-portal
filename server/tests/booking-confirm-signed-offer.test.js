@@ -29,8 +29,8 @@ jest.mock('../services/logger', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { createSelfBooking } = require('../routes/booking')._internals;
-const { mintSlotOfferField, SLOT_OFFER_TTL_MS } = require('../utils/slot-offer-token');
+const { createSelfBooking, bookInsertionOffersLive } = require('../routes/booking')._internals;
+const { mintSlotOfferField, SLOT_OFFER_TTL_MS, BOOK_INSERTION_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const SLOT_DATE = etDateString(addETDays(new Date(), 3));
@@ -104,6 +104,18 @@ function offerPayload(overrides = {}) {
     startMinutes: 9 * 60,
     technicianId: TECH_ID,
     durationMinutes: 60,
+    // Codex round 2 P1 on PR #5231: mirrors production — buildBookingAvailability
+    // mints with capacityPlacement: bookInsertionOffersLive(), read at mint
+    // time. Defaulting it here the same way means every pre-existing test
+    // in this file (most of which mint and confirm under the SAME env, and
+    // don't care about the policy tag) keeps minting a REALISTIC offer for
+    // whatever gate state it set before calling this — an untagged offer
+    // when the gate is off, a tagged one when both GATE_BOOK_CAPACITY_COMMIT
+    // and GATE_SCHEDULING_CAPACITY are on. Tests that specifically exercise
+    // a gate flip BETWEEN mint and confirm, or want a deliberate mismatch,
+    // pass an explicit `policy` override (undefined included), which always
+    // wins over this default.
+    policy: bookInsertionOffersLive() ? BOOK_INSERTION_OFFER_POLICY : undefined,
     ...overrides,
   };
 }
@@ -254,6 +266,61 @@ describe('createSelfBooking — service + location scope binding (round 3)', () 
   });
 });
 
+describe('createSelfBooking — mid-route insertion policy tag (Codex round 2, PR #5231)', () => {
+  const ENV_KEYS = ['GATE_BOOK_CAPACITY_COMMIT', 'GATE_SCHEDULING_CAPACITY'];
+  const saved = {};
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTables();
+    for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('an insertion-tagged offer confirmed after bookInsertionOffersLive() flips OFF → 409, never reaches the post-gate work', async () => {
+    // Minted as if buildBookingAvailability ran with capacityPlacement true
+    // (offerPolicy = BOOK_INSERTION_OFFER_POLICY); gates stay unset (off)
+    // for the confirm — a rollback/mixed-deploy window landing here.
+    const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+  });
+
+  test('an untagged (append-only) offer confirmed after bookInsertionOffersLive() flips ON → 409', async () => {
+    const sig = mintSlotOfferField(offerPayload()); // no policy — as buildBookingAvailability mints with capacityPlacement false/omitted
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+  });
+
+  test('a matching insertion-tagged offer with the gate ON clears the signature check (reaches the same post-gate sentinel as any valid offer)', async () => {
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+
+  test('a matching untagged offer with the gate OFF still clears the gate — the pre-existing default path is unaffected', async () => {
+    const sig = mintSlotOfferField(offerPayload());
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+
+  test('GATE_BOOK_CAPACITY_COMMIT alone (GATE_SCHEDULING_CAPACITY off) does not turn on the insertion policy — an untagged offer still matches', async () => {
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    // GATE_SCHEDULING_CAPACITY stays unset.
+    const sig = mintSlotOfferField(offerPayload());
+    const result = await createSelfBooking(confirmPayload(sig));
+    expect(result).toEqual({ ok: false, status: 404, error: 'Customer not found' });
+  });
+});
+
 describe('createSelfBooking — source_estimate_id (accept-retry correlation)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -303,11 +370,42 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   const OTHER_EST = 'bbbb2222-cc33-4d44-8e55-ffff6666aaaa';
   const PHONE_EST = 'cccc3333-dd44-4e55-8f66-aaaa7777bbbb';
   const MISMATCH_EST = 'dddd4444-ee55-4f66-8a77-bbbb8888cccc';
-  const CUST = { id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota' };
+  const CUST = {
+    id: 'cust-1', account_id: 'acct-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota',
+    address_line1: '123 Fixture Lane', address_line2: 'Unit 2', state: 'FL', zip: '34236',
+    latitude: LAT, longitude: LNG,
+  };
+  const SIBLING = {
+    ...CUST,
+    id: 'cust-2',
+    address_line1: '456 Sibling Lane',
+    address_line2: 'Unit 4',
+  };
+  const OTHER_CUST = { ...CUST, id: 'cust-other', account_id: 'acct-other' };
+  const customerFixture = (id, { fenced = false } = {}) => {
+    if (String(id) === String(loadedCustomer?.id)) return fenced ? fencedCustomer : loadedCustomer;
+    return ({ [CUST.id]: CUST, [SIBLING.id]: SIBLING, [OTHER_CUST.id]: OTHER_CUST })[String(id)] || null;
+  };
+  const priceableEstimate = (overrides = {}) => ({
+    source: 'admin',
+    status: 'sent',
+    annual_total: 387.96,
+    estimate_data: {
+      engineResult: {
+        lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }],
+      },
+    },
+    ...overrides,
+  });
   const ESTIMATES = {
-    [EST_ID]: { id: EST_ID, source: 'admin', customer_id: 'cust-1', status: 'sent' },
+    [EST_ID]: priceableEstimate({ id: EST_ID, customer_id: 'cust-1' }),
     // someone ELSE's estimate — linked to a different customer
-    [OTHER_EST]: { id: OTHER_EST, customer_id: 'cust-other', customer_phone: '(941) 555-0999', customer_email: 'mallory@example.com' },
+    [OTHER_EST]: priceableEstimate({
+      id: OTHER_EST,
+      customer_id: 'cust-other',
+      customer_phone: '(941) 555-0999',
+      customer_email: 'mallory@example.com',
+    }),
     // customer-less estimate whose contact phone (freeform) matches CUST
     [PHONE_EST]: { id: PHONE_EST, customer_id: null, customer_phone: '941-555-0100', customer_email: null },
     // customer-less estimate whose contact matches NOBODY on this booking
@@ -315,6 +413,9 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   };
   const SENTINEL = 'stop-after-scheduled-services-insert';
   let capturedScheduledInsert;
+  let returnScheduledInsert;
+  let fencedCustomer;
+  let loadedCustomer;
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
@@ -329,6 +430,21 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         // replay lookup → none; global day-cap count → 0 (under cap)
         first: () => Promise.resolve(counting ? { count: 0 } : null),
         insert: () => ({ returning: () => Promise.resolve([{ id: 'sb-1' }]) }),
+      };
+      return b;
+    }
+    if (table === 'leads') {
+      // Exercise the real address-verdict lookup shape while returning no
+      // matching lead. Invoke nested predicates so this fixture does not
+      // silently bypass the guard's contact-pair query construction.
+      const b = {
+        where(arg) { if (typeof arg === 'function') arg(b); return b; },
+        orWhere(arg) { if (typeof arg === 'function') arg(b); return b; },
+        whereNull: () => b,
+        whereRaw: () => b,
+        forUpdate: () => b,
+        first: async () => null,
+        select: async () => [],
       };
       return b;
     }
@@ -348,7 +464,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         // empty here, so the probe passes and the flow reaches the insert.
         select: () => b,
         orderBy: () => Promise.resolve([]),
-        insert: (row) => { capturedScheduledInsert = row; throw new Error(SENTINEL); },
+        insert: (row) => {
+          capturedScheduledInsert = row;
+          if (!returnScheduledInsert) throw new Error(SENTINEL);
+          return { returning: async () => [{ ...row, id: 'scheduled-1' }] };
+        },
       };
       return b;
     }
@@ -358,7 +478,18 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       // compare passes and the flow reaches the insert.
       // …and the county-verdict stored-pair read (#4667: email + phone of
       // the resolved customer, before the comms fence) — same row.
-      const b = { where: () => b, whereNull: () => b, first: async () => CUST };
+      const b = {
+        _id: null,
+        where(arg, value) {
+          if (arg && typeof arg === 'object') b._id = arg.id ?? b._id;
+          else if (arg === 'id') b._id = value;
+          return b;
+        },
+        whereNull: () => b,
+        forShare: () => b,
+        forUpdate: () => b,
+        first: async () => customerFixture(b._id || loadedCustomer.id, { fenced: true }),
+      };
       return b;
     }
     if (table === 'estimates') {
@@ -368,6 +499,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       const b = {
         _id: null,
         where(arg) { b._id = (arg && typeof arg === 'object') ? arg.id : arg; return b; },
+        forShare: () => b,
         first: async () => ESTIMATES[String(b._id)] || null,
       };
       return b;
@@ -400,7 +532,13 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'estimates') {
         const builder = {
           _id: null,
+          _ids: null,
           where(_field, id) { builder._id = id; return builder; },
+          whereIn(_field, ids) { builder._ids = ids; return builder; },
+          select: jest.fn(async () => (builder._ids || [])
+            .map(id => ESTIMATES[String(id)])
+            .filter(Boolean)
+            .map(row => ({ id: row.id, customer_id: row.customer_id }))),
           first: jest.fn(() => Promise.resolve(ESTIMATES[String(builder._id)] || null)),
         };
         return builder;
@@ -423,12 +561,19 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'customers') {
         // Phone lookup and the by-id lookup both resolve CUST — identity
         // lands on cust-1 for every path in this describe.
-        return {
-          whereRaw: jest.fn().mockReturnThis(),
-          where: jest.fn().mockReturnThis(),
-          andWhere: jest.fn().mockReturnThis(),
-          first: jest.fn().mockResolvedValue(CUST),
+        const builder = {
+          _id: null,
+          whereRaw: jest.fn(() => builder),
+          where: jest.fn((arg, value) => {
+            if (arg && typeof arg === 'object') builder._id = arg.id ?? builder._id;
+            else if (arg === 'id') builder._id = value;
+            return builder;
+          }),
+          whereNull: jest.fn(() => builder),
+          andWhere: jest.fn(() => builder),
+          first: jest.fn(async () => customerFixture(builder._id || loadedCustomer.id)),
         };
+        return builder;
       }
       if (table === 'notification_prefs' || table === 'property_preferences') {
         // Both rows are seeded via createDefaultCustomerRows for every
@@ -455,12 +600,40 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   beforeEach(() => {
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
+    returnScheduledInsert = false;
+    fencedCustomer = { ...CUST };
+    loadedCustomer = { ...CUST };
     mockOwnershipTables();
   });
 
   async function runToScheduledInsert(overrides) {
     const sig = mintSlotOfferField(offerPayload());
     await expect(createSelfBooking(confirmPayload(sig, overrides))).rejects.toThrow(SENTINEL);
+    expect(capturedScheduledInsert).toBeDefined();
+    return capturedScheduledInsert;
+  }
+
+  function callbackPayload(overrides = {}) {
+    return {
+      slot_date: SLOT_DATE,
+      slot_start: '09:00',
+      technician_id: TECH_ID,
+      source: 'reservice_link',
+      authedCustomer: loadedCustomer,
+      payAtVisit: false,
+      customersOnly: false,
+      callbackVisit: {
+        serviceKey: 'pest_re_service',
+        serviceId: 'eeee4444-ff55-4666-8777-aaaa8888bbbb',
+        serviceType: 'Pest Control Re-Service',
+        durationMinutes: 30,
+      },
+      ...overrides,
+    };
+  }
+
+  async function runCallbackToScheduledInsert(overrides) {
+    await expect(createSelfBooking(callbackPayload(overrides))).rejects.toThrow(SENTINEL);
     expect(capturedScheduledInsert).toBeDefined();
     return capturedScheduledInsert;
   }
@@ -476,6 +649,56 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     const row = await runToScheduledInsert({ source_estimate_id: EST_ID });
     expect(row.source_estimate_id).toBe(EST_ID);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test("a sibling property's estimate keeps its source link and frozen pay-at-visit price", async () => {
+    loadedCustomer = { ...SIBLING };
+    fencedCustomer = { ...SIBLING };
+    const duplicateGuard = jest.spyOn(require('../services/recurring-appointment-seeder'), 'checkActiveSeriesLocked')
+      .mockResolvedValue({ matches: [], guardError: null });
+    const pricing = jest.spyOn(require('../services/booking-pay-at-visit'), 'resolveBookingVisitPrice')
+      .mockReturnValue({ amount: 96.99, followUpAmount: 96.99, sourceEstimateId: EST_ID, serviceKey: 'pest_control' });
+    try {
+      const row = await runToScheduledInsert({
+        authedCustomer: loadedCustomer,
+        source_estimate_id: EST_ID,
+        payAtVisit: true,
+        recurring_pattern: 'quarterly',
+      });
+      expect(row.customer_id).toBe(SIBLING.id);
+      expect(row.source_estimate_id).toBe(EST_ID);
+      expect(row.estimated_price).toBe(96.99);
+      expect(row.payment_method_preference).toBe('pay_at_visit');
+      expect(row.create_invoice_on_complete).toBe(true);
+      expect(pricing).toHaveBeenCalledWith(expect.objectContaining({
+        estimate: expect.objectContaining({ id: EST_ID }),
+        serviceKey: 'pest_control',
+        bookingVisits: 4,
+      }));
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+    } finally {
+      pricing.mockRestore();
+      duplicateGuard.mockRestore();
+    }
+  });
+
+  test("another account's priceable estimate is rejected again under the booking fence", async () => {
+    loadedCustomer = { ...SIBLING };
+    fencedCustomer = { ...SIBLING };
+    const sig = mintSlotOfferField(offerPayload());
+    await expect(createSelfBooking(confirmPayload(sig, {
+      estimate_id: OTHER_EST,
+      authedCustomer: loadedCustomer,
+      source_estimate_id: OTHER_EST,
+      payAtVisit: true,
+      recurring_pattern: 'quarterly',
+    }))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your quote was just updated — please refresh and book again.',
+      code: 'CUSTOMER_CHANGED_RETRY',
+    });
+    expect(capturedScheduledInsert).toBeUndefined();
   });
 
   test('a customer-less estimate whose contact PHONE matches the booking customer stamps the link', async () => {
@@ -495,9 +718,598 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
+  test('a customer pin moved to another signed-offer grid cell under the booking fence requires a fresh slot', async () => {
+    fencedCustomer = { ...CUST, latitude: 27.41, longitude: -82.61 };
+    const sig = mintSlotOfferField(offerPayload());
+
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your address just changed — please pick a time again.',
+      code: 'LOCATION_CHANGED_RETRY',
+    });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test('an account reassignment under the booking fence requires a fresh customer resolution', async () => {
+    fencedCustomer = { ...CUST, account_id: 'acct-moved' };
+    const sig = mintSlotOfferField(offerPayload());
+
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your account details just changed — please refresh and book again.',
+      code: 'CUSTOMER_CHANGED_RETRY',
+    });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test.each([
+    ['true', 'true'], ['true', 'false'], ['false', 'true'], ['false', 'false'],
+  ])('a geocoded offer with no stored customer pin survives confirm (capacity=%s, commit=%s)', async (capacity, commit) => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = capacity;
+    process.env.GATE_BOOK_CAPACITY_COMMIT = commit;
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const exactPin = { lat: 27.339, lng: -82.531 };
+    let transactionStarted = false;
+    const runTransaction = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation((...args) => { transactionStarted = true; return runTransaction(...args); });
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async (address) => {
+      expect(address).toBe('123 Fixture Lane, Sarasota, FL, 34236');
+      expect(transactionStarted).toBe(false);
+      return exactPin;
+    });
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: exactPin } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity')
+      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      const row = await runToScheduledInsert();
+      expect(row).toMatchObject({
+        ...exactPin,
+        service_address_line1: CUST.address_line1, service_address_line2: CUST.address_line2,
+        service_address_city: CUST.city, service_address_state: CUST.state, service_address_zip: CUST.zip,
+      });
+      expect(loadedCustomer.latitude).toBeNull();
+      expect(fencedCustomer.latitude).toBeNull();
+      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
+      if (capacity === 'true' && commit === 'true') {
+        expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+        expect(verifySpy).toHaveBeenCalledWith(prepared, expect.objectContaining({ conn: expect.any(Function) }));
+      } else {
+        expect(prepareSpy).not.toHaveBeenCalled();
+        expect(verifySpy).not.toHaveBeenCalled();
+      }
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      const { recurringServiceAddress } = require('../services/booking/visit-financial-stamps');
+      expect(recurringServiceAddress(row)).toMatchObject({ lat: exactPin.lat, lng: exactPin.lng, service_address_line1: CUST.address_line1 });
+    } finally {
+      geocodeSpy.mockRestore(); prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('the booking persists its certified route order after inserting the candidate in the same transaction', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    returnScheduledInsert = true;
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const fit = { feasible: true, routeOrder: ['earlier', '__candidate__', 'later'] };
+    const prepared = { options: { prospective: { lat: LAT, lng: LNG } } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue(fit);
+    const persistSpy = jest.spyOn(arrivalRoute, 'persistArrivalOrder').mockImplementation(async () => {
+      expect(capturedScheduledInsert).toBeDefined();
+      throw new Error(SENTINEL);
+    });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      await runToScheduledInsert();
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+      const verifyTrx = verifySpy.mock.calls[0][1].conn;
+      expect(persistSpy).toHaveBeenCalledWith(verifyTrx, fit, 'scheduled-1');
+      const dayFenceCalls = verifyTrx.raw.mock.calls
+        .map((call, index) => ({ call, order: verifyTrx.raw.mock.invocationCallOrder[index] }))
+        .filter(({ call }) => call[1]?.[0] === 'slot-reserve')
+        .filter(({ call }) => call[1]?.[1] === `${TECH_ID}:${SLOT_DATE}` || call[1]?.[1] === `unassigned:${SLOT_DATE}`);
+      expect(dayFenceCalls.map(({ call }) => call[1][1])).toEqual([
+        `${TECH_ID}:${SLOT_DATE}`, `unassigned:${SLOT_DATE}`,
+      ]);
+      expect(dayFenceCalls.every(({ order }) => order < verifySpy.mock.invocationCallOrder[0])).toBe(true);
+    } finally {
+      prepareSpy.mockRestore(); verifySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('the production booking contract rejects an infeasible whole-route re-check as SLOT_TAKEN', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: { lat: LAT, lng: LNG } } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockRejectedValue(Object.assign(
+      new Error('This time is no longer available. Please choose another appointment.'),
+      { code: 'SLOT_UNAVAILABLE', reason: 'arrival_window', statusCode: 409, isOperational: true },
+    ));
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false,
+        status: 409,
+        code: 'SLOT_TAKEN',
+      });
+      expect(prepareSpy).toHaveBeenCalledTimes(1);
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally {
+      prepareSpy.mockRestore();
+      verifySpy.mockRestore();
+      conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('a missing-coordinate re-service uses one canonical pin for conflict, capacity, and the visit stamp', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const exactPin = { lat: 27.339, lng: -82.531 };
+    let transactionStarted = false;
+    const runTransaction = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation((...args) => { transactionStarted = true; return runTransaction(...args); });
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async (address) => {
+      expect(address).toBe('123 Fixture Lane, Sarasota, FL, 34236');
+      expect(transactionStarted).toBe(false);
+      return exactPin;
+    });
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: exactPin } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity')
+      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    try {
+      const row = await runCallbackToScheduledInsert();
+      expect(row).toMatchObject({
+        ...exactPin,
+        is_callback: true,
+        service_address_line1: CUST.address_line1, service_address_line2: CUST.address_line2,
+        service_address_city: CUST.city, service_address_state: CUST.state, service_address_zip: CUST.zip,
+      });
+      expect(loadedCustomer.latitude).toBeNull();
+      expect(fencedCustomer.latitude).toBeNull();
+      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
+      expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+      expect(verifySpy).toHaveBeenCalledWith(prepared, expect.objectContaining({ conn: expect.any(Function) }));
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      geocodeSpy.mockRestore(); prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('a re-service address changed while its missing pin resolves is refused under the customer fence', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, address_line1: '456 Changed Avenue' };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      await expect(createSelfBooking(callbackPayload())).resolves.toMatchObject({
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test.each([
+    ['changed longitude with capacity off', { latitude: null, longitude: LNG }, { latitude: null, longitude: LNG - 0.02 }, TECH_ID, 'false'],
+    ['changed latitude without a technician', { latitude: LAT, longitude: null }, { latitude: LAT + 0.02, longitude: null }, null, 'true'],
+    ['cleared complete pin with capacity off', { latitude: LAT, longitude: LNG }, { latitude: null, longitude: null }, TECH_ID, 'false'],
+  ])('re-service refuses an invalidated pin before any conflict probe: %s', async (_label, before, after, technicianId, gate) => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    process.env.GATE_BOOK_CAPACITY_COMMIT = gate;
+    loadedCustomer = { ...CUST, ...before };
+    fencedCustomer = { ...loadedCustomer, ...after };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      await expect(createSelfBooking(callbackPayload({ technician_id: technicianId }))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY',
+      });
+      expect(conflictSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally {
+      geocodeSpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('an assessment callback with its own expected location is not independently re-geocoded', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    try {
+      await expect(createSelfBooking(callbackPayload({
+        callbackVisit: {
+          serviceKey: 'lawn_inspection',
+          serviceId: 'ffff5555-aa66-4777-8888-bbbb9999cccc',
+          serviceType: 'Waves Assessment',
+          durationMinutes: 30,
+          isCallback: false,
+          expectedLocation: { lat: LAT, lng: LNG },
+        },
+      }))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(geocodeSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a complete customer pin cleared while confirm waits is not resurrected from the signed echo', async () => {
+    fencedCustomer = { ...CUST, latitude: null, longitude: null };
+    const sig = mintSlotOfferField(offerPayload());
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test.each([
+    { latitude: null, longitude: LNG }, { latitude: LAT, longitude: null },
+  ])('a stable incomplete legacy pair is replaced as a whole on the visit: %p', async (pair) => {
+    loadedCustomer = { ...CUST, ...pair };
+    fencedCustomer = { ...loadedCustomer };
+    const pin = { lat: 27.339, lng: -82.531 };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue(pin);
+    try {
+      const row = await runToScheduledInsert();
+      expect(row).toMatchObject(pin);
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test.each([
+    [{ latitude: null, longitude: LNG }, { latitude: null, longitude: LNG - 0.02 }],
+    [{ latitude: LAT, longitude: null }, { latitude: LAT + 0.02, longitude: null }],
+  ])('an incomplete legacy pair changed during geocoding requires a fresh slot: %p', async (before, after) => {
+    loadedCustomer = { ...CUST, ...before };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, ...after };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a canonical address changed during geocoding requires a fresh booking attempt', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, address_line1: '456 Changed Avenue' };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a canonical geocode outside the signed grid cannot certify the client echo', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test.each(['public', 're-service'])('a staff review hold recorded during geocoding prevents a new %s visit pin', async (surface) => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    const reviewSpy = jest.spyOn(require('../services/customer-geocode-review'), 'reviewedServiceLocation')
+      .mockResolvedValueOnce(null).mockResolvedValue({ location: null, reason: 'address_review_required' });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      const payload = surface === 'public' ? confirmPayload(sig) : callbackPayload();
+      await expect(createSelfBooking(payload)).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); reviewSpy.mockRestore(); }
+  });
+
+  test('an exact pin correction after traffic preparation requires a fresh offer', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    const freshPin = { lat: 27.339, lng: -82.531 };
+    fencedCustomer = { ...CUST, latitude: freshPin.lat, longitude: freshPin.lng };
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const occupancy = require('../services/scheduling/occupancy');
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({
+      options: { prospective: { lat: LAT, lng: LNG } },
+    });
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity');
+    const conflictSpy = jest.spyOn(occupancy, 'findConflictingVisits').mockResolvedValue([]);
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    try {
+      await expect(createSelfBooking(confirmPayload(mintSlotOfferField(offerPayload()))))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({
+        prospective: expect.objectContaining({ lat: LAT, lng: LNG }),
+      }));
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(conflictSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally {
+      conflictSpy.mockRestore();
+      prepareSpy.mockRestore();
+      verifySpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
   test('a customer-less estimate with a NON-matching contact books UNLINKED with a warn', async () => {
     const row = await runToScheduledInsert({ source_estimate_id: MISMATCH_EST });
     expect(row.source_estimate_id).toBeNull();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+  });
+
+  // ---- GATE_BOOK_ARRIVAL_GRACE (owner-approved 2026-09-29): the commit half of
+  // offer/commit parity. The strict travel-gap probe (findConflictingVisits
+  // with `travel`) tolerates a clash ONLY for a graced offer, with a prepared
+  // capacity proof, when every clash is a previous-side buffer against an
+  // assigned committed stop — and verifyArrivalCapacity then enforces the
+  // offer's own grace. The offer-side twin is book-arrival-grace-parity.test.js.
+  describe('GATE_BOOK_ARRIVAL_GRACE commit gate', () => {
+    const {
+      BOOK_ARRIVAL_GRACE_OFFER_POLICY,
+    } = require('../utils/slot-offer-token');
+    const ENV = ['GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT', 'GATE_BOOK_ARRIVAL_GRACE', 'SELF_SERVE_ARRIVAL_GRACE_MINUTES'];
+    const savedEnv = {};
+    let arrivalRoute; let prepareSpy; let verifySpy; let conflictSpy; let laneSpy;
+    const FIT = { feasible: true, routeOrder: ['earlier', '__candidate__', 'later'], arrivalDelayMinutes: 12 };
+    const clash = (extra = {}) => ({
+      id: 'prev-stop', technician_id: TECH_ID, customer_id: 'cust-x', reservation_expires_at: null,
+      conflict_reason: 'travel_gap', window_start: '08:00:00', ...extra,
+    });
+
+    beforeEach(() => {
+      for (const k of ENV) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'true';
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '120';
+      arrivalRoute = require('../services/scheduling/arrival-route');
+      prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({ options: { prospective: { lat: LAT, lng: LNG } } });
+      verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue(FIT);
+      conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+      laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
+    });
+    afterEach(() => {
+      prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
+      for (const k of ENV) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
+
+    const gracedSig = (grace = 90, overrides = {}) => mintSlotOfferField(offerPayload({
+      policy: BOOK_ARRIVAL_GRACE_OFFER_POLICY, arrivalGrace: grace, ...overrides,
+    }));
+    const confirmGraced = (sig) => createSelfBooking(confirmPayload(sig));
+
+    test('a graced offer whose only clash is the previous stop\'s buffer commits — verifyArrivalCapacity gets the OFFER\'s grace, and the row is inserted', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL); // sentinel = reached the insert
+      expect(capturedScheduledInsert).toBeDefined();
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test('the grace comes from the signed field, not the live env: env now reads 30, the offer said 90 — the commit still enforces 90', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '30';
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test.each([
+      ['the next stop\'s buffer', clash({ window_start: '10:00:00' })],
+      ['a real overlap', clash({ conflict_reason: 'overlap' })],
+      ['an unassigned stop', clash({ technician_id: null })],
+      ['another technician\'s stop', clash({ technician_id: 'someone-else' })],
+      ['a live hold', clash({ customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z' })],
+      ['an interview', clash({ id: 'interview:1', conflict_reason: 'interview' })],
+    ])('a graced offer still refuses %s as SLOT_TAKEN, never reaching verifyArrivalCapacity', async (_label, row) => {
+      conflictSpy.mockResolvedValue([row]);
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    test('one waivable clash plus one that is not (both neighbours) refuses', async () => {
+      conflictSpy.mockResolvedValue([clash(), clash({ id: 'next-stop', window_start: '10:00:00' })]);
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('an ungraced offer (grace 0 — env unset, same-day pick) is strict: the same previous-side clash refuses', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY })); // grace 0 mints the plain insertion tag (round 3)
+      await expect(confirmGraced(sig)).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('an ungraced offer with no clash still verifies WITHOUT a grace bound (undefined — the pre-existing 120-minute promise only)', async () => {
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      await expect(confirmGraced(sig)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+    });
+
+    test('verifyArrivalCapacity refusing the graced slot (delay past the grace, route changed) is the standard SLOT_TAKEN', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      verifySpy.mockRejectedValue(Object.assign(new Error('This time is no longer available. Please choose another appointment.'), {
+        code: 'SLOT_UNAVAILABLE', reason: 'arrival_grace', statusCode: 409, isOperational: true,
+      }));
+      await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, status: 409, code: 'SLOT_TAKEN' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    });
+
+    const SIG_MISS = { ok: false, status: 409, error: expect.stringMatching(/no longer available/i) };
+
+    test('a REAL gate / capacity-mode flip still fails the signature: a graced offer confirmed with the grace gate off, or with mid-route insertion off', async () => {
+      const graced = gracedSig(90);
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'false';
+      await expect(confirmGraced(graced)).resolves.toEqual(SIG_MISS);
+      process.env.GATE_BOOK_ARRIVAL_GRACE = 'true';
+      process.env.GATE_BOOK_CAPACITY_COMMIT = 'false';
+      await expect(confirmGraced(graced)).resolves.toEqual(SIG_MISS);
+      // an insertion-tagged strict offer confirmed with insertion off fails as before (#5231)
+      const insertionOnly = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      await expect(confirmGraced(insertionOnly)).resolves.toEqual(SIG_MISS);
+    });
+
+    test('the grace env crossing zero does NOT orphan an in-flight offer (Codex r4 P2): a graced offer minted at 90 still confirms once the env reads 0, with ITS grace', async () => {
+      const graced = gracedSig(90);
+      conflictSpy.mockResolvedValue([clash()]);
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      await expect(confirmGraced(graced)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+    });
+
+    test('...and a strict offer minted while the env read 0 still confirms once it becomes positive — strict (no waiver, no grace bound)', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      const strict = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '120';
+      await expect(confirmGraced(strict)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+      // strict means strict: the previous-side buffer is still refused
+      verifySpy.mockClear();
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(strict)).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
+
+    test('the grace value crossing zero with a TAMPERED shape still fails: a strict offer given a grace segment, a graced offer stripped of it', async () => {
+      process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+      const [exp, sig] = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY })).split('.');
+      await expect(confirmGraced([exp, '90', sig].join('.'))).resolves.toEqual(SIG_MISS);
+      const [gExp, , gSig] = gracedSig(90).split('.');
+      await expect(confirmGraced([gExp, gSig].join('.'))).resolves.toEqual(SIG_MISS);
+    });
+
+    test('with the second-tech fix (GATE_MULTI_TECH_CONFIRM): a graced offer survives the env crossing zero and the probe stays scoped to the booked tech', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        const graced = gracedSig(90);
+        process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '0';
+        conflictSpy.mockResolvedValue([clash()]);
+        await expect(confirmGraced(graced)).rejects.toThrow(SENTINEL);
+        expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID }));
+        expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+      } finally { delete process.env.GATE_MULTI_TECH_CONFIRM; }
+    });
+
+    test('the cleartext grace segment is verified, not trusted: raising it from 90 to 120 fails the signature', async () => {
+      const [exp, grace, sig] = gracedSig(90).split('.');
+      expect(grace).toBe('90');
+      await expect(confirmGraced([exp, '120', sig].join('.'))).resolves.toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+      // and stripping it (claiming an ungraced v2 shape) fails too
+      await expect(confirmGraced([exp, sig].join('.'))).resolves.toEqual({ ok: false, status: 409, error: expect.stringMatching(/no longer available/i) });
+    });
+
+    test('GATE OFF (capacity + commit on, grace gate unset): an insertion-tagged offer commits with NO grace bound and a previous-side clash stays SLOT_TAKEN — byte-identical to before this lane', async () => {
+      delete process.env.GATE_BOOK_ARRIVAL_GRACE;
+      const sig = mintSlotOfferField(offerPayload({ policy: BOOK_INSERTION_OFFER_POLICY }));
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(confirmGraced(sig)).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+      conflictSpy.mockResolvedValue([]);
+      await expect(confirmGraced(sig)).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1].arrivalGraceMinutes).toBeUndefined();
+    });
+
+    test('GATE_MULTI_TECH_CONFIRM + GATE_BOOK_ARRIVAL_GRACE together: the probe is tech-scoped AND a graced offer still waives its previous-side buffer', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        conflictSpy.mockResolvedValue([clash()]);
+        await expect(confirmGraced(gracedSig(90))).rejects.toThrow(SENTINEL);
+        expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ technicianId: TECH_ID }));
+        expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 90 });
+        // and the non-waivable clashes still refuse under the scoped probe
+        capturedScheduledInsert = undefined; verifySpy.mockClear();
+        conflictSpy.mockResolvedValue([clash({ window_start: '10:00:00' })]);
+        await expect(confirmGraced(gracedSig(90))).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+        expect(verifySpy).not.toHaveBeenCalled();
+      } finally { delete process.env.GATE_MULTI_TECH_CONFIRM; }
+    });
+
+    test('a same-day slot (grace 0 for its date) is signed and verified under the plain insertion policy even with the gate on', async () => {
+      const today = etDateString(new Date());
+      const sig = mintSlotOfferField(offerPayload({ date: today, policy: BOOK_INSERTION_OFFER_POLICY }));
+      const result = await createSelfBooking(confirmPayload(sig, { slot_date: today }));
+      // clears the signature gate (any later refusal is not the 409 signature miss)
+      expect(result.error || '').not.toMatch(/pick your time again/i);
+    });
+
+    test('an internal callback booking (re-service / inspection: no signed field) reads the live grace for its date', async () => {
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(createSelfBooking(callbackPayload())).rejects.toThrow(SENTINEL);
+      expect(verifySpy.mock.calls[0][1]).toMatchObject({ arrivalGraceMinutes: 120 });
+    });
+
+    test('an internal callback booking with the gate OFF keeps the strict probe', async () => {
+      delete process.env.GATE_BOOK_ARRIVAL_GRACE;
+      conflictSpy.mockResolvedValue([clash()]);
+      await expect(createSelfBooking(callbackPayload())).resolves.toMatchObject({ ok: false, code: 'SLOT_TAKEN' });
+      expect(verifySpy).not.toHaveBeenCalled();
+    });
   });
 });

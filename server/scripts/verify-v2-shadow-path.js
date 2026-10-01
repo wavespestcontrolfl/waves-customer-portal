@@ -9,7 +9,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const CRP = require('../services/call-recording-processor');
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey, reconstructWaivedAddressValidation } = require('../services/call-triage-flags');
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -35,6 +35,8 @@ async function main() {
       // rather than the staff cell that dialed out — buildFailOpenRoutingContext
       // now derives identity through that resolver (Codex #4933 r1 P2).
       .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'ai_validation',
+        // callStartedAt() backs out a post-call fallback row's own length (codex #5377 r12 P2)
+        'duration_seconds', 'recording_duration_seconds',
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
@@ -69,6 +71,11 @@ async function main() {
         ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
         : null;
     }
+    // The bookable catalog rides in the dump (Phase B has no DB access): the
+    // commercial dictated-booking quote check resolves the catalog row the way the
+    // booking does (GATE_CALL_COMMERCIAL_DICTATED_BOOKING; codex #5377 r9 P1).
+    const bookableServices = await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => []);
+    for (const row of rows) row.bookable_services = bookableServices;
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -94,7 +101,9 @@ async function main() {
       callId: r.id,
       // JSON round-trip turns the Date into a string; rehydrate it (in prod
       // this is a real Date from Knex). Guard against any unparseable value.
-      callStartedAt: r.created_at && !isNaN(new Date(r.created_at)) ? new Date(r.created_at) : new Date(),
+      // The real call start, as the fail-open routing context derives it (a post-call fallback row's
+      // insert time can cross ET midnight and shift "tomorrow") — codex #5377 r16 P2.
+      callStartedAt: require('../utils/call-timeline').callStartedAt(r) || new Date(),
     });
     const ms = Date.now() - t0;
     if (res.status === 'valid') {
@@ -108,8 +117,14 @@ async function main() {
       // is unchanged (codex round-11 P1); a changed street degrades to null
       // rather than riding on a stale validated_accept.
       const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
-      const rawAv = pj(r.ai_address_validation);
+      const rawAvUnwaived = pj(r.ai_address_validation);
+      const rawAvWaived = reconstructWaivedAddressValidation(rawAvUnwaived);
       const priorEnriched = pj(r.ai_extraction_enriched);
+      // A whole-structure unit waiver was decided for the PRIOR extraction's
+      // service and property type: keep it only when this extraction names the
+      // same; otherwise judge on the persisted, unwaived verdict.
+      const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+      const rawAv = (rawAvWaived !== rawAvUnwaived && waiverInputs(priorEnriched) !== waiverInputs(e)) ? rawAvUnwaived : rawAvWaived;
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
       // Recovery reconstruction (codex round-12 P2): a recovered call routed
       // on the recovery's accepting verdict, not the persisted unresolvable
@@ -131,11 +146,19 @@ async function main() {
         customer: pj(r.linked_customer),
         contactPhone,
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+        // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+        unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+        // the catalog the dump carried (commercial quote check; absent = held)
+        bookableServices: Array.isArray(r.bookable_services) ? r.bookable_services : null,
       });
-      const route = CRP.demoteFailOpenOnV1AddressConflict(
-        canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+      const route = CRP.applyUnclearServiceTranscriptVeto(
+        CRP.demoteFailOpenOnV1AddressConflict(
+          canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+          pj(r.ai_extraction) || {},
+          knownCaller
+        ),
         pj(r.ai_extraction) || {},
-        knownCaller
+        r.transcription
       );
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);

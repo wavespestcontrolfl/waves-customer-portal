@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
@@ -6,16 +6,18 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
-import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
+import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
-import { isProductApplication } from '../lib/product-application';
+import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { isLawnFindingSelection } from '../lib/lawn-completion';
 import { serviceCompletionChoicesFor } from '../lib/service-completion-choices';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -54,13 +56,15 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument from './ServiceReportDocument';
+import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -1012,8 +1016,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'neutral',
+      // A lawn report with the lead block (GATE_LAWN_REPORT_LEAD) prints the
+      // snapshot headline right below as its own heading — not here too.
       result: v2Snapshot.peaceOfMind
-        || v2Snapshot.statusHeadline
+        || (data.reportV2?.lead ? null : v2Snapshot.statusHeadline)
         || 'Service completed — we noted items to keep an eye on; details are below.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
       // Times live on the tech card, product count on "What Waves did today" —
@@ -1521,6 +1527,13 @@ function applicationReentrySummary(app = {}) {
 
 function applicationManufacturer(app = {}) {
   return app.product?.manufacturer || '';
+}
+
+// GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) — the server omits
+// `report_copy` entirely when the gate is off or the product has no
+// approved wording, so this reads as absent, never a placeholder.
+function applicationReportCopy(app = {}) {
+  return app.product?.report_copy || null;
 }
 
 // Product-specific watering guidance for the lawn report, sourced ONLY from the
@@ -2638,6 +2651,56 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year — never a price, owner rule that prices
+// only ever appear on estimate pages. The server sends it for members only.
+// Live view only; the payload field itself is stripped from
+// pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
+// so `mode` is a belt-and-braces check here, same as the other live-only
+// cards on this page.
+function PlanSummaryCard({ data, mode }) {
+  const plan = data.planSummary;
+  if (mode !== 'live' || !plan) return null;
+  const visits = Number(plan.visitsThisYear) || 0;
+  if (visits <= 0) return null;
+  const reservices = Number(plan.reservicesThisYear) || 0;
+  const visitWord = visits === 1 ? 'visit' : 'visits';
+  const reserviceWord = reservices === 1 ? 're-service' : 're-services';
+  const yearLine = reservices > 0
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
+    : `This year: ${visits} ${visitWord}`;
+  return (
+    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
+      <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
+// "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
+// GATE_REPORT_NEAR_YOU): the lawn pest most often found around the
+// customer's city this past month. The server sends it only for a live lawn
+// report once enough other customers there had that pest, and strips it from
+// pdf/static/sms_preview renders; `mode` is the same belt-and-braces check
+// as PlanSummaryCard.
+function NearYouCard({ data, mode }) {
+  const nearYou = data.nearYou;
+  if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
+  return (
+    <section data-glass="card" className="sr-section near-you-section" id="near-you">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
+      <p className="map-context-copy">
+        Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
+      </p>
+    </section>
+  );
+}
+
 // Shown to staff viewing an internal-only (shadow) report in place of the
 // download/share bar: no PDF is rendered for these records and the public
 // link 404s for customers, so every control there would dead-end. Customers
@@ -2899,10 +2962,18 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     if (!q || asking) return;
     setAsking(true);
     setAnswer('');
+    // Staff browsers send their portal JWT, as on the /data read, so the
+    // server can leave a staff QA question out of customer engagement.
+    // Guarded like that read: sandboxed webviews can throw on localStorage.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     try {
       const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(staffToken ? { Authorization: `Bearer ${staffToken}` } : {}),
+        },
         body: JSON.stringify({ question: q }),
       });
       const payload = await response.json();
@@ -2962,7 +3033,11 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
       </div>
       {answer && (
         <div className="waves-ask-answer" role="status">
-          <span>{answer}</span>
+          {/* AW-06 line-break fix: several answer builders (e.g. answerAppliedToday,
+              answerNextSteps, answerFindings) join recorded facts / next actions
+              with "\n" so they read as separate lines, not one run-on paragraph —
+              this class preserves those breaks without dangerouslySetInnerHTML. */}
+          <span className="waves-ask-answer-text">{answer}</span>
           <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer"><Icon name="close" size={16} strokeWidth={2} /></button>
         </div>
       )}
@@ -2976,7 +3051,7 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null, reportSections = null, nextVisitLabel = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   // The gated typed-report narrative (summarySource 'typed_narrative')
@@ -3008,7 +3083,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {body && <p className="ai-summary-body">{body}</p>}
+      {body && <ReportText text={body} sections={reportSections} nextVisitLabel={nextVisitLabel} className="ai-summary-body" />}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't.
           This containment rule applies to the narrative override too: the
@@ -3320,6 +3395,40 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   );
 }
 
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS). Server-driven: renders only when the LIVE
+// payload carries upcomingVisitsCard.visits — property scoping (this
+// report's property only), the 90-day window, the excluded statuses, and
+// the ~6 cap all live server-side (report-data.js); the client renders
+// exactly what it is given. Distinct from the hero's "Next service" cell
+// above, which stays scoped to this report's own service line only.
+function UpcomingVisitsCard({ data, mode }) {
+  const visits = data?.upcomingVisitsCard?.visits;
+  if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
+  return (
+    <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
+      {/* h2, not .section-eyebrow (codex round-2 P2): the glass theme hides
+          EVERY .section-eyebrow outside the hero kicker
+          (html[data-glass-theme] .service-report-v1 .section-eyebrow), so
+          the title was invisible under glass. .report-card h2 already
+          carries real, deliberate styling (same pattern the companion
+          section heading and the generic .report-card/.sr-section rule
+          use) and the glass rule never targets headings. */}
+      <h2>Your upcoming visits</h2>
+      <div className="service-status-grid">
+        {visits.map((visit, index) => (
+          <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
+            <div className="sr-cell-value">
+              {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sr-cell-note">Dates and windows are subject to change</div>
+    </section>
+  );
+}
+
 // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
 // Server-driven: renders only when the LIVE payload carries `crossSell` — the
 // server computes the offer fail-closed (ownership, commercial, secondary-
@@ -3488,7 +3597,23 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   // monitoring devices (stations, cartridges) are checks, not products
   // applied (codex P2 #3600 r23).
   const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
-  if (!applications.length) return null;
+  if (!applications.length) {
+    // No product rows, yet something went down: the server's applicationMade
+    // verdict from typed / specialty treatment evidence (product rows are
+    // optional there — Codex r1 #5032), an UNKNOWN verdict (null: the product
+    // read failed, so fail toward the safety line — Codex r4), or rodenticide
+    // in bait stations, which servicing does not count as an application
+    // (owner 2026-09-26). Poison Control prints on its own; this mount is the
+    // one slot both layouts share. The applicator is named only on real
+    // application evidence — a station check applied nothing (Codex r4).
+    if (data.applicationMade !== true && data.applicationMade !== null && !reportHasRodenticide(data)) return null;
+    return (
+      <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
+        <h2>Poison Control</h2>
+        <PoisonControlNote data={data} titled showApplicator={data.applicationMade === true} />
+      </section>
+    );
+  }
   const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
@@ -3528,6 +3653,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
             const manufacturer = applicationManufacturer(app);
+            const reportCopy = applicationReportCopy(app);
             const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
@@ -3589,6 +3715,32 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     <p>{productSummary}</p>
                   </div>
                 )}
+                {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
+                    2026-09-28) — customer-display only, never fed into the
+                    AI report writer. also_labeled_for describes the LABEL,
+                    never what was treated on this visit, so it never reads
+                    next to "Why used today" above. Since 2026-09-29 the
+                    line itself is a full sentence ("Labeled for 75+
+                    Bradenton pests") rather than a named pest list, so the
+                    cell label reads "On the label" instead of "Also labeled
+                    for" to avoid "Also labeled for: Labeled for ..."
+                    (owner ruling 2026-09-29). Narrow products (gel baits,
+                    granular bait, IGRs) and LESCO carry no also_labeled_for
+                    key at all (owner ruling). */}
+                {reportCopy && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">How it works</div>
+                    <p>{reportCopy.how_it_works}</p>
+                    {reportCopy.also_labeled_for && (
+                      <>
+                        <div className="sr-cell-label">On the label</div>
+                        <p>{reportCopy.also_labeled_for}</p>
+                      </>
+                    )}
+                    <div className="sr-cell-label">Pets &amp; kids</div>
+                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
+                  </div>
+                )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>
                 <summary>
                   <span>More information</span>
@@ -3623,7 +3775,23 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           })}
         </div>
       )}
+      {/* Poison Control rides the product list: this section only mounts
+          when something was actually applied, so WDO, assessment and
+          monitoring-only visits never carry it (owner 2026-09-26). */}
+      <PoisonControlNote data={data} listsProducts showApplicator />
     </section>
+  );
+}
+
+// titled: the standalone section already heads it "Poison Control".
+// showApplicator: the visit recorded an actual application.
+function PoisonControlNote({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
+  return (
+    <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
+      {!titled && <><strong>Poison Control.</strong>{' '}</>}<PoisonControlCopy listsProducts={listsProducts} />
+      {applicator && <div className="poison-control-applicator">{applicator}</div>}
+    </div>
   );
 }
 
@@ -4286,7 +4454,7 @@ function ServiceCoverageMap({
       !hasRenderableCoverageGeometry(location)
       || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
     ));
-  const activeMapBackgroundUrl = canUseImageGeometry ? mapBackgroundUrl : null;
+  const activeMapBackgroundUrl = canUseImageGeometry ? resolveApiAssetUrl(mapBackgroundUrl) : null;
   const displayLocations = useMemo(
     () => locations.map((location) => coverageDisplayLocation(location, canUseImageGeometry)),
     [locations, canUseImageGeometry],
@@ -5610,6 +5778,13 @@ function LegacyReport({ data, token, glass = false }) {
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
+          {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
+              & Safety link too; they never mount the v1 footer. */}
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+              See every product we use and our safety protocol
+            </a>
+          </p>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
@@ -5796,6 +5971,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       || (data.companionReports || []).some(
         (companion) => companion?.todaysResult?.bodySource === 'technician_report',
       ));
+  // Four-section report (GATE_REPORT_WRITER_RULES): its sections, shown
+  // wherever the report's text prints, and the next visit on this report's
+  // own service line for "What's next" (live view only: the server strips
+  // it from every other render).
+  const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
+  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
+  // When the four-section report is what a termite or cockroach dashboard
+  // shows, its next visit is the property-scoped one opening "What's next";
+  // the dashboard's own customer-wide label stays off (Codex #5500).
+  const termiteSectionsShown = Boolean(data.termiteReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.termiteReportV2.aiSummary?.body || '')));
+  const cockroachSectionsShown = Boolean(data.cockroachReportV2
+    && reportSectionsForText(reportSections, cleanVisitSummary(data.cockroachReportV2.aiSummary?.body || '')));
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -7282,6 +7470,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        /* Customer-facing body copy floor is 16px; 14px stays reserved for
+           labels (codex round-2 P2). Scoped to the upcoming-visits card only
+           — .sr-cell-value/.sr-cell-note are shared with other cards whose
+           existing 15px/14px sizing is unchanged here. */
+        .upcoming-visits-card .sr-cell-value,
+        .upcoming-visits-card .sr-cell-note {
+          font-size: 16px;
+        }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -7455,6 +7651,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .manufacturer-guideline-note strong {
           color: var(--text);
           font-weight: 700;
+        }
+        .poison-control-note {
+          margin: 16px 0 0;
+        }
+        .poison-control-note a {
+          color: var(--text);
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .poison-control-applicator {
+          margin-top: 8px;
+          font-weight: 600;
         }
         .applied-product-maker {
           margin: -2px 0 8px;
@@ -8842,6 +9050,29 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
+            under the visit status, ahead of everything else the customer
+            reads; the lawn section below no longer repeats it. */}
+        {isLawnReport && data.reportV2?.banner && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            {/* The report's 16px section rhythm (.sr-section margin-top). */}
+            <LawnWateringBanner banner={data.reportV2.banner} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
+        {/* The lawn lead (GATE_LAWN_REPORT_LEAD) is the report's above-the-fold
+            summary, so it sits right under the status and watering banner, not
+            down in the lawn section (which then drops its hero). */}
+        {isLawnReport && data.reportV2?.lead && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            <LawnLeadCard lead={data.reportV2.lead} snapshot={data.reportV2.snapshot || {}} style={{ marginTop: 16 }} />
+          </LawnPrintContext.Provider>
+        )}
+
+        <PlanSummaryCard data={data} mode={mode} />
+
+        <NearYouCard data={data} mode={mode} />
+
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
@@ -8859,6 +9090,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
               ? cleanVisitSummary(data.summary)
               : null}
+            reportSections={reportSections}
+            nextVisitLabel={nextSameServiceLabel}
           />
         )}
 
@@ -8894,6 +9127,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             #tech-note never duplicates. Live only. */}
         {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
 
+        {/* Your upcoming visits (owner-approved 2026-09-27,
+            GATE_REPORT_UPCOMING_VISITS) — right beside the cross-sell offer,
+            same interwoven placement. Live-only; renders nothing unless the
+            payload carries upcomingVisitsCard. */}
+        <UpcomingVisitsCard data={data} mode={mode} />
+
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
             story (hero / re-entry / timeline), before the findings detail.
@@ -8910,6 +9149,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <PestReportV2Section
               data={data.pestReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -8944,6 +9185,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <MosquitoReportV2Section
               data={data.mosquitoReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -8985,8 +9228,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
-              nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              nextVisitLabel={termiteSectionsShown ? null : formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              reportNextVisitLabel={termiteSectionsShown ? nextSameServiceLabel : null}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
                  REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
                  for a primary dashboard, the bait companion's gauge for a
@@ -9014,8 +9259,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mode={mode}
               /* Same-line next visit only — the builder scopes it to the
                  next ROACH-FAMILY appointment (live view only). */
-              nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              nextVisitLabel={cockroachSectionsShown ? null : formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              reportNextVisitLabel={cockroachSectionsShown ? nextSameServiceLabel : null}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status
                  was reconciled away from it the trend is stale (codex P2 #3613 r1) */
               activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
@@ -9063,7 +9310,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !routineFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
-            <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            <ReportText
+              text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}
+              sections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
+            />
             {recordedFindingsList}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
@@ -9274,6 +9525,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 <TodaysResultCard
                   typedReport={companion}
                   sectionId={`companion-${companion.type}-todays-result`}
+                  reportSections={reportSections}
+                  nextVisitLabel={nextSameServiceLabel}
                 />
               )}
               <TypedFindingsCard
@@ -9431,6 +9684,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page. The footer renders on every report, so assessment-
+              and inspection-only visits get it too. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+            See every product we use and our safety protocol
+          </a>.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must
@@ -9456,6 +9716,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     </div>
   );
 }
+
+function reportDataUrl(token, mode, pinnedAssessment) {
+  return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    + (pinnedAssessment
+      ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+        + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+        + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+        + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
+      : '');
+}
+
+// The report's satellite images are signed proxy links that expire (2 h). A
+// page left open (or restored from the background) past this re-requests just
+// the map fields, silently, instead of leaving a dead map behind.
+const REPORT_MAP_STALE_MS = 90 * 60 * 1000;
 
 export default function ReportViewPage() {
   const { token } = useParams();
@@ -9499,17 +9774,22 @@ export default function ReportViewPage() {
   const glassActive = mode === 'live';
   useGlassSurface(glassActive);
 
+  const mapsLoadedAt = useRef(0);
+  const mapsRefreshing = useRef(false);
+  const mapErrorRefetched = useRef(false);
+  // Identity of the report on screen: an in-flight map refresh for a report the
+  // reader has since navigated away from must not touch the new one.
+  const reportKey = `${token}|${mode}`;
+  const currentReportKey = useRef(reportKey);
+  currentReportKey.current = reportKey;
+  useEffect(() => {
+    mapErrorRefetched.current = false; // one error-retry per report, not per SPA session
+  }, [reportKey]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
-      + (pinnedAssessment
-        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
-          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
-          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
-          + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
-        : '');
+    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -9554,6 +9834,7 @@ export default function ReportViewPage() {
           if (d.staffViewer) staffViewTokens.add(token);
           else staffViewTokens.delete(token);
         }
+        mapsLoadedAt.current = Date.now();
         setData(d);
       })
       .catch(() => {
@@ -9571,6 +9852,66 @@ export default function ReportViewPage() {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
   }, [data]);
+
+  // Silent refresh of ONLY the map fields (fresh signed links); never touches
+  // the loading state or any other part of the rendered report.
+  const dataHasMaps = Boolean(data && !data.error
+    && (data.treatmentMap?.satellite?.live?.url || data.stationMap?.image?.url));
+  const refreshReportMaps = useCallback(() => {
+    if (mode !== 'live' || mapsRefreshing.current) return;
+    mapsRefreshing.current = true;
+    const requestedFor = `${token}|${mode}`;
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
+    fetch(reportDataUrl(token, mode, pinnedAssessment), {
+      cache: 'no-store',
+      headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((fresh) => {
+        if (!fresh || fresh.error || currentReportKey.current !== requestedFor) return;
+        mapsLoadedAt.current = Date.now();
+        setData((prev) => (prev && !prev.error ? {
+          ...prev,
+          treatmentMap: prev.treatmentMap
+            ? { ...prev.treatmentMap, satellite: fresh.treatmentMap?.satellite ?? prev.treatmentMap.satellite }
+            : prev.treatmentMap,
+          stationMap: fresh.stationMap ?? prev.stationMap,
+        } : prev));
+      })
+      .catch(() => {})
+      .finally(() => { mapsRefreshing.current = false; });
+  }, [token, mode, pinnedAssessment]);
+  useEffect(() => {
+    if (mode !== 'live' || !dataHasMaps) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - mapsLoadedAt.current > REPORT_MAP_STALE_MS) {
+        refreshReportMaps();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [mode, dataHasMaps, refreshReportMaps]);
+  // Once per page load: if the map image cannot load (an already-expired link,
+  // e.g. a restored tab), fetch fresh links a single time.
+  const mapProbeUrl = data?.treatmentMap?.satellite?.live?.url || data?.stationMap?.image?.url || null;
+  useEffect(() => {
+    if (mode !== 'live' || !mapProbeUrl || typeof Image === 'undefined') return undefined;
+    let done = false;
+    const probe = new Image();
+    probe.onerror = () => {
+      if (done || mapErrorRefetched.current) return;
+      mapErrorRefetched.current = true; // a single retry per page load, never a loop
+      refreshReportMaps();
+    };
+    probe.src = resolveApiAssetUrl(mapProbeUrl);
+    return () => { done = true; probe.onerror = null; };
+    // Only the URL identity matters: a refreshed URL re-probes exactly once.
+  }, [mode, mapProbeUrl]);
 
   // The browser resolves the URL fragment against the loading skeleton —
   // anchor targets (e.g. #visit-recap from recap SMS links) don't exist

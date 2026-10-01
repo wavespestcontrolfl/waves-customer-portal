@@ -27,7 +27,74 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // end is not carried: window_end is the job-duration block and the quoted
 // arrival window is always derived from the start (sms-time-format.js).
 // New instructions the model must follow, so this is a new cohort.
-const PROMPT_VERSION = 'v11';
+// v12: caller.relationship_to_property "home_buyer" (schema 1.15.0; owner
+// ruling 2026-09-26: a buyer under contract ordering their own WDO
+// inspection is authorized like a lender or realtor). Buyers calling for
+// themselves were told to use "other", so this changes what the model
+// returns for them: a new cohort.
+// v13: scheduling.caller_accepted_slot + scheduling.moved_appointment_date
+// (schema 1.16.0; owner decision 2026-09-27). The extraction judges a
+// reschedule's agreement over the whole call and names the existing
+// appointment being moved, each pinned to one speaker's verbatim utterance;
+// the reschedule applier verifies those quotes instead of parsing the
+// transcript itself. New fields and instructions: a new cohort.
+// v14: scheduling.agreed_slot_words + scheduling.moved_appointment_date's
+// own moved_appointment_words (schema 1.17.0; owner decision 2026-09-27).
+// The extraction records the agreed slot and the moved appointment's date
+// as VERBATIM WORDS copied from the confirmed_start_at / moved_appointment_
+// date evidence quotes, so the reschedule applier checks the quote is real
+// and contains those words instead of parsing speech. New fields and
+// instructions: a new cohort.
+// v15: reschedules only (owner decision 2026-09-28) — moving an EXISTING
+// appointment to a start hour said without AM/PM reads it as business
+// hours (7-11 morning; 12 and 1-6 afternoon), so "two to four" is 2 PM.
+// New bookings keep the unstated-period rule. A new cohort.
+// v16: caller.relationship_to_property "family_member" (schema 1.18.0;
+// owner ruling 2026-09-28: a relative of the homeowner/resident — child,
+// parent, grandchild, sibling, in-law — arranging service at THAT
+// relative's home is authorized when staff confirmed a time on the call).
+// Live miss (call f5a54dbd, 2026-09-28): the caller booked a paper-wasp
+// knockdown at "my grandfather's house", confirmed for Sunday 11am, and was
+// blocked on caller_not_authorized because "other" is the only value that
+// fit and it also covers strangers. Callers arranging service for their
+// OWN spouse/partner's household still use spouse_partner, unchanged. New
+// enum value the model must now choose between, so this is a new cohort.
+// v17: consent.sms_declined (schema 1.19.0; codex P1 on #5292). The
+// booking-link dry-run's removal of the sms_consent_given===false staging
+// check (that field is true only on an explicit yes, so false meant "never
+// asked" and blocked 151/159 real new-lead calls) also stopped catching an
+// explicit "no" to "may I text you?", recorded the SAME way. sms_declined
+// is a new, separately-judged field: true ONLY on an explicit decline of
+// texting. Additive/optional in both schemas (never added to `required`,
+// per AGENTS.md's extraction-schema rule), but the model is instructed to
+// always give an explicit true/false. New field and instructions: a new
+// cohort.
+// v18: a NEW booking's start hour said without AM/PM ("can we plan on 2
+// o'clock?" / "Sure.") reads as business hours (7-11 morning; 12 and 1-6
+// afternoon) — the reschedule rule of v15 now applies to every committed and
+// accepted exact on-the-hour start, and a stated period that conflicts with
+// that reading blocks confirmation (owner decision 2026-09-29; live miss:
+// call 4de755e1, a WDO agreed at "2 o'clock" never booked). Prompt wording
+// and schema descriptions only, no schema shape change. A new cohort.
+// v19: scheduling.definite_commitment, scheduling.relative_date_used and
+// scheduling.moved_appointment_relative_date_used (schema 1.20.0; owner
+// direction 2026-09-30, after word-list review rounds on #5201 did not
+// converge). The model, not code, judges the language of a reschedule
+// promise: a definite commitment vs could/might/probably/upon X/once Y/if Z,
+// and whether the day was said relatively (next week, the following
+// Thursday, eight days away), resolving relative dates to the absolute date
+// in confirmed_start_at / moved_appointment_date. The reschedule applier
+// verifies the flags, quotes and the date's weekday. New fields and
+// instructions: a new cohort.
+// v20: the commercial dictated booking judgements (schema 1.21.0; owner
+// direction 2026-09-30, codex #5377 r2 — word grammars for these never
+// converge, so the extraction judges them and the code verifies the pinned
+// quotes): service_request.price_offered_by_staff, price_accepted_by_caller
+// and price_is_final; scheduling.staff_accepted_proposed_slot and
+// scheduling.selected_day_words. agent_committed_booking now also accepts a
+// day set earlier in the call and a bare yes to the caller's own exact
+// proposal (owner ruling 2026-09-30). A new cohort.
+const PROMPT_VERSION = 'v20';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -91,7 +158,7 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
     : (opts.callDirection === 'inbound'
       ? '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff.\n'
       : '');
-  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
+  return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).
 
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
@@ -108,7 +175,7 @@ GENERALIZATION — callers phrase the same intents in endless unseen ways. Match
 
 SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
-  - ARRIVAL WINDOW: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — an explicit AM/PM stated on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon") — DOES qualify as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set confirmed_start_at to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") IS a specific day here; the vague examples in the rule above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range with NO explicit AM/PM, no "noon"/"midnight", and no day-part word — "Tuesday, 2 to 4", "between 2 and 4" — leaves the START's period unstated, so it does NOT qualify (you would otherwise have to invent AM or PM): status stays "requested"/"offered" as appropriate, confirmed_start_at null. The same applies to an offer staff did not commit to — "we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time" — which stays NOT confirmed.
+  - ARRIVAL WINDOW: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES qualify as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set confirmed_start_at to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") IS a specific day here; the vague examples in the rule above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed from that reading: set confirmed_start_at from that reading and agreed_slot_words.period to null. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so status stays "requested"/"offered" as appropriate, confirmed_start_at null. The same applies to an offer staff did not commit to — "we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time" — which stays NOT confirmed.
   - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
   - EXISTING APPOINTMENT: a caller who is re-confirming, double-checking, or coordinating an appointment that ALREADY EXISTS ("just checking — are we still on for Tuesday at 10?") is NOT booking. Status is "none" (or "reschedule_requested"/"canceled" if they change it) and you set the existing_appointment_coordination triage flag. "confirmed" is ONLY for a NEW visit agreed on this call.
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
@@ -121,7 +188,16 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - Do NOT set status to "confirmed" for unrelated business advice, SEO, marketing, construction advice, or non-Waves services.
 - DO set status to "confirmed" when a builder explicitly books a Waves pre-slab/preconstruction termite or soil-treatment field-service appointment with a specific date and time.
 - Do NOT set status to "confirmed" for admin calls about invoices, payments, receipts, compliance reports, stickers, certificates, W-9s, or paperwork — unless the caller ALSO books a new field-service visit.
-- agent_committed_booking: true ONLY when OUR agent, in the agent's OWN words, commits to the confirmed slot ("we'll confirm it for noon on Sunday", "you're on the schedule for Tuesday at 10", "we'll see you then"). The caller requesting, agreeing, or asserting that we committed is NEVER an agent commitment. Leave false/null when the agent hedges ("I'll have to check", "someone will call you back") or no specific slot was committed. When true, pin an evidence quote of the AGENT's commitment sentence with speaker "agent" — choose the sentence that states the agreed DAY and TIME ("we'll confirm it for noon on Sunday"), not a bare acknowledgment.
+- agent_committed_booking: true ONLY when OUR agent, in the agent's OWN words, commits to the confirmed slot ("we'll confirm it for noon on Sunday", "you're on the schedule for Tuesday at 10", "we'll see you then"). The caller requesting, agreeing, or asserting that we committed is NEVER an agent commitment. Leave false/null when the agent hedges ("I'll have to check", "someone will call you back") or no specific slot was committed. When true, pin an evidence quote of the AGENT's commitment sentence with speaker "agent" — choose the sentence that states the agreed DAY and TIME ("we'll confirm it for noon on Sunday"), not a bare acknowledgment. The day-from-an-earlier-turn exception for confirmed_start_at does NOT apply here: when no single agent sentence states both the agreed day and time, leave agent_committed_booking null (the booking can still be confirmed; it just cannot clear a caller-authorization or commercial hold). TWO EXCEPTIONS (owner ruling 2026-09-30, new bookings). (1) A day set earlier in the call: when the caller selected the DAY in an earlier turn ("Thursday works") and the agent's later sentence states the exact on-the-hour time as a plain commitment ("we'll see you at two"), pin that sentence as the commitment, leave agreed_slot_words.day null, and record the caller's selected day in scheduling.selected_day_words (see below). (2) A bare yes to the caller's own exact proposal: when the CALLER's immediately preceding turn proposed one exact day and on-the-hour time ("Can you come Thursday at 2?") and the agent's very next turn accepts that WHOLE proposal as stated ("Sure, that works."), the agent committed: pin that ENTIRE reply turn as the agent_committed_booking quote (speaker "agent"), set scheduling.staff_accepted_proposed_slot (below), and pin the caller's proposal turn as BOTH the /scheduling/confirmed_start_at quote and the /scheduling/caller_accepted_slot quote (speaker "caller"). A reply that is not the very next turn, that accepts only part ("that works for the price, but the time is bad"), that changes, conditions or questions the proposal, or a vague or several-option proposal is not a commitment.
+- caller_accepted_slot: for a booking or reschedule that ENDS with an agreed slot (confirmed_start_at set), true ONLY when the CALLER, in the caller's OWN words, accepted that FINAL slot ("yes, Thursday at two works", "that would be so much better") or asked for exactly that slot and the agent committed to it. Judge the WHOLE call: false when the caller afterwards withdrew it ("actually, keep my original time"), changed it ("make it three"), made it conditional ("if my husband agrees"), said it does not work or conflicts ("I have another appointment then"), asked for a different time, or never answered the agent's proposal. A "yes" to a different question (reminders, the gate code) is not acceptance. The agent's words never count as the caller's acceptance. When true, pin the caller's acceptance utterance to /scheduling/caller_accepted_slot with speaker "caller". null when no slot was agreed or it is unclear.
+- moved_appointment_date: for status "reschedule_requested" ONLY — the calendar date (YYYY-MM-DD, Eastern) of the EXISTING appointment being moved, as established on the call by EITHER speaker: the caller naming it ("my visit on the 24th", "my Thursday appointment") or the agent reading it back ("you're on September 24th at 9 AM"). Resolve relative dates against the call date. Pin the utterance that names that date to /scheduling/moved_appointment_date with its speaker. null when the call never identifies WHICH existing appointment is being moved — never infer it from the new slot, and never guess among several visits.
+- agreed_slot_words: set ONLY when confirmed_start_at is set — the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, and that quote must contain every non-null value below. hour: the word(s) naming the agreed START hour exactly as spoken ("two", "2", "10", "noon", "midnight") — only the hour, no minutes, no AM/PM; for an arrival window it is the window's start ("between two and four" -> "two"). period: the words that state AM/PM for THAT hour ("pm", "p.m.", "in the afternoon", "this evening", "tonight"; for a window ending at noon or midnight, that word: "between 10 and noon" -> "noon") — or null when nobody said AM/PM or a part of the day for that time (never write a period nobody said: an hour said without AM/PM is read as business hours by the BUSINESS-HOURS READING rule above, for a new booking or a reschedule, with period null — and never take a part of the day that describes the OLD appointment, e.g. "your morning appointment"); null for noon/midnight. day: the words naming the agreed day ("Thursday", "tomorrow", "tonight", "this evening", "November 9th", "the 9th") — or null when the day was not said because only the time of the same-day appointment changes (or, for a NEW booking, when the turn holding the agreed hour does not repeat the day: "can we plan on 2 o'clock?" said after "today between 1:30 and 3:30"). Set the whole object null (confirmed_start_at and status follow their own rules above) when the agreed time was not ONE exact on-the-hour start: approximate ("two-ish", "around noonish"), a bound ("before noon", "by two", "two or later"), alternatives ("two or four"), or minutes ("two thirty"). When a speaker corrected the time, use the FINAL corrected words only ("at two, actually three" -> hour "three"), and pick the quote accordingly.
+- moved_appointment_words: for reschedule_requested only — the verbatim words from the /scheduling/moved_appointment_date quote that name that date ("the 24th", "September 24th", "Thursday"); null whenever moved_appointment_date is null.
+- staff_accepted_proposed_slot: for a booking whose slot the CALLER proposed (one exact day and on-the-hour time in the caller's turn), true ONLY when the very next turn is staff's reply accepting that whole proposal as stated. false when the reply accepted only part of it, changed it, conditioned it, questioned it, or refused it. null when the caller did not propose the slot. When true, pin the ENTIRE reply turn verbatim to /scheduling/staff_accepted_proposed_slot with speaker "agent".
+- selected_day_words: for a NEW booking whose final time turn does not repeat the day (agreed_slot_words.day null), the verbatim words naming the day the CALLER SELECTED as the final agreed day ("Thursday", "October 24th"), copied exactly from a caller turn and pinned to /scheduling/selected_day_words with speaker "caller". Only a day the caller chose or agreed to: never one the caller rejected, called impossible or unavailable, or offered among several options, and never a relative day ("next Thursday"). null when agreed_slot_words.day is set or no day was selected.
+- definite_commitment: for a slot the call agreed (confirmed_start_at set), true when OUR agent's own words firmly commit to that exact day and time. FALSE only when a hedge or condition applies to WHETHER or WHEN the appointment happens: "could", "might", "can try", "should be able to", "probably", "possibly", "tentatively", "hopefully", "perhaps", "if <a condition on the slot>", "once ...", "upon ...", "pending ...", "after the rain", "weather permitting", "as long as ...", or a plan the agent presents as still to be checked. A courtesy or contingency line about a LATER follow-up does NOT make it false when the slot itself was stated firmly: "if anything comes up I'll let you know", "if there are any issues with that I'll let you know", "we'll text you a confirmation", "that should be fine" said after a firm slot ("we'll do 9 o'clock tomorrow ... if there's any issues with that, I'll let you know" is definite). PREFER false when genuinely unsure. The agent's commitment evidence quote (/scheduling/agent_committed_booking) MUST be the WHOLE clause that holds the day, date and time INCLUDING every qualifier around them ("we will see you Thursday at two PM upon clearance", not "Thursday at two PM") — the clause that states the slot, not the courtesy line after it. null when no slot was agreed.
+- relative_date_used: for a slot the call agreed, true when the agreed DAY was said relative to the call or to another date instead of as a plain weekday, calendar date, "today", "tomorrow" or "this <weekday>": "next week", "the following Thursday", "the Thursday after this one", "a week from Thursday", "Thursday eight days from now / away / out", "in two weeks", "next Thursday". RESOLVE it against the call date so confirmed_start_at holds the true absolute date the speakers meant, record ONLY the bare weekday in agreed_slot_words.day ("Thursday") when a weekday was said, and pin the WHOLE clause holding the relative expression to /scheduling/relative_date_used. When NO weekday was said, agreed_slot_words.day is the relative phrase itself, verbatim ("the day after tomorrow", "two weeks from now"); the verifier computes such dates only for these forms — tomorrow, the day after tomorrow, "in N days", "N days from now/today", "in N weeks", "N weeks from now/today", N being digits, "a"/"one", or a number word two to eight — and sends every other weekday-less relative date ("sometime next month", "a few days", "a couple of weeks", "half a day") to the office, so quote them exactly as spoken and do not paraphrase. PREFER true when unsure. false for a plain weekday, date, today, tomorrow or "this <weekday>". null when no slot was agreed.
+- moved_appointment_relative_date_used: the same judgement for the EXISTING appointment's day (moved_appointment_date): true when the caller or agent named it relatively ("my Thursday a week from now appointment", "the Thursday after next"); resolve it to the absolute moved_appointment_date, record ONLY the bare weekday in moved_appointment_words when a weekday was said (otherwise the exact relative phrase, in the same closed forms as relative_date_used), and pin the whole clause to /scheduling/moved_appointment_relative_date_used. false for a plain weekday or calendar date; PREFER true when unsure. null when moved_appointment_date is null.
 - follow_up_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks for the follow-up"). A generic "call us if it comes back" is NOT a follow-up visit.
 - follow_up_start_at: ISO 8601 Eastern Time datetime ONLY when a specific follow-up date (and time) was explicitly agreed. Most calls: null — the office schedules the follow-up at the standard interval.
 
@@ -158,9 +234,10 @@ EMAIL:
 - ATTRIBUTION: an email the caller relays FOR another named person ("the buyer is Joseph — his email is ...", "her email is ...") is THAT person's email. It goes on that person's secondary-contact entry and NEVER into caller.email, even though the caller is the one speaking it. The same rule applies to phone numbers and caller.phone_e164.
 
 CALLER RELATIONSHIP (relationship_to_property) AND on_site_authorization:
-- A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". Use "other" only when no enum value fits.
+- A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". A caller who is BUYING the property themselves (under contract, closing pending, not the owner yet — "we're buying the house", "we close next month") is "home_buyer"; once they say they already own it, they are "owner". Use "other" only when no enum value fits.
 - Most homeowners never say "it's my house". Someone arranging service for where they live ("my yard", "our kitchen", "come out to the house") is the owner or a household member: use "owner" when they speak as the resident, "spouse_partner" when they say so, and "unknown" ONLY when the call gives no signal either way. Never infer a non-owner relationship from a missing statement.
-- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
+- A caller arranging service at a RELATIVE's home, not their own — "my grandfather's house", "my mom's place", "my daughter's apartment" — is "family_member" (grandchild, child, parent, sibling, in-law, any relative). This is distinct from "spouse_partner": a spouse/partner arranging service at the SAME household they themselves live in is still "spouse_partner", never "family_member". "family_member" is only for service at someone ELSE's residence.
+- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, home buyer, family member, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
 
 UNIT BEDROOMS (property.bedroom_count):
 - When the caller states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "2 bed 2 bath", "studio" = 0), set property.bedroom_count to that integer. Only what was spoken — never infer it from square footage, rent, or the property type; null otherwise.
@@ -170,7 +247,7 @@ ADDRESS:
 - Parse into street_line_1, city, state, postal_code when clearly stated.
 - If the transcribed street name is not a plausible street name (real words or a proper name — "C Phone Trail" is not), it is likely a phonetic mis-transcription: still parse it as heard (the server re-validates and recovers), but lower service_address confidence to 0.6 or below.
 - state must be "FL" or null. Do not set for non-Florida addresses.
-- county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only.
+- county: Set if clearly identifiable from city/address. Manatee, Sarasota, Charlotte, or DeSoto only (DeSoto is recorded but NOT in the service area).
 - normalization_status: Always set to "not_attempted" (server handles normalization).
 
 PROPERTY:
@@ -209,6 +286,9 @@ SERVICE REQUEST:
 - STATED INTENT OUTRANKS SPECIES MENTIONS: choose primary_service_category and specific_service_name from what the caller ASKS FOR (starting/stopping/changing service, one-time vs recurring, scope), never from which pest species happens to be named. A named pest is evidence, not a request — a caller mentioning roaches or ants while asking to start a recurring/quarterly plan is requesting general pest control, NOT a one-time species treatment. Map to a species-specific service ONLY when the caller asks for that treatment itself (an active infestation cleanout, "I need the roaches treated"). When stated intent and a species mention pull different directions, follow the stated intent and note the species in call_summary.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Treatment"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
+- price_offered_by_staff: true ONLY when a Waves staff member (speaker "agent") OFFERED the amount in quoted_price_usd as Waves' OWN quote for this service: a statement of the price ("that runs $150"), never a question about a price ("did another company quote you $150?"), never a competitor's or the caller's number, never a hypothetical or a range. Pin the staff's price sentence to /service_request/price_offered_by_staff with speaker "agent" (the amount must be in the quote exactly as spoken — digits or words, e.g. "$149" or "one hundred forty-nine dollars"; never rewrite words as digits). false when it was not offered that way; null when no price was discussed.
+- price_accepted_by_caller: true ONLY when the CALLER, after that offer, accepted THAT price in their own words ("yes, that works", "okay, $150 is fine"). false when the caller objected, negotiated, asked a question instead, agreed to something else, or took the agreement back. Pin the caller's acceptance to /service_request/price_accepted_by_caller with speaker "caller". null when no price was discussed.
+- price_is_final: true ONLY when the accepted amount was the LAST price staff stated for this service on the call, with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing ("actually, correction, it's $250", "plus ten dollars for the garage", "that's before the trip fee", "it will be a bit more with the second building"). false when the price changed or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed.
 - price: The PRIMARY price stated on the call — a copy of prices[0] below (see the prices rule for how the primary is chosen and ordered). Capture ANY price stated on the call by EITHER party — the agent's quote, or a number the CALLER speaks (a competitor's quote, a price seen online; record who said it in stated_by) — whether or not the caller accepted it — this is broader than quoted_price_usd above, which stays accepted-total-only and unaffected by this field. Never invent a number; leave a subfield null when the call did not say it.
   - amount_usd / amount_max_usd: the stated number. A single price -> amount_usd only, amount_max_usd null. A RANGE ("$90 to 100 per quarter") -> amount_usd is the LOW end (90), amount_max_usd is the HIGH end (100). A muddled or corrected number ("300... no wait, 75, or was it 76") -> use the LAST clearly stated value per the corrections rule below; if it truly never resolves, null rather than guess.
   - unit: the billing unit AS SPOKEN — one_time, per_application, per_month, per_quarter, per_year. "unknown" when a price was stated but no unit was said (e.g. a bare "$300" with no "per" anything). null only when no price was stated at all.
@@ -240,6 +320,7 @@ CONSENT:
 - sms_consent_quote: Verbatim quote where consent was given. null if not given.
 - call_recording_disclosed: true if the greeting or agent mentioned recording/AI.
 - do_not_contact_request: true if caller explicitly asked not to be contacted.
+- sms_declined: true only if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. Always true or false — never null.
 
 VOICEMAIL & SPAM (definitions tightened 2026-07 after a 1,000-call audit — these
 exact mistakes lost real leads; apply them literally):
@@ -268,7 +349,7 @@ exact mistakes lost real leads; apply them literally):
 
 SENTIMENT & LEAD:
 - sentiment: Match caller's emotional state.
-- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte/DeSoto counties.
+- lead_quality: "hot" = ready to buy now, "warm" = interested but not urgent, "cold" = shopping/researching, "tire_kicker" = unlikely to convert, "spam_or_solicitation" = not a customer, "wrong_number" = misdial, "out_of_service_area" = outside Manatee/Sarasota/Charlotte counties and not one of the served south-Hillsborough towns (DeSoto/Arcadia is out).
 
 EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fields:
 - property.service_address (any component)
@@ -277,12 +358,19 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - property.hoa_common_area_service (when true)
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
-- scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.confirmed_start_at (the quote must contain the agreed date AND time — except for a NEW booking whose day was already set earlier in the call, e.g. the caller's "today between 1:30 and 3:30" and then the agent's "can we plan on 2 o'clock?": then quote the one turn that states the agreed time, verbatim, and resolve the day from that earlier turn; never stitch two turns into one quote)
 - scheduling.proposed_start_at (when set — the CALLER's requested new date and time)
 - scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
+- scheduling.caller_accepted_slot (when true — the CALLER's acceptance of the final slot; speaker must be "caller")
+- scheduling.moved_appointment_date (when set — the utterance naming the existing appointment's date)
+- scheduling.relative_date_used (when true — the whole clause holding the relative day expression) and scheduling.moved_appointment_relative_date_used (when true — the same for the existing appointment's day)
+- For a reschedule, each of the scheduling quotes above is ONE speaker's words from ONE turn, copied verbatim: no "Agent:"/"Caller:" labels, never two turns stitched together. The /scheduling/confirmed_start_at quote states the agreed time: quote only the words that state the agreed day and time (a verbatim part of one turn, e.g. "Thursday at two"), not other times said around them ("I have an appointment at four"). When the reschedule keeps the appointment's day and changes only the time ("can you make it noon instead of 9?"), a quote with the agreed time alone is enough.
+- When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values (day, hour, period) verbatim. When scheduling.moved_appointment_words is set, the /scheduling/moved_appointment_date quote must contain it verbatim.
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
+- service_request.price_offered_by_staff (when true — the agent's price sentence; speaker must be "agent") and service_request.price_accepted_by_caller (when true — the caller's acceptance; speaker must be "caller")
+- scheduling.staff_accepted_proposed_slot (when true — the ENTIRE agent reply turn; speaker must be "agent") and scheduling.selected_day_words (when set — the caller turn holding the selected day; speaker must be "caller")
 - service_request.price / service_request.prices[] (when amount_usd or amount_max_usd is set — each entry's own evidence_quote field above already carries this; no separate top-level evidence entry is required)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 
@@ -295,10 +383,10 @@ CONFIDENCE SCORES — Per-section scores in [0, 1]. Score FIDELITY, not complete
 - overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity), each scored on the rule above — the gate must reflect the weakest link, not an average that hides it.
 
 TRIAGE FLAGS — Set flags for situations requiring human review:
-- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
+- out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte counties and not a served south-Hillsborough town (Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, Riverview). DeSoto County (Arcadia) is out.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
-- caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.
+- caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, home_buyer, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.
 - no_sms_consent_captured: No explicit SMS consent obtained.
 - address_unverifiable: Address is vague or incomplete.
 - prior_complaint_unresolved: Caller mentioned an unresolved complaint.

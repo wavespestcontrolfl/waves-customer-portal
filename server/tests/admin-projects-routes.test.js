@@ -1884,6 +1884,82 @@ describe('admin projects routes', () => {
       expect(adminBody.defaultTechnicianId).toBe(null);
     });
   });
+
+  // Applicator identity + Poison Control preview fields (Codex P1,
+  // 2026-09-26) — GET /:id must carry the SAME resolved values as the
+  // public report, computed via the shared resolveProjectReportPreviewFields.
+  test('GET /:id resolves the applicator from the linked service_records technician, never the creator', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'termite_treatment',
+        project_date: '2026-06-11',
+        created_by_tech_id: 'tech-1',
+        tech_name: 'Office Tech',
+        service_record_id: 'sr-1',
+        findings: { treatment_method: 'Trenching', epa_registration: '12345-6' },
+      }),
+    });
+    const serviceRecordRead = chain({ first: jest.fn().mockResolvedValue({ technician_id: 'tech-performer' }) });
+    const technicianRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'tech-performer', name: 'Taylor Performer', fl_applicator_license: 'FA-PERFORM', license_expiry: '2027-01-01',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return serviceRecordRead;
+      if (table === 'technicians') return technicianRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.applicator_name).toBe('Taylor Performer');
+      expect(body.project.applicator_fdacs_id).toBe('FA-PERFORM');
+      // tech_name (the creator join) is untouched.
+      expect(body.project.tech_name).toBe('Office Tech');
+    });
+  });
+
+  test('GET /:id poison_control reflects the canonical typed treatment verdict', async () => {
+    const technicianRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'tech-1', name: 'Adam Benetti', fl_applicator_license: 'JF111111', license_expiry: null,
+      }),
+    });
+    const deviceOnlyRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-2',
+        customer_id: 'customer-1',
+        project_type: 'termite_treatment',
+        project_date: '2026-06-11',
+        created_by_tech_id: 'tech-1',
+        findings: { treatment_method: 'Bait station setup', epa_registration: '12345-6' },
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return deviceOnlyRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'technicians') return technicianRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-2`, {
+        headers: { Authorization: 'Bearer tech-1' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.poison_control).toBe(false);
+    });
+  });
 });
 
 // #2717 server hardening: one visit, one report. POST /admin/projects

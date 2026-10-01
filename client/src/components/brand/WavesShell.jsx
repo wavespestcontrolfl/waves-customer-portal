@@ -25,6 +25,7 @@ export default function WavesShell({
   showFooter = true,
   footerTone,
 }) {
+  const [footerNoGuarantee, setFooterNoGuarantee] = React.useState(false);
   const isTransparent = topBar === 'transparent';
   const phoneTone = isTransparent ? 'light' : 'dark';
   const resolvedFooterTone = footerTone || (isTransparent ? 'light' : 'dark');
@@ -43,7 +44,7 @@ export default function WavesShell({
   };
 
   return (
-    <WavesShellContext.Provider value={{ variant, inShell: true }}>
+    <WavesShellContext.Provider value={{ variant, inShell: true, setFooterNoGuarantee }}>
       <div
         style={{
           minHeight: '100vh',
@@ -100,7 +101,14 @@ export default function WavesShell({
         {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
             that are programmatically focusable — without it the skip link
             scrolls but Tab keeps walking the header. */}
-        <main id="waves-shell-main" tabIndex={-1} style={{ flex: 1, display: 'flex', flexDirection: 'column', outline: 'none' }}>
+        <main id="waves-shell-main" tabIndex={-1} style={{
+          flex: 1, display: 'flex', flexDirection: 'column', outline: 'none',
+          // Native contentInset="never" leaves notch clearance to the shell.
+          // Keep each page's own gutters inside that safe content area.
+          paddingLeft: 'env(safe-area-inset-left, 0px)',
+          paddingRight: 'env(safe-area-inset-right, 0px)',
+          boxSizing: 'border-box',
+        }}>
           {children}
         </main>
         {/* The ONE contentinfo landmark. Owning the footer here (not in each
@@ -114,7 +122,7 @@ export default function WavesShell({
             boxSizing: 'border-box',
           }}>
             {variant === 'customer' ? <BrandFooter /> : null}
-            <TrustFooter tone={resolvedFooterTone} variant={variant} />
+            <TrustFooter tone={resolvedFooterTone} variant={variant} noGuarantee={footerNoGuarantee} />
           </footer>
         )}
       </div>

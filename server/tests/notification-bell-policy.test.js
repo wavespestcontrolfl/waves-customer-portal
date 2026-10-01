@@ -57,7 +57,7 @@ const bellPolicy = require('../services/notification-bell-policy');
 function chainMock(result) {
   const chain = {};
   const methods = [
-    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy',
+    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy', 'orderByRaw',
     'limit', 'offset', 'select', 'first', 'insert', 'update',
     'count', 'returning', 'onConflict', 'merge',
   ];
@@ -412,14 +412,18 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
     });
   });
 
-  test('email spam-rescue-review row matches the old raw insert gate-off', async () => {
+  // This body is 149 chars — over the admin brevity guard's 110-char cap — so
+  // the row stores the cut sentence with the whole text in `detail`; every
+  // other column matches the pre-guard raw insert exactly.
+  test('email spam-rescue-review row matches the old raw insert gate-off, body cut with the full text in detail', async () => {
     const notifications = chainMock([{ id: 'd4' }]);
     mockTables({ notifications });
 
+    const fullBody = 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.';
     await NotificationService.notifyAdmin(
       'email_rescue_review',
       'Spam-foldered mail claims a known sender (unverified)',
-      'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      fullBody,
       { icon: '⚠️', link: '/admin/email', metadata: { gmail_message_id: 'g1' } },
     );
 
@@ -428,7 +432,8 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       recipient_id: null,
       category: 'email_rescue_review',
       title: 'Spam-foldered mail claims a known sender (unverified)',
-      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in…',
+      detail: fullBody,
       icon: '⚠️',
       link: '/admin/email',
       metadata: JSON.stringify({ gmail_message_id: 'g1' }),
@@ -631,6 +636,7 @@ describe('live dashboard-alert overlay under the bell policy', () => {
     computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'churn-risk', count: 143, title: '143 customers at churn risk' }] });
     const persisted = [{ id: 'p1', category: 'new_lead', title: 'New lead', metadata: null }];
     mockTables({ notifications: chainMock(persisted) });
+    db.raw = jest.fn((sql) => sql);
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/notifications/`);
@@ -784,14 +790,30 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
 });
 
 describe('voicemail supersedes a missed-call bell for the same call (hook P1)', () => {
-  test('supersedeMissedCallAdmin retires only unread admin missed_call bells carrying that callLogId', async () => {
+  test('supersedeMissedCallAdmin closes every OPEN admin missed_call bell carrying that callLogId (done_at IS NULL, never read_at: a read bell is still open work) and keeps a person\'s read', async () => {
     const notifications = chainMock(1);
     mockTables({ notifications });
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     await expect(NotificationService.supersedeMissedCallAdmin({ callLogId: 'call-1' })).resolves.toBe(1);
     expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
-    expect(notifications.whereNull).toHaveBeenCalledWith('read_at');
+    // openToCloser: not done, or done by a person (the system then owns the row).
+    const closerArg = notifications.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(closerArg).toBeDefined();
+    const inner = { whereNull: jest.fn(() => inner), orWhereRaw: jest.fn(() => inner) };
+    closerArg(inner);
+    expect(inner.whereNull).toHaveBeenCalledWith('done_at');
+    expect(inner.whereNull).not.toHaveBeenCalledWith('read_at');
     expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
-    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date) });
+    // keepExisting: COALESCE'd done_at / done_by / resolution / read_at, so a person's own read or done stands.
+    const patch = notifications.update.mock.calls[0][0];
+    expect(Object.keys(patch).sort()).toEqual(['done_at', 'done_by', 'read_at', 'resolution']);
+    expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
+    // done_by names the latest closer (a system close owns a person-done row: no reopen).
+    expect(patch.done_by).toBe('supersede');
+    expect(patch.resolution.sql).toBe('COALESCE(resolution, ?)');
+    // An unread row is read at the done instant; a person's own read stands.
+    expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
+    expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);
   });
   test('no callLogId = no-op', async () => {
     mockTables({});

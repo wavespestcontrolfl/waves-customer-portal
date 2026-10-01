@@ -183,3 +183,72 @@ describe('server-enforced eligibility — escalation short-circuit (no DB)', () 
     expect(r.blockers.join(' ')).toMatch(/escalation/i);
   });
 });
+
+// The one deliberate DB-touching case in this otherwise pure-logic file:
+// gratitudeCandidatePage's own query-builder shape is the exact surface the
+// pre-push audit's P1 flagged (a v11-only filter would silently stop
+// discovering real-answers-drafted candidates once GATE_SMS_REAL_ANSWERS
+// goes live). Isolated per-test via jest.doMock + resetModules so the rest
+// of the file stays DB-free.
+describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized prompt version (pre-push audit P1)', () => {
+  afterEach(() => {
+    jest.dontMock('../models/db');
+    jest.resetModules();
+  });
+
+  test('the candidate query matches PROMPT_VERSION, the bare REAL_ANSWERS_PROMPT_VERSION, or any +category-suffixed variant of it', () => {
+    // A fixed 2-value whereIn (the round-1 fix) would stop matching the
+    // moment a per-category gate joins the master one, since
+    // currentPromptVersion() then suffixes the version with the active
+    // category tags (pre-push audit P1 round 2) — this must be a LIKE-
+    // prefix match instead, covering every such variant without
+    // enumerating them.
+    jest.resetModules();
+    const whereCalls = [];
+    const orWhereCalls = [];
+    const query = {};
+    for (const method of [
+      'join', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists', 'whereIn',
+    ]) query[method] = jest.fn(() => query);
+    // Knex's own subquery convention (a `this`-bound function, called with
+    // NO positional argument) — the exact shape the real query builder AND
+    // this mock both support; an arrow function relying on a parameter
+    // would silently receive undefined here.
+    query.where = jest.fn((...args) => {
+      whereCalls.push(args);
+      if (typeof args[0] === 'function') args[0].call(query);
+      return query;
+    });
+    query.orWhere = jest.fn((...args) => { orWhereCalls.push(args); return query; });
+    const mockDb = jest.fn(() => query);
+    jest.doMock('../models/db', () => mockDb);
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const fresh = require('../services/sms-auto-send');
+    fresh.gratitudeCandidatePage({ activatedAt: new Date(0), now: new Date(), cursor: null, pageSize: 100 });
+
+    const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
+    expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
+    // ONE family LIKE (Codex #5392 r3 P0): keyed off the family, not the
+    // current constant, so a suffix bump ('_cf', later ones) never strands
+    // rows stamped under an earlier version.
+    expect(orWhereCalls).toEqual([
+      ['md.prompt_version', 'like', 'house\\_voice\\_v12\\_real\\_answers%'],
+    ]);
+    const pattern = orWhereCalls[0][2];
+    const likeRe = new RegExp(`^${pattern.replace(/\\(.)/g, '\u0000$1').replace(/%/g, '.*').replace(/\u0000(.)/g, (_, c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))}$`);
+    for (const stamped of [
+      'house_voice_v12_real_answers', // stamped before the bump
+      'house_voice_v12_real_answers+c', // the row from the finding
+      'house_voice_v12_real_answers+bclm',
+      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers3_cfl'
+      `${drafter.REAL_ANSWERS_PROMPT_VERSION}+bc`,
+      'house_voice_v12_real_answers_cf', // the company-facts cohort stamped before the re-service token
+      'house_voice_v12_real_answers2_cf', // the re-service + company-facts cohort stamped before the LIVE ETA bump
+      'house_voice_v12_real_answers2_cf_lbl+c', // a later suffix
+    ]) expect(likeRe.test(stamped)).toBe(true);
+    expect(likeRe.test('house_voice_v13_real_answers')).toBe(false);
+    expect(likeRe.test('house_voice_v12X')).toBe(false);
+    expect(likeRe.test('house_voice_v11')).toBe(false); // matched by the exact PROMPT_VERSION branch instead
+  });
+});

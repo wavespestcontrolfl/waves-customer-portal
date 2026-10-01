@@ -232,6 +232,32 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test('the json_schema sent to Anthropic carries no numeric bounds (a 400 on every call), and the caller\'s schema is untouched', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"confidence":0.5,"items":[]}' }] });
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['confidence', 'items'],
+      properties: {
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        items: {
+          type: 'array',
+          maxItems: 3,
+          items: {
+            type: 'object', additionalProperties: false, required: ['n'], properties: { n: { type: 'integer', exclusiveMinimum: 0, exclusiveMaximum: 10, multipleOf: 1 } },
+          },
+        },
+      },
+    };
+    const before = JSON.stringify(schema);
+    const r = await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: true, jsonSchema: schema });
+    expect(r.ok).toBe(true);
+    const wire = JSON.stringify(mockAnthropicCreate.mock.calls.at(-1)[0].output_config.format.schema);
+    expect(wire).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf|maxItems)"/);
+    expect(wire).toMatch(/"confidence"/);
+    expect(JSON.stringify(schema)).toBe(before);
+  });
+
   test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
     const MODELS = require('../config/models');
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
@@ -261,6 +287,37 @@ describe('callAnthropic prompt caching', () => {
     }
     await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
+  // A route (models.js TEXT_POLICIES leg / ROUTES entry, e.g.
+  // newsletterWriter's primary) may carry its own `effort` — dispatch()
+  // forwards it to the Anthropic leg only, and it wins over no pin at all.
+  test('dispatch() honors a route-level effort on the Anthropic leg only; routes without one are unaffected', async () => {
+    mockAnthropicCreate.mockReset().mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-key';
+    await dispatch({ provider: 'anthropic', model: 'claude-opus-5-5', effort: 'max' }, { text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'max' });
+
+    // A route with no `effort` field behaves exactly as before: no pin set,
+    // no explicit output_config.effort sent.
+    await dispatch({ provider: 'anthropic', model: 'claude-opus-5-5' }, { text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+
+    // A route-level effort the served model can't accept at all falls back
+    // exactly like an unsupported requested level always has (anthropicEffortFor).
+    await dispatch({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001', effort: 'max' }, { text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+
+    // OpenAI/Gemini legs ignore a route-level `effort` — no error, no stray field.
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-key';
+    await dispatch({ provider: 'openai', model: 'gpt-5.6-terra', effort: 'max' }, { text: 'hi', jsonMode: false });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.effort).toBeUndefined();
+    // The route's `effort: 'max'` never reaches the OpenAI leg's own
+    // `reasoning.effort` — it stays whatever callOpenAI's own reasoningEffort
+    // default/param says (unrelated field, unrelated concept).
+    expect(body.reasoning).toEqual({ effort: 'low' });
   });
 
   test('the wire max_tokens clears always-on thinking on Opus 5+ and is untouched on Opus 4.8', async () => {

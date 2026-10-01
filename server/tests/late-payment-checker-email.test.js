@@ -1,3 +1,9 @@
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -13,6 +19,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
   claimAttempt: jest.fn(async () => ({ allowed: true })),
+  releaseHeldReservation: jest.fn(async () => true),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -266,6 +273,66 @@ describe('late-payment checker email sidecar', () => {
     expect(result.skipped).toBe(1);
   });
 
+  // Dispute hold (owner ruling 2026-09-30) placed after the checker's rail-guard consult: the send
+  // boundary refuses a leg. A WAIT - the reservation is released (no failed row), the tier is not
+  // deduped and no other leg goes out, so the whole reminder goes out on the first run after the release.
+  describe('a dispute hold landing after the preflight', () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const ownershipReads = (n) => Array(n).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }));
+
+    test('the Text leg refused at the send boundary is released, not failed; nothing else sends and the tier stays open', async () => {
+      sendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
+      });
+      ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+      const dedupeInsertSpy = jest.fn(async () => undefined);
+      const insertChain = chain();
+      insertChain.insert = dedupeInsertSpy;
+      setDbQueues({
+        invoices: [chain({ result: [invoice] }), ...ownershipReads(2)],
+        activity_log: [chain({ first: null }), chain({ result: [] }), insertChain],
+        customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+      });
+      expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'late_payment_checker' });
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }));
+      expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+      expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+      expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled(); // held with the Text, not sent alone
+      expect(dedupeInsertSpy).not.toHaveBeenCalled(); // tier left open -> retried after the release
+    });
+
+    test('the Email leg refused at the billing email authority is released, not failed', async () => {
+      // The Text leg could not deliver anyway (landline), so the Email fallback is the leg in play.
+      sendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'SUPPRESSED_NON_MOBILE', retryable: false,
+      });
+      BalanceReminder.sendLatePaymentEmail.mockResolvedValueOnce({
+        ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER',
+      });
+      ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
+      const dedupeInsertSpy = jest.fn(async () => undefined);
+      const insertChain = chain();
+      insertChain.insert = dedupeInsertSpy;
+      setDbQueues({
+        invoices: [chain({ result: [invoice] }), ...ownershipReads(4)],
+        activity_log: [chain({ first: null }), insertChain],
+        customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+18777175476' } })],
+      });
+      expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'email-14' }));
+      // only the genuinely failed Text leg is stamped failed; the held Email leg is not
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.objectContaining({ id: 'sms-14' }), expect.anything());
+      expect(dedupeInsertSpy).not.toHaveBeenCalled();
+    });
+  });
+
   test.each([
     ['definite non-send', { sent: true, deliveryOutcome: 'not_sent', code: 'OWNER_SILENCE' }, true],
     ['unconfirmed outcome', { sent: true, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNCONFIRMED' }, false],
@@ -295,6 +362,71 @@ describe('late-payment checker email sidecar', () => {
       expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     }
     expect(activityInsert.insert).not.toHaveBeenCalled();
+  });
+
+  const priorApp = { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: new Date('2026-05-20T14:00:00Z') };
+  test.each([
+    [priorApp, true, false],
+    [priorApp, true, false, ['push', 'sms']],
+    [priorApp, true, false, ['email', 'push'], true],
+    [priorApp, false, false, ['email', 'push'], false],
+    [priorApp, false, false, ['push', 'sms'], false, { sent: true, deliveryOutcome: 'accepted' }],
+    [priorApp, true, false, ['push', 'sms'], false, { sent: true, deliveryOutcome: 'accepted',
+      deduped: true, sentAt: new Date('2026-05-19T14:00:00Z') }],
+    [priorApp, true, false, ['push', 'sms'], false, { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TERMINAL_DENIAL' }],
+    [{ sent: false, deliveryOutcome: 'uncertain', deferred: true, retryable: true, bellPersisted: true }, false, false],
+    [{ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }, false, true],
+  ])('settles visible App delivery while preserving earlier event history: %j', async (appResult, repaired, throws, channels = ['push'], oldEmail = false, smsResult = null) => {
+    const occurredAt = new Date('2026-05-20T14:00:00Z');
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00Z' };
+    if (throws) sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit acknowledgement lost'), { providerOutcome: appResult }));
+    else sendCustomerMessage.mockResolvedValueOnce(appResult);
+    if (smsResult) sendCustomerMessage.mockResolvedValueOnce(smsResult);
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {}, occurred_at: occurredAt }));
+    if (oldEmail) ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(4).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: smsResult ? '+19415550101' : null } })],
+      notification_prefs: [chain({ first: { billing_channels: channels } })],
+    });
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(result).toMatchObject({ notified: repaired ? 0 : 1, skipped: repaired ? 1 : 0 });
+    if (appResult.reason === 'app_event_already_visible') expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }), { occurredAt });
+    else expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }));
+    if (smsResult?.deduped) expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sms-14' }), { occurredAt: smsResult.sentAt });
+    if (!smsResult) expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(activityInsert.insert).toHaveBeenCalled();
+    if (oldEmail) expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    if (repaired) expect(activityInsert.insert.mock.calls[0][0]).toMatchObject({ created_at: occurredAt, description: 'Original 14-day App event settled' });
+    else expect(activityInsert.insert.mock.calls[0][0]).not.toHaveProperty('created_at');
+  });
+
+  test.each(['sms', 'email'])('repairs an old %s-only reminder without a fresh amount or send count', async (channel) => {
+    const originalAt = new Date('2026-05-20T14:00:00Z');
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00Z' };
+    if (channel === 'sms') sendCustomerMessage.mockResolvedValueOnce({ sent: true,
+      deliveryOutcome: 'accepted', deduped: true, sentAt: originalAt });
+    ContactLedger.recordContact.mockResolvedValue({ id: `${channel}-14`, occurred_at: originalAt, metadata: {} });
+    if (channel === 'email') ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(4).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: channel === 'sms' ? '+19415550101' : null } })],
+      notification_prefs: [chain({ first: { billing_channels: [channel] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+    expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ created_at: originalAt }));
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata)).toMatchObject({ delivery_repaired: true });
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata)).not.toHaveProperty('amount');
+    if (channel === 'email') expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
   });
 
   test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
@@ -393,7 +525,11 @@ describe('late-payment checker email sidecar', () => {
     ContactLedger.recordContact.mockResolvedValueOnce({ id: 'email-14', reused: true, metadata: {} });
     ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, held: true });
     setDbQueues({
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: {
         id: 'activity-1',
         metadata: { pendingEmail: true, tierDays: 14, invoiceKey: 'WPC-2026-1042|14 DAYS', ledgerIds: ['sms-14', 'email-14'] },
@@ -405,6 +541,48 @@ describe('late-payment checker email sidecar', () => {
     expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
     expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['Text', 'sms', 'sms'],
+    ['App', 'push', 'app'],
+  ])('settles a pending Email already terminally resolved after %s delivered', async (_label, selectedChannel, activityChannel) => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const completion = chain();
+    ContactLedger.recordContact.mockResolvedValueOnce({
+      id: 'email-14', reused: true,
+      metadata: { send_failed: true, resolved: true, resolution: 'email_terminal_refusal' },
+    });
+    ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, resolved: true });
+    setDbQueues({
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
+      activity_log: [chain({ first: {
+        id: 'activity-1',
+        metadata: {
+          pendingEmail: true, channel: activityChannel, tierDays: 14,
+          invoiceKey: 'WPC-2026-1042|14 DAYS', ledgerIds: [`${selectedChannel}-14`, 'email-14'],
+          emailLedgerId: 'email-14',
+        },
+      } }), completion],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', selectedChannel] } })],
+    });
+
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(completion.update).toHaveBeenCalledTimes(1);
+    expect(completion.update.mock.calls[0][0].metadata.bindings).toEqual([activityChannel]);
   });
 
   test.each(['sms', 'push'])('recovers 14-day Email from accepted %s ledger after activity write fails', async (channel) => {
@@ -453,7 +631,6 @@ describe('late-payment checker email sidecar', () => {
   });
 
   test.each([
-    ['email opt-out', { ok: false, skipped: true, reason: 'email_disabled' }, true],
     ['missing address with an activity row', { ok: false, skipped: true, reason: 'missing_email' }, true],
     ['suppressed address without an activity row', { ok: false, blocked: true, reason: 'Suppressed: bounce' }, false],
     ['unavailable template with an activity row', { ok: false, skipped: true, reason: 'template_unavailable' }, true],

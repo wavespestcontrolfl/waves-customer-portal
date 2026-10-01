@@ -68,6 +68,12 @@ node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-
 
 # Add the optional transcript judge (extra API spend):
 node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5 --judge
+
+# An OpenAI candidate (voice-eligible MODEL_CATALOG id, provider 'openai') —
+# needs OPENAI_API_KEY in this process's OWN environment; the runner sets
+# GATE_VOICE_RELAY_OPENAI=true in ONLY the two candidate-* conditions' child
+# env, never its own (see "OpenAI candidates" below):
+OPENAI_API_KEY=sk-… node server/scripts/run-voice-relay-benchmark.js --candidate-model=gpt-6-sol --trials=5
 ```
 
 `--only`, when passed, must name at least one real scenario id: an empty
@@ -114,15 +120,50 @@ final cycle repeats a prefix of the 4 orders, so a few adjacencies land more
 than once while others land zero times) — still far better than a fixed
 order, but not perfectly balanced.
 
-Every run's `cacheHypothesis` field is always `"unknown"` — never a
-cold/warm label by trial position. Two reasons: rotation above already
-removes "trial 0 == first" as even a positional proxy, and the eval JSON
-does not surface Anthropic's own prompt-cache read/write token counts
-anywhere today — a real warm/cold split needs reading
-`usage.cache_read_input_tokens` / `cache_creation_input_tokens` off the raw
-API response, which `runVoiceRelayEval` does not expose. If a future PR
-threads real per-scenario usage data through the eval harness, this label
-should read those fields directly instead of guessing from trial index.
+There is no cold/warm label by trial position, and there never should be:
+rotation above already removes "trial 0 == first" as even a positional
+proxy for cache state, so guessing warm/cold from where a trial falls in the
+sequence would just be wrong labeled as data.
+
+Instead, the eval JSON now carries the real thing. Each model round's
+`finalMessage()` resolves with Anthropic's own `usage` block
+(`input_tokens` / `output_tokens` / `cache_read_input_tokens` /
+`cache_creation_input_tokens`); `voice-relay-replay.js`'s `installHarness`
+patches `stream.finalMessage` to read it as each round settles (via the same
+`extractUsage('anthropic', …)` normaliser the LLM call ledger uses, so the
+field names match: `input_tokens` / `output_tokens` / `cached_input_tokens`
+/ `cache_write_tokens`) and accumulates it onto that scenario's `record`.
+Every scenario record in `result.results[]` carries its own `usage` totals;
+`result.summary.usage` sums them for the whole run, with `rounds` (how many
+rounds carried all four valid usage counters, including explicit zeroes)
+and `cacheReadRounds` (how many of those had a
+non-zero `cached_input_tokens`) as the cache-hit-rate's own denominator and
+numerator: `summary.usage.cacheHitRate = cacheReadRounds / rounds`, `null`
+(never `0`) when `rounds` is `0` — no evidence either way, not a confirmed
+zero. `run-voice-relay-benchmark.js`'s `summarizeCondition` sums the same
+fields across every attempt of every trial in a condition (`usage.rounds` /
+`usage.cacheReadRounds` / `usage.cacheHitRate`, plus raw
+`inputTokens` / `outputTokens` / `cachedInputTokens` / `cacheWriteTokens`)
+and the CLI's own printed table includes them per condition. This is why
+Haiku 4.5's minimum cacheable prefix (4,096 tokens) against Sandy's own
+system-prompt size (~3.6K tokens) is a real, checkable question now rather
+than a guess: run the benchmark and read `cacheHitRate` for the Haiku
+condition directly instead of inferring it from trial position.
+
+A rejected model round (the relay's 20-second stream timeout, an abort,
+or a provider error) may already have spent input, cache and output tokens
+that no `usage` block ever reports. A present block with a missing, renamed,
+or invalid input, output, cache-read, or cache-write counter is also
+incomplete; missing cache counters are never inferred to be zero. Each
+rejected or unparseable round is counted in
+`usage.incompleteRounds` (per scenario, per run summary, and per condition
+in the runner). With any, `usage.complete` is `false`, the eval summary line
+says `usage INCOMPLETE`, and the runner's `usageComplete` column reads
+`NO — N rejected/unparseable round(s)`: the token totals are then a lower
+bound. Successful rounds without complete usage also contribute to
+`missingUsageRounds`; a wholly absent block is not a measured zero round.
+The OpenAI adapter normalizes its provider-specific uncached and zero-usage
+shapes into the same four counters before this check.
 
 ### Inconclusive runs are missing data, never a completed run
 
@@ -149,13 +190,71 @@ without this a run could report 100% accuracy having skipped part of the
 fixture. `--out` is checked for writability before the first paid run, since
 the combined report is only written after every trial finishes.
 
+### OpenAI candidates (GATE_VOICE_RELAY_OPENAI)
+
+`--candidate-model` may also be a voice-eligible OpenAI id — one MODEL_CATALOG
+marks with a `voice` object (`server/config/models.js`; today gpt-6-sol,
+gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). This gate never reaches production
+inbound calls: under it the relay accepts an OpenAI id only in a sandbox
+session or in the eval harness's own sessions (`evalHarness`, which
+`voice-relay-replay.js` alone sets), and the shared `VOICE_RELAY_MODEL` never
+takes one (collections reads it too). Production inbound has its own separate
+`GATE_VOICE_RELAY_OPENAI_INBOUND`, which eval-harness sessions never read. The runner never touches Sandy's
+sandbox line, so this only widens what a **benchmark candidate** may run on.
+The runner:
+  - requires `OPENAI_API_KEY` in its OWN process environment up front (a
+    usage error, exit 2, before any child runs) — without it every
+    OpenAI-candidate condition would fail its first model call;
+  - sets `GATE_VOICE_RELAY_OPENAI=true` in ONLY the two `candidate-*`
+    conditions' child env (`buildConditions`) — never its own, and never the
+    two `current-*` conditions', so a leftover value in the invoking shell
+    can never leak into a "current" condition and secretly turn it into a
+    second candidate run either.
+  - runs the session through `relay-openai-client.js` (Responses API, SSE)
+    instead of the Anthropic SDK — same tool-use loop, same stream/finalMessage
+    surface, but its own request/response translation and its own per-model
+    reasoning effort (`MODEL_CATALOG[model].voice.reasoning`).
+
+**No Claude fallback in the harness.** Live calls (production inbound and
+the sandbox line) switch to Claude for the rest of the call when an OpenAI
+round fails for a provider reason; eval-harness sessions never do. An OpenAI
+leg that errors, times out, or is aborted rejects the SAME way a stalled
+Anthropic call does — it counts as a model failure/abort in the harness
+telemetry and runs through the relay's existing provider-failure handling. It
+never re-runs the turn on Claude; a benchmark candidate that hits an OpenAI
+outage must show up as a failed/inconclusive run, not a clean pass on the
+wrong provider.
+
+### Thinking-always-on Anthropic candidates (Opus 5.5+)
+
+`--candidate-model` may also be an Anthropic id whose thinking cannot be
+turned off (`MODELS.anthropicThinkingAlwaysOn` — Opus 5.5 and later, e.g.
+`claude-opus-5-5`, and Sonnet 5.5 and later, e.g. `claude-sonnet-5-5`). These never reach production inbound or the shared
+`VOICE_RELAY_MODEL`/`MODEL_VOICE` chain (`ALLOWED_OVERRIDE_MODEL_IDS`
+excludes them for exactly that reason — that lane always sends
+`thinking: { type: 'disabled' }`, which they reject), but every condition
+here runs through the eval harness (`evalHarness: true`), the same context
+flag that admits a sandbox/benchmark OpenAI candidate — so the runner's
+allowlist check and `buildConditions` both accept them with **no feature
+gate**: unlike an OpenAI candidate, they are plain Anthropic, just a
+different request shape (`low` effort; Opus 5.5 sends no `thinking` field
+with `max_tokens` raised by the same floor `anthropic-wire.js` uses
+elsewhere, while Sonnet 5.5 sends its catalog `voice.thinking` floor,
+`thinking: { type: 'between_tools' }` — no up-front thinking — with the
+same raised `max_tokens`, since its progress-update thinking blocks between
+tool calls spend from it). A candidate in
+this Set never sets `GATE_VOICE_RELAY_OPENAI`.
+
 ### Model-stamp verification (candidate conditions only)
 
-`--candidate-model` is checked against the relay's OWN allowlist
-(`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS`, derived from
-`config/models.js` `MODEL_CATALOG`) before any condition runs at all — an
-unrecognized id is a usage error (exit 2), not four wasted API-billed
-conditions. That check alone does not prove the candidate model actually ran,
+`--candidate-model` is checked against the relay's OWN catalog-eligible id
+sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic,
+thinking-always-on ids excluded — `ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS` —
+the thinking-always-on Anthropic ids just above — and
+`OPENAI_VOICE_OVERRIDE_MODEL_IDS` — OpenAI, see "OpenAI candidates" above —
+all derived from `config/models.js` `MODEL_CATALOG`) before any condition
+runs at all — an unrecognized id is a usage error (exit 2), not four wasted
+API-billed conditions. That check alone does not prove the candidate model actually ran,
 though: each condition's run is also checked AFTER it completes. Every
 scenario record in a completed run's `results[]` carries the resolved
 session model it actually pinned (`record.model`, from
@@ -346,31 +445,44 @@ alone:
   `judgeFallbackVerdictCountFinalAttemptOnly` /
   `judgeFallbackPassCountFinalAttemptOnly` — a condition leaning on the
   fallback leg a lot is a reliability signal about the judge call itself.
-- **Cost**: **benchmark-wide only, never per-condition** — the eval JSON
-  (`result.summary` / `result.attempts[].summary` / `result.results[]`)
-  carries no token-usage field anywhere; `runVoiceRelayEval` never surfaces
-  `usage.input_tokens` / `output_tokens` / cache token counts off the raw
-  Anthropic response, so `run-voice-relay-benchmark.js` has nothing to
-  aggregate per condition and does not attempt to (confirmed by inspection —
-  do not add relay-runtime instrumentation to get it; see the file header's
-  scope limit). Sandy's own model calls
-  (`relay-conversation.js`'s `anthropic.messages.stream`, which
-  `voice-relay-replay.js` calls into unmodified for the replay) go straight
-  to the Anthropic SDK and are NOT recorded in `llm_dispatch_log` — that
-  ledger is written only by calls that go through
+- **Cost**: **token counts are now per-condition; dollar cost is still
+  benchmark-wide only.** The eval JSON's `result.summary.usage` (and each
+  scenario's own `results[].usage`) now carries real per-round
+  `input_tokens` / `output_tokens` / `cached_input_tokens` (cache read) /
+  `cache_write_tokens` (cache creation) off Anthropic's own `usage` block —
+  `voice-relay-replay.js`'s `installHarness` reads it as each round's
+  `finalMessage()` resolves (see "Interleaving, rotation, and why there is
+  no cold/warm label" above) — and `run-voice-relay-benchmark.js`'s
+  `summarizeCondition` sums it across every attempt into each condition's
+  own `usage` block (`inputTokens` / `outputTokens` / `cachedInputTokens` /
+  `cacheWriteTokens` / `rounds` / `cacheReadRounds` / `cacheHitRate`),
+  printed in the CLI's own table. **Report tokens per condition — that part
+  no longer needs the console.** Turning those tokens into a DOLLAR figure
+  still does: this file has no per-model price table (adding one is out of
+  this file's scope — token counts are what the harness can observe
+  directly; $/token is a rate card that changes independently of any of
+  this), and the two `candidate-*` conditions can be priced differently per
+  token than the two `current-*` conditions, so a single blended rate would
+  misattribute cost across conditions even with real tokens in hand. Sandy's
+  own model calls (`relay-conversation.js`'s `anthropic.messages.stream`,
+  which `voice-relay-replay.js` calls into unmodified for the replay) go
+  straight to the Anthropic SDK and are NOT recorded in `llm_dispatch_log`
+  either way — that ledger is written only by calls that go through
   `server/services/llm/call.js` / `deep.js`, which Sandy's conversation loop
-  never uses, gate on or off. Read actual spend from the Anthropic console /
-  billing usage for the whole run's time window instead — and because the
-  runner interleaves all four conditions under the same API identity in one
-  run (see "Interleaving, rotation, and why there is no cold/warm label"
-  above), that console total is a benchmark-wide figure, not a per-condition
-  one. **To attribute cost to one condition**, run that condition alone —
+  never uses, gate on or off. For an exact dollar figure, read actual spend
+  from the Anthropic console / billing usage for the whole run's time
+  window — and because the runner interleaves all four conditions under the
+  same API identity in one run, that console total is still a
+  benchmark-wide dollar figure, not a per-condition one. **To attribute
+  dollar cost to one condition**, run that condition alone —
   `--only=<scenario ids>` narrows the fixture but still runs all four
   conditions; instead invoke `run-voice-relay-eval.js` directly once per
   condition (see "Running it" above for the one-condition command) with nothing
   else running against the same API identity in that window, and read the
-  console for each window separately. The ONE exception: with `--judge`, the
-  optional judge call does go through a ledgered `TEXT_POLICIES` lane, so
+  console for each window separately — or, now, just compare the reported
+  per-condition token counts directly, which needs no console at all. The
+  ONE exception: with `--judge`, the optional judge call does go through a
+  ledgered `TEXT_POLICIES` lane, so
   `llm_dispatch_log` may hold judge-call rows for a run if
   `GATE_LLM_CALL_LEDGER` was on — never the conversation's own model spend,
   and still not broken out per condition there either.

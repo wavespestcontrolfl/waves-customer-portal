@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -224,6 +224,13 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     }
 
     const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
+    // Codex #5194 P2 — see publishSuggestion's identical comment
+    // (sms-suggest-mode.js): the instant the drafter rendered the SLA phrase
+    // into factsBlock, read back by slaDraftedAt (sms-followup-sla.js) in
+    // place of this row's own (later) created_at.
+    const factsGeneratedAtIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime())
+      ? factsGeneratedAt.toISOString()
+      : null;
     const [row] = await trx('agent_decisions')
       .insert({
         workflow: AUTOSEND_WORKFLOW,
@@ -241,7 +248,23 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
         confidence_label: numericConfidence === null
           ? null
           : numericConfidence >= 0.85 ? 'high' : numericConfidence >= 0.6 ? 'medium' : 'low',
-        input_snapshot: JSON.stringify({ sms: { body: inboundMessage }, draft_id: draftId }),
+        input_snapshot: JSON.stringify({
+          sms: { body: inboundMessage },
+          draft_id: draftId,
+          // Codex P2 (open-times send-time recheck): the minimum needed to
+          // revalidate quoted OPEN TIMES windows at dispatch, threaded from
+          // the drafter through draftShadowReply's maybeAutoSend params.
+          ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
+          // Codex round-43 P2: the already-booked re-service callback(s) the drafted reply may refer to ({ lane: { date, windowStart } }) —
+          // rechecked live before provider entry (reserviceBookedHandoffCheck), same snapshot the manual / scheduled seams read.
+          ...(reserviceBookedSnapshot && Object.keys(reserviceBookedSnapshot).length ? { reservice_booked_snapshot: reserviceBookedSnapshot } : {}),
+          ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
+          // Independent review finding (PR #5334): the same live-ETA
+          // send-time snapshot publishSuggestion persists — see its comment.
+          ...(liveEtaSnapshot ? { live_eta_snapshot: liveEtaSnapshot } : {}),
+          ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
+        }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
@@ -285,7 +308,15 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId };
+    return {
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot, reserviceBookedSnapshot,
+      // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
+      inboundMessage,
+      // Independent review finding (PR #5334): carried in-memory so
+      // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
+      // through the row it just inserted.
+      liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
+    };
   });
 }
 
@@ -295,7 +326,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
  * Any open request/card is a reason to abstain because a courtesy closer must
  * not conceal operational work.
  */
-async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Date() }) {
+async function claimGratitudeSend({ draftId, smsLogId, confidence, promptVersion = null, now = new Date() }) {
   // Process-local, so it needs no lock: see GRATITUDE_ROLLOUT_SETTLE_MS.
   if (!gratitudeRolloutSettled()) return null;
   const suggest = require('./sms-suggest-mode');
@@ -308,8 +339,16 @@ async function claimGratitudeSend({ draftId, smsLogId, confidence, now = new Dat
 
     // Gate, epoch, timing, immutable rows, live customer, exact endpoints,
     // complete context and fixed reply are all re-read inside the lock.
+    // prompt_version is the one field that's write-once at insert (nothing
+    // ever updates message_drafts.prompt_version after the draft is
+    // created), so trusting the caller's copy here is trusting an immutable
+    // fact, not a mutable one the re-read discipline above exists to catch —
+    // it judges the version THIS row was drafted under, not "whichever
+    // prompt is live right now" (a v11 row must not fail after a later gate
+    // flip on, nor a v12 row after a later flip off). Null (an
+    // unaware/older caller) still fails closed, same as before.
     if (!isEnabled('smsGratitudeReplies')) return null;
-    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+    const checked = await readGratitudeContext({ draftId, smsLogId, now, activatedAt: gratitudeActivation(), dbh: trx, expectedPromptVersion: promptVersion });
     if (!checked.ok) return null;
     const { inbound, customer, draft, expectedReply } = checked;
     const modeRow = await trx('sms_intent_modes').where({ intent: GRATITUDE_INTENT }).first('mode');
@@ -452,6 +491,28 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 }
 
 /** Mark a claim whose send was blocked/failed/errored. The draft stays 'shadow'. */
+// A provider-boundary refusal that means the live-ETA recheck could not READ the state (Codex
+// round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
+// either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
+// the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
+const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
+function isRetryableEtaBoundaryRefusal(result) {
+  return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
+    && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
+}
+
+// Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
+// was inserted as CLAIM_STATUS by claimAutoSend moments ago, so removing it restores the
+// pre-claim state). Only while still CLAIM_STATUS; errors are logged, never thrown.
+async function releaseClaim(decisionId) {
+  try {
+    await db('agent_decisions').where({ id: decisionId, status: CLAIM_STATUS }).del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] releaseClaim errored (decision ${decisionId}): ${err.message}`);
+  }
+}
+
 async function failClaim(decisionId, reason) {
   try {
     await db('agent_decisions')
@@ -481,8 +542,10 @@ async function maybeAutoSend(params = {}) {
 
     // (5)+(6) Claim under the lock + guard-gauntlet. The ordinary lane parks
     // sibling cards; gratitude refuses them and leaves them untouched.
+    // promptVersion threads the caller's own copy of the row's stamped
+    // version through — see claimGratitudeSend's comment on the re-read.
     const claim = gratitudeLane
-      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence })
+      ? await claimGratitudeSend({ draftId: params.draftId, smsLogId: params.smsLogId, confidence: params.confidence, promptVersion: params.promptVersion })
       : await claimAutoSend({ ...params, customerId: ready.customerId });
     if (!claim) return { sent: false, reason: 'guarded_or_claimed' };
     return await dispatchClaimedSend({
@@ -559,6 +622,21 @@ async function autoSendReadiness(params, gratitudeLane) {
     return { reason: 'price_quote' };
   }
 
+  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
+  //       the real-answers prompt has the model quote the follow-up SLA
+  //       phrase when the facts can't answer, and the prompt now requires an
+  //       escalate action alongside it — but the prompt is not the boundary.
+  //       Deterministic backstop: an SLA phrase in the reply with no
+  //       escalate action means nobody owns the promise; never auto-send it.
+  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
+  //       prompt, and with the gate off auto-send is unchanged by this PR.
+  const followupSla = require('./sms-followup-sla');
+  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
+      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
+    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
+    return { reason: 'unowned_followup' };
+  }
+
   // (4) Server-enforced graduation eligibility — re-checked live every send.
   const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
     intent,
@@ -580,7 +658,20 @@ async function autoSendReadiness(params, gratitudeLane) {
 async function reloadGratitudeCaller({
   draftId, smsLogId, customer, inboundMessage, reply, model = null, promptVersion = null,
 }) {
-  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: require('./sms-shadow-drafter').PROMPT_VERSION });
+  // expectedPromptVersion judges the STORED row, not "whichever prompt is
+  // live right now" — a v11 draft made before a real-answers gate flip must
+  // not start failing after the flip, and a v12 draft must not fail after
+  // the gate flips back off. `promptVersion` is exactly the right value: the
+  // drafter set it once, at insert, to whichever version actually generated
+  // THIS row (sms-shadow-drafter.js's generateGroundedDraft resolves it per
+  // draft), and draftShadowReply threads that same value all the way through
+  // maybeAutoSend's params — the `promptVersion === context.draft.prompt_version`
+  // check two lines below ALREADY proves the two agree; reusing it here (in
+  // place of the static PROMPT_VERSION, which never moves once the gate goes
+  // live) lets a genuinely current v11 OR v12 row pass this contract check
+  // instead of only v11 forever. Null (an older/unaware caller) still fails
+  // closed, same as before.
+  const context = await readGratitudeContext({ draftId, smsLogId, dbh: db, expectedPromptVersion: promptVersion });
   if (!context.ok) return { reason: context.reason };
   const matches = (customer?.id || null) === context.customer.id
     && inboundMessage === context.inbound.message_body
@@ -658,6 +749,25 @@ function gratitudeHandoffCheck(claim, eligibilityPin = {}) {
   };
 }
 
+/**
+ * Codex round-43 P2: a drafted reply that refers to an ALREADY-BOOKED re-service callback ("your re-service is scheduled for Thursday,
+ * 9-11 AM") carries no escalate action, so it is auto-send eligible — and the booking can be cancelled or moved between drafting and
+ * sending. The same live check the manual / scheduled seams run (sms-shadow-drafter reserviceBookedReferenceBlock) against the snapshot
+ * persisted on the claim. Runs BOTH before provider entry (dispatchClaimedSend) and as the ordinary lane's providerPreSendCheck, the last
+ * await before the provider request. Fails closed: a body claiming a booked appointment with no snapshot / no live callback is blocked.
+ */
+function reserviceBookedHandoffCheck({ claim, reply, customerId }) {
+  const check = async () => {
+    const block = await require('./sms-shadow-drafter').reserviceBookedReferenceBlock({
+      body: reply, customerId, booked: claim.reserviceBookedSnapshot || null,
+    });
+    return block ? { ok: false, code: 'reservice_booking_changed', reason: block } : { ok: true };
+  };
+  // A pure state read, so it declares itself repeatable: twilio.js re-runs it after the durable attempt marker, the last await
+  // before the SDK request (Codex #5334 P2: it must be the LAST recheck, after the live-ETA read).
+  return require('./agent-decision-send-checks').markRepeatable(check);
+}
+
 /** The lane-specific sendCustomerMessage input for a claimed reply. */
 function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff }) {
   const parkedIds = claim.parkedIds || [];
@@ -671,7 +781,10 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       await dispatch(trx);
       return { ok: true };
     }),
-  } : {};
+  } : {
+    // Codex round-43 P2: the ordinary lane's last await before the provider request rechecks a booked-callback reference.
+    providerPreSendCheck: reserviceBookedHandoffCheck({ claim, reply, customerId }),
+  };
   return {
     to: claim.toPhone,
     body: reply,
@@ -682,6 +795,23 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'sms_auto_send_executor',
     ...laneFields,
+    // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the executor's own
+    // check ran before its recheck/handoff awaits and sendCustomerMessage's recipient and
+    // policy work; the same shared check (from the claim's in-memory snapshot — no extra
+    // read) runs again immediately before the provider request. ORDER (Codex #5334 P2): the
+    // async ETA read goes FIRST and the lane's own predicate (booked-callback reference /
+    // gratitude handoff) LAST, so no other state can change after the final guard and before
+    // the provider request; the repeatable parts re-run in the same order after the marker.
+    providerPreSendCheck: (() => {
+      const { etaSnapshotProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      return composeProviderPreSendChecks(
+        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
+        // LABEL FACTS (Codex #5416 P1): the latest visit is re-read here too, so a visit completed after the
+        // executor's own recheck cannot let the previous visit's timing through.
+        labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot: claim.labelFactsSnapshot, inboundMessage: claim.inboundMessage, promptVersion: claim.promptVersion, getBody: () => reply }),
+        laneFields.providerPreSendCheck,
+      );
+    })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
     // accepted send whose ordinary sms_log insert fails is promoted with the
     // provider's real context. Borrowing never creates a second reservation;
@@ -740,6 +870,114 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
   const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
   let result;
   try {
+    // OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
+    // threaded from claimAutoSend's own insert — the exact windows a
+    // drafted reply quoted plus the lookup inputs (same shape the shared
+    // /sms and /schedule-sms choke point in admin-communications.js
+    // rechecks). Applies to every claimed auto-send, gratitude included.
+    // Only windows still present in the reply that will actually send are
+    // rechecked; a gone slot, a fetch error, or a timeout all fail closed —
+    // same supersede-via-failClaim mechanism every other refusal in this
+    // function already uses, siblings reopened same as any other pre-send
+    // refusal so a stale slot never silently swallows the thread.
+    if (claim.openTimesSnapshot?.quotedWindows?.length) {
+      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && w?.window && reply.includes(w.window));
+      if (stillQuoted.length) {
+        const { openTimesStillOffered } = require('./sms-shadow-drafter');
+        const recheck = await openTimesStillOffered({
+          city: claim.openTimesSnapshot.lookup?.city || null,
+          customerId: claim.openTimesSnapshot.lookup?.customerId || null,
+          estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
+          // Same service identity the draft was priced with (Codex r3 / audit P1)
+          ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
+          ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
+          // Which picker minted the offer, and what it needs to be asked again
+          // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+          ...(claim.openTimesSnapshot.lookup?.source ? { source: claim.openTimesSnapshot.lookup.source } : {}),
+          ...(claim.openTimesSnapshot.lookup?.serviceKey ? { serviceKey: claim.openTimesSnapshot.lookup.serviceKey } : {}),
+          quotedWindows: stillQuoted,
+        });
+        if (!recheck.ok) {
+          logger.warn(`[sms-auto-send] open-times stale (decision ${claim.decisionId}): ${recheck.reason}`);
+          const outcome = await notSent(recheck.reason);
+          await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
+          return outcome;
+        }
+      }
+    }
+    // LABEL FACTS send-time recheck: a reply that copies a label sentence
+    // must still be backed by the customer's CURRENT latest performed visit
+    // (a newer visit, a visit today, a changed label all refuse). Same
+    // supersede-via-failClaim refusal as the open-times recheck above.
+    // Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
+    // answers a label question); older-prompt drafts run it only when they carry a snapshot.
+    if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
+      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
+      if (labelReason && require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
+        // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
+        // like the live-ETA case below - reservation settled, parked siblings reopened, the draft falls through to a
+        // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
+        logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
+        await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+        await releaseClaim(claim.decisionId);
+        await reopenParked('Auto-send paused: the label timing could not be rechecked — suggestion reopened.');
+        return { sent: false, reason: labelReason, retryable: true };
+      }
+      if (labelReason) {
+        logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
+        const outcome = await notSent(labelReason);
+        await reopenParked('Auto-send held: the label timing in the draft is no longer current — suggestion reopened.');
+        return outcome;
+      }
+    }
+    // LIVE ETA send-time recheck (independent review + Codex round-1
+    // finding, PR #5334): the SAME shared check the immediate /sms send and
+    // the scheduler's queued-send path run (sms-eta-freshness) — claim's
+    // liveEtaSnapshot/factsGeneratedAt are the in-memory copies claimAutoSend
+    // just inserted, so this needs no round trip through the row. A reply
+    // that makes a minutes-away/ETA claim with no backing snapshot, a stale
+    // draft, or a visit that is no longer customer-facing en_route fails
+    // closed — same supersede-via-failClaim mechanism every other refusal
+    // here uses, siblings reopened the same way.
+    const { etaClaimBlockReason } = require('./sms-eta-freshness');
+    const etaReason = await etaClaimBlockReason({
+      liveEtaSnapshot: claim.liveEtaSnapshot,
+      factsGeneratedAt: claim.factsGeneratedAt,
+      techNames: claim.techNames,
+      promptVersion: claim.promptVersion,
+      outgoingBody: reply,
+    });
+    if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {
+      // The recheck could not READ the live state (Codex round-44 P2) — nothing is known to
+      // be stale, so the claim is RELEASED instead of failed: the freshly inserted claim row
+      // is removed and its reservation settled (nothing was sent), parked siblings reopen, and
+      // the verified draft falls through to a human-visible suggestion that the reviewer-send
+      // seam rechecks again. The decision is never recorded as a failed auto-send.
+      logger.warn(`[sms-auto-send] live ETA recheck unreadable (decision ${claim.decisionId}): ${etaReason}; releasing the claim (retryable)`);
+      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+      await releaseClaim(claim.decisionId);
+      await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+      return { sent: false, reason: etaReason, retryable: true };
+    }
+    if (etaReason) {
+      logger.warn(`[sms-auto-send] live ETA unsendable (decision ${claim.decisionId}): ${etaReason}`);
+      const outcome = await notSent(etaReason);
+      await reopenParked('Auto-send held: the live ETA it quoted is no longer current — suggestion reopened.');
+      return outcome;
+    }
+    // Codex round-43 P2: the booked-callback reference recheck (see reserviceBookedHandoffCheck) — before provider entry here, and again as
+    // the ordinary lane's providerPreSendCheck at the provider boundary. Same supersede-via-failClaim mechanism as the OPEN TIMES refusal.
+    // Codex #5334 P2: it runs AFTER the (async) live-ETA recheck above, so booking state that changes while the ETA read was in flight is
+    // still caught: the last async read before provider entry is the booked-callback one.
+    if (!gratitudeLane) {
+      const booked = await reserviceBookedHandoffCheck({ claim, reply, customerId })();
+      if (!booked.ok) {
+        logger.warn(`[sms-auto-send] booked re-service reference stale (decision ${claim.decisionId}): ${booked.reason}`);
+        const outcome = await notSent(booked.code, booked.reason);
+        await reopenParked('Auto-send held: the referenced re-service appointment changed — suggestion reopened.');
+        return outcome;
+      }
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -770,6 +1008,18 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
   if (isAmbiguousProviderOutcome(result)) {
     logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
     return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
+  }
+
+  if (isRetryableEtaBoundaryRefusal(result)) {
+    // Same release path as the early executor check: release the claim (never auto_send_failed),
+    // settle the reservation, reopen parked siblings; the verified draft falls through to a
+    // human-visible suggestion that the reviewer-send seam rechecks again.
+    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
+    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    await releaseClaim(claim.decisionId);
+    await reopenParked(`Auto-send paused: ${what} could not be rechecked — suggestion reopened.`);
+    return { sent: false, reason: result.code, retryable: true };
   }
 
   const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
@@ -824,13 +1074,49 @@ const SWEEP_PAGE_SIZE = 100;
  * never be claimed again and are excluded.
  */
 function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
+  const drafter = require('./sms-shadow-drafter');
+  // Every currently-recognized live prompt version is an eligible candidate —
+  // not just the static PROMPT_VERSION (which never moves once
+  // GATE_SMS_REAL_ANSWERS goes live; it stays 'house_voice_v11' forever by
+  // design). The gratitude special-case text is identical across all of
+  // them, so which one drafted a row makes no safety difference to the
+  // sweep — but a v11-only filter would silently stop discovering real-
+  // answers candidates the moment the gate flips on, and never resume until
+  // it flips back off. A LIKE-prefix match (not a fixed whereIn list, pre-
+  // push audit P1 round 2): currentPromptVersion() suffixes
+  // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
+  // on (e.g. '...+complaints'), so an exact 2-value list would stop
+  // matching the moment any category gate joins the master one. Codex
+  // round-2 finding: an EXACT match against the CURRENT
+  // REAL_ANSWERS_PROMPT_VERSION also stopped matching the moment that
+  // constant's own numeric suffix bumps (e.g. 'house_voice_v12_real_answers'
+  // → '...answers2') — drafts written in the minutes before such a deploy
+  // under the PREVIOUS identity were orphaned. The gratitude copy is
+  // identical across every v12 real-answers variant regardless of that
+  // suffix or any category tag, so this matches the whole v12 real-answers
+  // FAMILY by prefix (REAL_ANSWERS_PROMPT_BASE_PREFIX, e.g.
+  // 'house_voice_v12_real_answers%' — covers the bare identity, any numeric
+  // bump, and any +category suffix on either) plus the exact v11 identity.
+  // This is a DISCOVERY filter (no single row to compare against yet), so
+  // it's a membership check rather than the per-row "whichever version this
+  // draft actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
       'md.status': 'shadow',
       'md.intent': GRATITUDE_INTENT,
-      'md.prompt_version': require('./sms-shadow-drafter').PROMPT_VERSION,
       's.direction': 'inbound',
+    })
+    .where(function versionMatch() {
+      // A `this`-bound function, not an arrow — the Knex-documented
+      // subquery convention this codebase already uses elsewhere
+      // (availability.js's whereNotExists(function linkedVisit() {...})).
+      this.where('md.prompt_version', drafter.PROMPT_VERSION)
+        // the whole real-answers family (bare, '_cf', later suffixes, any
+        // '+category' tags) — NOT the current REAL_ANSWERS_PROMPT_VERSION,
+        // which moves with every suffix bump and would strand rows stamped
+        // under an earlier version. LIKE metacharacters escaped.
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_VERSION_FAMILY.replace(/[\\%_]/g, '\\$&')}%`);
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)
@@ -1089,4 +1375,5 @@ module.exports = {
   maybeAutoSend,
   processGratitudeAutoSendCandidates,
   reconcileAutoSendClaims,
+  gratitudeCandidatePage,
 };

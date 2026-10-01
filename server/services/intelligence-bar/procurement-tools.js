@@ -922,17 +922,692 @@ async function resolveProduct(input) {
   return { product: matches[0] };
 }
 
+// ─── OPERATOR-NAMED PRODUCT FALLBACK ────────────────────────────
+//
+// The rigid grammar below only recognizes a handful of phrasings ("add <qty>
+// <unit> of <name>", "restock <name>", ...). Real voice-typed operator
+// prompts routinely miss it ("we just bought a thing of Taurus... I think
+// it's 78 ounces"). When the grammar can't extract a target at all, this
+// fallback still requires the OPERATOR's own words (this turn, or their own
+// recent prior turns on the same thread — never an assistant turn, tool
+// result, attachment, or note) to name exactly the product already sitting
+// in the preview. It never widens WHO can name a target, only HOW casually
+// they can say it.
+//
+// Generic catalog vocabulary is never distinctive enough, alone, to ground a
+// target — "lesco" and "control" show up in dozens of active product names,
+// so a bare mention proves nothing about which one an operator meant. Real
+// product identity words (Taurus, Alpine, Bifen, ...) are never on this list.
+const GENERIC_PRODUCT_WORDS = new Set([
+  'insecticide', 'insecticides', 'termiticide', 'termiticides', 'fungicide', 'fungicides',
+  'herbicide', 'herbicides', 'fertilizer', 'fertilizers', 'granular', 'granules', 'liquid',
+  'liquids', 'concentrate', 'concentrated', 'professional', 'control', 'bait', 'baits',
+  'gel', 'station', 'stations', 'spray', 'sprays', 'pest', 'lawn', 'turf', 'plus', 'with',
+  'and', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags', 'gallon', 'gallons', 'ounce',
+  'ounces', 'lesco', 'product', 'products', 'inventory', 'stock', 'shelf', 'purchase',
+  'purchased', 'chemical', 'chemicals', 'vendor', 'restock', 'reorder', 'order', 'shipment',
+]);
+
+// A name token can ground a target only when it is long enough to be a real
+// identity word, not a bare number, and not generic catalog vocabulary.
+// Whether it is actually distinctive (unique to one active product) is
+// decided fresh per call in productsNamedIn — a later catalog addition can
+// only ever remove a token's distinctiveness, never silently invent one.
+function isCandidateToken(token) {
+  return token.length >= 4 && !/^[0-9]+$/.test(token) && !GENERIC_PRODUCT_WORDS.has(token);
+}
+
+
+// Spoken percent (Codex round-2 P2): "20 percent"/"per cent"/"pct" is the
+// same concentration qualifier as "20%" — a voice-typed "We bought Southern
+// Ag Copper 20 percent" must conflict with a "27.15%" catalog row exactly
+// like "20%" would. Spelled-out numbers ("twenty percent", "twenty seven
+// percent") count too; percentWordsToValue converts the ones this regex can
+// capture (one..twenty, thirty..ninety, and a tens+ones compound).
+const PERCENT_WORD_RE = '(?:%|percent\\b|per\\s+cent\\b|pct\\b)';
+const NUMBER_WORD_ONES = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+  'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const NUMBER_WORD_TENS = ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const PERCENT_NUMBER_WORD_ALT = `(?:${NUMBER_WORD_TENS.join('|')})(?:[\\s-]+(?:${NUMBER_WORD_ONES.slice(0, 9).join('|')}))?|${NUMBER_WORD_ONES.join('|')}`;
+const PERCENT_NUMBER_WORDS_TO_VALUE = Object.fromEntries([
+  ...NUMBER_WORD_ONES.map((word, i) => [word, i + 1]),
+  ...NUMBER_WORD_TENS.map((word, i) => [word, (i + 2) * 10]),
+]);
+// "twenty seven" → 27; a lone tens or ones word converts directly; anything
+// else (a malformed compound the regex still matched loosely) yields null —
+// never counted as a concentration rather than guessed at.
+function percentWordsToValue(phrase) {
+  const words = phrase.toLowerCase().trim().split(/[\s-]+/);
+  if (words.length === 1) return PERCENT_NUMBER_WORDS_TO_VALUE[words[0]] ?? null;
+  const [tens, ones] = words;
+  const tensValue = PERCENT_NUMBER_WORDS_TO_VALUE[tens];
+  const onesValue = PERCENT_NUMBER_WORDS_TO_VALUE[ones];
+  return tensValue != null && tensValue >= 20 && tensValue % 10 === 0 && onesValue != null && onesValue < 10
+    ? tensValue + onesValue : null;
+}
+
+// The codebase treats "10% SC" and "20% SC" as different products — ANY
+// match (full catalog name, alias, or distinctive token) must not ignore a
+// concentration or formulation qualifier that sits immediately BEFORE or
+// AFTER the matched span in the operator's RAW text (a qualifier INSIDE the
+// span is already accounted for — matching the name/alias string at all
+// proves it's consistent). This is the ONE place that check happens —
+// qualifierConflict, called from every match branch in productsNamedIn.
+//
+// Closed formulation-code set; single letters (F, G, L) are too ambiguous in
+// free text to trust. "AS" (aqueous suspension) is deliberately left out —
+// it's an ordinary English word ("Taurus AS to add...", a real production
+// prompt) and a code this collision-prone is not worth the false positives.
+// "FL" is left out for the same reason: "fl oz" (fluid ounces) is the most
+// common unit phrase in these prompts, and "fl" sitting right next to a
+// match would otherwise misread as the FL code every time. "ME" is left out
+// too: "get me Taurus SC" puts the word "me" right before the name. Sorted
+// longest-first so "WDG"/"WSG" are never shadowed by the shorter "WG".
+const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'WG', 'WDG', 'WSG', 'WP', 'WSP',
+  'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU']
+  .sort((a, b) => b.length - a.length);
+const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
+// A qualifier is adjacent to a match when only punctuation or whitespace
+// (any non-alphanumeric run: commas, colons, quotes, parentheses, ...) sits
+// between them, checked in both directions (qualifiersFollowing /
+// qualifiersPreceding). "Taurus SC: 20%" and "Taurus SC (20%)" both carry
+// the qualifier. A bare number with no '%'/"percent" is still not a
+// concentration on its own ("Taurus 78 ounces") — but a bare STRENGTH number
+// immediately followed by a formulation code IS a qualifier ("Armada 20 WDG"
+// against a "Armada 50 WDG" catalog row): the middle alternative below
+// captures the number and the code as one pair, checked together in
+// qualifierConflict. Groups: 1 = digit concentration, 2 = spelled-out
+// concentration (converted via percentWordsToValue), 3+4 = a bare strength
+// number + formulation code pair, 5 = a bare formulation code alone.
+const QUALIFIER_AFTER_RE = new RegExp(
+  `^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(\\d+(?:\\.\\d+)?)\\s*(${FORMULATION_CODE_ALT})\\b|(${FORMULATION_CODE_ALT})\\b)`, 'i',
+);
+// Reading backward, a qualifier must also START on a word boundary: the
+// code "SE" must not be read out of "Please", nor "1.5%" out of "21.5%".
+// Same group layout as QUALIFIER_AFTER_RE.
+const QUALIFIER_BEFORE_RE = new RegExp(
+  `(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|\\b(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*(${FORMULATION_CODE_ALT})\\b|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i',
+);
+
+function escapeRegExpLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Every place in the RAW operator text where this whole-word phrase (the full
+// catalog name's words, an alias's own words, or a single distinctive token)
+// occurs. Punctuation/whitespace may separate the phrase's own words,
+// mirroring containsWholeWords' tolerance. Returns [{ start, end }, ...].
+// Between a digit and a letter (either order, inside a word or between two
+// words) a separator is optional, so a catalog "Barricade 65WG" matches a
+// spoken "65 WG" and an "Armada 50 WDG" matches "50WDG". So is it between
+// two single letters ("Bifen I/T" matches "Bifen IT"). Elsewhere words still
+// need a separator between them.
+const DIGIT_LETTER_BOUNDARY = /(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)/i;
+function phrasePattern(words) {
+  return words.map((word, i) => {
+    const inner = word.split(DIGIT_LETTER_BOUNDARY).map(escapeRegExpLiteral).join('[^a-zA-Z0-9]*');
+    if (i === 0) return inner;
+    // Two single letters in a row ("I/T") also match spoken compact ("IT").
+    const boundary = /\d$/.test(words[i - 1]) !== /^\d/.test(word) || (words[i - 1].length === 1 && word.length === 1);
+    return `${boundary ? '[^a-zA-Z0-9]*' : '[^a-zA-Z0-9]+'}${inner}`;
+  }).join('');
+}
+function findPhraseSpansInRawText(rawText, words) {
+  const pattern = phrasePattern(words);
+  return [...rawText.matchAll(new RegExp(`\\b${pattern}\\b`, 'gi'))]
+    .map((match) => ({ start: match.index, end: match.index + match[0].length }));
+}
+
+// The concentration(s)/formulation code(s)/number+code pair(s) immediately
+// trailing `fromIndex`, reading forward. Raw text, so '%' survives
+// (normalizeForMatch drops it).
+function qualifiersFollowing(rawText, fromIndex) {
+  let rest = rawText.slice(fromIndex);
+  const concentrations = [];
+  const formulations = [];
+  const numberCodes = [];
+  let step = QUALIFIER_AFTER_RE.exec(rest);
+  while (step) {
+    if (step[1] !== undefined) concentrations.push(Number(step[1]));
+    else if (step[2] !== undefined) { const value = percentWordsToValue(step[2]); if (value != null) concentrations.push(value); }
+    else if (step[3] !== undefined) numberCodes.push({ number: Number(step[3]), code: step[4].toUpperCase() });
+    else formulations.push(step[5].toUpperCase());
+    rest = rest.slice(step[0].length);
+    step = QUALIFIER_AFTER_RE.exec(rest);
+  }
+  return { concentrations, formulations, numberCodes };
+}
+
+// The concentration(s)/formulation code(s)/number+code pair(s) immediately
+// preceding `toIndex`, reading backward (each found qualifier must reach
+// all the way to `toIndex` through only separator characters — mirrors
+// qualifiersFollowing).
+function qualifiersPreceding(rawText, toIndex) {
+  let rest = rawText.slice(0, toIndex);
+  const concentrations = [];
+  const formulations = [];
+  const numberCodes = [];
+  let step = QUALIFIER_BEFORE_RE.exec(rest);
+  while (step) {
+    if (step[1] !== undefined) concentrations.push(Number(step[1]));
+    else if (step[2] !== undefined) { const value = percentWordsToValue(step[2]); if (value != null) concentrations.push(value); }
+    else if (step[3] !== undefined) numberCodes.push({ number: Number(step[3]), code: step[4].toUpperCase() });
+    else formulations.push(step[5].toUpperCase());
+    rest = rest.slice(0, step.index);
+    step = QUALIFIER_BEFORE_RE.exec(rest);
+  }
+  return { concentrations, formulations, numberCodes };
+}
+
+// Does a match of `words` (any match type — full name, alias, or a single
+// distinctive token) conflict with `productNameRaw`, given qualifiers found
+// immediately before or after the matched span in the RAW text? No qualifier
+// captured at all ⇒ never a conflict (e.g. "Taurus" alone, or "Taurus 78
+// ounces" — a bare number is not a concentration). Any qualifier captured
+// must ALL appear in the product's own catalog name — a formulation code as
+// a normalized whole token, a concentration as an exact numeric match against
+// the percent numbers in the name's raw text — or it's a conflict. The ONE
+// chokepoint for this check; every productsNamedIn match branch calls it.
+// `phrases` is every phrase the text names this product by (see
+// productsNamedIn), each already carrying its own body-region-filtered
+// `spans` (a note/message body mention was never "named" in the first place,
+// so it's never checked for a qualifier either). Every surviving occurrence
+// of each phrase is checked: "We have Taurus SC on the shelf. We bought
+// Taurus SC 20%" conflicts on its second mention even though the first is
+// clean.
+// `identityNames` are the product's catalog name and its registered aliases:
+// a qualifier in any of them is part of the product's identity ("Velista
+// WDG" is a registered alias of "Velista").
+//
+// An N-P-K fertilizer analysis (three 1-2 digit numbers, each with an
+// optional one-decimal fraction, joined by -, –, —, or / with optional
+// spaces around the separators) is an identity qualifier exactly like a
+// concentration or formulation code — a seeded alias "K-Flow" mapping to
+// "LESCO K-Flow 0-0-25" must not ground "We bought K-Flow 0-0-20". Checked
+// over the WHOLE raw text, not just adjacent to a matched span, because the
+// analysis reads as the product's own identity wherever it sits in the
+// sentence ("K-Flow — we bought 0-0-20 of it" is still a mismatch).
+//
+// A REAL analysis uses the SAME separator twice ("0-0-25", "0/0/20") — a
+// mixed number like "1-1/2" (gallons) uses TWO DIFFERENT separators ("-"
+// then "/") and must never read as one (Codex round-13 P2: "We bought
+// Taurus SC, 1-1/2 gallons" misread "1-1/2" as an analysis and refused a
+// product with no analysis in its identity at all). \1 backreferences the
+// first separator so the second must match it exactly. –/— are normalized
+// to a plain "-" first (each is one code unit, same as "-", so match
+// indices against the original text are unaffected) so "0–0—25" still
+// reads as one analysis with the separator repeated, rather than as two
+// different separators that would now fail the backreference.
+const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*([-/])\s*\d{1,2}(?:\.\d)?\s*\1\s*\d{1,2}(?:\.\d)?\b/g;
+function normalizeAnalysis(raw) {
+  return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
+}
+// A deadline date is not an analysis (Codex round-12 P2: "Please buy two
+// bottles of Taurus SC by 9/27/26" refused as an 9-27-26 mismatch). A triple
+// counts as a date only when a date word introduces it AND it reads as a
+// real month/day — "10-10-10" is a common fertilizer grade, so a bare
+// date-shaped triple ("Lesco, the 10-10-10") stays an identity qualifier.
+const DATE_CUE_BEFORE_RE = /\b(?:by|on|for|before|after|until|till|due|from|since|dated)\s+$/i;
+function isCuedDate(text, match) {
+  const [month, day] = match[0].split(/\s*[-–—/]\s*/).map(Number);
+  const realMonthDay = Number.isInteger(month) && Number.isInteger(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  return realMonthDay && DATE_CUE_BEFORE_RE.test(text.slice(0, match.index));
+}
+function analysesIn(text) {
+  const raw = String(text);
+  // Normalize –/— to a plain "-" (same code-unit length, so match.index
+  // still lines up with `raw` for isCuedDate's look-back) before matching,
+  // so the backreference reads a triple that mixes dash STYLES ("0–0—25")
+  // as one repeated separator rather than two different ones.
+  const normalized = raw.replace(/[–—]/g, '-');
+  return [...normalized.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
+}
+function qualifierConflict(rawText, phrases, identityNames) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
+  const nameConcentrations = identityNames.flatMap((name) => [...String(name).matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1])));
+  const nameAnalyses = new Set(identityNames.flatMap((name) => analysesIn(name)));
+  // An analysis only matters for a product whose OWN identity (catalog name
+  // or a registered alias) names one (Codex round-13 P2): with no analysis
+  // anywhere in its identity, nameAnalyses is empty and no analysis-shaped
+  // text in the operator's words can ever conflict with it — a plain
+  // "Taurus SC" (no analysis) is never refused by a date, a mixed number,
+  // or anything else analysis-shaped sitting anywhere in the sentence.
+  const analysisConflict = nameAnalyses.size > 0 && analysesIn(rawText).some((analysis) => !nameAnalyses.has(analysis));
+  return analysisConflict || phrases.some((phrase) => phrase.spans.some((span) => {
+    const before = qualifiersPreceding(rawText, span.start);
+    const after = qualifiersFollowing(rawText, span.end);
+    const formulations = [...before.formulations, ...after.formulations];
+    const concentrations = [...before.concentrations, ...after.concentrations];
+    const numberCodes = [...before.numberCodes, ...after.numberCodes];
+    return !formulations.every((code) => nameTokens.has(code.toLowerCase()))
+      || !concentrations.every((n) => nameConcentrations.includes(n))
+      // "65 WG" or "65WG" in the text agrees with either "65 WG" or "65WG" in
+      // the catalog name.
+      || !numberCodes.every((nc) => (nameTokens.has(String(nc.number)) && nameTokens.has(nc.code.toLowerCase()))
+        || nameTokens.has(`${nc.number}${nc.code.toLowerCase()}`));
+  }));
+}
+
+// ─── CLOSED-VOCABULARY RESIDUAL RULE ────────────────────────────
+//
+// Every prose heuristic tried here — proximity/capitalization, a purchase-
+// cue-word regex, a note/message-body detector, a negation detector — chased
+// one more failing pre-push-audit prompt without ever converging. Replaced
+// with ONE structural rule: a text grounds product P only when, after
+// removing every RAW occurrence of P's own name/alias/distinctive-token
+// mentions from the text, EVERY remaining word is a number or belongs to a
+// small, closed, documented vocabulary (CLOSED_VOCAB). A leftover word
+// outside that vocabulary — "used", "unlisted", "chemical", "adjustments",
+// "instead", "not", "notes", "customer" — is content the fallback can't
+// read, so the text grounds nothing rather than guess at what it means.
+// This is what isBareFollowUp ("1 bottle", "78 ounces", "Yes") and
+// productsNamedIn's naming check both reduce to; see isClosedVocabResidual.
+//
+// Deliberately NOT in the vocabulary: not, no, instead, rather, except, but,
+// used, before, notes, note, text, message, saying, customer, and every
+// other content word — a leftover instance of any of these already refuses
+// the text, with no need for its own special-cased detector ("We used
+// Taurus SC before, but bought Unlisted Chemical today; add 2 jugs of that
+// to inventory" refuses because "used"/"but"/"unlisted"/"chemical" all
+// survive removing the one genuine "Taurus SC" mention).
+// The one closed, documented list of discourse/politeness filler words —
+// spread into CLOSED_VOCAB below (so a leftover filler word never blocks
+// the residual rule) AND used to build LEADING_FILLER_RE further down (see
+// isQuestion), so the two can never drift apart again. Codex round-11 P2:
+// "please" was in CLOSED_VOCAB but missing from the old hand-maintained
+// LEADING_FILLER_RE, so "Please, did we receive..." read as a statement.
+// Deliberately excludes modal/auxiliary verbs (can, could, would, will, do,
+// did, have, has, had, is, are, was, were) — those carry real grammatical
+// signal for REQUEST_START_RE / QUESTION_START_RE / the aux-inversion check
+// and must never be stripped as if they were content-free filler.
+// "question" is NOT here: announcing one ("Quick question, we received two
+// bottles of Taurus SC") makes the whole prompt a question (see
+// QUESTION_WORD_RE), and it must never count as a neutral closed-vocabulary
+// word either.
+const FILLER_WORDS = [
+  'please', 'pls', 'plz', 'kindly', 'hey', 'hi', 'hello', 'ok', 'okay',
+  'so', 'and', 'also', 'um', 'uh', 'well', 'oh', 'yeah', 'yes', 'alright',
+  'now', 'just', 'quick',
+];
+const CLOSED_VOCAB = new Set([
+  // pronouns/determiners
+  'i', 'we', 'you', 'it', 'its', 's', 'this', 'that', 'these', 'those',
+  // contraction fragments once the apostrophe is dropped ("we've", "we're",
+  // "we'll", "I'm", "we'd"); "n't" leaves "didn"/"don", which stay outside
+  're', 've', 'll', 'm', 'd',
+  'a', 'an', 'the', 'some', 'more', 'another', 'our', 'your', 'my', 'me', 'us', 'them', 'they',
+  // discourse/politeness filler (the shared FILLER_WORDS list above)
+  ...FILLER_WORDS,
+  // auxiliaries (grammatical, never filler — kept out of FILLER_WORDS)
+  'can', 'could', 'would', 'will', 'go', 'ahead', 'do', 'did',
+  'is', 'was', 'are', 'were', 'be', 'been', 'have', 'has', 'had', 'got', 'get', 'think', 'guess',
+  // prepositions/conjunctions
+  'of', 'to', 'in', 'into', 'for', 'on', 'at', 'as', 'and', 'with', 'from', 'by', 'up',
+  // purchase/stock words
+  'add', 'added', 'adding', 'bought', 'buy', 'purchase', 'purchased', 'picked', 'pick',
+  'received', 'receive', 'restock', 'restocked', 'reorder', 'reordered', 'order', 'ordered',
+  'log', 'logged', 'record', 'recorded', 'put', 'count', 'stock', 'inventory', 'shelf',
+  'delivered', 'arrived', 'came',
+  // quantity words
+  ...NUMBER_WORD_ONES, ...NUMBER_WORD_TENS, 'hundred', 'dozen', 'half', 'quarter', 'couple', 'few', 'several',
+  // units/containers
+  'oz', 'ounce', 'ounces', 'fl', 'fluid', 'gal', 'gallon', 'gallons', 'qt', 'quart', 'quarts',
+  'pt', 'pint', 'pints', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'ml', 'l',
+  'liter', 'liters', 'each', 'item', 'items', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags',
+  'case', 'cases', 'box', 'boxes', 'pail', 'pails', 'can', 'cans', 'container', 'containers',
+  'tube', 'tubes', 'pack', 'packs', 'thing', 'things', 'unit', 'units', 'bucket', 'buckets',
+  // spoken concentration (a percent is a unit for a number, same as "oz" —
+  // needed alongside qualifierConflict's own spoken-percent support so a
+  // clean "20 percent" mention doesn't strand "percent" as content)
+  'percent', 'pct', 'per', 'cent',
+  // time
+  'today', 'yesterday', 'tonight', 'morning',
+]);
+
+// Every RAW word (lowercased, non-alphanumeric runs collapsed to a
+// separator) in `rawText`, once the character ranges in `spans` are blanked
+// out. `spans` are exactly the matched occurrences of the product mention(s)
+// under test — nothing else is ever removed.
+function residualWords(rawText, spans) {
+  // UTF-16 code units, the same units the regex span offsets count in (an
+  // emoji before the name would otherwise shift every blanked position).
+  const chars = rawText.split('');
+  for (const span of spans) {
+    for (let i = span.start; i < span.end; i++) chars[i] = ' ';
+  }
+  return chars.join('').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+}
+
+// Every leftover word must be a number or in CLOSED_VOCAB. An empty residual
+// (the whole text was the removed span(s), or nothing was removed and the
+// text was already all-vocabulary) trivially passes.
+function isClosedVocabResidual(rawText, spans = []) {
+  return residualWords(rawText, spans).every((word) => /^[0-9]+(?:\.[0-9]+)?$/.test(word) || CLOSED_VOCAB.has(word));
+}
+
+// A prior operator turn — or the current prompt — may only stand in for
+// naming a product when it names NONE of them (checked by the caller via
+// productsNamedIn before calling this) and every one of its own words is a
+// number or in CLOSED_VOCAB: a genuine bare follow-up ("1 bottle", "78
+// ounces", "Yes", "add it"). "we got a new jug of Unlisted Chemical" is NOT
+// bare — "unlisted"/"chemical" survive — so it must stand on its own, never
+// borrowing a name from an earlier turn.
+// A strength or formulation in a follow-up ("20%", "20 percent", "SC") is
+// about WHICH product, so it can't borrow one from an earlier turn: the
+// borrowed product's own qualifiers were never checked against it.
+const FOLLOW_UP_QUALIFIER_RE = new RegExp(`%|\\b(?:percent|pct|per\\s+cent)\\b|(?:\\b|\\d)(?:${FORMULATION_CODE_ALT})\\b`, 'i');
+function isBareFollowUp(text) {
+  // At least one word: a reply of only punctuation ("?", "...") says nothing
+  // and never borrows a product from an earlier turn. An N-P-K analysis is
+  // an identity qualifier like a percent or a formulation code: "0-0-20"
+  // after "K-Flow 0-0-25" corrects the product, so it never borrows it — and
+  // as a turn the look-back meets, it stops the look-back instead of being
+  // skipped (2026-09-27 pre-push audit). A cued date isn't an analysis.
+  return residualWords(text, []).length > 0 && isClosedVocabResidual(text)
+    && !FOLLOW_UP_QUALIFIER_RE.test(text) && analysesIn(text).length === 0;
+}
+
+// Which ACTIVE catalog products does operator text name? A product is named
+// by its full catalog name, one of its product_aliases, or a name token that
+// belongs to it ALONE across the active catalog — each matched as whole
+// words (never a substring of a longer word), searched over the FULL raw
+// text. A product is actually NAMED only when, after every one of its own
+// mention spans is removed, the CLOSED_VOCAB residual rule passes (see
+// above) — this is what replaces targetClause (which stripped a real catalog
+// name's own punctuation, e.g. an alias like "Premium: Dispatch wetting
+// agent" or 'We bought "Taurus SC"') and every prior prose heuristic.
+// Returns { named, conflict }: `named` is a Set of product ids (0 = nothing
+// named, 1 = grounded, 2+ = ambiguous — the caller refuses rather than
+// guessing); `conflict` is true when a match (of ANY type — full name,
+// alias, or token) was disqualified by a concentration/formulation qualifier
+// sitting immediately before or after the matched span that doesn't match
+// that product's own catalog name (e.g. "Taurus SC 20%" or "20% Taurus SC"
+// naming only a plain "Taurus SC" catalog row, or "Taurus 20% SC" naming
+// only a "Taurus 10% SC" row) — a conflict never grounds, on this text or
+// any other (see resolveByOperatorGrounding). See qualifierConflict for the
+// one check every match type routes through.
+const NOUN_POSITION_UNITS = 'fl\\s*oz|oz|ounces?|gal(?:lons?)?|gals|qts?|quarts?|pts?|pints?|lbs?|pounds?|g|grams?|kg|ml|l|liters?'
+  + '|each|items?|bottles?|jugs?|bags?|cases?|box(?:es)?|pails?|cans?|containers?|tubes?|packs?|things?|units?|buckets?';
+// A spoken quantity: a/an, hundred, dozen, or a number word including tens+ones
+// compounds ("twenty one"), the same forms the percent parser reads.
+const NOUN_POSITION_NUMBER_WORDS = `a|an|hundred|dozen|${PERCENT_NUMBER_WORD_ALT}`;
+const NOUN_POSITION_BEFORE_RE = new RegExp('(?:\\bof'
+  + `|(?:\\b\\d+(?:\\.\\d+)?|\\b(?:${NOUN_POSITION_NUMBER_WORDS}))\\s*(?:${NOUN_POSITION_UNITS})(?:\\s+of)?`
+  + ')[^a-zA-Z0-9]*$', 'i');
+// Also a noun position: right after a purchase word when a quantity follows
+// ("we bought Taurus, eleven ounces"). "We received the dispatch today" has
+// no quantity after it, so the shipment reading wins and it names nothing.
+const PURCHASE_BEFORE_RE = /\b(?:bought|purchased|got|received|restocked|reordered|ordered|add|added|picked\s+up)(?:\s+(?:a|an|the|some|more|another))?[^a-zA-Z0-9]*$/i;
+const QUANTITY_AFTER_RE = new RegExp(`^[^a-zA-Z0-9]*(?:\\d+(?:\\.\\d+)?|(?:${NOUN_POSITION_NUMBER_WORDS}))\\s*(?:${NOUN_POSITION_UNITS})\\b`, 'i');
+function inNounPosition(rawText, start, end) {
+  const before = rawText.slice(Math.max(0, start - 40), start);
+  if (NOUN_POSITION_BEFORE_RE.test(before)) return true;
+  return PURCHASE_BEFORE_RE.test(before) && QUANTITY_AFTER_RE.test(rawText.slice(end, end + 40));
+}
+
+async function productsNamedIn(rawText) {
+  const named = new Set();
+  let conflict = false;
+  if (!rawText) return { named, conflict };
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const aliasRows = await db('product_aliases as pa')
+    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true)
+    .select('pa.alias_name', 'pa.product_id');
+
+  // A token shared by 2+ active products' names proves nothing on its own.
+  const tokenOwners = new Map(); // normalized token -> Set(productId)
+  for (const p of products) {
+    for (const token of normalizeForMatch(p.name).split(' ')) {
+      if (!isCandidateToken(token)) continue;
+      if (!tokenOwners.has(token)) tokenOwners.set(token, new Set());
+      tokenOwners.get(token).add(p.id);
+    }
+  }
+
+  for (const p of products) {
+    const nameNorm = normalizeForMatch(p.name);
+    // Every match type routes through the same qualifierConflict chokepoint
+    // — a full-name match is NOT exempt: "Taurus SC 20%" matches the full
+    // name "Taurus SC", but the trailing "20%" still has to agree with the
+    // catalog row (see qualifierConflict's own doc for why a qualifier
+    // INSIDE the matched span needs no separate check).
+    // Every phrase that could name this product (full name, each alias,
+    // each distinctive token) is checked for its RAW occurrences.
+    // A name or alias that normalizes to nothing (whitespace or punctuation
+    // only) would build an empty pattern matching every word boundary.
+    const phraseWords = [
+      nameNorm.split(' '),
+      ...aliasRows.filter((a) => a.product_id === p.id).map((a) => normalizeForMatch(a.alias_name).split(' ')),
+      ...nameNorm.split(' ').filter((token) => isCandidateToken(token) && tokenOwners.get(token)?.size === 1).map((token) => [token]),
+    ].filter((words) => words.join('') !== '');
+    const phrases = phraseWords
+      .map((words) => ({ single: words.length === 1, spans: findPhraseSpansInRawText(rawText, words) }))
+      .filter((phrase) => phrase.spans.length > 0);
+    if (!phrases.length) continue;
+    // Named only by a lone word (a distinctive token or a one-word alias):
+    // that word must stand where a product name stands (inNounPosition): after
+    // "of" or a quantity ("a jug of Taurus", "78 oz Taurus"), or after a
+    // purchase word with a quantity following ("bought Taurus, eleven
+    // ounces"). A verb use ("Can you dispatch this order?") or a common noun
+    // ("We received the dispatch today") names nothing.
+    if (phrases.every((phrase) => phrase.single)
+      && !phrases.some((phrase) => phrase.spans.some((span) => inNounPosition(rawText, span.start, span.end)))) continue;
+    // The residual rule: remove every one of THIS product's own mention
+    // spans (every match type combined — a full-name match and its own
+    // token match cover the same ground) and require the rest of the text
+    // to be closed-vocabulary. Not naming (continue, no conflict) when it
+    // fails — insufficient/unreadable evidence, never a reason to block a
+    // prior-turn fallback the way a genuine qualifier conflict does.
+    const allSpans = phrases.flatMap((phrase) => phrase.spans);
+    if (!isClosedVocabResidual(rawText, allSpans)) continue;
+    const identityNames = [p.name, ...aliasRows.filter((a) => a.product_id === p.id).map((a) => a.alias_name)];
+    if (qualifierConflict(rawText, phrases, identityNames)) { conflict = true; continue; }
+    named.add(p.id);
+  }
+  return { named, conflict };
+}
+
+// Does the operator's own text (this prompt, or — only when this prompt
+// names nothing AND is a bare follow-up — their own recent prior turns)
+// ground the preview's product? Returns { productId } (allow),
+// { mismatch: true } (a different single product was named —
+// target_relationship_mismatch), or null (no grounding found; the caller
+// keeps its original clarification refusal, which also covers "named 2+
+// products"). Called only where the grammar found no target at all.
+// The fallback's words must ask for the tool's own operation. Each text
+// reads as ONE operation, in this order of precedence:
+// - arrival or completed-purchase words (bought, received, arrived...) mean
+//   a receipt, even beside the noun "order" ("The Taurus SC order arrived;
+//   add two bottles");
+// - otherwise ordering words (order, reorder, restock, buy) mean an order
+//   ("please buy Taurus SC", "add Taurus to the reorder list");
+// - otherwise recording words (add, log, record, put) mean a receipt.
+// adjust_stock needs a receipt and grounds only a restock preview (never a
+// count or a write-off); create_restock_request needs an order.
+const ARRIVAL_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'restocked', 'delivered', 'arrived', 'came', 'got']);
+const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy']);
+const RECORDING_WORDS = new Set(['receive', 'add', 'added', 'adding', 'put', 'log', 'logged', 'record', 'recorded']);
+// The verb "purchase" asks for an order ("please purchase two bottles"); the
+// noun after a determiner ("we added your purchase") names nothing.
+const PURCHASE_VERB_RE = /(?<!\b(?:your|our|the|a|this|that|my|their)\s)\bpurchase\b/;
+function textOperation(text) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const normalized = normalizeForMatch(text);
+  const words = normalized.split(' ');
+  if (words.some((word) => ARRIVAL_WORDS.has(word))) return 'receipt';
+  if (words.some((word) => ORDER_WORDS.has(word)) || PURCHASE_VERB_RE.test(normalized)) return 'order';
+  return words.some((word) => RECORDING_WORDS.has(word)) ? 'receipt' : null;
+}
+
+// A question asks to read, never to write: "Did we receive two bottles of
+// Taurus SC?" grounds nothing. Polite requests ("Can you add...", "Could
+// you add...?") are not questions.
+const QUESTION_START_RE = /^\s*(?:did|do|does|have|has|had|is|are|was|were|how|what|when|where|why|who|which|any)\b/i;
+const REQUEST_START_RE = /^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b/i;
+// Leading greetings and fillers ("Hey, did we receive...", "Please, did we
+// receive...") are skipped before the question-start check. Built from the
+// single shared FILLER_WORDS list (see its own doc comment above
+// CLOSED_VOCAB) so a word added there is automatically stripped here too —
+// any punctuation/whitespace may separate a run of several filler words
+// ("um so please, have we received...").
+const LEADING_FILLER_RE = new RegExp(`^\\s*(?:(?:${FILLER_WORDS.join('|')})\\b[\\s,.:;!-]*)+`, 'i');
+// A clause boundary a question can start fresh after ("Taurus SC — did we
+// receive two bottles" is a question even though it doesn't start with
+// one). Also used to re-run the filler strip + question-start check at the
+// head of every clause, not just the whole text's own head.
+const CLAUSE_SPLIT_RE = /[,;:.!?]+|[-–—]+/;
+// A non-modal auxiliary immediately followed by its subject, ANYWHERE in
+// the text — not just at a clause head — is a spoken-question inversion
+// regardless of where it lands ("two bottles of Taurus SC did we receive
+// them"). Modals (can/could/would/will) are deliberately excluded: "can
+// you"/"could you" stay requests, never questions (REQUEST_START_RE).
+const AUX_INVERSION_RE = /\b(?:did|do|does|have|has|had)(?:n['’]?t)?\s+(?:we|you|they|i)\b/i;
+// The operator announcing a question anywhere ("quick question", "I have a
+// question") makes the prompt a question, whatever its grammar.
+const QUESTION_WORD_RE = /\bquestions?\b/i;
+function isQuestion(text) {
+  const raw = String(text || '');
+  // A polite REQUEST ("Can you add...", "Could you add...?") is never a
+  // question even when it ends with '?' or contains an aux-inversion
+  // elsewhere — checked once against the whole text (after its own leading
+  // filler is stripped), exactly as before.
+  if (REQUEST_START_RE.test(raw.replace(LEADING_FILLER_RE, ''))) return false;
+  const clauses = raw.split(CLAUSE_SPLIT_RE)
+    .map((clause) => clause.replace(LEADING_FILLER_RE, '').trim())
+    .filter(Boolean);
+  if (clauses.some((clause) => QUESTION_START_RE.test(clause))) return true;
+  if (AUX_INVERSION_RE.test(raw) || QUESTION_WORD_RE.test(raw)) return true;
+  return /\?\s*$/.test(raw);
+}
+
+// A statement about the FUTURE, ability, or obligation is not a write
+// instruction — exactly like a question, it describes something rather
+// than asking for it to be done now (Codex round-13 P2: "We will receive
+// two bottles of Taurus SC today" and "We can receive two bottles of
+// Taurus SC" both grounded a restock card for a shipment that hasn't
+// arrived; base-form "receive" reads as a receipt with no tense check at
+// all). A subject pronoun immediately followed by a modal verb, or its
+// contraction, is a modal statement: "we will", "we can", "we'll" (curly
+// or straight apostrophe), and the apostrophe-less "we ll" normalizeForMatch
+// leaves once it collapses "we'll" to two words. The pronoun must come
+// FIRST — "Can you ...?"/"Could you ...?" are requests (REQUEST_START_RE
+// already reads them as non-questions) and must keep grounding, and this
+// order requirement is exactly why they never match here either. A bare
+// "can"/"cans" naming a container unit ("two cans of Taurus SC") never
+// matches: nothing here reads "can" unless a subject pronoun sits directly
+// before it.
+const MODAL_WORD_ALT = 'can|could|would|will|shall|should|may|might|must';
+const MODAL_STATEMENT_RE = new RegExp(
+  `\\b(?:i|we|you|they|he|she|it)\\b(?:['’]?\\s*(?:ll|d)\\b|\\s+(?:${MODAL_WORD_ALT})\\b)`,
+  'i',
+);
+// An infinitive write ("have to receive", "are to receive", "got to
+// receive") is the same future/obligation statement spelled without a
+// modal verb: an obligation-carrying verb (have/has/had/am/is/are/was/
+// were/got) immediately before "to <write verb>". Requiring that lead-in —
+// never a bare "to <verb>" anywhere in the text — matters: real
+// ungrammatical voice-typed prompts routinely drop an ordinary "to add"
+// into a sentence with no obligation sense at all ("...a thing of Taurus
+// as to add this to your inventory..." must still ground).
+const INFINITIVE_OBLIGATION_LEAD_ALT = 'have|has|had|am|is|are|was|were|got';
+const INFINITIVE_WRITE_VERB_ALT = 'receive|add|put|log|record|restock|buy|order|reorder|purchase';
+const INFINITIVE_WRITE_RE = new RegExp(
+  `\\b(?:${INFINITIVE_OBLIGATION_LEAD_ALT})\\s+to\\s+(?:${INFINITIVE_WRITE_VERB_ALT})\\b`,
+  'i',
+);
+// The one check every operator-grounding gate uses in place of a bare
+// isQuestion: a question, a modal statement, or an infinitive write are all
+// read-only or future/hypothetical, never a write instruction right now.
+function isNotAnInstruction(text) {
+  const raw = String(text || '');
+  return isQuestion(raw) || MODAL_STATEMENT_RE.test(raw) || INFINITIVE_WRITE_RE.test(raw);
+}
+// `texts` run newest first: the current prompt, any bare turns the look-back
+// skipped, then the turn that named the product. The newest text with an
+// operation decides, so "It arrived, one bottle" after "Order Taurus SC" is
+// a receipt, and so is "1 bottle" after "We ordered Taurus SC" then "It
+// arrived".
+function operationMatches(toolName, texts, preview) {
+  const operation = texts.map(textOperation).find(Boolean) || null;
+  if (toolName === 'adjust_stock') {
+    return operation === 'receipt' && (preview.movement_type == null || preview.movement_type === 'restock');
+  }
+  return toolName === 'create_restock_request' && operation === 'order';
+}
+
+const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
+  const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
+  if (grounded?.productId) return { productId: grounded.productId };
+  return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
+}
+
+async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
+  if (!preview?.product?.id || isNotAnInstruction(prompt)) return null;
+  // `texts` are the operator's words the grounding rests on (this prompt,
+  // plus the prior turn that named the product): they must also ask for the
+  // same operation as the tool (operationMatches).
+  // `result` is productsNamedIn's { named, conflict } for one text. A
+  // conflict or 2+ products refuses; exactly one grounds when it is the
+  // preview's product and the words ask for this tool's operation.
+  const decide = (result, texts) => {
+    if (result.conflict || result.named.size !== 1) return null;
+    const [id] = result.named;
+    if (id !== preview.product.id) return { mismatch: true };
+    return operationMatches(toolName, texts, preview) ? { productId: id } : null;
+  };
+  // Naming comes from the operator's FULL raw text via the closed-vocabulary
+  // residual rule (productsNamedIn) — never targetClause, which also strips
+  // identity punctuation from a real catalog name/alias ("We bought Premium:
+  // Dispatch wetting agent", a seeded alias; 'We bought "Taurus SC"').
+  // "Add notes for this customer: Request 2 lb of Taurus SC" still names
+  // nothing ("notes"/"customer" are leftover content words, outside
+  // CLOSED_VOCAB). Qualifier conflicts are checked across the same spans, so
+  // a concentration after a colon ("Taurus SC: 20%") still refuses.
+  const current = await productsNamedIn(prompt);
+  // A prompt that names anything (or carries a conflict) stands on its own.
+  if (current.conflict || current.named.size) return decide(current, [prompt]);
+  // A stale tab never grounds off turns it never saw (two tabs on one
+  // thread): observedSeq is the requesting tab's own tail seq, from the
+  // route's thread_seq. Without one there is no prior-turn grounding at all.
+  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return null;
+  const IbThreads = require('./threads');
+  // Newest first and resolved ONE AT A TIME, never concatenated: a turn
+  // ending "...Demand" and the next-older turn beginning "CS..." must never
+  // combine into a phantom "Demand CS".
+  const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
+  const skipped = [];
+  for (const turn of turns) {
+    // A question, modal statement, or infinitive write never authorizes a
+    // write, even as the turn a "Yes" answers: the look-back stops at it.
+    if (isNotAnInstruction(turn)) return null;
+    const turnResult = await productsNamedIn(turn);
+    if (turnResult.conflict || turnResult.named.size) return decide(turnResult, [prompt, ...skipped, turn]);
+    // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion
+    // and may be skipped; any other turn ("Actually use Unlisted Chemical
+    // instead") may be a correction this catalog can't read, so the scan
+    // stops rather than reach past it to an older product.
+    if (!isBareFollowUp(turn)) return null;
+    skipped.push(turn);
+  }
+  return null;
+}
+
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
   const { targetClause, UUID_RE } = require('./task-context');
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
   const clause = String(toolName === 'update_restock_request' ? targetClause(prompt, true) : prompt)
     .trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
-  const unavailable = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+  const unavailable = TARGET_UNAVAILABLE;
   const inventoryPage = /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
   const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
   const quantity = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten|zero)';
@@ -964,6 +1639,12 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     && !/^(?:save|create)\s+another\s+(?:(?:restock|reorder)\s+)?request\s+for\s+/i.test(clause)) {
     return { error: 'Explicitly request another restock request to create a duplicate.', code: 'duplicate_intent_required' };
   }
+  // Grammar found no interpretable product reference at all: fall back to
+  // whether the OPERATOR's own words name exactly the product already
+  // sitting in the preview. Each call site states its own policy on prior
+  // turns — see resolveByOperatorGrounding. `threadSeq` (the caller's
+  // observed thread tail) rides along on every call so a stale tab never
+  // reads prior turns it never saw.
   const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
   const patterns = [
     /^write off the (?:spilled|damaged) (?:bag|bottle|container|case|jug) of\s+(.+)$/i,
@@ -975,8 +1656,15 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     /^(?:restock|reorder)\s+(.+)$/i,
   ];
   const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
-  if (!selected) return unavailable;
-  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  // No pattern matched at all, so the operator named no target the grammar
+  // can read: this is the one place the free-phrasing fallback runs (and,
+  // for a bare follow-up like "1 bottle", recent operator turns).
+  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
+  // A trailing destination ("… to inventory", "… into our stock") names
+  // where the stock goes, not the product: "add two bottles of Taurus SC to
+  // inventory" must look up "Taurus SC" (the grammar captured the whole
+  // remainder, so the lookup failed and asked the operator to clarify).
+  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|(?:to|into)\s+(?:the\s+|our\s+)?(?:inventory|stock)|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
   if (deadline) {
@@ -984,6 +1672,8 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     // Only split it after that lookup misses, and never drop the preview date.
     literal = await resolveProduct({ product_name: name });
     if (!literal.product && !literal.candidates) {
+      // A missing/unresolvable deadline is not a product-identity problem —
+      // no grounding fallback here at all, operator-named or otherwise.
       if (!preview.needed_by) return unavailable;
       name = deadline[1].trim();
       literal = null;
@@ -993,6 +1683,11 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
     : name.replace(/^product\s+/i, '');
   const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
+  // The grammar found an explicit target here (a page deictic, or a named
+  // selector below). When that target can't be resolved, the operator asked
+  // for something specific the catalog doesn't show, so they are asked to
+  // clarify; the free-phrasing fallback never substitutes another mention
+  // ("Restock Unlisted Chemical instead of Taurus SC").
   if (deictic && !selector.product_id) return unavailable;
   const resolved = literal || await resolveProduct(selector);
   if (resolved.error) return { ...resolved, code: 'target_clarification_required' };

@@ -39,7 +39,7 @@ const engine = require('../services/photo-id-v2/pest-engine');
 
 const {
   buildAnswer, mapToV1, resolveCandidate, dedupeCandidates, isConsequential, isApproved,
-  identifyPestV2, REFERRAL_TEMPLATES,
+  identifyPestV2, REFERRAL_TEMPLATES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
 } = engine;
 
 // ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
@@ -133,6 +133,17 @@ describe('buildAnswer — entry-level naming', () => {
     expect(built.answer.level).toBe('group');
   });
 
+  test('owner_approved content with a stale hash cannot be named', () => {
+    const candidate = cand('ghost-ant', 0.95);
+    candidate.entry = JSON.parse(JSON.stringify(candidate.entry));
+    candidate.entry.copy.fact = 'Changed after approval.';
+    expect(isApproved(candidate.entry)).toBe(false);
+
+    const built = buildAnswer(baseCtx({ candidates: [candidate] }));
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'ants' });
+    expect(built.entry).toBeNull();
+  });
+
   test('an escalation trigger with no OpenAI answer can never read pretty_sure, even at 0.90', () => {
     const built = buildAnswer(baseCtx({
       candidates: [cand('fire-ant', 0.90)], escalationTriggered: true, openaiAnswered: false,
@@ -200,7 +211,7 @@ describe('buildAnswer — lineage climb', () => {
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
     expect(built.tier).toBe('needs_more_evidence');
     // Still gets retake guidance (pre-push audit on Codex #4916 r4).
-    expect(built.nextPhoto).toEqual({ ask: 'Other retake photo', why: 'Other retake why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 });
 
@@ -239,6 +250,12 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 
+  test('a sign-only read never names an organism entry (Codex #4974 r7)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.95, { traitsVisible: [1] })], evidenceKind: { shownKind: 'sign', hiddenKind: 'organism' } }));
+    expect(built.answer.level).not.toBe('entry');
+    expect(built.entry).toBeNull();
+  });
+
   test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
     expect(built.answer.wording).toBe('likely');
@@ -271,6 +288,34 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto).not.toBeNull();
     expect(built.nextPhoto.photo_can_confirm).toBe(false);
     expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a sign-only bite-pattern veto does not block a clear organism photo', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
+
+    const a = catalog.getEntry('no-photo-pair-a');
+    const b = catalog.getEntry('no-photo-pair-b');
+    expect(engine._test.pairBetween(a, b, 'sign').photo_can_confirm).toBe(false);
+    expect(engine._test.pairBetween(a, b, 'organism')).toBeNull();
+
+    const likely = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.60)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(likely.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  test("a sign-only veto does not govern when shows='both'", () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'both', hiddenKind: null }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
   });
 
   test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
@@ -309,9 +354,27 @@ describe('buildAnswer — next_photo', () => {
     });
   });
 
-  test('falls back to the node next_photo when there is no curated pair', () => {
+  test('the compared look-alike\'s warning rides with the comparison, even when it is not a candidate', () => {
+    // one-way-ant's own look-alike is fire-ant, which the model never listed.
+    const built = buildAnswer(baseCtx({ candidates: [cand('one-way-ant', 0.60)] }));
+    expect(built.answer.level).toBe('entry');
+    expect(built.candidatesBlock.map((c) => c.slug)).toEqual(['one-way-ant']);
+    expect(built.nextPhoto).toMatchObject({ photo_can_confirm: true, safety_line: 'Stings burn and can trigger allergic reactions.' });
+  });
+
+  test('an unapproved answer with no look-alike pair gets the fixed retake prompt', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('pending-verification-ant', 0.95)] }));
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  // Codex #5106 r1: climbing to a node withholds a look-alike pair's prose
+  // but must keep its "no photo can confirm" veto (another fixture entry
+  // lists unreviewed-ant as photo_can_confirm: false).
+  test('an unapproved answer that climbs to a node keeps a look-alike veto', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto).toEqual(NO_PHOTO_CONFIRMS);
   });
 
   test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
@@ -337,7 +400,28 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
     expect(built.answer.wording).toBe('likely');
     // The group's generic prompt stands in; nothing names the unapproved ant.
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  test('a stale look-alike approval hash blocks its name and pair prose on every pair path', () => {
+    const staleTarget = catalog.getEntry('white-footed-ant');
+    const originalFact = staleTarget.copy.fact;
+    staleTarget.copy.fact = 'Changed after approval.';
+    try {
+      const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65), cand('white-footed-ant', 0.3)] }));
+      expect(built.entry.look_alikes).toEqual([]);
+      expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+      expect(JSON.stringify(built)).not.toMatch(/white-footed|black all over/i);
+    } finally {
+      staleTarget.copy.fact = originalFact;
+    }
+  });
+
+  test('a reverse-edge veto brings its own safe wording, not the forward tip (Codex #4974 r6)', () => {
+    const { pairBetween } = engine._test;
+    const top = { slug: 'a', look_alikes: [{ slug: 'b', difference: 'Forward diff', next_photo: 'A close-up of the marking', photo_can_confirm: true }] };
+    const other = { slug: 'b', look_alikes: [{ slug: 'a', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false }] };
+    expect(pairBetween(top, other)).toEqual({ slug: 'b', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false });
   });
 
   test('a one-way curated pair is found from the runner-up\'s side (Codex #4916 r3)', () => {
@@ -402,6 +486,44 @@ describe('buildAnswer — candidates block hides an unapproved candidate\'s iden
     expect(unreviewed.scientific_name).toBeNull();
     expect(JSON.stringify(built)).not.toContain('Unreviewed Ant');
   });
+
+  test('indistinguishable draft candidates collapse without overstating confidence or local range', () => {
+    const draft = cand('unreviewed-ant', 0.8);
+    const candidates = [
+      draft,
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-two', range: 'rare' }, confidence: 0.7 },
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-three', range: 'occasional' }, confidence: 0.3 },
+    ];
+    expect(engine.candidatesBlockFor(candidates, CURRENT_MONTH)).toEqual([{
+      slug: null,
+      common_name: 'an ant',
+      scientific_name: null,
+      strength: 'possible',
+      difference_from_top: null,
+      local: null,
+      safety_line: null,
+    }]);
+  });
+
+  test('approved candidates remain separate named rows', () => {
+    const visible = engine.candidatesBlockFor([
+      cand('fire-ant', 0.85), cand('ghost-ant', 0.7), cand('white-footed-ant', 0.3),
+    ], CURRENT_MONTH);
+    expect(visible.map((candidate) => candidate.slug)).toEqual([
+      'fire-ant', 'ghost-ant', 'white-footed-ant',
+    ]);
+  });
+
+  test('a named alternative carries its own warning; a masked one carries none', () => {
+    const visible = engine.candidatesBlockFor([
+      cand('ghost-ant', 0.7), cand('fire-ant', 0.3), cand('unreviewed-ant', 0.2),
+    ], CURRENT_MONTH);
+    expect(visible.map((c) => [c.common_name, c.safety_line])).toEqual([
+      ['Ghost Ant', null],
+      ['Fire Ant', 'Stings burn and can trigger allergic reactions.'],
+      ['an ant', null],
+    ]);
+  });
 });
 
 describe('buildAnswer — evidence', () => {
@@ -453,6 +575,15 @@ describe('isConsequential', () => {
   });
   test('disease_vector makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: { disease_vector: true } })).toBe(true);
+  });
+  test('protected status makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { protected: true } })).toBe(true);
+  });
+  test.each([
+    ['medical risk', { verdict: 'watch', risk: 'medical', safety: {} }],
+    ['allergen safety', { verdict: 'watch', risk: 'low', safety: { allergen: true } }],
+  ])('%s makes a candidate consequential', (_label, entry) => {
+    expect(isConsequential(entry)).toBe(true);
   });
   test('inspection-first makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: {}, service: { inspection_first: true } })).toBe(true);
@@ -536,11 +667,12 @@ describe('mapToV1', () => {
     expect(v1.report_contract.urgency).toBe('high');
   });
 
-  test('an unapproved/climbed answer (no named entry at all) maps to the fully generic v1 default', () => {
+  test('an unapproved/climbed answer keeps its selected catalog category with generic v1 service defaults', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
     const v1 = mapToV1({ ...built, disagreed: false });
     expect(v1.species_slug).toBeNull();
-    expect(v1.category).toBe('other');
+    expect(v1.category).toBe('insect');
+    expect(v1.report_contract.identification.category).toBe('insect');
     expect(v1.report_contract.service.inspection_required).toBe(true);
   });
 
@@ -561,6 +693,20 @@ function candidatesReply(candidates, quality = { usable: true, issue: 'none' }, 
 }
 
 describe('identifyPestV2 — escalation triggers', () => {
+  test("preserves shows='both' so a sign-only veto does not govern the final answer", async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'no-photo-pair-a', confidence: 0.95 }], undefined, 'both'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'no-photo-pair-a', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(false);
+    expect(result.v2.answer).toMatchObject({ node_id: 'no-photo-pair-a', wording: 'pretty_sure' });
+    expect(result.v2.next_photo).toBeNull();
+    expect(result.v2.tier).toBe('ai_suggestion');
+  });
+
   test('Gemini missed entirely + OpenAI stands in ALONE with EMPTY trait arrays never reads pretty_sure — Codex round-0 P1 (round 10)', async () => {
     // Gemini's total failure means candidateContextFor had nothing to hand
     // OpenAI — its own escalation prompt tells it to report empty trait
@@ -641,6 +787,75 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.internal.escalation_reasons).toContain('low_confidence');
     expect(result.internal.disagreed).toBe(false);
     expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
+  });
+
+  test('provider agreement is recomputed after an organism-only read removes sign candidates', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: 'roof-rat', confidence: 0.60 }, { slug: 'fire-ant', confidence: 0.50 },
+      ], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'roof-rat', confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+        { slug: 'fire-ant', confidence: 0.50, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: 'organism',
+        candidates: [{ slug: 'fire-ant', confidence: 0.80, traits_visible: [1], traits_not_visible: [] }],
+      } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(true);
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.candidates.map((candidate) => candidate.slug)).not.toContain('roof-rat');
+  });
+
+  test.each([
+    ['organism', 'roof-rat', 'fire-ant'],
+    ['sign', 'fire-ant', 'roof-rat'],
+  ])('a high-confidence wrong-kind candidate cannot suppress %s escalation', async (shows, hiddenSlug, visibleSlug) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: hiddenSlug, confidence: 0.95 }, { slug: visibleSlug, confidence: 0.60 },
+      ], undefined, shows))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: hiddenSlug, confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+        { slug: visibleSlug, confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows,
+        candidates: [{ slug: visibleSlug, confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+      } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.candidates.map(candidate => candidate.slug)).not.toContain(hiddenSlug);
+  });
+
+  test.each([
+    ['invalid', { ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: {} } }],
+    ['timed out', { ok: false, reason: 'openai_timeout' }],
+  ])('an organism read cannot restore a sign candidate when escalation is %s', async (_outcome, escalationResult) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'termite-mud-tubes', confidence: 0.95 }], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'termite-mud-tubes', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce(escalationResult);
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.ok).toBe(true);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.v2.answer).toMatchObject({ level: 'unknown', node_id: null });
+    expect(result.v2.entry).toBeNull();
+    expect(result.v2.candidates).toEqual([]);
+    expect(result.v2.answer.headline).not.toMatch(/termite/i);
+    expect(result.v1).toMatchObject({ species_slug: null, service_line: 'pest', urgency: 'low' });
+    expect(result.v1.report_contract.safety).toMatchObject({
+      disease_vector: false, structural_threat: false,
+    });
   });
 
   test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
@@ -1056,6 +1271,14 @@ describe('combineEscalation — agreement only takes a CHECKED confidence (Codex
     expect(out.finalCandidates[0].confidence).toBe(0.7);
     expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
   });
+
+  test('provider disagreement is computed after candidates of the contradicted kind are removed', () => {
+    const gemini = [cand('roof-rat', 0.9), cand('fire-ant', 0.6)];
+    const out = combineEscalation(gemini, escalation(0.8), new Set(['fire-ant']), 'sign');
+    expect(out.disagreed).toBe(false);
+    expect(out.finalCandidates[0].slug).toBe('fire-ant');
+    expect(out.finalCandidates.every((candidate) => candidate.entry?.kind !== 'sign')).toBe(true);
+  });
 });
 
 describe('Codex #4916 r1', () => {
@@ -1162,5 +1385,129 @@ describe('pre-push audit on Codex #4916 r1: a "nothing" read never backs a named
     }
     const result = await identifyPestV2([PHOTO]);
     expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+});
+
+// ── L1 (species-catalog plant/condition sections): the pest engine reads
+// only the pest section. Every `catalog.listEntries()` call site in
+// pest-engine.js became `listEntries({ section: 'pest' })` in that PR — this
+// proves the filter actually excludes a non-pest entry, using a small
+// second fixture catalog (built with the SAME `buildFixtureCatalog` helper,
+// extended with a `section`-aware `listEntries`) rather than touching the
+// shared `FIXTURE` every other test in this file depends on. ─────────────
+describe('L1: pest engine reads only the pest section', () => {
+  const { buildFixtureCatalog } = require('./helpers/pest-engine-fixtures');
+  const { buildCatalogIndexText } = require('../services/photo-id-v2/pest-engine-prompts');
+
+  const mixedSectionCatalog = buildFixtureCatalog({
+    categories: {
+      // No explicit `section` — mirrors every pre-existing pest category,
+      // which defaults to 'pest' (see species-catalog.js#sectionOf).
+      insect: { label: 'Insect', generic: 'an insect' },
+      plant: { label: 'Plant', generic: 'a plant', section: 'plant' },
+    },
+    groups: [
+      { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
+      { id: 'turfgrasses', label: 'Lawn grasses', category: 'plant', generic: 'a lawn grass' },
+    ],
+    entries: [
+      { slug: 'fixture-pest-ant', common_name: 'Fixture Pest Ant', scientific_name: 'Testus pestus', kind: 'organism', group: 'ants', subgroup: null, look_alikes: [] },
+      { slug: 'fixture-plant-entry', common_name: 'Fixture Plant Entry', scientific_name: 'Testus plantus', kind: 'turfgrass', group: 'turfgrasses', subgroup: null, look_alikes: [] },
+    ],
+  });
+
+  test('listEntries({ section: "pest" }) excludes a plant-section entry', () => {
+    const pestOnly = mixedSectionCatalog.listEntries({ section: 'pest' });
+    expect(pestOnly.map((e) => e.slug)).toEqual(['fixture-pest-ant']);
+  });
+
+  test('the pest engine catalog index text (candidates/escalation prompt input) never names a non-pest entry', () => {
+    const pestOnly = mixedSectionCatalog.listEntries({ section: 'pest' });
+    const text = buildCatalogIndexText(pestOnly);
+    expect(text).toContain('Fixture Pest Ant');
+    expect(text).not.toContain('Fixture Plant Entry');
+    expect(text).not.toContain('turfgrasses');
+  });
+
+  test('listEntries({ section: "pest" }) excludes L1b\'s 119 plant/condition entries from the real catalog data', () => {
+    // The real, un-mocked loader — not the FIXTURE this file mocks
+    // `../services/species-catalog` to. L1b landed 119 draft plant/condition
+    // entries (72 plant + 47 condition); filtering to the pest section must
+    // exclude every one of them, leaving the pre-existing 239 pest entries
+    // untouched.
+    const real = jest.requireActual('../services/species-catalog');
+    const all = real.listEntries();
+    const pestOnly = real.listEntries({ section: 'pest' });
+    // 358 approved + the 19 draft entries of the 2026-09-30 yard-rotation
+    // set (7 pest, 4 plant, 8 condition).
+    expect(all.length).toBe(377);
+    expect(pestOnly.length).toBe(246);
+    expect(pestOnly.every((e) => real.sectionOf(e) === 'pest')).toBe(true);
+    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(131);
+  });
+
+  // Codex #5143 r1 P2: filtering the PROMPT to pest-section entries doesn't
+  // bound what the model can hand back — a hallucinated or leaked slug/group
+  // id could still resolve to a real, non-pest node once plant/condition
+  // content exists. `resolveCandidate`/`candidateNodeId` are the one place
+  // every model-returned identifier becomes a catalog node (candidates,
+  // verify's merge-by-slug, and escalation all route through them), so the
+  // section guard belongs there too. Uses a fresh, isolated require of
+  // `pest-engine.js` bound to its own small mixed-section catalog (built
+  // with `buildFixtureCatalog`) — never the shared `FIXTURE` — so no other
+  // test in this file is affected.
+  describe('resolution boundary: a model-returned identifier outside the pest section is rejected', () => {
+    let freshEngine;
+
+    beforeAll(() => {
+      jest.isolateModules(() => {
+        const { buildFixtureCatalog } = require('./helpers/pest-engine-fixtures');
+        const mixed = buildFixtureCatalog({
+          categories: {
+            insect: { label: 'Insect', generic: 'an insect' },
+            plant: { label: 'Plant', generic: 'a plant', section: 'plant' },
+          },
+          groups: [
+            { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
+            { id: 'turfgrasses', label: 'Lawn grasses', category: 'plant', generic: 'a lawn grass' },
+          ],
+          entries: [
+            {
+              slug: 'fire-ant', common_name: 'Fire Ant', scientific_name: 'Solenopsis invicta', kind: 'organism',
+              group: 'ants', subgroup: null, look_alikes: [], traits: ['Reddish-brown mound builders'],
+            },
+            {
+              slug: 'st-augustinegrass', common_name: 'St. Augustinegrass', scientific_name: 'Stenotaphrum secundatum', kind: 'turfgrass',
+              group: 'turfgrasses', subgroup: null, look_alikes: [], traits: ['Coarse, rolled blades'],
+            },
+          ],
+        });
+        jest.doMock('../services/species-catalog', () => mixed);
+        freshEngine = require('../services/photo-id-v2/pest-engine');
+      });
+    });
+
+    test('a model-returned SLUG that resolves to a plant-section entry is rejected — off-catalog, never a v2 entry', () => {
+      const resolved = freshEngine.resolveCandidate({ slug: 'st-augustinegrass', group_id: 'turfgrasses', confidence: 0.9 });
+      expect(resolved.entry).toBeNull();
+      expect(resolved.slug).toBeNull();
+      expect(freshEngine.candidateNodeId(resolved)).toBeNull();
+    });
+
+    test('a model-returned GROUP_ID naming a plant-section group (off-catalog answer) is rejected the same way', () => {
+      const offCatalog = freshEngine.resolveCandidate({ slug: '', off_catalog_name: 'Some Grass', group_id: 'turfgrasses', confidence: 0.7 });
+      expect(offCatalog.entry).toBeNull();
+      expect(freshEngine.candidateNodeId(offCatalog)).toBeNull();
+    });
+
+    test('a real pest slug and a real pest group_id still resolve exactly as before', () => {
+      const resolved = freshEngine.resolveCandidate({ slug: 'fire-ant', confidence: 0.9 });
+      expect(resolved.entry).toBeTruthy();
+      expect(resolved.entry.slug).toBe('fire-ant');
+      expect(freshEngine.candidateNodeId(resolved)).toBe('fire-ant');
+
+      const offCatalogPest = freshEngine.resolveCandidate({ slug: '', off_catalog_name: 'Some Ant', group_id: 'ants', confidence: 0.6 });
+      expect(freshEngine.candidateNodeId(offCatalogPest)).toBe('ants');
+    });
   });
 });

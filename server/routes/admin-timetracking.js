@@ -25,6 +25,7 @@ const {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
 } = require('../utils/staff-identity');
+const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
 
@@ -741,6 +742,10 @@ async function createTechnician(req, res, next) {
     }
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+    // Owner-only access model (owner ruling 2026-09-28) — a brand-new row
+    // has nothing to strip (fromEmail: null), only a possible assignment.
+    const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: null, toEmail: normalizedEmail.value });
+    if (fullAccessEmailGuard) return res.status(403).json(fullAccessEmailGuard);
     if (!normalizedEmail.value && status === 'active') {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }
@@ -880,6 +885,20 @@ async function updateTechnician(req, res, next) {
       const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
       const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
       const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
+      // Owner-only access model (owner ruling 2026-09-28): gated on an
+      // ACTUAL change (emailChanged), never on the edit form simply
+      // resending the row's existing, unchanged email — an ordinary edit
+      // of another field on the owner's own profile by a different admin
+      // must not be blocked just because the payload still carries it.
+      // Both directions covered: assigning a full-access email to this row
+      // (toEmail), and moving this row's CURRENT full-access email away to
+      // something else (fromEmail: storedEmail) — the latter would
+      // otherwise let a non-owner admin permanently strip the owner's own
+      // access with no in-product way to reassign it back.
+      if (emailChanged) {
+        const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: normalizedEmail.value });
+        if (fullAccessEmailGuard) return { fullAccessEmailGuard };
+      }
       const credentialsChanged = activeChanged || emailChanged;
       if (credentialsChanged) {
         updates.auth_token_version = Number(target.auth_token_version || 0) + 1;
@@ -914,6 +933,7 @@ async function updateTechnician(req, res, next) {
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
     if (outcome.missingEmail) {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }

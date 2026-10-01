@@ -188,6 +188,67 @@ describe('resolveCompletionDefaultProductNames methodsByName', () => {
   });
 });
 
+// ---- follow-up visit override (Codex r3 P1, PR #5049) ----
+//
+// POST /:serviceId/schedule-followup books a follow-up child by copying
+// its source visit's service_type verbatim and marking it ONLY with
+// scheduled_services.followup_source_service_id — text/service-key
+// matching alone resolves it back to the SOURCE visit's own rule.
+// isFollowup overrides the resolved visit to the matched program's own
+// follow-up visit, found from protocol-matcher's MATCH_RULES table
+// (reason ending "_followup"), never a hard-coded visit number.
+describe('resolveCompletionDefaultProductNames isFollowup (Codex r3 P1, PR #5049)', () => {
+  const protocols = {
+    cockroach: {
+      visits: [
+        { visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait'] },
+        { visit: 2, month: 'Any' },
+        // No completionDefaultProducts today — matches real protocols.json.
+        { visit: 3, month: 'Any' },
+      ],
+    },
+    pest: {
+      visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Taurus SC'] }],
+    },
+  };
+
+  test('a follow-up child of a cockroach service resolves visit 3 (reason cockroach_followup), source none — never the visit-1 cleanout mix', () => {
+    const result = resolveCompletionDefaultProductNames({
+      protocols, serviceType: 'Cockroach Control Service', isFollowup: true,
+    });
+    expect(result.programKey).toBe('cockroach');
+    expect(result.matchedVisit).toEqual({ visit: 3, reason: 'cockroach_followup', matched: true });
+    expect(result.source).toBe('none');
+    expect(result.names).toEqual([]);
+  });
+
+  test('without isFollowup the same service still resolves visit 1 as usual (regression)', () => {
+    const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'Cockroach Control Service' });
+    expect(result.programKey).toBe('cockroach');
+    expect(result.matchedVisit).toEqual({ visit: 1, reason: 'cockroach_control', matched: true });
+    expect(result.source).toBe('protocol_visit');
+  });
+
+  test('isFollowup on a program with no follow-up rule (pest) leaves the normal resolution untouched', () => {
+    const result = resolveCompletionDefaultProductNames({
+      protocols, serviceType: 'General Pest Control (Quarterly)', isFollowup: true,
+    });
+    expect(result.programKey).toBe('pest');
+    expect(result.matchedVisit.visit).toBe(1);
+    expect(result.source).toBe('protocol_visit');
+    expect(result.names).toEqual(['Taurus SC']);
+  });
+
+  test('isFollowup true but this protocols object has no visit 3 for cockroach falls back to the normal visit, never throws', () => {
+    const noVisit3 = { cockroach: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG'] }] } };
+    const result = resolveCompletionDefaultProductNames({
+      protocols: noVisit3, serviceType: 'Cockroach Control Service', isFollowup: true,
+    });
+    expect(result.matchedVisit.visit).toBe(1);
+    expect(result.source).toBe('protocol_visit');
+  });
+});
+
 // ---- calendar month from a DATE column (pre-push audit P1) ----
 //
 // scheduled_date is a DATE column with no time-of-day. The bug: building
@@ -425,15 +486,20 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
       ],
     },
     cockroach: {
-      visits: [{
-        visit: 1, month: 'Any',
-        completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait'],
-        lineMeta: {
-          'Crack-and-crevice treatment': { catalogProductHints: ['Alpine WSG'], completionApplicationMethod: 'spot_treatment' },
-          'IGR point-source': { catalogProductHints: ['Gentrol IGR'], completionApplicationMethod: 'spot_treatment' },
-          'Gel bait': { catalogProductHints: ['Advion Cockroach Gel Bait'], completionApplicationMethod: 'bait_placement' },
+      visits: [
+        {
+          visit: 1, month: 'Any',
+          completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait'],
+          lineMeta: {
+            'Crack-and-crevice treatment': { catalogProductHints: ['Alpine WSG'], completionApplicationMethod: 'spot_treatment' },
+            'IGR point-source': { catalogProductHints: ['Gentrol IGR'], completionApplicationMethod: 'spot_treatment' },
+            'Gel bait': { catalogProductHints: ['Advion Cockroach Gel Bait'], completionApplicationMethod: 'bait_placement' },
+          },
         },
-      }],
+        // Visit 3 (protocol-matcher.js reason 'cockroach_followup') — no
+        // completionDefaultProducts today, matching real protocols.json.
+        { visit: 3, month: 'Any' },
+      ],
     },
     lawn: { st_augustine: { visits: [{ visit: 1, month: 'Jan' }] } },
   };
@@ -510,6 +576,42 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
 
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-5', protocols: noMethodProtocols });
     expect(result.products[0].completionApplicationMethod).toBeNull();
+  });
+
+  test('a follow-up child of a cockroach service (followup_source_service_id set) resolves visit 3, source none — never the visit-1 cleanout mix (Codex r3 P1, PR #5049)', async () => {
+    const tables = catalogTables();
+    tables.scheduled_services = [{
+      id: 'svc-followup-1', service_id: null, service_type: 'Cockroach Control Service',
+      service_key_snapshot: 'cockroach_control', scheduled_date: '2026-10-01',
+      // schedule-followup copies service_type/service_key verbatim from the
+      // source visit — only this column marks it as a follow-up child.
+      followup_source_service_id: 'svc-3-source',
+    }];
+    const db = fakeDb(tables);
+
+    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-followup-1', protocols });
+    expect(result.programKey).toBe('cockroach');
+    expect(result.matchedVisit).toEqual({ visit: 3, reason: 'cockroach_followup', matched: true });
+    expect(result.source).toBe('none');
+    expect(result.products).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  test('a normal (non-follow-up) cockroach visit is unaffected: followup_source_service_id null still resolves visit 1 (regression)', async () => {
+    const tables = catalogTables();
+    tables.scheduled_services = [{
+      id: 'svc-6', service_id: null, service_type: 'Cockroach Control Service',
+      service_key_snapshot: 'cockroach_control', scheduled_date: '2026-10-01',
+      followup_source_service_id: null,
+    }];
+    const db = fakeDb(tables);
+
+    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-6', protocols });
+    expect(result.matchedVisit.visit).toBe(1);
+    expect(result.source).toBe('protocol_visit');
+    expect(result.products.map((p) => p.name).sort()).toEqual(
+      ['Advion Cockroach Gel Bait', 'Alpine WSG', 'Gentrol IGR'].sort(),
+    );
   });
 
   test('lawn is excluded end to end: no products, source excluded_lawn', async () => {

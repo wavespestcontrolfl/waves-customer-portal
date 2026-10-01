@@ -19,7 +19,7 @@ const logger = require('./logger');
 const { sendCustomerMessage, normalizeRecipient, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
-const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { deliveredTexts } = require('./messaging/auto-text-holds');
 
 /**
  * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
@@ -176,16 +176,13 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
   if (since) {
     // Any text either way since the form: the customer replied, or staff
     // already answered from the Inbox (which leaves lead status untouched).
-    // Outbound counts only when Twilio actually accepted it (a real SM/MM
-    // sid, not scheduled/cancelled/failed): a reply staff merely scheduled
-    // has reached nobody.
-    // An unresolved send reservation (a 'sending' placeholder) is not a text.
-    const exchanged = await excludeUnresolvedSendReservations(conn('sms_log'))
-      .where((q) => q.where({ direction: 'inbound' })
-        .orWhere((out) => out.where({ direction: 'outbound' })
-          .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
-          .where((st) => st.whereNull('status')
-            .orWhereNotIn('status', ['scheduled', 'cancelled', 'canceled', 'failed', 'undelivered']))))
+    // deliveredTexts (messaging/auto-text-holds.js) is the one definition of
+    // "a text that reached the other side", shared with the voicemail and
+    // missed-call text holds: outbound counts only when Twilio actually
+    // accepted it (a real SM/MM sid, not scheduled/cancelled/failed — a reply
+    // staff merely scheduled has reached nobody), and an unresolved send
+    // reservation (a 'sending' placeholder) is never a text.
+    const exchanged = await deliveredTexts(conn)
       .where('created_at', '>=', since)
       .where((q) => q.where({ customer_id: customerId })
         .orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits])
@@ -314,6 +311,7 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
       original_message_type: 'auto_reply',
       customerLocationId: location.id,
       lead_source: leadSource.source,
+      templateKey: 'lead_auto_reply_biz',
     },
   }).catch(async (err) => {
     await resolveLeadAutoReplyClaim(phoneDigits, err?.providerOutcome || null);

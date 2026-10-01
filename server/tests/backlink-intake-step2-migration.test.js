@@ -55,8 +55,18 @@ const colOf = (cols, name) => cols.find((c) => c.args[0] === name);
 const hasMod = (col, mod, args) => col.mods.some(([m, a]) => m === mod && (args === undefined || JSON.stringify(a) === JSON.stringify(args)));
 
 describe('frozen enum literals == services/seo/link-registry.js', () => {
-  test.each([['LINK_SOURCES'], ['INTAKE_ITEM_STATES'], ['INTAKE_DROP_REASONS']])('%s', (name) => {
+  test.each([['INTAKE_ITEM_STATES'], ['INTAKE_DROP_REASONS']])('%s', (name) => {
     expect(literal(name)).toEqual([...R[name]]);
+  });
+  // seo_link_intake_items.source keeps the step-1/2 CHECK set: `ai_citation`
+  // (20260928050000) never writes an intake item — the AEO feeder resolves
+  // fully-qualified citation URLs itself and goes through ensureDomain
+  // directly (link-registry-gap-ingest.js's shape), never the pasted/CSV
+  // reference-resolution flow `intake()` owns. The step-1 literal is still a
+  // PREFIX of the live enum, same convention as the other frozen-CHECK tests.
+  test('LINK_SOURCES: the step-1/2 literal is a prefix of the service enum (ai_citation is never an intake-item source)', () => {
+    const step2 = literal('LINK_SOURCES');
+    expect([...R.LINK_SOURCES].slice(0, step2.length)).toEqual(step2);
   });
   test('the migration requires no service enum (literals are frozen at migration time)', () => {
     expect(src).not.toMatch(/require\(['"][^'"]*link-registry['"]\)/);

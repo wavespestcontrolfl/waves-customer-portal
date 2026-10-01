@@ -17,8 +17,9 @@
  * (this.sandbox === true) and takes precedence over the inbound override, so
  * the owner can A/B a candidate model on the sandbox line without touching
  * production inbound calls. Precedence, highest first:
- *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
- *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ * (every link before the code default is validated; a refused one falls to the next)
  * Every override is checked against an allowlist derived from
  * MODELS.MODEL_CATALOG (Anthropic, text-capable, not `requires: 'deep'` —
  * this lane always runs `thinking: 'disabled'`, which Fable/Mythos ids
@@ -32,6 +33,57 @@
  * MODEL export stays the plain VOICE_RELAY_MODEL/MODELS.VOICE resolution for
  * any other importer (e.g. collections-conversation.js's own independent
  * read of the same env).
+ *
+ * GATE_VOICE_RELAY_OPENAI (off in production): while live, the SANDBOX and
+ * INBOUND override envs above may also resolve to an OpenAI model
+ * MODEL_CATALOG marks voice-eligible (`voice: {...}` — config/models.js), but
+ * only for a sandbox session or an eval-harness session (`evalHarness`,
+ * voice-relay-replay.js) — an ordinary production inbound call rejects an
+ * OpenAI override under THIS gate even with it on, and so does the shared
+ * VOICE_RELAY_MODEL fallback (isAllowedOverrideModel / allowedOverrideModelIds
+ * read the gate at call time; see there).
+ *
+ * GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28: GPT-6 Luna after
+ * the benchmark — ships DARK, off unless exactly 'true'): a SEPARATE gate,
+ * read the same way, that lets an ordinary PRODUCTION INBOUND session (never
+ * sandbox, never eval-harness) resolve VOICE_RELAY_INBOUND_MODEL to a
+ * voice-eligible OpenAI id. GATE_VOICE_RELAY_OPENAI being live in prod for
+ * the sandbox/eval lane never opens this — the two gates are independent.
+ * The shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only
+ * regardless of either gate (collections-conversation.js shares it).
+ *
+ * Whichever gate admits it, the resolved session picks its client by
+ * MODEL_CATALOG[this.model].provider (`this._provider`, pinned alongside
+ * `this.model`): 'anthropic' runs the unchanged `anthropic.messages.stream(...)`
+ * path below; 'openai' runs relay-openai-client.js's adapter, which exposes
+ * the same stream/on/finalMessage surface. voiceEffortFor returns null for
+ * any non-Anthropic model id (its capability regexes only match `claude-*`),
+ * so an OpenAI round never sends `output_config` — the OpenAI adapter maps
+ * its own per-model reasoning effort from MODEL_CATALOG's `voice.reasoning`
+ * instead.
+ *
+ * OpenAI provider-failure fallback (production inbound AND sandbox; NEVER
+ * eval-harness — the benchmark must measure the pure model): an OpenAI
+ * round that fails for a PROVIDER reason — a request error, a non-2xx, a
+ * stream error, or the STREAM_TIMEOUT_MS timeout — is NOT the silent
+ * re-run this file used to promise. `_runModelRound` (see its doc comment)
+ * switches the session onto the Anthropic model the validated shared chain
+ * (VOICE_RELAY_MODEL → MODEL_VOICE → the registry default,
+ * resolveSharedAnthropicChain) resolves and retries THAT SAME round once on
+ * Claude, ONLY when nothing of the round has reached the caller's ear yet —
+ * a caller barge-in abort, a session supersession, or a round that already
+ * spoke (streamed a piece) is never retried this way; a barge-in still
+ * takes the unchanged early-exit path, and a round that already spoke just
+ * lets the switch stand for the NEXT round instead of replaying from the
+ * top (never double-speaks). Anthropic-only history fields (`_openai`
+ * reasoning-replay extras on a tool_use block — see relay-openai-client.js)
+ * are stripped from `this.messages` at the moment of the switch
+ * (stripOpenAIHistoryExtras). One switch per call
+ * (`this._modelSwitch`, stamped `{ from, to, reason, turn }` in
+ * `_versionStamps()` and `stat.modelSwitched` per turn); a second OpenAI
+ * failure after the switch — impossible, since the switched-to model is
+ * Anthropic — or a Claude failure on the retried round both run the
+ * ordinary `_modelFailures` / provider-failure-handoff path unchanged.
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
@@ -81,6 +133,7 @@ const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
+const { anthropicMaxTokens } = require('../llm/anthropic-wire');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -134,6 +187,14 @@ function deriveRelayEventsSubscribed(relayProfileId) {
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// The shared chain under the inbound overrides, read at the same moment as
+// MODEL: VOICE_RELAY_MODEL, then the VOICE tier (MODEL_VOICE) — each link
+// taken only as an allowlisted Anthropic id (resolveSessionModel), the same
+// links the Models tab's inbound row walks (model-switchboard.js voice_relay).
+const SHARED_MODEL_CHAIN = [
+  { source: 'VOICE_RELAY_MODEL', value: process.env.VOICE_RELAY_MODEL || null },
+  { source: 'MODEL_VOICE', value: MODELS.VOICE },
+];
 
 // Env names for the two inbound-only override levers (see the file header),
 // used in log/stamp text. The reads below name process.env.VOICE_RELAY_* directly
@@ -147,20 +208,128 @@ const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
 // (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
 // a new/retired Anthropic id needs no change here. Anthropic + text-capable
 // only (this lane never sends images); `requires: 'deep'` ids (Fable/Mythos)
-// are excluded because only services/llm/deep.js knows how to run them — this
-// lane sends `thinking: { type: 'disabled' }`, which those models reject.
+// are excluded because only services/llm/deep.js knows how to run them, and
+// thinking-always-on ids (Opus 5.5+ — MODELS.anthropicThinkingAlwaysOn) are
+// excluded for the same reason as Fable/Mythos: this production allowlist
+// backs a request that always sends `thinking: { type: 'disabled' }`, which
+// both reject. A thinking-always-on id is still reachable — see
+// ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS below — just never through this
+// production-wide Set.
 const ALLOWED_OVERRIDE_MODEL_IDS = new Set(
   Object.entries(MODELS.MODEL_CATALOG)
-    .filter(([, meta]) => meta
+    .filter(([id, meta]) => meta
       && meta.provider === 'anthropic'
       && Array.isArray(meta.caps) && meta.caps.includes('text')
       && meta.status !== 'unavailable'
-      && !meta.requires)
+      && !meta.requires
+      && !MODELS.anthropicThinkingAlwaysOn(id))
     .map(([id]) => id)
 );
 
-function isAllowedOverrideModel(id) {
-  return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
+// GATE_VOICE_RELAY_OPENAI (server/config/feature-gates.js voiceRelayOpenaiLive,
+// unset/off in production): the SAME override envs above may also resolve to
+// an OpenAI model — server/services/voice-agent/relay-openai-client.js — for
+// the benchmark/sandbox lane, but ONLY a model MODEL_CATALOG marks
+// voice-eligible (a `voice` object — see config/models.js) AND only while
+// this gate is live. Read at CALL time (not baked into the Set above) so a
+// gate flip needs no redeploy and never widens the allowlist for a session
+// that already resolved before the flip (resolveSessionModel runs once, at
+// construction). Off ⇒ isAllowedOverrideModel behaves exactly as before this
+// lane existed — Anthropic text models only.
+const OPENAI_VOICE_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([, meta]) => meta
+      && meta.provider === 'openai'
+      && meta.voice && typeof meta.voice === 'object'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable')
+    .map(([id]) => id)
+);
+
+// Thinking-always-on Anthropic ids the catalog marks voice-eligible (a
+// `voice` object — Opus 5.5; Fable/Mythos carry none, since only deep.js
+// handles their refusals), held out of the production allowlist above — reachable ONLY for a sandbox
+// test call or the eval/benchmark harness (the same `openaiContext` flag the
+// OpenAI ids use), never production inbound and never the shared
+// VOICE_RELAY_MODEL / MODEL_VOICE chain (SHARED_MODEL_CHAIN below is
+// validated against ALLOWED_OVERRIDE_MODEL_IDS alone, not this Set). Unlike
+// the OpenAI ids, these need no feature gate: they are plain Anthropic, run
+// through the exact same client, and only change the request shape (no
+// `thinking: disabled`, max_tokens raised — see the request build below).
+const ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([id, meta]) => meta
+      && meta.provider === 'anthropic'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable'
+      && meta.voice && typeof meta.voice === 'object'
+      && MODELS.anthropicThinkingAlwaysOn(id))
+    .map(([id]) => id)
+);
+
+/**
+ * GATE_VOICE_RELAY_OPENAI, live — feature-gates.js's canonical
+ * voiceRelayOpenaiLive() alone (same convention as discountStackingLive, so
+ * the gate shows up in that module's status listing too). Read only for a
+ * sandbox or eval-harness session (allowedOverrideModelIds), so a suite that
+ * stubs feature-gates and builds one of those exposes voiceRelayOpenaiLive
+ * in its stub.
+ */
+function voiceRelayOpenaiGateLive() {
+  return require('../../config/feature-gates').voiceRelayOpenaiLive();
+}
+
+/**
+ * GATE_VOICE_RELAY_OPENAI_INBOUND, live — feature-gates.js's canonical
+ * voiceRelayOpenaiInboundLive() alone. Ships DARK (off unless exactly
+ * 'true'). A SEPARATE gate from voiceRelayOpenaiGateLive() above — that one
+ * is already live in prod for the sandbox/eval lane and must never be read
+ * as authorizing PRODUCTION inbound. Read only for an ordinary production
+ * inbound session (allowedOverrideModelIds' `inboundOpenaiContext`), so a
+ * suite that stubs feature-gates and builds one exposes this function in
+ * its stub too.
+ */
+function voiceRelayOpenaiInboundGateLive() {
+  return require('../../config/feature-gates').voiceRelayOpenaiInboundLive();
+}
+
+/**
+ * The override allowlist for ONE session — gate-aware, always fresh.
+ *
+ * `openaiContext` (a sandbox test call or the eval/benchmark harness, never
+ * an ordinary production inbound call): OpenAI ids join under
+ * GATE_VOICE_RELAY_OPENAI, and thinking-always-on Anthropic ids (Opus 5.5+)
+ * join unconditionally — they are plain Anthropic, just a different request
+ * shape (see ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS above).
+ *
+ * `inboundOpenaiContext` (an ordinary production inbound session, and ONLY
+ * that — never set alongside `openaiContext`): OpenAI ids join under the
+ * SEPARATE GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28); the
+ * thinking-always-on Anthropic ids do NOT join here — those stay
+ * sandbox/eval-only regardless of this gate.
+ *
+ * With neither flag set (the default, and what the Models tab's inbound row
+ * reads when the gate is off) the list is Anthropic-only, thinking-always-on
+ * ids excluded, whatever either gate or the override envs say — production
+ * inbound stays on Claude unless GATE_VOICE_RELAY_OPENAI_INBOUND is live
+ * (docs/sandy-benchmark.md "OpenAI candidates").
+ */
+function allowedOverrideModelIds({ openaiContext = false, inboundOpenaiContext = false } = {}) {
+  if (openaiContext === true) {
+    const ids = new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS]);
+    if (voiceRelayOpenaiGateLive()) for (const id of OPENAI_VOICE_OVERRIDE_MODEL_IDS) ids.add(id);
+    return ids;
+  }
+  if (inboundOpenaiContext === true && voiceRelayOpenaiInboundGateLive()) {
+    const ids = new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+    for (const id of OPENAI_VOICE_OVERRIDE_MODEL_IDS) ids.add(id);
+    return ids;
+  }
+  return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+}
+
+function isAllowedOverrideModel(id, opts) {
+  return typeof id === 'string' && id.length > 0 && allowedOverrideModelIds(opts).has(id);
 }
 
 // A misconfigured override is re-read by every new call; the per-session
@@ -168,11 +337,11 @@ function isAllowedOverrideModel(id) {
 // the whole allowlist) is logged once per process per source/value — the
 // relay-profiles.js warnOnce pattern — so a busy line cannot flood the logs.
 const warnedOverrides = new Set();
-function warnRejectedOverrideOnce(source, value) {
+function warnRejectedOverrideOnce(source, value, opts) {
   const key = `${source}=${value}`;
   if (warnedOverrides.has(key)) return;
   warnedOverrides.add(key);
-  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...allowedOverrideModelIds(opts)].join(', ')})`);
 }
 
 /**
@@ -188,8 +357,39 @@ function warnRejectedOverrideOnce(source, value) {
  * `fallbackReason` even if a lower-precedence override or the shared default
  * ends up running instead — the version stamp must show a rejection happened
  * even when the call still ran on a legitimate (if less-preferred) model.
+ *
+ * The shared chain (VOICE_RELAY_MODEL, then MODELS.VOICE / MODEL_VOICE, both
+ * read at module load) is validated here too — the resolved model no longer
+ * only shapes request params, it SELECTS THE PROVIDER CLIENT (providerFor,
+ * used by the constructor right after this returns). Each link is taken only
+ * as an allowlisted Anthropic id; a refused one (an OpenAI id, one this
+ * registry never marked voice-eligible, or any id it does not recognize) is
+ * logged once, recorded as `fallbackReason` if it is the first rejection,
+ * and falls to the next link, finally the registry's own code default
+ * (MODELS.DEFAULTS.VOICE — always a valid, allowlisted Anthropic id). The
+ * Models tab's inbound row walks the same validated chain
+ * (model-switchboard.js voice_relay), so it shows what actually runs.
+ *
+ * OpenAI ids are eligible for a sandbox session or an eval-harness session
+ * (`evalHarness`, set by services/eval/voice-relay-replay.js alone — the
+ * Twilio relay server never passes it) under GATE_VOICE_RELAY_OPENAI, OR —
+ * separately — for an ordinary production inbound session (neither sandbox
+ * nor eval-harness) under GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling
+ * 2026-09-28). The two gates are independent: production inbound rejects an
+ * OpenAI override whenever GATE_VOICE_RELAY_OPENAI_INBOUND is off, even
+ * with GATE_VOICE_RELAY_OPENAI on, and vice versa for sandbox/eval.
  */
-function resolveSessionModel({ sandbox } = {}) {
+function sessionAllowOpts({ sandbox, evalHarness } = {}) {
+  const sandboxOrEval = sandbox === true || evalHarness === true;
+  return {
+    openaiContext: sandboxOrEval,
+    // Production inbound only — never set alongside openaiContext above.
+    inboundOpenaiContext: !sandboxOrEval,
+  };
+}
+
+function resolveSessionModel({ sandbox, evalHarness } = {}) {
+  const allowOpts = sessionAllowOpts({ sandbox, evalHarness });
   const candidates = [];
   if (sandbox === true) {
     const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
@@ -200,15 +400,75 @@ function resolveSessionModel({ sandbox } = {}) {
 
   let fallbackReason = null;
   for (const { source, value } of candidates) {
-    if (isAllowedOverrideModel(value)) {
+    if (isAllowedOverrideModel(value, allowOpts)) {
       return { model: value, fallbackReason };
     }
     if (!fallbackReason) {
       fallbackReason = `unknown_model_override:${source}=${value}`;
+      warnRejectedOverrideOnce(source, value, allowOpts);
+    }
+  }
+  // The shared chain — VOICE_RELAY_MODEL, then MODEL_VOICE — takes the
+  // Anthropic allowlist alone, gate or no gate: VOICE_RELAY_MODEL is shared
+  // with collections-conversation.js, which only speaks Anthropic, and
+  // OpenAI is reachable only via the inbound/sandbox overrides above. A
+  // rejected link falls to the next one, then to the registry's code default.
+  return resolveSharedAnthropicChain(fallbackReason);
+}
+
+/**
+ * The shared VOICE_RELAY_MODEL → MODEL_VOICE → code-default chain alone
+ * (Anthropic allowlist only) — factored out of resolveSessionModel's own
+ * tail so the mid-call OpenAI provider-failure fallback below
+ * (_switchToClaudeFallback) can resolve to the EXACT SAME model a plain
+ * non-override session would already be running, instead of hand-rolling a
+ * second walk of the chain. `startFallbackReason` lets resolveSessionModel
+ * carry an earlier override rejection's reason through unchanged; the
+ * mid-call fallback always calls this with `null` — a provider switch is
+ * not itself an "override rejected" event, so it must never be reported as
+ * one on the switched-to model's own (fresh) session.
+ */
+function resolveSharedAnthropicChain(startFallbackReason = null) {
+  let fallbackReason = startFallbackReason;
+  for (const { source, value } of SHARED_MODEL_CHAIN) {
+    if (!value) continue;
+    if (ALLOWED_OVERRIDE_MODEL_IDS.has(value)) return { model: value, fallbackReason };
+    if (!fallbackReason) {
+      fallbackReason = `unknown_shared_model:${source}=${value}`;
       warnRejectedOverrideOnce(source, value);
     }
   }
-  return { model: MODEL, fallbackReason };
+  return { model: MODELS.DEFAULTS.VOICE, fallbackReason };
+}
+
+/**
+ * Strip the OpenAI adapter's private `_openai` reasoning-replay extra
+ * (relay-openai-client.js's mapResponseToMessage) off every tool_use block
+ * in `messages`, in place. Called once, by the mid-call provider-failure
+ * switch below, the moment a session leaves the OpenAI provider — history
+ * built while this session ran on OpenAI may carry that extra on a
+ * successful round's first tool_use block, and it must not ride into a
+ * request built for the Anthropic client. Deleting the key leaves the block
+ * (and its tool_use/tool_result pairing) otherwise untouched.
+ *
+ * Also drops blank text blocks: the adapter keeps an empty `output_text`
+ * part beside a tool call (mapResponseToMessage only refuses a blank reply
+ * with NO tool call), and the Anthropic Messages API rejects an empty or
+ * whitespace-only text block — one left in history would fail every Claude
+ * round after the switch. A block is dropped only while something else stays
+ * in that message, so no message is left with empty content.
+ */
+function stripOpenAIHistoryExtras(messages) {
+  for (const m of messages || []) {
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block && block.type === 'tool_use' && Object.prototype.hasOwnProperty.call(block, '_openai')) {
+        delete block._openai;
+      }
+    }
+    const kept = m.content.filter((b) => !(b && b.type === 'text' && !String(b.text || '').trim()));
+    if (kept.length && kept.length !== m.content.length) m.content = kept;
+  }
 }
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
@@ -220,6 +480,16 @@ const VOICE_EFFORT = 'low';
 // take only some levels) keep it.
 function voiceEffortFor(model) {
   return MODELS.anthropicAcceptsEffort(model, VOICE_EFFORT) ? VOICE_EFFORT : null;
+}
+// The `thinking` field this lane sends. Every model that can turn thinking
+// off gets `disabled` (dead air on a live call is the cost of thinking).
+// Thinking-always-on ids send their catalog `voice.thinking` floor when it is
+// `between_tools` (Sonnet 5.5: no up-front thinking; accepted at `low`), and
+// otherwise omit the field — adaptive, as Opus 5.5 has always run here.
+function voiceThinkingFor(model) {
+  if (!MODELS.anthropicThinkingAlwaysOn(model)) return { type: 'disabled' };
+  const meta = MODELS.MODEL_CATALOG[model];
+  return meta && meta.voice && meta.voice.thinking === 'between_tools' ? { type: 'between_tools' } : null;
 }
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.
@@ -274,6 +544,12 @@ const CALLER_STOP_STALE_MS = 15000;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
+// A failed model call, by whether the stream timed out: the switch reason it
+// stamps, its log level, and the copy spoken if the round is not retried.
+const MODEL_FAILURE = {
+  true: { reason: 'stream_timeout', level: 'warn', copy: 'streamTimeout' },
+  false: { reason: 'provider_error', level: 'error', copy: 'modelError' },
+};
 const MAX_TOKENS = 1024; // voice replies are short
 // Bound the office-hours read the same way the context resolve is bounded: a
 // `.catch()` handles a rejection, not a hang, and this await sits in front of
@@ -333,6 +609,46 @@ try {
   anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 } catch {
   anthropic = null;
+}
+
+// GATE_VOICE_RELAY_OPENAI (benchmark/sandbox only — see the file header and
+// isAllowedOverrideModel below). A shared singleton, same convention as
+// `anthropic` above; relay-openai-client.js resolves its own fetch at call
+// time, so this can be constructed even before OPENAI_API_KEY is set.
+let openaiClient = null;
+try {
+  const { OpenAIRelayClient } = require('./relay-openai-client');
+  openaiClient = new OpenAIRelayClient({ apiKey: process.env.OPENAI_API_KEY });
+} catch {
+  openaiClient = null;
+}
+
+/** MODEL_CATALOG's provider for `model`, defaulting to 'anthropic' for an unlisted id. */
+function providerFor(model) {
+  const meta = MODELS.MODEL_CATALOG[model];
+  return (meta && meta.provider) || 'anthropic';
+}
+
+/**
+ * The effort this session's model requests actually carry, for the version
+ * and per-turn stamps: the Anthropic `output_config` effort (voiceEffortFor)
+ * on an Anthropic session, or, on an OpenAI session, the Responses
+ * `reasoning.effort` relay-openai-client.js reads from MODEL_CATALOG's
+ * `voice.reasoning` ('none' included — distinct from no effort at all). Only
+ * the Anthropic value is ever sent as `output_config`.
+ */
+function stampedEffortFor(provider, model, anthropicEffort) {
+  if (provider !== 'openai') return anthropicEffort;
+  try {
+    return require('./relay-openai-client').reasoningEffortFor(model);
+  } catch {
+    return null;
+  }
+}
+
+/** The provider client for a resolved session — never a silent Claude substitute. */
+function clientFor(provider) {
+  return provider === 'openai' ? openaiClient : anthropic;
 }
 
 // The gate-off pricing rule. Defined ONCE and referenced inside SYSTEM_PROMPT
@@ -700,7 +1016,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -715,10 +1031,46 @@ class RelayConversation {
     // stamp below reads this.model, never the module-level MODEL, so a
     // mid-call env change or a concurrent call under a different env can
     // never leak into an in-flight session.
-    const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
+    // `evalHarness` is set only by the eval/benchmark replay
+    // (services/eval/voice-relay-replay.js) — the one non-sandbox context in
+    // which resolveSessionModel may pick a gated OpenAI candidate.
+    // Stored (not just passed through) so the mid-call OpenAI provider-failure
+    // fallback (_canSwitchToClaudeFallback) can tell an eval-harness session
+    // apart from an ordinary production-inbound or sandbox one for its own
+    // lifetime, the same way resolveSessionModel used it only at construction.
+    this._evalHarness = evalHarness === true;
+    const modelResolution = resolveSessionModel({ sandbox: this.sandbox, evalHarness: this._evalHarness });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    // Set once by _switchToClaudeFallback (mid-call OpenAI → Claude
+    // provider-failure fallback) — { from, to, reason, turn } — null until
+    // then. One switch per call: its presence is also the switch-used guard.
+    this._modelSwitch = null;
+    // Bumped by every interrupt() (a barge-in frame, or end()'s own abort)
+    // AND every caller prompt handlePrompt records — a caller who simply
+    // speaks again during a silent failed call arrives as a prompt, not an
+    // interrupt (codex r7). _runModelRound compares it across a failed
+    // attempt to tell whether the caller moved on before a Claude retry —
+    // the controller's own signal cannot say so once a stream timeout has
+    // already aborted it.
+    this._callerSeq = 0;
+    // Which client this session's model rounds run on — resolved once here,
+    // alongside the model itself, and never re-read mid-call (see the file
+    // header + resolveSessionModel). voiceEffortFor already returns null for
+    // any non-Anthropic id (its capability regexes only match claude-*), so
+    // no separate check is needed to keep output_config off an OpenAI round.
+    this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
+    // Thinking-always-on Anthropic ids (Opus 5.5+, sandbox/eval-harness
+    // only — see ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS) reject the
+    // `thinking: { type: 'disabled' }` this lane otherwise always sends.
+    // Pinned once here, alongside the model, so the request build below
+    // never re-derives it mid-call.
+    this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
+    this._thinking = voiceThinkingFor(this.model);
+    // What the stamps record: the effort actually sent, whichever provider
+    // carries it (an OpenAI session's reasoning effort is not `_effort`).
+    this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
     // behavior; only 'stream' runs the new sentence-chunked path below.
@@ -757,6 +1109,10 @@ class RelayConversation {
     this._interruptFollowupTimer = null;
     // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
     this._pendingInterruptNote = null;
+    // A thinking-always-on model's signed assistant response is immutable on
+    // replay. When delivery differs from that response, carry the truth
+    // forward as a new user-side note instead of editing the signed prefix.
+    this._pendingDeliveryNote = null;
     // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
     // the one-per-call transfer latch.
     this._toolOutcomes = [];
@@ -1266,8 +1622,15 @@ class RelayConversation {
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
+      provider: this._provider,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: this._effort,
+      // Mid-call OpenAI → Claude provider-failure fallback (see
+      // _switchToClaudeFallback) — { from, to, reason, turn }, or null when
+      // this call never switched. `model`/`provider` above already read the
+      // POST-switch pin (this.model/this._provider are mutated in place), so
+      // this is only the attribution record of when/why that happened.
+      model_switch: this._modelSwitch || null,
+      effort: this._stampedEffort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
@@ -1674,12 +2037,13 @@ class RelayConversation {
    */
   /**
    * End a streamed round early — a barge-in (`interrupted`) or a failed send
-   * (`failed`) — keeping history to what was actually SENT: the sent prefix
-   * plus the round's tool_use blocks, each paired with a "not run" result so
-   * the next model call sees a valid, honest transcript. No tool runs, no
-   * further frame is sent, and an entry interrupt() already cut is left as
-   * interrupt() recorded it. THE ONE CHOKEPOINT for every early exit of a
-   * streamed round — finalize-time abort, finalize-time failed send,
+   * (`failed`) — keeping unsigned history to what was actually sent, while a
+   * completed thinking response stays intact for signed replay and carries
+   * delivery truth in a later user-side note. Tool-use blocks are paired with
+   * a "not run" result so the next model call sees a valid transcript. No tool
+   * runs, no further frame is sent, and an entry interrupt() already cut is
+   * left as interrupt() recorded it. THE ONE CHOKEPOINT for every early exit
+   * of a streamed round — finalize-time abort, finalize-time failed send,
    * mid-stream barge-in, mid-stream model failure/timeout, pre-tool abort —
    * so history/transcript are built one way regardless of where the round
    * stopped. `msg` may be `null` (the model call itself never resolved, e.g.
@@ -1688,7 +2052,21 @@ class RelayConversation {
    * case, only whatever prefix was already sent.
    */
   _closeStreamedRoundEarly(streamState, msg, reason) {
-    if (reason === 'failed') {
+    const outcome = {
+      failed: {
+        closeStream: true,
+        result: { failed: true },
+        toolResult: 'speech to the caller failed',
+        deliveryKnown: false,
+      },
+      interrupted: {
+        closeStream: false,
+        result: { aborted: true },
+        toolResult: 'the current turn was interrupted',
+        deliveryKnown: Boolean(this._pendingInterruptNote),
+      },
+    }[reason];
+    if (outcome.closeStream) {
       // Best effort: end the token group Twilio has open (it has only seen
       // last:false frames) so the next turn's speech can't attach to it. The
       // socket may be the thing that failed, so a throw here is expected.
@@ -1702,10 +2080,19 @@ class RelayConversation {
     streamState.closed = true;
     const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
     const toolUseBlocks = msg ? msg.content.filter((b) => b.type === 'tool_use') : [];
-    const assistantMessage = {
-      role: 'assistant',
-      content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
-    };
+    // A completed thinking response is a signed replay prefix: preserve every
+    // block byte-for-byte and in provider order, even when only part of its
+    // text reached the caller. With no `msg` (abort before finalMessage), no
+    // signed response exists and the synthesized sent prefix remains valid.
+    const preservesProviderResponse = Boolean(this._thinkingAlwaysOn && msg);
+    const assistantMessage = preservesProviderResponse
+      ? { role: 'assistant', content: msg.content }
+      : {
+          role: 'assistant',
+          content: sentText
+            ? [{ type: 'text', text: sentText }, ...toolUseBlocks]
+            : toolUseBlocks,
+        };
     if (assistantMessage.content.length) {
       // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
       // (finalize-time, or the pre-existing paths), `interrupt()` already ran
@@ -1716,21 +2103,23 @@ class RelayConversation {
       // identical rewrite here. Gate off, or this entry was never
       // interrupted (e.g. a failed send): the sent prefix (`sentText`,
       // already `entry.planned`) stands as-is.
-      if (streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
+      if (!this._thinkingAlwaysOn && streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
         const kept = assistantMessage.content.filter((b) => b.type !== 'text');
         assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
+      }
+      if (preservesProviderResponse && !outcome.deliveryKnown) {
+        this._queueDeliveryNote(sentText);
       }
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
     }
     if (toolUseBlocks.length) {
-      const why = reason === 'failed' ? 'speech to the caller failed' : 'the current turn was interrupted';
       this.messages.push({
         role: 'user',
-        content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` })),
+        content: this._appendDeliveryNote(toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${outcome.toolResult}.` }))),
       });
     }
-    return reason === 'failed' ? { failed: true } : { aborted: true };
+    return outcome.result;
   }
 
   /**
@@ -1786,24 +2175,25 @@ class RelayConversation {
   }
 
   /**
-   * Phase 2 — write-turn close: history holds ONLY the sent prefix (never
-   * the model's full `msg.content`), on either of the two shapes that need
-   * exactly this — a write-tool turn (P2-c: suppress the held tail so a
-   * pending write is never spoken as already-said) or a genuine text
-   * mismatch (same sent-only shape; nothing to suppress, there IS no
-   * unspoken tail worth mentioning). The write-tool turn additionally logs
-   * a suppressed-tail note; a mismatch does not, since there was never a
-   * pending write to suppress.
+   * Phase 2 — write-turn close: thinking-disabled history holds only the sent
+   * prefix. A thinking-always-on response instead stays byte-for-byte intact
+   * for signed replay, with an append-only user note carrying what was sent.
+   * These are the two shapes that need it: a write-tool turn (suppress the
+   * held tail until the write result is known) or a genuine text mismatch.
    */
   _closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite) {
     const label = hasPendingWrite ? 'close failed on a write-tool turn' : 'close failed on a text mismatch';
     const failure = this._runStreamSendOrFail(streamState, msg, label, () => this._closeStreamEntry(streamState));
     if (failure) return failure;
     const keep = msg.content.filter((b) => b.type !== 'text');
-    const assistantMessage = {
-      role: 'assistant',
-      content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
-    };
+    const assistantMessage = this._thinkingAlwaysOn
+      ? { role: 'assistant', content: msg.content }
+      : {
+          role: 'assistant',
+          content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
+        };
+    const providerText = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    if (this._thinkingAlwaysOn && providerText !== sent.trim()) this._queueDeliveryNote(sent);
     if (hasPendingWrite && tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
     this.messages.push(assistantMessage);
     if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
@@ -1873,10 +2263,11 @@ class RelayConversation {
     // turns keep their filler text — there is nothing to falsely promise.
     const assistantMessage = {
       role: 'assistant',
-      content: hasPendingWrite
+      content: hasPendingWrite && !this._thinkingAlwaysOn
         ? msg.content.filter((b) => b.type !== 'text')
         : msg.content,
     };
+    if (hasPendingWrite && this._thinkingAlwaysOn && text) this._queueDeliveryNote('');
     this.messages.push(assistantMessage);
     // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
     // check-then-act — a reconnect can take the claim during the model
@@ -1926,6 +2317,7 @@ class RelayConversation {
       return this._chain;
     }
     this._userTurns.push(t);
+    this._callerSeq += 1;
     // The caller-stop instant (from Twilio's speaker event) belongs to THIS
     // turn only if it is recent; it is consumed so no later turn reuses it.
     const stoppedAt = this._lastCallerSpeechStopAt;
@@ -1935,6 +2327,10 @@ class RelayConversation {
     this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
+      // This prompt's place in the caller's activity (see _callerSeq): any
+      // later interrupt or prompt means the caller has moved past this turn
+      // (codex r9 — held for the whole turn, across its tool rounds).
+      callerSeq: this._callerSeq,
       // The PER-SOCKET generation this turn ran under (relay-server stamps
       // it from the upgrade token's nonce on every authenticated socket,
       // including the first leg of a call that never reconnects — this is
@@ -1953,12 +2349,13 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: this._effort,
+      effort: this._stampedEffort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,
       interruptWithoutFollowupTranscript: false,
       timedOut: false,
+      modelSwitched: false, // this turn's round loop ran the mid-call OpenAI→Claude fallback
       partialCount: this._pendingPartials || 0,
       playedSource: 'assumed', // best evidence across the turn's utterances
       agentEntries: [],
@@ -1993,6 +2390,7 @@ class RelayConversation {
    * call is end()'s own abort and records nothing.
    */
   interrupt(detail) {
+    this._callerSeq += 1;
     try {
       if (this._controller) this._controller.abort();
     } catch {
@@ -2060,19 +2458,22 @@ class RelayConversation {
    * `entry.text` the transcript stores ("<heard> [interrupted]",
    * "[not played — caller interrupted]", "[interrupted — played text
    * unknown]") — so the rewrite reads played text by construction, never
-   * `planned`. Tool-use blocks on that message are kept (their tool_result
-   * must still pair). The next caller message then carries what the caller
-   * heard, so the model resumes from there instead of repeating the clause
-   * the caller never heard. Utterances with no history message (copy()
+   * `planned`. Thinking-disabled sessions keep that historical rewrite.
+   * Thinking-always-on responses are signed replay prefixes, so their blocks
+   * remain untouched and the next caller message alone carries what was
+   * heard. That append-only note still lets the model resume instead of
+   * repeating the unheard clause. Utterances with no history message (copy()
    * fallbacks) get the note only. Gate off ⇒ nothing here runs.
    */
   _noteInterruptForModel(cut, laters) {
     if (!isInterruptContextEnabled()) return;
-    for (const entry of [cut, ...laters]) {
-      const msg = entry.historyMessage;
-      if (!msg || !Array.isArray(msg.content)) continue;
-      const kept = msg.content.filter((b) => b && b.type !== 'text');
-      msg.content = [{ type: 'text', text: entry.text }, ...kept];
+    if (!this._thinkingAlwaysOn) {
+      for (const entry of [cut, ...laters]) {
+        const msg = entry.historyMessage;
+        if (!msg || !Array.isArray(msg.content)) continue;
+        const kept = msg.content.filter((b) => b && b.type !== 'text');
+        msg.content = [{ type: 'text', text: entry.text }, ...kept];
+      }
     }
     const heard = cut.playedUnknown ? null : String(cut.played || '').trim();
     this._pendingInterruptNote = { heard: heard || null };
@@ -2086,6 +2487,31 @@ class RelayConversation {
     return note.heard
       ? `[Caller interrupted you after: "${note.heard}"] `
       : '[Caller interrupted you before your reply finished; what they heard is unknown] ';
+  }
+
+  /**
+   * Preserve a signed thinking response verbatim while telling the next model
+   * round which prefix actually reached the caller. The note is appended to a
+   * tool-result turn when one immediately follows, otherwise to the caller's
+   * next turn.
+   */
+  _queueDeliveryNote(sent) {
+    if (!this._thinkingAlwaysOn) return;
+    const prefix = String(sent || '').trim();
+    this._pendingDeliveryNote = prefix
+      ? `[Delivery note: Only this text from your preceding reply was sent to the caller: ${JSON.stringify(prefix)}. Treat the remaining text as unsaid.]`
+      : '[Delivery note: None of the text in your preceding reply was sent to the caller. Treat it as unsaid.]';
+  }
+
+  _consumeDeliveryNote() {
+    const note = this._pendingDeliveryNote;
+    this._pendingDeliveryNote = null;
+    return note ? `${note} ` : '';
+  }
+
+  _appendDeliveryNote(blocks) {
+    const note = this._consumeDeliveryNote().trim();
+    return note ? [...blocks, { type: 'text', text: note }] : blocks;
   }
 
   /**
@@ -2424,7 +2850,7 @@ class RelayConversation {
     if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow())) {
       try {
         const { executeTool } = require('./relay-tools');
-        const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
+        const out = await executeTool('transfer_to_office', { intent: require('./relay-transfer').RECOVERY_INTENT, summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
         this._recordTurn('tool', 'transfer_to_office');
         if (/Transferring the caller/.test(String(out))) return true;
       } catch (err) {
@@ -2560,6 +2986,10 @@ class RelayConversation {
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
+    // The model an earlier leg of this call ran on (codex r1, r7 on #5209) —
+    // applied before this leg's first model round (_runLoop awaits
+    // _resumeReady first).
+    this._adoptEarlierModel(state);
     // A segment may reveal its captured lead only after this leg booked.
     // Repair that existing card just as capture_lead and the capture floor do.
     if (this._leadId && this._bookingRequested) {
@@ -2681,7 +3111,7 @@ class RelayConversation {
     if (!roundSignal || !roundSignal.aborted) return false;
     const remaining = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
     results.push(...remaining.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })));
-    this.messages.push({ role: 'user', content: results });
+    this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
     return true;
   }
 
@@ -2736,7 +3166,7 @@ class RelayConversation {
       if (failureHandoff || this._ending || this.ended) {
         const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
         results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current tool round has stopped.' })));
-        this.messages.push({ role: 'user', content: results });
+        this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
         if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
         return { done: true };
       }
@@ -2757,13 +3187,342 @@ class RelayConversation {
     // abort check's pairing is a no-op here, and the normal-path push below
     // only runs when it didn't already push on an abort.
     if (this._abortStreamToolLoop(roundSignal, msg, results)) return { done: true };
-    this.messages.push({ role: 'user', content: results });
+    this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
     return { done: false };
   }
 
+  /**
+   * Eligible for the mid-call OpenAI → Claude provider-failure fallback
+   * (owner ruling 2026-09-28, Luna inbound lane): a session PINNED to an
+   * OpenAI model, never the eval harness (`_evalHarness` — the benchmark
+   * must measure the pure model, so voice-relay-replay.js sessions keep
+   * today's no-fallback behavior), and no switch spent yet this call
+   * (`_modelSwitch` doubles as the one-per-call guard). Sandbox sessions ARE
+   * eligible — the fallback is scoped to "production inbound AND sandbox",
+   * matching how those two already share the OpenAI-eligible allowlist.
+   */
+  _canSwitchToClaudeFallback() {
+    return this._provider === 'openai' && !this._evalHarness && !this._modelSwitch;
+  }
+
+  /**
+   * Pin this session onto the Anthropic model the SAME validated shared
+   * chain a plain non-override session resolves (VOICE_RELAY_MODEL →
+   * MODEL_VOICE → the registry default — resolveSharedAnthropicChain) for
+   * the REST of the call, strip the OpenAI adapter's private `_openai`
+   * reasoning-replay extras out of history (stripOpenAIHistoryExtras — dead
+   * weight once nothing here speaks Responses-API reasoning replay again),
+   * and record the switch once. Every later `this.model`/`this._provider`
+   * read (the next request build, every version/turn stamp) sees the
+   * switched-to values automatically — this method is the only place either
+   * is mutated mid-call. Called at most once per call (see
+   * _canSwitchToClaudeFallback).
+   */
+  async _switchToClaudeFallback(reason, stat) {
+    const from = this.model;
+    this._pinClaudeFallback();
+    this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(stat.turn) ? stat.turn : null };
+    stat.modelSwitched = true;
+    if (reason === 'stream_timeout') stat.timedOut = true; // the caller still waited out the timeout, rescued or not
+    logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
+    // The call row's relay_model_switch is the ONE call-level record: the
+    // first leg to persist a switch wins, and a leg that finds another's
+    // already there runs on that one's model instead (codex r6) — before any
+    // Claude round, so overlapping sockets never split the call across two
+    // models. loadResumeState reads the same stamp for a reconnect.
+    const winner = await this._claimModelSwitch(this._modelSwitch);
+    if (winner) {
+      this._pinClaudeFallback(winner.to);
+      this._modelSwitch = winner;
+    }
+  }
+
+  /**
+   * Persist `sw` as the call's switch only when none is recorded yet.
+   * Returns the switch the row records when this leg did not provably win
+   * (another leg's, or this leg's own after a slow write), or null when this
+   * one won or the row could not be read or written (bounded, best effort —
+   * the switch never waits more than a few seconds or fails on it).
+   */
+  async _claimModelSwitch(sw) {
+    if (!this.callSid) return null;
+    try {
+      const claimed = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .whereRaw("metadata->'relay_model_switch' IS NULL")
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_model_switch', ?::jsonb)", [JSON.stringify(sw)]) }), 2000, null);
+      // Only an affected row is a win; a lost claim (0) or a timed-out one
+      // (null — the write may still land either way, codex r8) reads what
+      // the row records now and adopts it when it names another leg's model.
+      if (claimed > 0) return null;
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .first(db.raw("metadata->'relay_model_switch' AS model_switch")), 2000, null);
+      const earlier = row && row.model_switch;
+      return earlier && earlier.to && ALLOWED_OVERRIDE_MODEL_IDS.has(earlier.to) ? earlier : null;
+    } catch (err) {
+      logger.warn(`[voice-relay] model switch stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * A reconnected leg of a call an earlier leg already switched: the switch
+   * is once per CALL, so this leg runs on the same shared-chain Claude model
+   * for the rest of the call instead of returning to the provider that
+   * failed, and carries the earlier record forward in its own stamps. A leg
+   * that already switched on its own (a delayed resume reload — codex r5)
+   * keeps its own pin and record untouched. It keeps the model
+   * the call already switched to when that is still an allowed Claude id,
+   * so a reconnect on a process with newer settings never changes models
+   * again mid-call (codex r4).
+   *
+   * An earlier leg that never switched: this leg keeps running that leg's
+   * model (codex r7) rather than whatever this process's settings resolve
+   * now — but only while that model is still allowed for this session under
+   * the CURRENT gates (turning GATE_VOICE_RELAY_OPENAI_INBOUND off still
+   * moves a reconnect to Claude), and only before this leg has run any
+   * model call, so a delayed reload never changes models mid-leg.
+   */
+  _adoptEarlierModel({ modelSwitch, priorModel } = {}) {
+    if (this._modelSwitch) return;
+    if (modelSwitch) {
+      this._pinClaudeFallback(modelSwitch.to);
+      this._modelSwitch = modelSwitch;
+    } else if (priorModel && priorModel !== this.model && !this._turnStats.some((t) => t.rounds > 0)
+      && isAllowedOverrideModel(priorModel, sessionAllowOpts({ sandbox: this.sandbox, evalHarness: this._evalHarness }))) {
+      this._pinModel(priorModel);
+    } else {
+      return;
+    }
+    if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
+  }
+
+  /** Every per-model pin, derived from `model` exactly as the constructor derives them. */
+  _pinModel(model) {
+    this.model = model;
+    this._provider = providerFor(model);
+    this._effort = voiceEffortFor(model);
+    this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(model);
+    this._thinking = voiceThinkingFor(model);
+    this._stampedEffort = stampedEffortFor(this._provider, model, this._effort);
+  }
+
+  /**
+   * The pin half of the switch: the shared Anthropic chain's model and every
+   * per-model pin derived from it, with OpenAI-only history cleaned up. Also
+   * run by _applyResumeState when an earlier leg of this call already
+   * switched, so a reconnect never returns to the provider that failed.
+   */
+  _pinClaudeFallback(recordedModel = null) {
+    const shared = ALLOWED_OVERRIDE_MODEL_IDS.has(recordedModel) ? { model: recordedModel, fallbackReason: null } : resolveSharedAnthropicChain(null);
+    // A rejected VOICE_RELAY_MODEL / MODEL_VOICE is why the call runs on the
+    // registry default now (codex r2 P2): keep that in the stamp.
+    if (shared.fallbackReason && !String(this._modelFallbackReason || '').includes(shared.fallbackReason)) {
+      this._modelFallbackReason = [this._modelFallbackReason, shared.fallbackReason].filter(Boolean).join('; ');
+    }
+    this._pinModel(shared.model);
+    stripOpenAIHistoryExtras(this.messages);
+  }
+
+  /**
+   * One model call for the current round: a fresh AbortController, stream
+   * state, and STREAM_TIMEOUT_MS timer, the request built from this
+   * session's CURRENT pins (so a retry after a provider switch runs on the
+   * new provider's client), and the turn's model-time stats. Never throws:
+   * resolves `{ msg, streamState }` on a completed call, or `{ err,
+   * streamState, timedOut }` — `_runModelRound` decides what a failure
+   * becomes.
+   */
+  async _modelAttempt(stat) {
+    const client = clientFor(this._provider);
+    this._controller = new AbortController();
+    // PR C: fresh per attempt, never read outside it — see _newStreamState.
+    const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
+    // Bound the model stream: without this a hung upstream call would pin the
+    // serialized turn chain open with no recovery. On timeout we abort the
+    // same controller barge-in uses, then surface a graceful reprompt.
+    let timedOut = false;
+    const streamTimer = setTimeout(() => {
+      timedOut = true;
+      try { this._controller.abort(); } catch { /* no-op */ }
+    }, STREAM_TIMEOUT_MS);
+    const modelStartAt = now();
+    stat.rounds += 1; // an ATTEMPT — a timed-out, aborted, or switched-and-retried call is still a round
+    try {
+      const stream = client.messages.stream(
+        {
+          model: this.model,
+          // Thinking-always-on ids reject `thinking: { type: 'disabled' }`
+          // (voiceThinkingFor sends their floor instead) and adaptive ones
+          // spend from max_tokens before the reply — raise the cap by
+          // the same registry floor `anthropic-wire.js` uses elsewhere so
+          // thinking cannot starve the spoken reply. Every other model's
+          // request is byte-identical to before (this._thinkingAlwaysOn is
+          // false for all of them, sandbox or not).
+          max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
+          system: this._systemBlocks,
+          ...(this._thinking ? { thinking: this._thinking } : {}),
+          // LIVE PHONE CALL. The default effort is `high`, which buys depth
+          // this lane cannot spend: every extra second of deliberation is dead
+          // air on an open line, and the work here is short receptionist turns
+          // driven by tools, not reasoning. `low` is the right end of the
+          // ladder for that.
+          // Omitted entirely for models that reject it (voiceEffortFor).
+          ...(this._effort ? { output_config: { effort: this._effort } } : {}),
+          tools: this._tools,
+          messages: this.messages,
+        },
+        { signal: this._controller.signal }
+      );
+      // First-token latency (test doubles expose only finalMessage). The
+      // first streamed CONTENT BLOCK, not the first text event: a round that
+      // opens with tool_use has produced output, and stamping only text
+      // would charge the tool's latency to the model (codex r9 P2). The
+      // turn keeps its FIRST stamp, not the last round's.
+      stream.on?.('streamEvent', (ev) => {
+        if (ev?.type !== 'content_block_start') return;
+        stat.firstTokenAt ??= now();
+        // PR C: the moment ANY tool call starts, stop flushing further
+        // progressive text this round — belt-and-braces alongside the
+        // widened commitment-or-success hold list (relay-stream-renderer.js):
+        // text already streamed before this point has already gone out as
+        // its own content block's deltas (this cannot un-send it), but any
+        // trailing text after a tool_use block waits for finalize, where
+        // the write-tool suppression check applies.
+        if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
+      });
+      // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
+      // policy. Only wired when this session pinned the stream renderer;
+      // the block path below is otherwise untouched.
+      if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
+      return { msg: await stream.finalMessage(), streamState };
+    } catch (err) {
+      return { err, streamState, timedOut };
+    } finally {
+      clearTimeout(streamTimer);
+      // Every path — success, timeout, barge-in abort, error — is model time.
+      stat.modelMs += now() - modelStartAt;
+    }
+  }
+
+  /**
+   * One model round, WITH the mid-call OpenAI provider-failure fallback
+   * (see _canSwitchToClaudeFallback / _switchToClaudeFallback above). A
+   * caller barge-in mid-stream is never a provider failure: it closes the
+   * round as before. Any other failed call on an OpenAI session still
+   * eligible (one switch per call) switches the session to Claude, then:
+   *   - ends the round as superseded when a replacement socket owns the call
+   *     (never spend a Claude retry on a stale socket — codex r2);
+   *   - ends it as an interruption when the caller barged in, hung up, or
+   *     simply spoke again (a new prompt queued behind this one) at any
+   *     point since this TURN's prompt — including during an earlier tool
+   *     round of the same turn (`stat.callerSeq` vs `_callerSeq`; a timeout
+   *     already aborted the controller, so the controller cannot say) — and
+   *     a completed retry is checked the same way before it is used;
+   *   - otherwise retries the SAME round once on Claude, over the same
+   *     `this.messages` (already cleaned of OpenAI-only history) — but only
+   *     when nothing of the round reached the caller or failed trying
+   *     (`streamState.entry` exists once a piece was sent; `failed` once a
+   *     send failed — codex r3), so a retry can never double-speak or talk
+   *     into a dead socket.
+   * A round that is not retried, or a retried call that fails too, takes the
+   * ordinary failure path: failure copy or the provider-failure handoff. The
+   * switch itself always stands for the rest of the call.
+   *
+   * Returns `{ msg, streamState }` on a completed round, or `null` once this
+   * method has fully handled the round's end itself — the caller
+   * (`_runLoop`) must return immediately on `null`.
+   */
+  async _runModelRound(stat, toolCtx) {
+    // The caller barged in, hung up, or spoke again since this TURN's prompt
+    // (not just this round — a correction can land during an earlier tool
+    // round): a Claude retry must never answer the old request (codex r7–r9).
+    const callerMovedOn = () => this.ended || this._callerSeq !== stat.callerSeq;
+    let retrying = false;
+    for (;;) {
+      // A retry must measure its own first token, not the failed call's.
+      const firstTokenAtStart = stat.firstTokenAt;
+      const { msg, err, streamState, timedOut } = await this._modelAttempt(stat);
+      if (msg) {
+        // Checked on a retry only: an ordinary first call keeps today's
+        // behavior, but a retry the caller talked past while it ran is
+        // dropped before it is spoken or runs a tool.
+        if (retrying && callerMovedOn()) {
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          return null;
+        }
+        this._modelFailures = 0; // a completed round resets the streak
+        this._clearedFailures.model = true;
+        return { msg, streamState };
+      }
+      // PR C stream-renderer piece (flushChain await + interrupted/failed
+      // close) lives in `_closeStreamedRoundOnCatch` — see its doc comment
+      // for why the flush chain must be awaited before either branch below
+      // touches `streamState.entry`. A no-op for a block-renderer round.
+      if (!timedOut && this._controller.signal.aborted) {
+        // Barge-in caught mid-model-stream, before finalMessage() resolved:
+        // the same chokepoint every other early exit uses — there is no
+        // `msg`, so only the sent prefix (if any) is pushed, no tool_use
+        // blocks to pair.
+        await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+        return null;
+      }
+      // The last text-delta's flush is chained async: await it before
+      // reading `entry`/`failed`, or a send still in flight reads as "never
+      // spoke" and wrongly retries.
+      if (streamState) await streamState.flushChain;
+      if (this._canSwitchToClaudeFallback()) {
+        await this._switchToClaudeFallback(MODEL_FAILURE[timedOut].reason, stat);
+        const retryable = !streamState || !(streamState.entry || streamState.failed);
+        if (retryable && await this._sessionSuperseded().catch(() => false)) {
+          logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${maskSid(this.callSid)}`);
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          this._ending = true;
+          try { this._endSession?.({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+          return null;
+        }
+        if (callerMovedOn()) {
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          return null;
+        }
+        if (retryable) {
+          // Only a retry makes Claude this turn's speaker; a round that already
+          // spoke on OpenAI keeps OpenAI's effort (codex r4).
+          stat.effort = this._stampedEffort;
+          stat.firstTokenAt = firstTokenAtStart;
+          retrying = true;
+          continue;
+        }
+      }
+      stat.timedOut = stat.timedOut || timedOut;
+      const failure = MODEL_FAILURE[timedOut];
+      logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${timedOut}: ${err.message}`);
+      this._modelFailures += 1;
+      // PR C: a partial streaming utterance is still "open" on Twilio's side
+      // (it has only ever seen last:false frames) — close it out with a
+      // last:true empty token so playback finalizes, WITHOUT resending
+      // anything already sent, and record exactly that sent prefix as its
+      // own assistant message (role alternation stays valid — the very
+      // next thing pushed is either the caller's next `user` turn or this
+      // same round's tool_result user turn, never another assistant
+      // message back to back) — same chokepoint as every other early
+      // exit; there is no `msg` here either (the model call itself is what
+      // failed), so no tool_use blocks to pair. The failure copy below is
+      // spoken but, like every `say()` call, never enters `this.messages`
+      // — unchanged, existing behavior for both renderers.
+      await this._closeStreamedRoundOnCatch(streamState, 'failed');
+      if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
+      return null;
+    }
+  }
+
   async _runLoop(callerText = null) {
-    if (this.ended || !anthropic) {
-      if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
+    // Resolved from this session's PINNED provider (this._provider, set at
+    // construction) — never re-checked against the live gate mid-call, so a
+    // gate flip during an in-flight call can neither add nor remove a
+    // client from under it.
+    const client = clientFor(this._provider);
+    if (this.ended || !client) {
+      if (!client) this.say(require('./relay-language').copy('unavailable', this.language));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -2899,7 +3658,7 @@ class RelayConversation {
     }
     // Always a stat to write into: a loop with no caller turn (tests, a
     // future greeting round) records into a discarded one.
-    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0 };
+    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, callerSeq: this._callerSeq };
 
     // The caller's turn, with the live clock attached as a per-turn note. Past
     // turns keep the time they actually happened at, so the message prefix stays
@@ -2908,7 +3667,7 @@ class RelayConversation {
       const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
       // PR 1B: the model — not the transcript — is told what the caller heard
       // before they cut in. Set only under its gate (see interrupt()).
-      const turnText = `${this._consumeInterruptNote()}${callerText}`;
+      const turnText = `${this._consumeInterruptNote()}${this._consumeDeliveryNote()}${callerText}`;
       this.messages.push({
         role: 'user',
         content: clockBlock
@@ -2919,100 +3678,14 @@ class RelayConversation {
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
-      this._controller = new AbortController();
-      let msg;
-      // PR C: fresh per round, never read outside it — see _newStreamState.
-      const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
-      // Bound the model stream: without this a hung upstream call would pin the
-      // serialized turn chain open with no recovery. On timeout we abort the
-      // same controller barge-in uses, then surface a graceful reprompt.
-      let streamTimedOut = false;
-      const streamTimer = setTimeout(() => {
-        streamTimedOut = true;
-        try { this._controller.abort(); } catch { /* no-op */ }
-      }, STREAM_TIMEOUT_MS);
-      const modelStartAt = now();
-      stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
-      try {
-        const stream = anthropic.messages.stream(
-          {
-            model: this.model,
-            max_tokens: MAX_TOKENS,
-            system: this._systemBlocks,
-            thinking: { type: 'disabled' },
-            // LIVE PHONE CALL. The default effort is `high`, which buys depth
-            // this lane cannot spend: every extra second of deliberation is dead
-            // air on an open line, and the work here is short receptionist turns
-            // driven by tools, not reasoning. `low` is the right end of the
-            // ladder for that.
-            // Omitted entirely for models that reject it (voiceEffortFor).
-            ...(this._effort ? { output_config: { effort: this._effort } } : {}),
-            tools: this._tools,
-            messages: this.messages,
-          },
-          { signal: this._controller.signal }
-        );
-        // First-token latency (test doubles expose only finalMessage). The
-        // first streamed CONTENT BLOCK, not the first text event: a round that
-        // opens with tool_use has produced output, and stamping only text
-        // would charge the tool's latency to the model (codex r9 P2). The
-        // turn keeps its FIRST stamp, not the last round's.
-        stream.on?.('streamEvent', (ev) => {
-          if (ev?.type !== 'content_block_start') return;
-          stat.firstTokenAt ??= now();
-          // PR C: the moment ANY tool call starts, stop flushing further
-          // progressive text this round — belt-and-braces alongside the
-          // widened commitment-or-success hold list (relay-stream-renderer.js):
-          // text already streamed before this point has already gone out as
-          // its own content block's deltas (this cannot un-send it), but any
-          // trailing text after a tool_use block waits for finalize, where
-          // the write-tool suppression check applies.
-          if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
-        });
-        // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
-        // policy. Only wired when this session pinned the stream renderer;
-        // the block path below is otherwise untouched.
-        if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
-        msg = await stream.finalMessage();
-        this._modelFailures = 0; // a completed round resets the streak
-        this._clearedFailures.model = true;
-      } catch (err) {
-        // PR C stream-renderer piece (flushChain await + interrupted/failed
-        // close) lives in `_closeStreamedRoundOnCatch` — see its doc comment
-        // for why the flush chain must be awaited before either branch below
-        // touches `streamState.entry`. A no-op for a block-renderer round.
-        if (!streamTimedOut && this._controller.signal.aborted) {
-          // Barge-in caught here (mid-model-stream, before finalMessage()
-          // resolved): the same chokepoint every other early exit uses —
-          // there is no `msg` (the model call never resolved), so only the
-          // sent prefix (if any) is pushed, no tool_use blocks to pair.
-          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
-          return;
-        }
-        stat.timedOut = streamTimedOut;
-        const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
-        logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
-        this._modelFailures += 1;
-        // PR C: a partial streaming utterance is still "open" on Twilio's side
-        // (it has only ever seen last:false frames) — close it out with a
-        // last:true empty token so playback finalizes, WITHOUT resending
-        // anything already sent, and record exactly that sent prefix as its
-        // own assistant message (role alternation stays valid — the very
-        // next thing pushed is either the caller's next `user` turn or this
-        // same round's tool_result user turn, never another assistant
-        // message back to back) — same chokepoint as every other early
-        // exit; there is no `msg` here either (the model call itself is what
-        // failed), so no tool_use blocks to pair. The failure copy below is
-        // spoken but, like every `say()` call, never enters `this.messages`
-        // — unchanged, existing behavior for both renderers.
-        await this._closeStreamedRoundOnCatch(streamState, 'failed');
-        if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
-        return;
-      } finally {
-        clearTimeout(streamTimer);
-        // Every path — success, timeout, barge-in abort, error — is model time.
-        stat.modelMs += now() - modelStartAt;
-      }
+      // OpenAI provider-failure fallback (GATE_VOICE_RELAY_OPENAI_INBOUND):
+      // the model call itself, plus the ONE eligible switch-and-retry, now
+      // lives in _runModelRound — see its doc comment. A null result means
+      // the round already ran the barge-in or failure/handoff path to
+      // completion.
+      const roundResult = await this._runModelRound(stat, toolCtx);
+      if (!roundResult) return;
+      const { msg, streamState } = roundResult;
 
       const text = msg.content
         .filter((b) => b.type === 'text')
@@ -3030,12 +3703,11 @@ class RelayConversation {
       // turns keep their filler text — there is nothing to falsely promise.
       const hasPendingWrite = msg.stop_reason === 'tool_use'
         && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOLS.has(b.name));
-      // ⭐ AND THE HISTORY MUST AGREE WITH THE AIR. Storing the full assistant
-      // message while suppressing its speech left the model believing the
-      // caller already HEARD that text — its post-result turn could then be an
-      // empty end_turn, ending the exchange with no confirmation spoken at
-      // all. Suppressed turns are stored tool-use-only, so the follow-up round
-      // knows nothing has been said yet and states the outcome itself.
+      // ⭐ AND THE HISTORY MUST AGREE WITH THE AIR. Thinking-disabled sessions
+      // store a suppressed turn tool-use-only. A thinking-always-on response
+      // cannot be edited without invalidating its signed replay prefix, so it
+      // stays intact and an append-only delivery note tells the follow-up round
+      // that the text was not spoken.
       const result = streamState
         ? await this._finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat)
         : await this._finalizeBlockRound(msg, text, hasPendingWrite);
@@ -3802,4 +4474,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

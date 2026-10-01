@@ -266,3 +266,45 @@ describe('internal-link SEO policy opportunity evaluation', () => {
     expect(policy.paragraphHash('Different paragraph.')).not.toBe(policy.paragraphHash('Termite swarmers in bathrooms.'));
   });
 });
+
+describe('internal-link SEO policy anchor names the target subject', () => {
+  test.each([
+    ['Southwest Florida homes', '/pest-control/spiders-southwest-florida-home/', 'spiders southwest florida home'],
+    ['local pest control', '/pest-control/orkin-vs-local-pest-control-swfl/', 'orkin vs local pest control'],
+    ['lawn care in Bradenton', '/lawn-weed-control-bradenton-fl/', 'lawn weed control bradenton'],
+  ])('rejects generic anchor %p for a narrower target', (anchor, url, keyword) => {
+    expect(policy.anchorNamesTargetSubject(anchor, { url, keyword })).toBe(false);
+  });
+
+  test.each([
+    ['weed control', '/lawn-weed-control-bradenton-fl/', 'lawn weed control bradenton'],
+    ['neem oil', '/pest-control/neem-oil-for-whiteflies/', 'neem oil whiteflies'],
+    ['white grub', '/lawn-care/white-grubs-bradenton-fl/', 'white grubs'],
+    ['Manatee County Mosquito Control', '/mosquito/manatee-county-mosquito-control/', ''],
+    // City/category hubs have no narrower subject, so the generic anchor is right.
+    ['Bradenton lawn care', '/lawn-care-bradenton-fl/', ''],
+    ['pest control in Sarasota', '/pest-control-sarasota-fl/', 'pest control sarasota'],
+  ])('accepts anchor %p', (anchor, url, keyword) => {
+    expect(policy.anchorNamesTargetSubject(anchor, { url, keyword })).toBe(true);
+  });
+
+  test('evaluateLinkOpportunity reports anchor_not_target_specific', () => {
+    const result = policy.evaluateLinkOpportunity({
+      source: { url: '/does-baking-soda-kill-ants/', canonical_url: 'https://www.wavespestcontrol.com/does-baking-soda-kill-ants/', http_status: 200, indexable: true, topic: 'spiders southwest florida home' },
+      target: { url: '/pest-control/spiders-southwest-florida-home/', canonical_url: 'https://www.wavespestcontrol.com/pest-control/spiders-southwest-florida-home/', http_status: 200, indexable: true, topic: 'spiders southwest florida home' },
+      anchor_text: 'Southwest Florida homes',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((i) => i.code)).toContain('anchor_not_target_specific');
+  });
+});
+
+describe('internal-link SEO policy subject plurals', () => {
+  test.each([
+    ['mosquito control', '/mosquito-control-bradenton-fl/', 'mosquitoes bradenton'],
+    ['cluster fly', '/pest-control/cluster-flies/', ''],
+    ['a mouse', '/rodent/mice-in-attic/', ''],
+  ])('%p matches its plural target subject', (anchor, url, keyword) => {
+    expect(policy.anchorNamesTargetSubject(anchor, { url, keyword })).toBe(true);
+  });
+});

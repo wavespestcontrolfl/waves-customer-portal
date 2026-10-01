@@ -1,10 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
+import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
+import {
+  glassCtaMicroForKeys,
+  glassRowInclusions,
+  glassServiceSlug,
+} from '../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -128,6 +134,38 @@ function Bullet({ children }) {
   );
 }
 
+const SCOPE_BREADTH = { none: 0, satisfaction: 1, all: 2 };
+function narrowerScope(a, b) {
+  if (!a) return b;
+  return SCOPE_BREADTH[b] < SCOPE_BREADTH[a] ? b : a;
+}
+
+function proposalInclusions(items, scope = 'all') {
+  if (!Array.isArray(items)) return null;
+  const visible = items.filter((line) => copyAllowedInScope(line, scope));
+  return visible.length ? visible : null;
+}
+
+export function proposalMakesNoGuaranteeClaim(data = {}) {
+  return typeof data?.proposal?.noGuaranteeClaims === 'boolean'
+    ? data.proposal.noGuaranteeClaims
+    : data?.estimate?.noGuaranteeClaims === true;
+}
+
+// The document's guarantee scope ('all' | 'satisfaction' | 'none') for the
+// lines that cover the whole document, from the server's decisions about the
+// rows it prints: an authored (commercial), rodent or mixed-neutral proposal
+// keeps only "satisfaction guaranteed". The page's own decision also counts:
+// it sees engine commercial marks that the printed rows drop.
+export function proposalGuaranteeScope(data = {}) {
+  const proposal = data?.proposal;
+  return guaranteeScope({
+    noGuaranteeClaims: proposalMakesNoGuaranteeClaim(data),
+    noEstimateWideGuarantee: (proposal && typeof proposal === 'object' && proposal.noEstimateWideGuarantee === true)
+      || data?.estimate?.noEstimateWideGuarantee === true,
+  });
+}
+
 export default function EstimateProposalDocument({ data, token }) {
   const estimate = data?.estimate || {};
   const proposal = data?.proposal || null;
@@ -184,27 +222,42 @@ export default function EstimateProposalDocument({ data, token }) {
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
   const termRows = commercialTermRows(proposal?.commercialTerms);
+  // Document mode classifies the normalized proposal rows it actually prints.
+  // An explicit false matters too: the ordinary page may classify a different
+  // current service mix than a retained proposal itemization. Older payloads
+  // keep the estimate-level flag as their compatibility fallback.
+  const scope = proposalGuaranteeScope(data);
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent || programList.length) return [];
+    // Each stack states its own service's terms: commercial work carries
+    // only its satisfaction clause, and a residential line the server's
+    // termsScope (an unstamped line follows the document).
     if (isCommercial) {
       const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
-      return stack ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items: stack }] : [];
+      const items = proposalInclusions(stack, serviceGuaranteeScope(scope, 'satisfaction'));
+      return items ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items }] : [];
+    }
+    const recurringLines = buildings
+      .flatMap((building) => (building.lineItems || []))
+      .filter((item) => item.frequency !== 'one_time')
+      .map((item) => ({ item, slug: glassServiceSlug(String(item.description || '')) }))
+      .filter(({ slug }) => slug);
+    // A stack speaks for every line it covers: the narrowest of their scopes.
+    const slugScopes = new Map();
+    for (const { item, slug } of recurringLines) {
+      slugScopes.set(slug, narrowerScope(slugScopes.get(slug), serviceGuaranteeScope(scope, item.termsScope)));
     }
     const seen = new Map();
-    for (const building of buildings) {
-      for (const item of (building.lineItems || [])) {
-        if (item.frequency === 'one_time') continue;
-        const slug = glassServiceSlug(String(item.description || ''));
-        if (!slug || seen.has(slug)) continue;
-        const visits = item.frequency === 'per_application'
-          ? (Number(item.visitsPerYear) || null)
-          : (FREQUENCY_VISITS[item.frequency] || null);
-        const items = glassRowInclusions(slug, visits, false);
-        if (items) seen.set(slug, { key: slug, title: 'What this service includes', items });
-      }
+    for (const { item, slug } of recurringLines) {
+      if (seen.has(slug)) continue;
+      const visits = item.frequency === 'per_application'
+        ? (Number(item.visitsPerYear) || null)
+        : (FREQUENCY_VISITS[item.frequency] || null);
+      const items = proposalInclusions(glassRowInclusions(slug, visits, false), slugScopes.get(slug));
+      if (items) seen.set(slug, { key: slug, title: 'What this service includes', items });
     }
     return [...seen.values()];
-  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList]);
+  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList, scope]);
 
   // Terms line — only claims the estimate page itself already makes for the
   // same services. Authored terms govern (neutral line beside them, never a
@@ -215,7 +268,10 @@ export default function EstimateProposalDocument({ data, token }) {
   // rodent document never prints the pest callbacks/guarantee line the
   // page deliberately withholds (codex #3281 r1). One-time-only (no
   // recurring lines) resolves to the neutral line the same way.
-  const NEUTRAL_TERMS = 'Licensed & insured · Satisfaction guaranteed';
+  // A termite (or unclassifiable) estimate makes no guarantee claim: the
+  // server's proposal.noGuaranteeClaims decision, based on the normalized
+  // rows this document renders.
+  const NEUTRAL_TERMS = scope === 'none' ? 'Licensed & insured' : 'Licensed & insured · Satisfaction guaranteed';
   const recurringLineDescriptions = buildings
     .flatMap((b) => (b.lineItems || []))
     .filter((li) => li.frequency !== 'one_time')
@@ -223,7 +279,9 @@ export default function EstimateProposalDocument({ data, token }) {
   // Programs are authored content: their inclusions state the plan terms,
   // so the canned no-long-term-contract claim must not print beside them
   // (codex 1A-ii r3d).
-  const termsLine = (authoredTermsPresent || programList.length > 0)
+  // The terms line speaks for the whole document, so a no-guarantee estimate
+  // prints the neutral line on every path, as its estimate emails do.
+  const termsLine = (scope !== 'all' || authoredTermsPresent || programList.length > 0)
     ? NEUTRAL_TERMS
     : isCommercial
       // Structural terms only — commercial accepts run the MANUAL invoicing
@@ -549,7 +607,7 @@ export default function EstimateProposalDocument({ data, token }) {
             ) : null}
             {estimate.satelliteUrl && !satelliteFailed ? (
               <img
-                src={estimate.satelliteUrl}
+                src={resolveApiAssetUrl(estimate.satelliteUrl)}
                 alt={`Satellite view of ${estimate.address || 'the property'}`}
                 style={{ marginTop: 8, width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 10, border: `1px solid ${LINE}` }}
                 onError={() => setSatelliteFailed(true)}

@@ -38,7 +38,7 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
 }
 
 // Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
-async function lockAppointmentAddress(trx, plan, updates = {}) {
+async function lockAppointmentAddress(trx, plan, updates = {}, { noWait = false } = {}) {
   // Match createOrJoinVisit: customer row before every stop lock.
   await trx('customers').where({ id: plan.anchor.customer_id }).forNoKeyUpdate().first('id');
   const keys = new Set(plan.stopKeys);
@@ -49,7 +49,7 @@ async function lockAppointmentAddress(trx, plan, updates = {}) {
       }));
     }
   }
-  for (const key of [...keys].sort()) await lockStop(trx, key);
+  for (const key of [...keys].sort()) await lockStop(trx, key, { noWait });
 }
 
 async function applyAppointmentAddress(trx, plan, actorId) {

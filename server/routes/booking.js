@@ -7,9 +7,28 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const {
+  estimateBelongsToCustomerAccount,
+  loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
+  estimateOwnershipMatchesLockedRows,
+  validateEstimateOwnershipUnderLock,
+} = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const {
+  validatePreferredTimeRequest,
+  recordPreferredTimeRequest,
+  hasRecentPreferredTimeRequest,
+  closeBookedPreferredLeads,
+  dropSupersededPreferredFunnelRows,
+} = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
+const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -147,7 +166,11 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled, reserviceRankAfterNewLive } = require('../config/feature-gates');
+const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive, bookArrivalGraceLive } = require('../config/feature-gates');
+const { multiTechConfirmLive } = require('../config/feature-gates');
+const {
+  bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
+} = require('../services/scheduling/book-arrival-grace');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -156,12 +179,62 @@ const {
   mintSlotOfferField,
   verifySlotOfferField,
   isRealCalendarDate,
+  bookOfferPolicy,
+  slotOfferFieldGrace,
   generateConfirmationCode,
 } = require('../utils/slot-offer-token');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
 } = require('../services/self-booking-plan-sync');
+
+// Canonical reader for whether a /book self-serve offer may be minted (and
+// later confirmed) with mid-route insertion (owner 2026-09-28, PR #5231
+// round 2): capacityPlacement is worth passing only when createSelfBooking
+// will actually prepare, verify and persist the traffic-certified route
+// order for it (GATE_BOOK_CAPACITY_COMMIT) AND the whole-route capacity
+// model is live at all (GATE_SCHEDULING_CAPACITY) — re-running placement
+// only makes sense once the offer itself came from that model. Mirrors the
+// existing `technician_id && bookCapacityCommitLive() && capacityEnabled()`
+// condition createSelfBooking's own preparedCapacity gate already uses
+// (unchanged here — it also needs technician_id, which this reader has no
+// opinion on). Named rather than repeated inline: five offer builders and
+// the commit-time signature check below all read it.
+function bookInsertionOffersLive() {
+  return bookCapacityCommitLive() && capacityEnabled();
+}
+
+// Canonical reader for whether /book offers (and their commit) run under the
+// online-booking arrival grace (owner-approved 2026-09-29,
+// GATE_BOOK_ARRIVAL_GRACE): the gate AND mid-route insertion live — grace is
+// judged by the whole-route arrival simulation and enforced at commit by
+// createSelfBooking's verifyArrivalCapacity, both of which only exist under
+// bookInsertionOffersLive(). The offer builder additionally requires its
+// caller to pass `bookArrivalGrace: true` (only the redeemable /book surfaces do
+// — never the phone agent or public reschedule) and `capacityPlacement`.
+function bookArrivalGraceOffersLive() {
+  // Insertion first: a build/commit with mid-route insertion off never reaches
+  // the gate read at all.
+  return bookInsertionOffersLive() && bookArrivalGraceLive();
+}
+
+// The signed-offer policy the /confirm verifier expects. The gate and the
+// capacity mode are read LIVE (a flip of either between mint and confirm fails
+// the HMAC, in either direction) but the grace itself is NOT: the offer's own
+// slot_sig field claims the exact grace it was minted under (`<exp>.<grace>.
+// <sig>`, or `<exp>.<sig>` for 0), and the HMAC then authenticates that claim
+// — the verifier signs over the claimed grace AND this policy tag, so a forged
+// shape fails. Re-reading the env here would invalidate every in-flight offer
+// whenever SELF_SERVE_ARRIVAL_GRACE_MINUTES crosses zero (Codex r4 P2): a
+// graced offer would fail once the value became 0 and a strict one once it
+// became positive. Grace 0 keeps the plain insertion tag and wire shape
+// (byte-identical to gate off, the round-3 invariant), so a strict offer needs
+// no grace state at all. Mirrors buildBookingAvailability's per-slot
+// offerPolicyFor.
+function bookOfferPolicyLive(slotSig) {
+  const graceLive = bookArrivalGraceOffersLive() && slotOfferFieldGrace(slotSig) > 0;
+  return bookOfferPolicy({ insertion: bookInsertionOffersLive(), graceLive });
+}
 
 function cleanBookingServiceLabel(value) {
   const label = String(value || '').trim().replace(/\s+/g, ' ');
@@ -791,6 +864,26 @@ async function findUniqueCustomerByAddress(address, city, zip, unit) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// A token-proven customer identifies an account, while the submitted address
+// identifies the property row that availability and confirmation must share.
+// This is the one account-property binding contract for both paths.
+async function findAccountPropertyByAddress(customer, { address, zip, unit }, conn = db) {
+  if (!customer || !address) return customer || null;
+  if (addressMatchesCustomer(customer, address, zip, unit)) return customer;
+  const accountId = customer.account_id || customer.id;
+  const accountRows = await conn('customers')
+    .where(function () {
+      this.where('account_id', accountId).orWhere('id', accountId);
+    })
+    .whereNot('id', customer.id)
+    .whereNull('deleted_at')
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    })
+    .limit(25);
+  return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -878,6 +971,10 @@ router.get('/config', async (req, res, next) => {
       multi_service: isEnabled('multiServiceBooking'),
       // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
       van_scene: isEnabled('vanScene'),
+      // "Can't find a time?" block + preferred day/time request form
+      // (GATE_BOOK_PREFERRED_TIME) — fail-closed dark-ship flag; the POST
+      // route also answers 404 while off.
+      preferred_time: bookPreferredTimeLive(),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -967,6 +1064,10 @@ function inTimeOfDay(startTimeHHMM, timeOfDay) {
 // check here) would hand out someone else's rooftop-accurate location, so the
 // public routes round those (roundPublicCoord). Slot computation always uses
 // the exact values either way.
+function firstNonblankAddressValue(...values) {
+  return values.map(value => String(value ?? '').trim()).find(Boolean) || '';
+}
+
 async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   let resolvedLat = lat ? parseFloat(lat) : null;
   let resolvedLng = lng ? parseFloat(lng) : null;
@@ -1002,6 +1103,76 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   }
 
   return { lat: resolvedLat, lng: resolvedLng, disclosable };
+}
+
+// /book's offer location (/availability and /find-slots). When the request is
+// for an existing customer — the estimate's account property selected by the
+// typed address/unit, else the unique customer at that address (the step-1
+// lookup's own match) — confirmation books at
+// customerBookingLocation and refuses an offer signed on any other grid cell,
+// so the offer is built there too (Codex #4992 P1: a staff-verified pin the
+// address geocoder never returns would refuse every retry), and never
+// echoed exactly — it is a customer record's pin. A validated optional
+// bearer supplies the same account identity for bare signed-in entries;
+// estimate identity takes precedence for estimate links. Both offer routes
+// and /confirm ignore ambient bearer identity while customers-only is off.
+// Everyone else keeps resolveBookingCoords. estimate_id is a raw public
+// value: only a UUID (LEAD_ID_RE's shape) is looked up.
+async function resolveOfferCoords({
+  lat, lng, address, city, state, zip, unit, estimate_id,
+  authedCustomer,
+}) {
+  let customer = null;
+  let estimateBound = false;
+  const parsed = parseRawAddress(address || '');
+  const line1 = firstNonblankAddressValue(parsed.line1, address);
+  const locality = {
+    city: firstNonblankAddressValue(city, parsed.city),
+    state: firstNonblankAddressValue(state, parsed.state),
+    zip: firstNonblankAddressValue(zip, parsed.zip),
+  };
+  const submittedUnit = firstNonblankAddressValue(unit, submittedInlineUnit(line1));
+  if (LEAD_ID_RE.test(String(estimate_id || ''))) {
+    const customerId = (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id;
+    estimateBound = !!customerId;
+    if (customerId) {
+      const primary = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+        .first('id', 'account_id', 'active', 'deleted_at', 'latitude', 'longitude',
+          'address_line1', 'address_line2', 'city', 'state', 'zip');
+      customer = await findAccountPropertyByAddress(primary, {
+        address: line1, zip: locality.zip, unit: submittedUnit,
+      });
+    }
+  }
+  if (!estimateBound && authedCustomer) {
+    customer = await findAccountPropertyByAddress(authedCustomer, {
+      address: line1, zip: locality.zip, unit: submittedUnit,
+    });
+    // Callers supply a bearer row only under customers-only, matching
+    // confirmation's account boundary and its location binding.
+    if (!customer) return { lat: null, lng: null, disclosable: false };
+  }
+  // A bound estimate proves one account. If its submitted property matches
+  // none of that account's rows, confirmation refuses it; do not fall through
+  // to another household's globally unique address or the estimate's old pin.
+  if (estimateBound && !customer) return { lat: null, lng: null, disclosable: false };
+  if (!customer && address) {
+    const customerId = (await findUniqueCustomerByAddress(
+      line1,
+      locality.city,
+      locality.zip,
+      submittedUnit,
+    ))?.id;
+    customer = customerId
+      ? await db('customers').where({ id: customerId })
+        .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      : null;
+  }
+  const pin = customer ? await customerBookingLocation(customer) : null;
+  if (customer) return pin ? { ...pin, disclosable: false } : { lat: null, lng: null, disclosable: false };
+  const stateZip = [locality.state, locality.zip].filter(Boolean).join(' ');
+  const geocodeAddressLine = [line1, locality.city, stateZip].filter(Boolean).join(', ');
+  return resolveBookingCoords({ lat, lng, address: geocodeAddressLine, city: locality.city, estimate_id: null });
 }
 
 // Load the singleton booking_config row, falling back to the same defaults the
@@ -1043,15 +1214,96 @@ function bookingSlotWindow(config = {}) {
 // server's authority for what each funnel service's visit takes. A known key
 // pins the duration outright; the caller-sent minutes then only matter for
 // unknown/legacy service labels, where the 45–90 catalog-range clamp remains.
-// Pipeline stages that mark a row as a PROSPECT, not a current customer —
-// the customers-only gate refuses these even after a successful phone verify
-// (the quote wizard mints active 'new_lead' rows for anyone who runs it, and
-// admin moves unconverted leads through the rest; 'lost' is a lost lead —
-// 'churned' ex-customers are deliberately NOT here). Subset of
-// admin-customers.js CUSTOMER_STAGES; keep the two in sync.
-const PRE_CUSTOMER_PIPELINE_STAGES = new Set([
-  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating', 'lost',
-]);
+// PRE_CUSTOMER_PIPELINE_STAGES lives in services/booking-contact-linked-handoff.js
+// (shared with capture-intent and the abandoned-booking recovery worker).
+const {
+  PRE_CUSTOMER_PIPELINE_STAGES, establishedContactLinkedDraft, loadContactLinkedAccountRows, isBlockingLinkedRow,
+} = require('../services/booking-contact-linked-handoff');
+
+// Contact-linked quote-wizard handoff → established customer (B11).
+//
+// public-quote links a draft to any existing customer matching the
+// UNVERIFIED contact the anonymous quoter typed and returns the handoff token
+// to that same caller, so under the customers-only gate the token must not
+// turn a typed phone + street into "I am that customer". The gate tags such a
+// binding (contactLinkedHandoff); THIS runs inside the booking transaction,
+// with the bound customer row already share-locked (an UPDATE promoting a
+// lead to an established stage cannot land between this read and the
+// commit), after the address bind and the signed-slot validation — so the
+// refusal is neither a stale gate-time read nor an early oracle for "is this
+// contact a customer". The one exception is a lost-response retry of a
+// booking that ALREADY committed: the first wizard booking promotes its own
+// lead to 'won' in its transaction, so an identical retry must still reach
+// the idempotent replay. That retry is recognized only when a live booking
+// already consumed THIS draft for the SAME slot tuple under the bound
+// customer AND the submitted contact is that customer's — by phone, or by
+// email when the draft itself was linked by that email (a new/different
+// typed phone must not strand the retry).
+const ESTABLISHED_HANDOFF_REFUSAL_MESSAGE = 'This contact is already on file with Waves. To book as an existing customer, please sign in to your customer portal with the code we text you, then book from the Book page — or call (941) 297-5749 and we will get you scheduled.';
+
+async function assertContactLinkedHandoffProvisional(trx, {
+  handoff, pricingEstimateId, slotDate, slotStart, newCustomer,
+}) {
+  if (!handoff?.rootId || !handoff?.boundId) return;
+  // Account-wide, through the ONE shared classifier (capture-intent and the
+  // recovery worker use it too): blocked when the draft-linked row OR any
+  // sibling property row on its account (including the row the address bound)
+  // is established. The bound row is always in the account, but a vanished
+  // root falls back to reading it directly.
+  let { root, rows } = await loadContactLinkedAccountRows(trx, handoff.rootId, { forShare: true });
+  if (!rows.some((r) => String(r.id) === String(handoff.boundId))) {
+    const boundRow = await trx('customers').where({ id: handoff.boundId }).forShare().first('id', 'pipeline_stage', 'phone', 'email', 'deleted_at');
+    if (boundRow) rows = [...rows, boundRow];
+  }
+  // A missing root, or any archived / established linked row, blocks.
+  if (root && !rows.some(isBlockingLinkedRow)) return;
+  const last10 = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; };
+  const lcEmail = (v) => String(v || '').trim().toLowerCase();
+  // The linking contact belongs to the draft-linked ROOT row (A) — the row
+  // findExistingCustomerByContact matched — which can differ from the account
+  // property row the address bound (B). Contact is judged against A; the
+  // consumed booking below is still required under B.
+  const linkRow = rows.find((r) => String(r.id) === String(handoff.rootId))
+    || rows.find((r) => String(r.id) === String(handoff.boundId));
+  const consumed = await trx('scheduled_services as ss')
+    .join('self_booked_appointments as sba', 'sba.id', 'ss.self_booking_id')
+    .where('ss.source_estimate_id', pricingEstimateId)
+    .where('ss.customer_id', handoff.boundId)
+    .where('sba.date', slotDate)
+    .where('sba.start_time', slotStart)
+    .whereNot('sba.status', 'cancelled')
+    .first('ss.id');
+  if (consumed) {
+    const typed10 = last10(newCustomer?.phone);
+    const typedEmail = lcEmail(newCustomer?.email);
+    const draft = await trx('estimates').where({ id: pricingEstimateId }).first('customer_email');
+    const phoneMatches = !!typed10 && typed10 === last10(linkRow?.phone);
+    const emailMatches = !!typedEmail && typedEmail === lcEmail(linkRow?.email)
+      && lcEmail(draft?.customer_email) === lcEmail(linkRow?.email);
+    if (phoneMatches || emailMatches) return;
+  }
+  throw Object.assign(new Error(ESTABLISHED_HANDOFF_REFUSAL_MESSAGE), {
+    statusCode: 409,
+    isOperational: true,
+    code: 'ESTABLISHED_CUSTOMER_SIGN_IN',
+  });
+}
+
+// A refused (or never-eligible) contact-linked handoff must leave NO open
+// abandoned-booking recovery intent behind: the recovery cron texts/emails
+// the intent's phone/email (the real customer's, when an attacker quoted with
+// their contact). Scoped to the HMAC-verified draft id ONLY: a draft's stored
+// contact and the caller's typed contact are both anonymous input, so neither
+// may widen the suppression to other people's intents. Every capture staged
+// through this handoff carries the verified id. booking_intents.suppressed is
+// the cron's kill flag — every recovery selection filters `suppressed = false`.
+async function suppressRecoveryIntents(conn, { pricingEstimateId }) {
+  if (!pricingEstimateId) return;
+  await conn('booking_intents')
+    .whereNull('converted_at')
+    .where('pricing_estimate_id', String(pricingEstimateId))
+    .update({ suppressed: true, updated_at: conn.fn.now() });
+}
 
 const BOOKING_FUNNEL_SERVICE_DURATIONS = {
   pest_control: 60,
@@ -1293,6 +1545,35 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
   return idle;
 }
 
+// The arrival grace (minutes) a /book slot is offered under: 0 (strict) for
+// any build without GATE_BOOK_ARRIVAL_GRACE, and for a slot that did not come
+// from find-time's arrival-window route simulation (the only generator whose
+// slots were checked against a grace at all). Returns -1 when the slot must
+// NOT be offered at all — the offer-side twin of arrival-route.js's
+// arrivalExceedsGrace (the commit's bound): a graced build never offers a
+// slot whose simulated arrival delay is past the grace it would be signed
+// under, since verifyArrivalCapacity would refuse it at confirm.
+function bookSlotGrace(graceBuild, slot) {
+  // Capacity mode (a graced build requires it) only ever produces
+  // arrival-window slots, so this depends on the DATE alone. /confirm does not
+  // re-read it: it takes the grace from the signed slot_sig field
+  // (bookOfferPolicyLive), so a later env change cannot orphan this offer.
+  if (!graceBuild) return 0;
+  const grace = bookArrivalGraceMinutes({ date: slot.date });
+  return delayWithinGrace(slot.arrival_delay_minutes, grace) ? grace : -1;
+}
+
+// /book's offer-side travel-gap mirror of the commit gate's strict probe.
+// Graced builds (GATE_BOOK_ARRIVAL_GRACE) judge it with bookGapAdmits — the
+// same rule the commit applies via bookClashesWaivable — everything else is
+// the unchanged strict violatesTravelGap.
+function travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied }) {
+  if (!graceBuild || !(slotGrace > 0)) return violatesTravelGap(candidateEntity, dayOccupied);
+  return !bookGapAdmits(candidateEntity, dayOccupied, {
+    technicianId: slot.technician.id, grace: slotGrace, arrivalDelayMinutes: slot.arrival_delay_minutes,
+  });
+}
+
 // Core availability builder. Runs the route-aware slot finder over [rangeFrom,
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 (best-3 under the re-service profile — see rankProfile
@@ -1313,8 +1594,35 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace }) {
   config = applySchedulingPolicy(config);
+  // The signed-offer policy tag for this build (minted inside addCandidate
+  // below; createSelfBooking verifies with the same mapping). An offer built
+  // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
+  // GATE_SCHEDULING_CAPACITY flip during the offer's 45-minute lifetime fails
+  // the signature instead of confirming under the wrong policy (Codex round 2
+  // P1 on PR #5231).
+  //
+  // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+  // 2026-09-29): `bookArrivalGrace` is an explicit per-caller opt-in (only the
+  // REDEEMABLE /book surfaces whose own commit is createSelfBooking pass it:
+  // /availability, /find-slots, capture-intent revalidation, public
+  // re-service, inspection booking — never the phone agent, whose commit
+  // keeps end-of-day-only, nor public reschedule, whose rebooker commit still
+  // runs the strict travel probe). It takes effect only with mid-route
+  // insertion (capacityPlacement) AND the gate live. A graced build signs the
+  // BOOK_ARRIVAL_GRACE_OFFER_POLICY tag instead of the insertion tag, and
+  // each slot carries the exact grace that justified it (see addCandidate).
+  // Grace mode only when SOME date in the range has a positive grace (grace
+  // 0 everywhere — env unset/0 — is byte-identical to the gate being off:
+  // same packing, same policy tag, same token). Per-date zero grace (a
+  // same-day pick) is handled per slot below via slotGrace.
+  const graceBuild = bookArrivalGrace === true && capacityPlacement === true && bookArrivalGraceOffersLive()
+    && (bookArrivalGraceMinutes({ date: rangeFrom }) > 0 || bookArrivalGraceMinutes({ date: rangeTo }) > 0);
+  // Per-slot policy tag (see addCandidate): grace tag only where the slot's
+  // own grace is positive, else the insertion tag /confirm computes for a
+  // zero-grace date.
+  const offerPolicyFor = (slotGrace) => bookOfferPolicy({ insertion: capacityPlacement, graceLive: slotGrace > 0 });
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
@@ -1341,9 +1649,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     : null;
 
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
+  // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
+  // self-serve caller resolves the request's zone FROM COORDINATES (not city
+  // text — 'North Venice' / 'Northport' are not in service_zones.cities) so
+  // find-time can lift the detour cap on that zone's route day. Null (and no
+  // db call at all) with the gate off; the phone agent (selfServeNotice
+  // false) never asks.
+  const zoneSlug = selfServeNotice ? await resolveZoneRouteDaySlug({ lat, lng, conn: db }) : null;
   const result = await findAvailableSlots({
     lat,
     lng,
+    zoneSlug,
     durationMinutes: duration,
     serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
     // This booking's own expected-minutes credit — the same number the
@@ -1353,6 +1669,29 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // packed inside find-time (no `insertion` to key off here), and
     // unassigned committed visits anchor the route (push-audit P1).
     packEnds: true,
+    // capacityPlacement is the estimate picker's existing flag
+    // (estimate-slot-availability.js): it both allows inserting the new
+    // visit BETWEEN a day's existing stops (not only appended after the
+    // stored route order) and skips find-time's conservative_travel
+    // no-traffic fallback probe, because the estimate accept commit
+    // re-verifies with live traffic and persists the certified order.
+    // Owner 2026-09-28: only a caller here whose OWN commit is
+    // createSelfBooking, and only while GATE_BOOK_CAPACITY_COMMIT is live,
+    // may pass it too — that commit re-verifies with traffic
+    // (verifyArrivalCapacity) and persists the certified route order
+    // (persistBookCapacityOrder), so an inserted offer it confirms is
+    // exactly what gets saved. A caller whose commit does NOT persist a
+    // route order (public reschedule — rebooker.js clears route_order on a
+    // move; the voice agent — relay-booking.js inserts with no route_order)
+    // must never pass this — an inserted offer there would commit as an
+    // unnumbered stop sorted after the route, not at the position it was
+    // offered at — so it stays append-only and omits capacityPlacement.
+    capacityPlacement,
+    // packCapacityEnds' /book mode (GATE_BOOK_ARRIVAL_GRACE): pack against
+    // BOTH route neighbours under the exact rule the mirror in addCandidate
+    // below applies, so find-time and /book agree. False (ignored) for every
+    // build without the gate/opt-in — byte-identical to before.
+    bookArrivalGrace: graceBuild,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -1438,6 +1777,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // rejected) AI request releases its slot instead of holding the day full.
       .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
       .whereBetween('scheduled_date', [rangeFrom, rangeTo])
+      // Owner ruling 2026-09-30: an unconfirmed street-level address hold takes no
+      // daily-cap capacity (same exclusion the commit-time counter uses).
+      .whereNotExists(function () { require('../services/street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
       .select('scheduled_date')
       .count('* as count')
       .groupBy('scheduled_date');
@@ -1566,6 +1908,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // without clashing). Also covers cleanBookingStart snaps that would land
     // a candidate on a window find-time validated around.
     let idleMinutes = 0;
+    // The arrival grace THIS slot is offered under (0 = strict): GATE_BOOK_
+    // ARRIVAL_GRACE builds only. The simulation's own arrival delay for the
+    // slot must be within it — createSelfBooking's verifyArrivalCapacity
+    // enforces the same bound at commit, so a slot delayed past it is never
+    // offered (offer/commit parity).
+    const slotGrace = bookSlotGrace(graceBuild, slot);
     if (occupiedByDate) {
       const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
         || row.technician_id == null || row.technician_id === slot.technician.id);
@@ -1574,9 +1922,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // findConflictingVisits `travel` probe rejects a window that merely
       // touches a stop across a real drive; drop it here so it is never
       // offered. Same soft-degrade as the overlap mirror (no map → skip).
-      if (dayOccupied && violatesTravelGap({
+      // GATE_BOOK_ARRIVAL_GRACE builds judge it with book-arrival-grace.js's
+      // bookGapAdmits instead — the SAME rule createSelfBooking's commit
+      // probe applies (bookClashesWaivable) — which waives ONLY the buffer
+      // against the previous assigned committed stop, within grace.
+      const candidateEntity = {
         startMin, endMin, lat, lng, windowMinutes: duration, expectedMinutes: candidateExpectedMinutes,
-      }, dayOccupied)) return;
+      };
+      if (dayOccupied && travelGapMirrorRefuses({ graceBuild, slot, slotGrace, candidateEntity, dayOccupied })) return;
       idleMinutes = idleMinutesAgainst(dayOccupied, startMin, endMin, {
         lat, lng, durationMinutes: duration, expectedMinutes: candidateExpectedMinutes,
       });
@@ -1598,7 +1951,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // a live HMAC — see utils/slot-offer-token.js. The client passes it
       // through as-is; serviceKey + locationKey bind the request context the
       // slots were computed FOR, so an offer fetched for one address/service
-      // can't confirm another.
+      // can't confirm another. `policy` (offerPolicyFor, per slot grace)
+      // additionally binds THIS build's insertion policy into the HMAC —
+      // Codex round 2 P1 on PR #5231.
       slot_sig: mintSlotOfferField({
         surface: 'booking',
         scopeId: '',
@@ -1608,6 +1963,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         startMinutes: startMin,
         technicianId: slot.technician.id || null,
         durationMinutes: duration,
+        policy: offerPolicyFor(slotGrace),
+        // The exact grace that justified this offer (0 → the unchanged
+        // `<exp>.<sig>` field; > 0 → `<exp>.<grace>.<sig>`, HMAC-bound) so the
+        // commit enforces the value the offer used, never a live re-read.
+        arrivalGrace: slotGrace,
       }),
       start_label: minToTime12(startMin),
       end_label: minToTime12(endMin),
@@ -1630,7 +1990,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     });
   };
 
-  for (const slot of (result.slots || [])) {
+  // A graced build never offers a slot whose simulated arrival delay is past
+  // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
+  // confirm. Ungraced builds pass every slot through untouched.
+  const offerSlots = graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []);
+  for (const slot of offerSlots) {
     if (fullDays.has(slot.date)) continue;
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -1772,8 +2136,74 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   };
 }
 
+// The /book funnel's default offer window — anchored to ET calendar days so it
+// doesn't shift by a day between 8 PM ET and midnight UTC — and the 90-day
+// horizon a caller-supplied range is clamped to.
+function bookingOfferWindow(config, today) {
+  return {
+    minDate: etDateString(addETDays(today, config.advance_days_min ?? 1)),
+    maxDate: etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS)),
+    defaultTo: etDateString(addETDays(today, config.advance_days_max ?? 14)),
+  };
+}
+
+// The /book funnel's offer builder — GET /availability, POST /find-slots and
+// the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
+// through it, so an offer and its later createSelfBooking commit come from
+// one finder. Self-serve surface: the notice window is enforced (owner ruling
+// 2026-09-23). /confirm's commit for this funnel is createSelfBooking, which
+// (while bookInsertionOffersLive() is live) re-verifies with traffic and
+// persists the certified route order — see the comment on capacityPlacement
+// inside buildBookingAvailability. The minted offer carries a signed policy
+// tag either way, so a gate flip between this mint and /confirm can't be
+// redeemed under the wrong policy.
+function buildFunnelAvailability(args) {
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+}
+
+// What the /book funnel would offer an EXISTING customer for one funnel
+// service (GET /availability with no date range: the customer's own booking
+// pin, the service's catalog duration, the default window) — null when there
+// is nothing to commit against: /book off, no funnel service (createSelfBooking
+// refuses an empty serviceKey), the customer gone, or no resolvable pin (no
+// coordinates and no geocodable address, or a staff review holding it), or
+// an inactive account.
+async function availabilityForExistingCustomer({ customerId, serviceKey }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  if (!customerId || !funnelKey) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) return null;
+  // active: true — the bearer resolver's own rule (middleware/auth.js
+  // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
+  // /book, so the texting AI must not offer them times it could not commit.
+  const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
+    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  // createSelfBooking's own rule: under bookingCustomersOnly a row still in a
+  // pre-customer pipeline stage is not a verified customer and cannot book, so
+  // it is offered nothing either.
+  if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
+  const location = customer ? await customerBookingLocation(customer) : null;
+  if (!location) return null;
+  const config = await loadBookingConfig();
+  const today = new Date();
+  const { minDate, defaultTo } = bookingOfferWindow(config, today);
+  return buildFunnelAvailability({
+    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+    // The /book page's own first request always sends expand=open
+    // (PublicBookingPage.jsx), so an open route day offers its full block of
+    // hourly windows there — and here.
+    expandOpenDays: true,
+    // Same online-booking arrival grace as /availability + /find-slots (a
+    // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
+    // exactly what /book would show this customer, graced slots included.
+    bookArrivalGrace: true,
+  });
+}
+
 // GET /api/booking/availability
-//   query: lat, lng, address, city, service_type, duration_minutes, date_from, date_to
+//   query: lat, lng, address, city, state, zip, unit, estimate_id,
+//          service_type, duration_minutes, date_from, date_to
 router.get('/availability', async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -1782,7 +2212,7 @@ router.get('/availability', async (req, res, next) => {
     }
 
     const {
-      lat, lng, address, city, estimate_id,
+      lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
       date_from, date_to,
     } = req.query;
@@ -1794,19 +2224,24 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const customersOnly = isEnabled('bookingCustomersOnly');
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = customersOnly ? await resolveBearerCustomer(req) : null;
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
-    // Default date window from config — anchored to ET calendar days so the
-    // window doesn't shift by a day between 8 PM ET and midnight UTC. A
-    // caller-supplied range is honored but clamped to the 90-day horizon so a
+    // A caller-supplied range is honored but clamped to the 90-day horizon so a
     // "Find more dates" / specific-date request can reach further out.
     const today = new Date();
-    const minDate = etDateString(addETDays(today, config.advance_days_min ?? 1));
-    const maxDate = etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS));
-    const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+    const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
     const clamp = (d, fallback) => {
       if (!d) return fallback;
       if (d < minDate) return minDate;
@@ -1824,14 +2259,16 @@ router.get('/availability', async (req, res, next) => {
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
+      // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+      // the gate is off): this offer's own commit is createSelfBooking, which
+      // applies the matching waiver + grace bound.
+      bookArrivalGrace: true,
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -1875,7 +2312,8 @@ const findSlotsHourlyLimiter = rateLimit({
 });
 
 // POST /api/booking/find-slots — Waves AI date/time search.
-//   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
+//   body: { query, lat, lng, address, city, state, zip, unit, estimate_id,
+//           service_type, duration_minutes }
 //   Parses the natural-language "when" into a date window + time-of-day, then
 //   returns the matching open slots (same shape as /availability) plus a short
 //   summary line and a `nearby` flag for the soft route-density message.
@@ -1887,7 +2325,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     }
 
     const {
-      query, lat, lng, address, city, estimate_id,
+      query, lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
     } = req.body || {};
     const cleanQuery = String(query || '').trim();
@@ -1901,7 +2339,16 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const customersOnly = isEnabled('bookingCustomersOnly');
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = customersOnly ? await resolveBearerCustomer(req) : null;
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1920,14 +2367,14 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
+      // Same online-booking arrival grace as /availability (see there).
+      bookArrivalGrace: true,
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -1965,6 +2412,44 @@ function seededRowPin(row, offerLat, offerLng) {
     lat: own(row?.lat) ?? fallback(offerLat),
     lng: own(row?.lng) ?? fallback(offerLng),
   };
+}
+
+function storedBookingPin(customer) {
+  const pair = [customer?.latitude, customer?.longitude];
+  if (pair.some(value => value == null || String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) === 0)) return null;
+  return { lat: Number(pair[0]), lng: Number(pair[1]) };
+}
+
+function bookingAddressStamp(customer) {
+  return Object.fromEntries(['line1', 'line2', 'city', 'state', 'zip'].map(part => [
+    `service_address_${part}`,
+    customer?.[part.startsWith('line') ? `address_${part}` : part] || null,
+  ]));
+}
+
+// Load a missing primary pin from the server-owned address before taking
+// scheduling locks. The public echo proves the signed grid, not an exact
+// customer pin, so it must never be persisted as our geocoding authority.
+async function preloadBookingLocation(customer) {
+  if (!customer || storedBookingPin(customer)) return null;
+  const review = await require('../services/customer-geocode-review').reviewedServiceLocation({
+    customer_id: customer.id, ...bookingAddressStamp(customer),
+  });
+  if (review) return review.location;
+  return require('../services/scheduling/day-stops').resolveServiceLocation({
+    ...customer, lat: null, lng: null,
+  });
+}
+
+// The pin a booking for this existing customer commits at: its stored pin,
+// else preloadBookingLocation's staff-verified pin or canonical geocode of
+// the server-owned address — null while a staff review holds it, or when
+// nothing resolves. The offer paths build on it too (resolveOfferCoords,
+// reservice-public's buildAvailabilityForCustomer), so an offer is made at
+// the location its confirmation re-derives (Codex #4992 P1).
+async function customerBookingLocation(customer) {
+  const location = storedBookingPin(customer) || await preloadBookingLocation(customer);
+  return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
@@ -2103,26 +2588,11 @@ async function createSelfBooking(payload = {}) {
     // the wrong door. No submitted address → the row's own address is the
     // booking address, bind directly.
     const bindCustomerRowByAddress = async (row) => {
-      const submittedLine1 = new_customer?.address_line1;
-      if (!submittedLine1) return { custId: row.id };
-      let matched = addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2)
-        ? row : null;
-      if (!matched) {
-        const accountId = row.account_id || row.id;
-        const accountRows = await db('customers')
-          .where(function () {
-            this.where('account_id', accountId).orWhere('id', accountId);
-          })
-          .whereNot('id', row.id)
-          .whereNull('deleted_at')
-          .andWhere(function () {
-            this.whereNull('active').orWhere('active', true);
-          })
-          .limit(25);
-        matched = (accountRows || []).find(
-          (r) => addressMatchesCustomer(r, submittedLine1, new_customer?.zip, new_customer?.address_line2),
-        ) || null;
-      }
+      const matched = await findAccountPropertyByAddress(row, {
+        address: new_customer?.address_line1,
+        zip: new_customer?.zip,
+        unit: new_customer?.address_line2,
+      });
       if (!matched) {
         return {
           error: {
@@ -2237,6 +2707,7 @@ async function createSelfBooking(payload = {}) {
     // legitimately creates the customer it prices for). The refusal carries
     // the quote-wizard URL so the client renders a forward action, never a
     // dead end.
+    let contactLinkedHandoff = null;
     if (customersOnly && !custId) {
       const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
       // Two token-proven entries can pass: the quote-wizard pricing handoff
@@ -2261,7 +2732,26 @@ async function createSelfBooking(payload = {}) {
       //     matches no account property, or a foreign contact all fall to
       //     the refusal / fix-it responses below.
       const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      const bindGateEstimate = async (estimateId) => {
+      // contactLinked = the estimate is a public quote-wizard draft, whose
+      // customer_id was attached by matching the UNVERIFIED contact the
+      // anonymous quoter typed (public-quote findExistingCustomerByContact),
+      // and whose handoff token is returned to that same anonymous caller.
+      // Possession of that token proves the quoter reached the draft, NOT
+      // that they are the matched customer — so a draft linked to an
+      // ESTABLISHED customer must not act as that customer's identity (anyone
+      // knowing a customer's phone + street could otherwise book AS them,
+      // bypassing this gate's whole purpose). The binding is tagged here and
+      // the refusal is enforced later, inside the booking transaction under
+      // the customer lock (assertContactLinkedHandoffProvisional): after the
+      // address bind and signed-slot validation, so the 409 is never an
+      // early oracle for "is this contact a customer", and against the
+      // customer's CURRENT stage rather than a stale gate-time read. A draft
+      // linked to a row still in a pre-customer stage is the quoter's OWN
+      // freshly minted lead (public-quote upserts new prospects as new_lead),
+      // which this gate never protected — it keeps binding as before.
+      // Staff/system issued links (the accept token) are NOT contact-linked:
+      // their token goes to the estimate's own contact, so they stay identity.
+      const bindGateEstimate = async (estimateId, { contactLinked = false } = {}) => {
         const gateEstimate = await db('estimates')
           .where('id', estimateId)
           .first()
@@ -2276,7 +2766,12 @@ async function createSelfBooking(payload = {}) {
           if (!estCustomer) return { valid: false };
           const bound = await bindCustomerRowByAddress(estCustomer);
           if (bound.error) return { valid: true, error: bound.error };
-          return { valid: true, custId: bound.custId };
+          // contactLinkedRootId marks the binding as contact-derived: the
+          // established-customer refusal is applied INSIDE the booking
+          // transaction (assertContactLinkedHandoffProvisional), after the
+          // address bind and signed-slot validation above, under the
+          // customer row lock — never here.
+          return { valid: true, custId: bound.custId, contactLinkedRootId: contactLinked ? estCustomer.id : null };
         }
         if (gateEstimate.customer_phone) {
           const typed = last10(new_customer?.phone);
@@ -2325,7 +2820,7 @@ async function createSelfBooking(payload = {}) {
           gateShapeOk = !!consumedBy;
         }
         if (gateShapeOk) {
-          gatePass = await bindGateEstimate(pricing_estimate_id);
+          gatePass = await bindGateEstimate(pricing_estimate_id, { contactLinked: true });
           // A customer-less consumed draft deliberately yields NO custId
           // here: bindGateEstimate validates only the draft's stored
           // contact, and a forwarded handoff plus that stale contact must
@@ -2340,6 +2835,9 @@ async function createSelfBooking(payload = {}) {
       }
       if (gatePass.valid && gatePass.error) return gatePass.error;
       if (gatePass.valid && gatePass.custId) custId = gatePass.custId;
+      if (gatePass.valid && gatePass.custId && gatePass.contactLinkedRootId) {
+        contactLinkedHandoff = { rootId: gatePass.contactLinkedRootId, boundId: gatePass.custId };
+      }
       if (!gatePass.valid) {
         const { ESTIMATE_MARKETING_REDIRECTS } = require('../config/estimate-marketing-redirects');
         return {
@@ -2540,6 +3038,14 @@ async function createSelfBooking(payload = {}) {
       Number.isFinite(offerLat) ? offerLat : null,
       Number.isFinite(offerLng) ? offerLng : null,
     );
+    // The signed coordinates above prove what the availability builder
+    // offered. Dispatch normally inherits the customer's live pin; a missing
+    // pin needs a server-resolved visit stamp instead. Reload and fence that
+    // effective location before any conflict/capacity simulation so those
+    // checks model the same exact point as the inserted visit.
+    let bookingLat = Number.isFinite(offerLat) ? offerLat : null;
+    let bookingLng = Number.isFinite(offerLng) ? offerLng : null;
+    let bookingLocationStamp = null;
     // An empty serviceKey can never have been offered by the funnel (both
     // public offer routes derive a key the same way) — refuse outright so a
     // sig harvested from a non-redeeming builder call (reschedule/voice
@@ -2551,7 +3057,22 @@ async function createSelfBooking(payload = {}) {
     // commits), and callbackVisit is unreachable from public POST bodies
     // (/confirm pins it null after the spread). Every transactional re-check
     // below — blackout, date bounds, geometry, day cap, conflict + global
-    // occupancy — still runs for them.
+    // occupancy — still runs for them. No separate policy tag is needed for
+    // them either: reservice-public.js's buildAvailabilityForCustomer and
+    // inspection-public.js's buildAvailabilityForLead both call
+    // buildBookingAvailability in the SAME request, a few lines before this
+    // createSelfBooking call, so that rebuild's capacityPlacement and this
+    // preparedCapacity gate just below read bookInsertionOffersLive() (and
+    // therefore the same env) microseconds apart — not across the signed
+    // offer's 45-minute window a gate flip could actually straddle.
+    //
+    // `policy` (Codex round 2 P1 on PR #5231): binds the SAME insertion
+    // policy the offer was minted under (buildBookingAvailability's
+    // offerPolicy) — a GATE_BOOK_CAPACITY_COMMIT/GATE_SCHEDULING_CAPACITY
+    // flip between mint and this verify fails the signature in either
+    // direction (an insertion offer confirmed with the gate off, or an
+    // append-only offer confirmed with it on) rather than silently
+    // accepting a route-order promise this commit can't actually keep.
     if (!callbackVisit && (!serviceKey || !verifySlotOfferField({
       surface: 'booking',
       scopeId: '',
@@ -2561,9 +3082,22 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
+      policy: bookOfferPolicyLive(slot_sig),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+    // 2026-09-29): the EXACT grace that justified this offer. A signed offer
+    // carries it as an HMAC-bound field (`<exp>.<grace>.<sig>`, verified just
+    // above — never a live env re-read, so a grace change between offer and
+    // confirm is inert for this one offer); an internal callback booking
+    // (re-service, inspection) has no signed field — its offer proof is a
+    // rebuild in the SAME request — so it reads the live value for this date,
+    // which that rebuild used a few lines earlier. 0 = strict: the commit is
+    // byte-identical to before this lane (no waiver, no grace bound).
+    const offerGrace = callbackVisit
+      ? (bookArrivalGraceOffersLive() ? bookArrivalGraceMinutes({ date: slotDateStr }) : 0)
+      : slotOfferFieldGrace(slot_sig);
 
     // technician_id comes straight from the client (an opaque id echoed from
     // the availability response) — verify it names a real, active technician
@@ -2688,7 +3222,7 @@ async function createSelfBooking(payload = {}) {
       const srcEstIdStr = String(sourceEstimateRow.id);
       let owned = false;
       if (sourceEstimateRow.customer_id) {
-        owned = String(sourceEstimateRow.customer_id) === String(custId);
+        owned = await estimateBelongsToCustomerAccount(db, sourceEstimateRow, customer);
       } else {
         const last10 = (v) => {
           const digits = String(v || '').replace(/\D/g, '');
@@ -2882,7 +3416,7 @@ async function createSelfBooking(payload = {}) {
         const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
-          && String(pricingEstimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, pricingEstimate, customer);
         // The verified LINKED-estimate path (/book/:estimateToken posts
         // estimate_id) still prices as it did before the handoff landed: that
         // estimate resolved identity above (non-quote_wizard only), so pricing
@@ -2890,7 +3424,7 @@ async function createSelfBooking(payload = {}) {
         // customer_id pair can't stamp another customer's price.
         const linkedEstimatePriceable = !!estimate
           && estimate.source !== 'quote_wizard'
-          && String(estimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, estimate, customer);
         // NON-pest wizard series: the quote's own cadence supplies the
         // divisor, under the same trust (token + shape + customer match)
         // and the same signed-service bind the pest rule uses — and ONLY
@@ -3023,16 +3557,61 @@ async function createSelfBooking(payload = {}) {
       // the fence and clears an inherited address/contact, the booking
       // must retry against live state, not commit on stale assumptions.
       const COMMS_FINGERPRINT_COLS = [
-        'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+        'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
         ...[1, 2, 3].flatMap((n) => {
           const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
           return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
         }),
       ];
       const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+      // Snapshot every estimate the visit will stamp before entering the
+      // scheduling transaction. Its current owner contributes a comms fence
+      // below; after that fence the estimate row and owner account are held
+      // FOR SHARE through the visit insert. A merge undo therefore either
+      // finishes its repoint before this snapshot is revalidated or waits for
+      // the booking to commit — it cannot change the owner after our check.
+      const stampedEstimateRefs = [...new Set([estimate?.id, sourceEstimateId].filter(Boolean).map(String))];
+      const estimateOwnershipSnapshots = await loadEstimateOwnershipSnapshots(db, stampedEstimateRefs);
+      const estimateOwnershipById = new Map(estimateOwnershipSnapshots.map(snapshot => [snapshot.id, snapshot]));
       const preFenceCustomer = custId
-        ? await db('customers').where({ id: custId }).first(...COMMS_FINGERPRINT_COLS)
+        ? await db('customers').where({ id: custId }).first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude')
         : null;
+      // A genuine re-service rebuilds availability from the customer's
+      // server-owned address just before calling this commit path. Preserve
+      // that same fallback when the legacy profile has no saved pin. The
+      // assessment caller already supplies expectedLocation from its own
+      // resolved/fenced property flow, so it must not trigger a second,
+      // potentially divergent geocode here.
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      const preloadedBookingLocation = shouldResolveMissingBookingLocation
+        ? await preloadBookingLocation(preFenceCustomer)
+        : null;
+      // Spend the traffic budget before scheduling locks. The verifier below
+      // reuses this request-local travel object only when the locked route's
+      // fingerprint still matches, and never makes a provider request.
+      let preparedCapacity = null;
+      if (technician_id && bookCapacityCommitLive() && capacityEnabled()) {
+        const preparedPin = storedBookingPin(preFenceCustomer)
+          || storedBookingPin({
+            latitude: preloadedBookingLocation?.lat,
+            longitude: preloadedBookingLocation?.lng,
+          })
+          || storedBookingPin({ latitude: bookingLat, longitude: bookingLng });
+        const { prepareArrivalCapacity } = require('../services/scheduling/arrival-route');
+        preparedCapacity = await prepareArrivalCapacity({
+          date: slotDateStr,
+          technicianId: technician_id,
+          prospective: {
+            lat: preparedPin?.lat ?? null,
+            lng: preparedPin?.lng ?? null,
+            estimated_duration_minutes: duration,
+            service_type: resolvedServiceType,
+          },
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+        });
+      }
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -3058,10 +3637,22 @@ async function createSelfBooking(payload = {}) {
       // global order) so concurrent confirms can't deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       if (technician_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${technician_id}:${slotDateStr}`],
-        );
+        if (preparedCapacity) {
+          // verifyArrivalCapacity fingerprints selected AND unassigned stops.
+          // Dispatch moves a stop to unassigned while holding its source-day
+          // and unassigned-day fences, so hold both in the shared canonical
+          // order before any row lock and through verification + insertion.
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, [
+            { techId: technician_id, date: slotDateStr },
+            { techId: null, date: slotDateStr },
+          ]);
+        } else {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${technician_id}:${slotDateStr}`],
+          );
+        }
       }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -3144,16 +3735,27 @@ async function createSelfBooking(payload = {}) {
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
-      // The consultation page fences EVERY profile its lead touches first,
-      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
-      // uses); re-taking this customer's own fence below is a no-op.
+      // The consultation page fences EVERY profile its lead touches. Estimate
+      // ownership adds the current owner of every estimate this visit will
+      // stamp. Take the whole set in canonical id order before any customer
+      // or estimate row lock: merge undo takes the estimate owner's same
+      // customer-comms fence before it can repoint that estimate, so the
+      // ownership check below stays true through the final insert.
+      const commsFenceIds = new Set(
+        [custId, ...estimateOwnershipSnapshots.map(snapshot => snapshot.customerId)]
+          .filter(Boolean)
+          .map(String),
+      );
       if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
-        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) {
+          if (id) commsFenceIds.add(String(id));
+        }
       }
-      await lockCustomerComms(trx, custId);
+      for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
-          .where({ id: custId }).first(...COMMS_FINGERPRINT_COLS);
+          .where({ id: custId }).forShare()
+          .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
@@ -3161,14 +3763,71 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
+        if (contactLinkedHandoff) {
+          await assertContactLinkedHandoffProvisional(trx, {
+            handoff: contactLinkedHandoff,
+            pricingEstimateId: pricing_estimate_id,
+            slotDate: slot_date,
+            slotStart: slot_start,
+            newCustomer: new_customer,
+          });
+        }
+        let freshPin = storedBookingPin(freshBookingCustomer);
+        const missingPinUnchanged = ['latitude', 'longitude'].every(
+          column => (freshBookingCustomer[column] ?? null) === (preFenceCustomer[column] ?? null),
+        );
+        if (shouldResolveMissingBookingLocation && !freshPin && missingPinUnchanged && !storedBookingPin(preFenceCustomer)) {
+          // A customer can have server-built availability without a saved
+          // pin. Preserve that resolved location, but only while the same
+          // address/missing pair still holds. Never resurrect a cleared pin
+          // or bypass a staff review recorded while the lookup was running.
+          const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({
+            customer_id: custId, ...bookingAddressStamp(freshBookingCustomer),
+          }, trx);
+          const resolved = reviewed ? reviewed.location : preloadedBookingLocation;
+          freshPin = storedBookingPin({ latitude: resolved?.lat, longitude: resolved?.lng });
+          if (freshPin) {
+            bookingLocationStamp = { ...freshPin, ...bookingAddressStamp(freshBookingCustomer) };
+          }
+        }
+        bookingLat = freshPin?.lat ?? null;
+        bookingLng = freshPin?.lng ?? null;
+        // Public offers bind the pin on the same rounded grid used by the
+        // availability response. A move to another grid cell invalidates the
+        // offer. An exact correction inside the same cell can still drive the
+        // overlap check; when a traffic proof was prepared, the exact-point
+        // comparison below requires a fresh offer instead.
+        // Re-service callbacks have no signed location key. They still must
+        // refuse an invalidated/held fallback, including when capacity is off
+        // or no technician is bound; a null pin cannot reach the visit insert.
+        if ((shouldResolveMissingBookingLocation && !freshPin)
+          || (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey)) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
+        // The prepared traffic legs are exact-coordinate inputs. A profile
+        // correction inside the public signature's rounded grid is safe for
+        // overlap-only commits, but cannot reuse traffic prepared for the old
+        // point. Retry before verify instead of certifying a different door.
+        const preparedPoint = preparedCapacity?.options?.prospective;
+        if (preparedPoint
+          && (Number(preparedPoint.lat) !== bookingLat || Number(preparedPoint.lng) !== bookingLng)) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
         // callbackVisit.expectedLocation (consultation page only, Codex #4737
         // r5 P1): the location the caller validated the slot for must still be
         // the customer's, checked under this fence — another commit can have
         // replaced the address after the caller's own lock released.
         if (callbackVisit?.expectedLocation) {
-          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
           const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
-          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+          if (!same(bookingLat, callbackVisit.expectedLocation.lat) || !same(bookingLng, callbackVisit.expectedLocation.lng)) {
             throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
               statusCode: 409,
               isOperational: true,
@@ -3185,10 +3844,12 @@ async function createSelfBooking(payload = {}) {
         // source estimate already books UNLINKED (fail-open ownership
         // gate above), and revalidating its row here would 409 a booking
         // that stamps nothing from it.
-        for (const estRef of [estimate?.id, sourceEstimateId]) {
-          if (!estRef) continue;
-          const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
-          if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
+        for (const estRef of stampedEstimateRefs) {
+          if (!await validateEstimateOwnershipUnderLock(
+            trx,
+            estimateOwnershipById.get(estRef),
+            freshBookingCustomer,
+          )) {
             throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
               statusCode: 409,
               isOperational: true,
@@ -3535,6 +4196,21 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
+      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
+      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // zone/city leg matches ANOTHER technician's overlapping row, and a
+      // hold leg matches a hold stamped for another technician — even though
+      // the offer (buildBookingAvailability's occupancy mirror) only counts
+      // rows that are unassigned or on the slot's own technician. AND the
+      // same predicate onto the whole probe so a slot offered on technician
+      // B's day is not refused for technician A's stop. Unassigned rows still
+      // block everyone. Off (or no technician, or capacity off): untouched.
+      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+        conflictQuery.where((q) => {
+          q.whereNull('scheduled_services.technician_id')
+            .orWhere('scheduled_services.technician_id', technician_id);
+        });
+      }
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
@@ -3556,29 +4232,68 @@ async function createSelfBooking(payload = {}) {
       // serializes writers; a narrow predicate stays narrow under any
       // lock. No exclusions: this path moves no existing row (the
       // double-submit replay returned above before any conflict check).
+      // GATE_BOOK_ARRIVAL_GRACE (owner-approved 2026-09-29) — how the probe
+      // below meets a graced offer: a strict travel-gap clash is tolerated ONLY
+      // when the offer was graced (offerGrace > 0), a prepared capacity proof
+      // exists to judge it (verifyArrivalCapacity below enforces the offer's
+      // grace bound on the simulation's own arrival delay), and EVERY clash is
+      // a previous-side buffer against an assigned committed stop — exactly
+      // the clashes the offer mirror (book-arrival-grace.js bookGapAdmits)
+      // waived. A real overlap, a hold, an interview, an unassigned stop or
+      // the NEXT stop's buffer still refuse.
       const globalClash = await findConflictingVisits({
         db: trx,
         includeInterviews: true,
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        technicianId: technician_id || null, // tech-aware scope, gate-dark (occupancy.js header)
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {
-          lat: Number.isFinite(offerLat) ? offerLat : null,
-          lng: Number.isFinite(offerLng) ? offerLng : null,
+          lat: bookingLat,
+          lng: bookingLng,
           // Same credit buildBookingAvailability offered this window under.
           // expectedIdentity: consultation page only (#4737 r1 P2).
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
         },
       });
-      if (globalClash.length) {
+      // GATE_BOOK_ARRIVAL_GRACE: waive ONLY the graced offer's previous-side
+      // buffer clashes (see offerGrace above and book-arrival-grace.js).
+      if (globalClash.length && !(preparedCapacity && offerGrace > 0
+        && bookClashesWaivable(globalClash, {
+          technicianId: technician_id, grace: offerGrace, candidateStartMin: timeToMin(slot_start),
+        }))) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
           statusCode: 409,
           isOperational: true,
           code: 'SLOT_TAKEN',
         });
       }
+
+      // Verify the traffic-aware prepared proof under the existing tech-day
+      // lock. A changed route fingerprint or infeasible live fit refuses the
+      // slot; a verified corrected order is persisted after insertion.
+      const capacityServiceTypes = callbackVisit
+        ? [resolvedServiceType]
+        : normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+      const capacityCommitFit = preparedCapacity
+        ? await require('../services/scheduling/arrival-route').verifyArrivalCapacity(preparedCapacity, {
+          conn: trx,
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+          serviceTypes: capacityServiceTypes,
+          // The offer's own grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+          // 2026-09-29; undefined = no bound beyond the 120-minute arrival
+          // promise, the pre-existing behavior). The strict pre-verify travel
+          // probe above now waives exactly the previous-side buffer clashes
+          // the graced offer waived, so a grace-kept slot reaches this check
+          // and is accepted only while its certified delay stays within the
+          // same grace the offer screened for.
+          arrivalGraceMinutes: offerGrace > 0 ? offerGrace : undefined,
+        })
+        : null;
 
       const [bookingRow] = await trx('self_booked_appointments').insert({
         customer_id: custId,
@@ -3603,6 +4318,12 @@ async function createSelfBooking(payload = {}) {
 
       const hasGenerationColumn = await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation');
       const hasReconciledColumn = await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at');
+      // callbackVisit.customerRequest (reservice-public.js only, migration
+      // 20260927100000) — hasColumn-guarded so a deploy that runs before the
+      // migration can't break booking.
+      const hasCustomerRequestColumn = callbackVisit?.customerRequest
+        ? await trx.schema.hasColumn('scheduled_services', 'customer_request')
+        : false;
       // Duplicate-kept decided HERE, atomically with the visit (owner
       // ruling 2026-08-27; pre-push P0): the post-commit seeding used to
       // be the only place this was decided, so a worker death between the
@@ -3634,6 +4355,9 @@ async function createSelfBooking(payload = {}) {
         throw err;
       }
       const [scheduledRow] = await trx('scheduled_services').insert({
+        // A geocoded fallback has no customer pin to inherit. Persist the
+        // exact checked pair and its address on THIS visit, not the profile.
+        ...(bookingLocationStamp || {}),
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
           ? { source_estimate_generation: sourceEstimateGeneration }
@@ -3692,11 +4416,26 @@ async function createSelfBooking(payload = {}) {
           service_id: callbackVisit.serviceId || null,
           create_invoice_on_complete: false,
         } : {}),
+        // Clean re-service request storage (customer_request/_source/_pests,
+        // migration 20260927100000) — internal callers only (reservice-public
+        // customerRequest); hasColumn-guarded like hasGenerationColumn above.
+        ...(callbackVisit?.customerRequest && hasCustomerRequestColumn ? {
+          customer_request: callbackVisit.customerRequest.text || null,
+          customer_request_source: callbackVisit.customerRequest.source || null,
+          customer_request_pests: callbackVisit.customerRequest.pests
+            ? JSON.stringify(callbackVisit.customerRequest.pests)
+            : null,
+        } : {}),
       }).returning('*');
       if (pestDuplicateKeptAtBooking) {
         await trx('scheduled_services')
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
+      }
+      // Apply the certified order only after the candidate has a stored id.
+      if (capacityCommitFit) {
+        const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
+        await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
       }
       // Visit groups (visit-group-scope.md §2): the primary self-booked row
       // stamps at scheduling, same as the seeded series rows below.
@@ -3813,7 +4552,14 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+        if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
+          // No message may follow this refusal: retire the recovery intent the
+          // wizard's capture-intent staged for this contact.
+          await suppressRecoveryIntents(db, { pricingEstimateId: pricing_estimate_id }).catch((supErr) => {
+            logger.warn(`[booking:confirm] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+          });
+        }
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -3841,7 +4587,8 @@ async function createSelfBooking(payload = {}) {
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged
         // (it reads only error + customersOnly fields).
-        return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
+        return { ok: false, status: 409, error: txErr.message,
+          code: txErr.code === 'SLOT_UNAVAILABLE' ? 'SLOT_TAKEN' : (txErr.code || null) };
       }
       throw txErr;
     }
@@ -3890,12 +4637,31 @@ async function createSelfBooking(payload = {}) {
     const { verifyEstimateHandoffToken: verifyFeeHandoffToken } = require('../utils/estimate-handoff-token');
     const setupFeeHandoffEligible = !!pricing_estimate_id
       && verifyFeeHandoffToken(pricing_estimate_id, estimate_token);
-    const stampDisclosedSetupFee = async (outerTrx, { allowStamp = true, stampServiceRow = null } = {}) => {
+    const stampDisclosedSetupFee = async (outerTrx, {
+      allowStamp = true,
+      stampServiceRow = null,
+      ownershipSnapshot = null,
+    } = {}) => {
             await outerTrx.transaction(async (sp) => {
-                const freshPricingEst = await sp('estimates')
-                  .where({ id: pricing_estimate_id })
-                  .forUpdate()
-                  .first('*');
+                const snapshot = ownershipSnapshot
+                  || (await loadEstimateOwnershipSnapshots(sp, [pricing_estimate_id]))[0];
+                const ownershipCustomerIds = estimateOwnershipCustomerIds(snapshot, custId);
+                for (const id of ownershipCustomerIds) await lockCustomerComms(sp, id);
+                // Lock account membership before the draft. A merge changes
+                // these rows before it repoints estimates; waiting here and
+                // then comparing the locked current rows prevents a stale
+                // sibling relationship from stamping or archiving a draft.
+                const lockedOwnershipCustomers = await lockCustomerAccountRows(
+                  sp,
+                  ownershipCustomerIds,
+                  { forUpdate: true, columns: ['*'] },
+                );
+                const freshPricingEst = await validateEstimateOwnershipUnderLock(
+                  sp,
+                  snapshot,
+                  custId,
+                  { forUpdate: true, columns: ['*'], lockedCustomers: lockedOwnershipCustomers },
+                );
                 const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
                 if (!freshPricingEst || !wizardDraftSelfServeBookable(freshPricingEst)) return;
                 // Ownership: a mirrored draft carries this customer's id; a
@@ -3907,14 +4673,13 @@ async function createSelfBooking(payload = {}) {
                 // (Codex #3489: null !== custId silently dropped the
                 // stamp). A draft linked to a DIFFERENT customer never
                 // stamps.
-                if (freshPricingEst.customer_id) {
-                  if (String(freshPricingEst.customer_id) !== String(custId)) return;
-                } else {
+                if (!freshPricingEst.customer_id) {
                   const last10 = (v) => {
                     const digits = String(v || '').replace(/\D/g, '');
                     return digits.length >= 10 ? digits.slice(-10) : '';
                   };
-                  const bookerRow = await sp('customers').where({ id: custId }).first('phone', 'email');
+                  const bookerRow = lockedOwnershipCustomers
+                    .find(row => String(row.id) === String(custId));
                   const estPhone10 = last10(freshPricingEst.customer_phone);
                   const estEmail = String(freshPricingEst.customer_email || '').trim().toLowerCase();
                   const contactMatches = estPhone10
@@ -3969,7 +4734,6 @@ async function createSelfBooking(payload = {}) {
                   const configuredSetupFee = `$${(Math.round(Number(RODENT.baitSetupFee) * 100) / 100).toFixed(2).replace(/\.00$/, '')}`;
                   const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
                   if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
-                  await sp('customers').where({ id: custId }).forUpdate().first('id');
                   const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
                   const liveFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
                     .filter((key) => key !== 'rodent_bait');
@@ -4030,10 +4794,8 @@ async function createSelfBooking(payload = {}) {
                   && (signedFeeComponents.length === 0
                     || !signedFeeComponents.every(draftHasComponent))) return;
                 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
-                const freshCustomer = await sp('customers')
-                  .where({ id: custId })
-                  .forUpdate()
-                  .first();
+                const freshCustomer = lockedOwnershipCustomers
+                  .find(row => String(row.id) === String(custId));
                 const activeMember = !!freshCustomer
                   && freshCustomer.active !== false
                   && isMembershipCustomerRow(freshCustomer);
@@ -4256,6 +5018,9 @@ async function createSelfBooking(payload = {}) {
       let parentExtension = null;
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const activationOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
           // per-date occupancy locks precede every other lock, and taking
           // them after the comms/row locks below can deadlock with normal
@@ -4275,7 +5040,11 @@ async function createSelfBooking(payload = {}) {
           const lockedSeedDates = [...new Set([slotDateStr, ...plannedSeedDates])].filter(Boolean).sort();
           await acquireOccupancyLocks(trx, lockedSeedDates);
           const lockedSeedDateSet = new Set(lockedSeedDates);
-          await lockCustomerComms(trx, custId);
+          const activationOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            activationOwnershipSnapshot,
+            custId,
+          );
+          for (const id of activationOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE any scheduled_services row lock/write in
           // this transaction (Codex #4716 r2 P1): the parent-row FOR UPDATE
           // just below (lockedParent) used to run first, with the customer
@@ -4289,7 +5058,11 @@ async function createSelfBooking(payload = {}) {
           // here, before lockedParent, puts this transaction on the same
           // customer -> row order as the merge and every other creator in
           // this file.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          const activationOwnershipCustomers = await lockCustomerAccountRows(
+            trx,
+            activationOwnershipCustomerIds,
+            { forUpdate: true, columns: ['*'] },
+          );
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
           // activation commits, pass the replay pre-checks, and wait here on
@@ -4445,9 +5218,13 @@ async function createSelfBooking(payload = {}) {
           // #3504): a concurrent refresh/promotion can leave the same
           // recurring line on an archived/promoted/commercial/mixed draft.
           const { wizardDraftSelfServeBookable: lockedShapeOk } = require('../services/booking-pay-at-visit');
-          const freshPlan = (lockedDraft
-            && String(lockedDraft.customer_id) === String(custId)
-            && lockedShapeOk(lockedDraft))
+          const lockedDraftOwned = estimateOwnershipMatchesLockedRows(
+            activationOwnershipSnapshot,
+            lockedDraft,
+            custId,
+            activationOwnershipCustomers,
+          );
+          const freshPlan = (lockedDraftOwned && lockedShapeOk(lockedDraft))
             ? freshPlanFor(lockedDraft, RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }))
             : null;
           const freshPriced = freshPlan
@@ -4566,7 +5343,11 @@ async function createSelfBooking(payload = {}) {
             // alone is passive — the office must decide whether this extra
             // visit rides the existing series or gets billed another way.
             await notifySeriesStripInTx(trx, seriesParentRow.id, 'the customer already has an active series for this service');
-            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              allowStamp: false,
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
             return { kept: matches[0] };
           }
           const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
@@ -4721,8 +5502,8 @@ async function createSelfBooking(payload = {}) {
               // extension can eat the gap without overlapping the next stop
               // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
               travel: {
-                lat: Number.isFinite(offerLat) ? offerLat : null,
-                lng: Number.isFinite(offerLng) ? offerLng : null,
+                lat: bookingLat,
+                lng: bookingLng,
               },
             });
             if (extensionClashes.length === 0) {
@@ -4849,7 +5630,7 @@ async function createSelfBooking(payload = {}) {
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
-              travel: seededRowPin(row, offerLat, offerLng),
+              travel: seededRowPin(row, bookingLat, bookingLng),
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented
@@ -4879,7 +5660,10 @@ async function createSelfBooking(payload = {}) {
           }
 
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
           }
           // Fee-exempt families (lawn/tree quotes freeze no setup fee):
           // the stamp helper returns without consuming the draft, but the
@@ -5054,6 +5838,9 @@ async function createSelfBooking(payload = {}) {
     }
 
     if (txResult.existing) {
+      // The genuine lead(s) this replay's own conversion converted (lineage for the
+      // closed preferred-time request's funnel-row cleanup).
+      let replayConvertedLeadIds = [];
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
       // between the booking commit and its promotion savepoint, the retry
@@ -5192,11 +5979,14 @@ async function createSelfBooking(payload = {}) {
           if (replaySeriesActivated) {
             try {
               const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-              await convertLeadFromEvent({
+              const replayConversion = await convertLeadFromEvent({
                 source: 'recurring_service_booked',
                 customerId: custId,
                 enforceOriginating: true,
+                excludeCallbackRequests: true,
+                bookingId: txResult.existing.id,
               });
+              if (replayConversion?.converted) replayConvertedLeadIds = replayConversion.leadIds || [];
             } catch (leadErr) {
               logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
             }
@@ -5266,6 +6056,15 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
+      // A first attempt that committed but died before its post-commit close
+      // step leaves the customer's preferred-time request open: close it
+      // (idempotent per lead + visit; closes as 'handled', never converts).
+      if (!callbackVisit) {
+        await closeBookedPreferredLeads(db, { customerId: custId, booking: txResult.existing, convertedLeadIds: replayConvertedLeadIds });
+        // The first attempt's own attribution row may already exist: if so, the
+        // request this booking closed no longer needs its funnel row.
+        await dropSupersededPreferredFunnelRows(db, { booking: txResult.existing, convertedLeadIds: replayConvertedLeadIds });
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -5307,12 +6106,19 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking) {
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const seedingOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
           // take customer-comms and THEN the series guard — this fresh
           // post-commit seeding transaction must acquire in the same
           // order, or concurrent creation for the same customer/service
           // deadlocks (the in-seeder acquire is then reentrant).
-          await lockCustomerComms(trx, custId);
+          const seedingOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            seedingOwnershipSnapshot,
+            custId,
+          );
+          for (const id of seedingOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE the series-advisory lock (Codex #4716
           // r1 P1) — the same customer → series-advisory order admin-
           // schedule.js (~7186) and this file's own in-booking guard
@@ -5326,7 +6132,7 @@ async function createSelfBooking(payload = {}) {
           // waiting on the customer row the merge already holds, and the
           // merge waits on the advisory lock this transaction holds — a
           // deadlock Postgres resolves by aborting one side.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });
           // Re-read the parent under lock and confirm it is STILL this
           // customer's (Codex #4716 r3 P1): a merge can commit between the
           // booking's own transaction and this post-commit one, repointing
@@ -5419,7 +6225,10 @@ async function createSelfBooking(payload = {}) {
           // pricing path checks (draft shape, customer ownership) is
           // re-read fresh under the savepoint below.
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: effectiveParent });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: effectiveParent,
+              ownershipSnapshot: seedingOwnershipSnapshot,
+            });
             // NO catch here: an ERROR while deciding/stamping must abort
             // this whole seeding transaction - series and fee obligation
             // commit together or not at all, never a series with a
@@ -5638,10 +6447,28 @@ async function createSelfBooking(payload = {}) {
           source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
           customerId: custId,
           enforceOriginating: true,
+          bookingId: booking?.id || null,
+          // The customer's own /book booking closes a preferred-time request as
+          // 'handled' (closeBookedPreferredLeads below) — never wins it here.
+          excludeCallbackRequests: true,
         });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
       }
+    }
+
+    // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
+    // customer is moot once they have booked, so the booking closes it (owner
+    // ruling 2026-10-01): the customer's open request(s) move to the terminal
+    // status 'handled' with one audit row and one admin FYI. No lead is won or
+    // lost, no funnel row touched. Best-effort; runs whatever the gate reads (a
+    // request already filed still closes). The replay branch does the same.
+    // The genuine lead(s) this booking's own conversion converted: the lineage the
+    // closed request's funnel-row cleanup needs when attributeSelfBooking writes
+    // no row of its own (persisted on the close's audit row, and passed to the cleanup).
+    const convertedLeadIds = leadConversion?.converted ? (leadConversion.leadIds || []) : [];
+    if (!callbackVisit) {
+      await closeBookedPreferredLeads(db, { customerId: custId, booking, convertedLeadIds });
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the
@@ -5662,7 +6489,7 @@ async function createSelfBooking(payload = {}) {
     if (!callbackVisit) {
       try {
         const { attributeSelfBooking } = require('../services/lead-estimate-link');
-        await attributeSelfBooking({
+        const selfAttribution = await attributeSelfBooking({
           customerId: custId,
           attribution,
           serviceInterest: resolvedServiceType,
@@ -5673,6 +6500,11 @@ async function createSelfBooking(payload = {}) {
           bookingSource: source || null,
           leadConverted: !!leadConversion?.converted,
         });
+        // The booking now has its own funnel row, so the funnel row of a request
+        // this booking closed (here or in the submit's reconcile) is a duplicate of
+        // the same journey: drop it (resolved from the close audit rows, verified
+        // against the booking's row in the same statement; kept when none).
+        if (selfAttribution?.attributed || convertedLeadIds.length) await dropSupersededPreferredFunnelRows(db, { booking, convertedLeadIds });
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
       }
@@ -5853,9 +6685,19 @@ const RECOVERY_SKIP_SOURCES = new Set(['admin-manual-booking-resend']);
 // intent per phone (refreshed, not duplicated); booked phones are skipped.
 // Fire-and-forget: never returns a funnel-blocking error.
 router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter, async (req, res) => {
+  // ONE constant response for every accepted request (Codex r5 P0): the
+  // client is fire-and-forget and reads no body, and any variation — skipped
+  // reason, created vs updated, intent_id, suppressed vs ordinary row, lookup
+  // error — would be an oracle for whether a contact belongs to a customer
+  // (or has a recent booking). The reason is logged server-side only. Only the
+  // request-shape 400 below differs; it depends on nothing but the request.
+  const accepted = (reason) => {
+    logger.debug(`[booking:capture-intent] ${reason}`);
+    return res.json({ ok: true });
+  };
   try {
     const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('selfBooking')) return res.json({ ok: false, skipped: 'gate' });
+    if (!isEnabled('selfBooking')) return accepted('gate');
 
     const b = req.body || {};
 
@@ -5865,7 +6707,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // send-eligible endpoint could be used to seed recovery SMS/email to arbitrary
     // recipients. Fail closed — no/invalid token, no send-eligible row.
     if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
-      return res.json({ ok: true, skipped: 'unverified' });
+      return accepted('unverified');
     }
 
     // One-time / estimate-originated booking links are recovered by the estimate
@@ -5877,13 +6719,29 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // isn't in that helper (this is a recovery-lane guard only — it does not
     // change createSelfBooking's recurring decision for those sources).
     if (isOneTimeBookingSource(b.source) || RECOVERY_SKIP_SOURCES.has(String(b.source || '').trim())) {
-      return res.json({ ok: true, skipped: 'estimate_source' });
+      return accepted('estimate_source');
     }
 
     const nc = b.new_customer || b;
     const phoneDigits = String(nc.phone || b.phone || '').replace(/\D/g, '');
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
     const ten = phoneDigits.slice(-10);
+
+    // A visitor who filed a "can't find a time" request asked the office to
+    // reach out — never stage an abandoned-booking recovery row (an automated
+    // text/email) for the same phone afterwards. Gate-off: untouched.
+    if (bookPreferredTimeLive()) {
+      try {
+        // Session too: a visitor who filed under one phone and then retyped another
+        // in the same funnel session is still the person who asked for a call back.
+        const captureSession = String(b.session_id == null ? '' : b.session_id).trim().slice(0, 80) || null;
+        if (await hasRecentPreferredTimeRequest(db, ten, { sessionId: captureSession })) return accepted('preferred_time_request');
+      } catch (ptErr) {
+        // Fail closed: a lookup error must not risk an automated send.
+        logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);
+        return accepted('lookup_failed');
+      }
+    }
 
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -5902,6 +6760,32 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     const handoffId = str(b.pricing_estimate_id, 80);
     const handoffToken = str(b.estimate_token, 200);
     const handoffVerified = !!(handoffId && handoffToken && verifyHandoff(handoffId, handoffToken));
+    // A wizard handoff whose draft is contact-linked to a customer whose ACCOUNT
+    // holds an ESTABLISHED row can never book without the portal OTP (see
+    // assertContactLinkedHandoffProvisional; one shared classifier), so it must
+    // never stage a send-eligible recovery row: the recovery cron would
+    // text/email the real customer for a booking an anonymous quoter started
+    // with their contact. The capture is handled EXACTLY like any other one —
+    // same validation, same revalidation, same response — except the row it
+    // writes is born suppressed (and any intent already staged for this draft
+    // is retired), so the response is no oracle for "is this contact a
+    // customer" (Codex r3 P2). A lookup error fails closed the same way
+    // (suppressed row, ordinary response). Gate off: the flow still books, so
+    // recovery is untouched.
+    let linkedEstablished = false;
+    if (handoffVerified && isEnabled('bookingCustomersOnly')) {
+      try {
+        linkedEstablished = await establishedContactLinkedDraft(db, handoffId);
+      } catch (linkErr) {
+        logger.warn(`[booking:capture-intent] contact-link check failed — staging suppressed: ${linkErr.message}`);
+        linkedEstablished = true;
+      }
+      if (linkedEstablished) {
+        await suppressRecoveryIntents(db, { pricingEstimateId: handoffId }).catch((supErr) => {
+          logger.warn(`[booking:capture-intent] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+        });
+      }
+    }
     const row = {
       pricing_estimate_id: handoffVerified ? handoffId : null,
       pricing_estimate_token: handoffVerified ? handoffToken : null,
@@ -5936,6 +6820,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       attribution: b.attribution ? JSON.stringify(b.attribution) : null,
       last_activity_at: db.fn.now(),
       updated_at: db.fn.now(),
+      ...(linkedEstablished ? { suppressed: true } : {}),
     };
 
     const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
@@ -5948,14 +6833,14 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // yet" nudge for a booking that already succeeded.
     const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
       .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
-    if (booked) return res.json({ ok: true, skipped: 'already_booked' });
+    if (booked) return accepted('already_booked');
     const recentBooking = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
       .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
       .where('sba.created_at', '>', new Date(Date.now() - 6 * 3600000))
       .whereNot('sba.status', 'cancelled')
       .first('sba.id');
-    if (recentBooking) return res.json({ ok: true, skipped: 'already_booked' });
+    if (recentBooking) return accepted('already_booked');
 
     // Revalidate the SUBMITTED booking context server-side. The IP-bound token
     // proves the caller fetched availability, but not for THIS slot — so confirm
@@ -5966,7 +6851,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     try {
       const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
       if (!lat || !lng || !row.slot_date || !row.slot_start) {
-        return res.json({ ok: true, skipped: 'unverified_slot' });
+        return accepted('unverified_slot');
       }
       const cfg = (await db('booking_config').first()) || {};
       // Codex r5 P2 #5 — thread the same funnel identity /availability
@@ -5978,25 +6863,32 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const serviceKey = normalizeBookingServiceKey(b.service_id)
         || normalizeBookingServiceKey(b.service_type)
         || normalizeBookingServiceKey(b.quoted_service_label);
-      const avail = await buildBookingAvailability({
+      // The /book funnel's own builder (buildFunnelAvailability): a slot the
+      // notice window would now refuse must not be treated as still offered,
+      // and this re-checks a slot /availability or /find-slots already
+      // offered, so it must use the SAME capacityPlacement value those used
+      // (offer/commit parity). This route never redeems a slot_sig itself
+      // (capture-intent only stages a recovery row), so the mismatch protection
+      // here is offer/commit parity, not the signed policy tag.
+      const avail = await buildFunnelAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
         serviceKey,
-        // Self-serve surface — a slot the notice window would now refuse
-        // must not be treated as still offered (offer/commit parity).
-        selfServeNotice: true,
+        // Same online-booking arrival grace as /availability + /find-slots —
+        // or a genuinely still-offered graced slot would revalidate as gone.
+        bookArrivalGrace: true,
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
         && day.slots.some((s) => String(s.start_time).slice(0, 5) === String(row.slot_start).slice(0, 5));
-      if (!offered) return res.json({ ok: true, skipped: 'slot_unavailable' });
+      if (!offered) return accepted('slot_unavailable');
       row.lat = lat;
       row.lng = lng;
     } catch (e) {
       logger.warn(`[booking:capture-intent] slot revalidation failed: ${e.message}`);
-      return res.json({ ok: false, skipped: 'unverified' });
+      return accepted('unverified');
     }
 
     // Resolve an existing customer by phone so a recovery send to a known customer
@@ -6017,11 +6909,11 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       let found = null;
       if (sessionId) {
         found = await conn('booking_intents').where({ session_id: sessionId })
-          .whereNull('converted_at').where('suppressed', false)
+          .whereNull('converted_at').where('suppressed', linkedEstablished)
           .orderBy('captured_at', 'desc').first('id');
       }
       if (!found) {
-        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', false))
+        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', linkedEstablished))
           .orderBy('captured_at', 'desc').first('id');
       }
       return found;
@@ -6091,12 +6983,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       // null would treat an existing OPTED-OUT customer as a lead and bypass their
       // opt-out on the recovery send. A transient blip → skip this capture.
       logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
-      return res.json({ ok: false, skipped: 'lookup_failed' });
+      return accepted('lookup_failed');
     }
-    return res.json(result);
+    return accepted(result.stale ? 'stale' : (result.created ? 'created' : 'updated'));
   } catch (err) {
     logger.error(`[booking:capture-intent] failed: ${err.message}`);
-    return res.json({ ok: false }); // fire-and-forget — never block the funnel
+    return accepted('error'); // fire-and-forget — never block the funnel
   }
 });
 
@@ -6124,6 +7016,72 @@ router.get('/embed-snippet', (req, res) => {
   });
 </script>`;
   res.json({ source, url: iframeSrc, snippet });
+});
+
+// Dark gate + token-route privacy headers for POST /api/booking/preferred-time.
+// server/index.js mounts this ABOVE the global cors(), the global /api/ limiter
+// and the shared body parsers (like the other dark public routes), so while the
+// gate is off every method gets the generic unknown-route 404 — no CORS 204, no
+// limiter 429, no body parse 400/413 — and every response (404, 429, 400,
+// success) carries no-store / noindex / no-referrer. The route below re-runs it
+// as its own first layer.
+const preferredTimePreParserGuard = [
+  noStore,
+  (req, res, next) => {
+    if (!bookPreferredTimeLive()) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    return next();
+  },
+];
+
+// Per-IP limiters for the preferred-time request (an internal lead + one
+// admin bell per new phone). Generous for a real visitor, tight against bulk
+// office-inbox spam. Same shape as capture-intent's.
+const preferredTimeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+const preferredTimeHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// POST /api/booking/preferred-time — the /book "Can't find a time?" form
+// (GATE_BOOK_PREFERRED_TIME, dark). Files ONE internal lead the office answers
+// by hand and rings the admin bell; it sends NOTHING to the customer (no SMS,
+// no email) and retires any open abandoned-booking intent for the phone so the
+// recovery worker can't text them either. Gate off = the generic 404 before
+// the limiter. Proof-of-funnel: the same IP-bound token /availability mints
+// for capture-intent (the funnel always fetches availability first).
+router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const parsed = validatePreferredTimeRequest(b);
+    // Honeypot: pretend success, store nothing.
+    if (parsed.honeypot) return res.json({ ok: true });
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.status(400).json({ error: 'session_expired' });
+    }
+    const serviceKey = normalizeBookingServiceKey(b.service_id)
+      || normalizeBookingServiceKey(b.service_type)
+      || null;
+    const serviceLabel = canonicalBookingServiceLabel(b.service_id)
+      || canonicalBookingServiceLabel(b.service_type)
+      || null;
+    await recordPreferredTimeRequest(db, parsed.value, { serviceLabel, serviceKey });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[booking:preferred-time] failed: ${err.message}`);
+    return res.status(500).json({ error: 'We could not save that. Please text us instead.' });
+  }
 });
 
 // GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
@@ -6178,8 +7136,19 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
+  assertContactLinkedHandoffProvisional,
+  suppressRecoveryIntents,
+  captureIpKey,
   isOneTimeBookingSource,
+  // Codex round 2 P1 on PR #5231: the canonical reader reservice-public.js
+  // and inspection-public.js pass through to buildBookingAvailability
+  // (capacityPlacement) so their own createSelfBooking commits agree with
+  // what they offered.
+  bookInsertionOffersLive,
+  bookArrivalGraceOffersLive,
+  bookOfferPolicyLive,
   cleanBookingServiceLabel,
   canonicalBookingServiceLabel,
   BOOKING_FUNNEL_SERVICE_LABELS,
@@ -6193,7 +7162,10 @@ module.exports._internals = {
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).
   resolveBookingCoords,
+  resolveOfferCoords,
+  customerBookingLocation,
   buildBookingAvailability,
+  availabilityForExistingCustomer,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

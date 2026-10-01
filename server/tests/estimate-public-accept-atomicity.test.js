@@ -135,7 +135,20 @@ jest.mock('../models/db', () => {
       // → rows (commitReservation's graduation UPDATE uses the latter).
       state.ops.push({ type: 'update', table, data: obj });
       const hits = matched();
-      hits.forEach((row) => Object.assign(row, obj));
+      hits.forEach((row) => {
+        // Emulate the atomic JSON-path stamps (jsonb_set on estimate_data) the
+        // accept writes — assigning the raw token would clobber the column.
+        const raw = obj.estimate_data && obj.estimate_data.__raw;
+        if (raw && /jsonb_set/.test(raw)) {
+          const key = /'\{(\w+)\}'/.exec(raw)[1];
+          const wasString = typeof row.estimate_data === 'string';
+          const cur = (wasString ? JSON.parse(row.estimate_data) : row.estimate_data) || {};
+          cur[key] = /'true'::jsonb/.test(raw) ? true : obj.estimate_data.bindings[0];
+          Object.assign(row, { ...obj, estimate_data: wasString ? JSON.stringify(cur) : cur });
+        } else {
+          Object.assign(row, obj);
+        }
+      });
       return {
         returning: async () => hits.map((r) => ({ ...r })),
         then: (res, rej) => Promise.resolve(hits.length).then(res, rej),
@@ -191,9 +204,21 @@ jest.mock('../models/db', () => {
 // Module mocks: everything with real side effects (comms, Stripe-adjacent,
 // notifications) is stubbed; converter HELPERS stay real (the in-txn invoice
 // mint derives its gates from them) with only convertEstimate replaced.
+// stampCombinedFirstApplicationInvoiceCoverage is a bare spy (never the real
+// impl — it needs a real DB, and this suite's knex is a fake) so tests can
+// assert it was invoked (or not) with the right args, same style as
+// convertEstimate above. shouldAttachScheduledServiceToStandardDraftInvoice
+// wraps the REAL implementation by default (existing tests all exercise its
+// real gate) but can be overridden per-test to force the attach path without
+// reconstructing the full pricing pipeline in this fake-knex harness.
 jest.mock('../services/estimate-converter', () => {
   const actual = jest.requireActual('../services/estimate-converter');
-  return { ...actual, convertEstimate: jest.fn() };
+  return {
+    ...actual,
+    convertEstimate: jest.fn(),
+    stampCombinedFirstApplicationInvoiceCoverage: jest.fn().mockResolvedValue(),
+    shouldAttachScheduledServiceToStandardDraftInvoice: jest.fn(actual.shouldAttachScheduledServiceToStandardDraftInvoice),
+  };
 });
 jest.mock('../services/invoice', () => ({
   create: jest.fn(),
@@ -575,6 +600,97 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
+
+  // Codex round-9 P1 (#5021): this public accept path mints the standard
+  // setup/first-application invoice itself (skipSetupInvoice above) and,
+  // unlike estimate-converter.js's own standard branch, never called
+  // stampCombinedFirstApplicationInvoiceCoverage — so a multi-program public
+  // acceptance was invisible to first-application-sibling-split.js's sweep.
+  // shouldAttachScheduledServiceToStandardDraftInvoice is force-returned true
+  // for this one test (a jest spy on the real implementation everywhere
+  // else) rather than reconstructing the full multi-service pricing ladder
+  // in this fake-knex harness — the real gate itself is unit-tested directly
+  // in estimate-converter's own suite; this test's job is only to prove the
+  // ROUTE calls the stamper with the right ids once that gate says yes.
+  test('Codex round-9 P1: a reserved-anchor accept stamps the standard invoice with the anchor row', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-multi-1', token: 'tok-multi-1-x0123456789' }));
+    EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice.mockReturnValueOnce(true);
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-multi-1',
+      // Codex round-12 P2: convertEstimate's own additive field — the
+      // promoted same-trip sibling ids it actually inserted for this
+      // accept, threaded straight through to the stamper's memberIds
+      // rather than reconstructed here or by the stamper itself.
+      combinedInvoiceMemberIds: ['ss-multi-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-multi-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
+      expect.anything(), // the accept's own trx — same transaction the invoice itself commits in
+      { invoiceId: 'inv-1', anchorId: 'ss-multi-1', memberIds: ['ss-multi-2'] },
+    );
+  });
+
+  // Codex round-15 P1: an INVOICE-MODE accept with no pre-existing visit
+  // (acceptLinkedSsId null) mints its combined invoice BEFORE convertEstimate
+  // creates the anchor, so it was neither attached to that anchor nor
+  // stamped. After conversion the route must attach the invoice to the
+  // converter's firstScheduledServiceId and stamp the converter's members.
+  test('Codex round-15 P1: an invoice-mode, no-slot, multi-program accept attaches the invoice to the converter anchor and stamps', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-im-1', token: 'tok-im-1-x0123456789', bill_by_invoice: true }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-im-1',
+      combinedInvoiceMemberIds: ['ss-im-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-im-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(response.data.invoiceMode).toBe(true);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    const attach = db.__state.ops.find((op) => op.type === 'update' && op.table === 'invoices'
+      && op.data && op.data.scheduled_service_id === 'ss-im-1');
+    expect(attach).toBeTruthy();
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
+      expect.anything(),
+      { invoiceId: 'inv-1', anchorId: 'ss-im-1', memberIds: ['ss-im-2'] },
+    );
+  });
+
+  test('control: a single-program accept (no reserved multi-program anchor) never calls the stamper', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-single-1', token: 'tok-single-1-x0123456789' }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-single-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).not.toHaveBeenCalled();
+  });
 });
 
 describe('FIX 2 — already-accepted retry returns the full success payload', () => {
@@ -745,6 +861,63 @@ describe('AUDIT P1 — membership-started email suppressed for skipped conversio
     const AccountMembershipEmail = require('../services/account-membership-email');
     expect(AccountMembershipEmail.sendMembershipStarted)
       .toHaveBeenCalledWith({ customerId: 'cust-1', tier: 'Bronze' });
+  });
+});
+
+describe('ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL) — membership.started is decided at send time', () => {
+  const MEMBERSHIP = { customerId: 'cust-1', tier: 'Bronze' };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+  const AccountMembershipEmail = require('../services/account-membership-email');
+
+  async function acceptWith(token, onboardingImpl) {
+    resetStore(recurringPestEstimate({ id: `est-${token}`, token }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: MEMBERSHIP,
+      deferredFollowUpReminderRows: [],
+    });
+    sendEstimateAcceptedOnboarding.mockReset();
+    sendEstimateAcceptedOnboarding.mockImplementation(onboardingImpl);
+    AccountMembershipEmail.sendMembershipStarted.mockClear();
+    const res = await putAccept(token);
+    await flush();
+    await flush();
+    return res;
+  }
+
+  beforeEach(() => { process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true'; });
+  afterEach(() => { delete process.env.GATE_SIGNUP_SINGLE_EMAIL; });
+
+  test('the combined send covered the plan: membership.started is NOT sent, and the sender was handed the plan args', async () => {
+    const res = await acceptWith('tok-fold-cover-x0123456789', async () => ({ sent: true, coversMembership: true }));
+    expect(res.status).toBe(200);
+    expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledWith(expect.objectContaining({ signup: { membershipEmail: MEMBERSHIP } }));
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the send was accepted but did not carry the whole plan', async () => ({ sent: true })],
+    ['a suppression / preference block', async () => ({ sent: false, blocked: true })],
+    ['no address', async () => ({ sent: false, outcome: 'no_address' })],
+    ['a failed send', async () => ({ sent: false, outcome: 'failed' })],
+    ['the sender throwing', async () => { throw new Error('boom'); }],
+    ['no result at all', async () => undefined],
+  ])('%s: membership.started is sent inline, exactly once, with the same args as today', async (_label, impl) => {
+    const res = await acceptWith('tok-fold-miss-x0123456789', impl);
+    expect(res.status).toBe(200);
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledTimes(1);
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(MEMBERSHIP);
+  });
+
+  test('gate off: membership.started is sent right away and the sender is not asked to fold anything in', async () => {
+    delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
+    await acceptWith('tok-fold-off-x0123456789', async () => ({ sent: true, coversMembership: true }));
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(MEMBERSHIP);
+    expect(sendEstimateAcceptedOnboarding.mock.calls[0][0]).not.toHaveProperty('signup');
   });
 });
 
@@ -1601,5 +1774,1005 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     const res = await putAccept('tok-restart-f-x0123456789', { selectedFrequency: 'monthly' });
     expect([400, 409]).toContain(res.status);
     expect(storedEstimate().status).toBe('sent');
+  });
+});
+
+describe('Missing-contact capture (contactLastName/contactEmail) — owner ruling 2026-09-27', () => {
+  // clearAllMocks keeps queued *Once values; a test whose accept never
+  // reaches conversion would otherwise leak its queued result into the next.
+  beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+  // The name fan-out has its own suites and uses SQL this fake knex does
+  // not model; here we only assert the accept invokes it.
+  let nameFanoutSpy;
+  beforeEach(() => {
+    nameFanoutSpy = jest.spyOn(require('../services/customer-contact-fanout'), 'propagateCustomerNameChange').mockResolvedValue({});
+  });
+  afterEach(() => nameFanoutSpy.mockRestore());
+
+  function conversionOk(customerId = 'cust-1') {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId,
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+
+  test('a fresh accept with a single-token name: supplied last name replaces the "Customer" placeholder on the new profile', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-1',
+      token: 'tok-contact-1-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-1-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'testy@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const customerId = storedEstimate().customer_id;
+    expect(customerId).toBeTruthy();
+    const cust = db.__state.tables.customers.find((c) => c.id === customerId);
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('testy@example.com');
+    // The estimate row itself is patched too — downstream reads (retry
+    // rebuild, notifications) see the real name/email, not the placeholder.
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+  });
+
+  test('regression baseline: with no contactLastName/contactEmail supplied, the new profile still gets the "Customer" placeholder', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-2',
+      token: 'tok-contact-2-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-2-x0123456789');
+    expect(res.status).toBe(200);
+
+    const customerId = storedEstimate().customer_id;
+    const cust = db.__state.tables.customers.find((c) => c.id === customerId);
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Customer');
+    expect(cust.email).toBeNull();
+  });
+
+  test('an existing linked customer with a blank last name/email gets them filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-3',
+      token: 'tok-contact-3-x0123456789',
+      customer_id: 'cust-blank',
+      customer_phone: null,
+      // The page only offers (and the server only fills) real gaps.
+      customer_name: 'Pat',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-blank', first_name: 'Pat', last_name: null, email: null, phone: null }];
+    conversionOk('cust-blank');
+
+    const res = await putAccept('tok-contact-3-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'pat@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-blank');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('pat@example.com');
+  });
+
+  test('a lowercase "customer" placeholder and a whitespace-only email count as gaps and get filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-9',
+      token: 'tok-contact-9-x0123456789',
+      customer_id: 'cust-placeholder',
+      customer_phone: null,
+      customer_name: 'Pat',
+      customer_email: '   ',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-placeholder', first_name: 'Pat', last_name: 'customer', email: '  ', phone: null }];
+    conversionOk('cust-placeholder');
+
+    const res = await putAccept('tok-contact-9-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'pat@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-placeholder');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('pat@example.com');
+    expect(storedEstimate().customer_email).toBe('pat@example.com');
+  });
+
+  test('an existing linked customer with a real last name/email on file is NEVER overwritten', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-4',
+      token: 'tok-contact-4-x0123456789',
+      customer_id: 'cust-real',
+      customer_phone: null,
+    }));
+    db.__state.tables.customers = [{
+      id: 'cust-real', first_name: 'Pat', last_name: 'Original', email: 'original@example.com', phone: null,
+    }];
+    conversionOk('cust-real');
+
+    const res = await putAccept('tok-contact-4-x0123456789', {
+      contactLastName: 'Different',
+      contactEmail: 'different@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-real');
+    expect(cust.last_name).toBe('Original');
+    expect(cust.email).toBe('original@example.com');
+  });
+
+  test('a rejected accept (rolled-back transaction) leaves the stored contact details untouched', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-7',
+      token: 'tok-contact-7-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
+
+    const res = await putAccept('tok-contact-7-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'testy@example.com',
+    });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_name).toBe('Testy');
+    expect(storedEstimate().customer_email == null).toBe(true);
+  });
+
+  test('the persisted email fill never overwrites an email that landed after the accept read the gap', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-8',
+      token: 'tok-contact-8-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    // A concurrent writer stamps an email after the handler read the gap
+    // but before the accept transaction opens — the in-transaction
+    // compare-and-set must leave that value alone.
+    const stored = storedEstimate();
+    conversionOk();
+    const origTransaction = db.transaction;
+    db.transaction = async (fn) => {
+      stored.customer_email = 'office@example.com';
+      db.transaction = origTransaction;
+      return origTransaction.call(db, fn);
+    };
+
+    const res = await putAccept('tok-contact-8-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_email).toBe('office@example.com');
+    // The new profile uses the stored (winning) email, not the stale patch.
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.email).toBe('office@example.com');
+  });
+
+  test('an existing customer never gets an email that lost the estimate compare-and-set', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-12',
+      token: 'tok-contact-12-x0123456789',
+      customer_id: 'cust-race',
+      customer_phone: null,
+      customer_name: 'Pat Original',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-race', first_name: 'Pat', last_name: 'Original', email: null, phone: null }];
+    const stored = storedEstimate();
+    conversionOk('cust-race');
+    const origTransaction = db.transaction;
+    db.transaction = async (fn) => {
+      stored.customer_email = 'office@example.com';
+      db.transaction = origTransaction;
+      return origTransaction.call(db, fn);
+    };
+
+    const res = await putAccept('tok-contact-12-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_email).toBe('office@example.com');
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-race');
+    expect(cust.email).toBeNull();
+  });
+
+  test('a refused email claim (merge-undo holder) is cleared from the estimate too', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-13',
+      token: 'tok-contact-13-x0123456789',
+      customer_id: 'cust-undo',
+      customer_phone: null,
+      customer_name: 'Pat Original',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-undo', first_name: 'Pat', last_name: 'Original', email: null, phone: null }];
+    conversionOk('cust-undo');
+    const fanout = require('../services/customer-email-fanout');
+    const spy = jest.spyOn(fanout, 'backfillCustomerEmailInTrx').mockResolvedValueOnce({
+      emailApplied: false,
+      emailDroppedReason: 'address was restored to a merged-away customer by an undo',
+    });
+    try {
+      const res = await putAccept('tok-contact-13-x0123456789', { contactEmail: 'restored@example.com' });
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalled();
+      expect(storedEstimate().customer_email == null).toBe(true);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-undo');
+      expect(cust.email).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an authored proposal preparedFor that matched the old name moves with it and drops the PDF-delivery marker', async () => {
+    const base = recurringPestEstimate({
+      id: 'est-contact-14',
+      token: 'tok-contact-14-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: 'testy@example.com',
+    });
+    const data = typeof base.estimate_data === 'string' ? JSON.parse(base.estimate_data) : { ...(base.estimate_data || {}) };
+    data.proposal = { ...(data.proposal || {}), preparedFor: 'Testy' };
+    data.proposalDelivery = { status: 'emailed' };
+    resetStore({ ...base, estimate_data: JSON.stringify(data) });
+    conversionOk();
+
+    const res = await putAccept('tok-contact-14-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    const stored = storedEstimate();
+    const storedData = typeof stored.estimate_data === 'string' ? JSON.parse(stored.estimate_data) : stored.estimate_data;
+    expect(stored.customer_name).toBe('Testy Sample');
+    expect(storedData.proposal.preparedFor).toBe('Testy Sample');
+    expect(storedData.proposalDelivery).toBeUndefined();
+  });
+
+  test('a custom preparedFor (someone else) is left alone with its delivery marker', async () => {
+    const base = recurringPestEstimate({
+      id: 'est-contact-15',
+      token: 'tok-contact-15-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: 'testy@example.com',
+    });
+    const data = typeof base.estimate_data === 'string' ? JSON.parse(base.estimate_data) : { ...(base.estimate_data || {}) };
+    data.proposal = { ...(data.proposal || {}), preparedFor: 'Sample Property Manager' };
+    data.proposalDelivery = { status: 'emailed' };
+    resetStore({ ...base, estimate_data: JSON.stringify(data) });
+    conversionOk();
+
+    const res = await putAccept('tok-contact-15-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    const stored = storedEstimate();
+    const storedData = typeof stored.estimate_data === 'string' ? JSON.parse(stored.estimate_data) : stored.estimate_data;
+    expect(storedData.proposal.preparedFor).toBe('Sample Property Manager');
+    expect(storedData.proposalDelivery).toEqual({ status: 'emailed' });
+  });
+
+  test('a new profile keeps the full supplied surname even when the combined name snapshot is capped', async () => {
+    const longFirst = 'F'.repeat(60);
+    const longLast = 'L'.repeat(50);
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-16',
+      token: 'tok-contact-16-x0123456789',
+      customer_id: null,
+      customer_name: longFirst,
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-16-x0123456789', { contactLastName: longLast });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toHaveLength(100);
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    // Full 50 characters survive (contact normalization title-cases it).
+    expect(cust.last_name).toHaveLength(50);
+    expect(cust.last_name.toUpperCase()).toBe(longLast);
+  });
+
+  test('a submitted email never steers the phone match away from the unique address match', async () => {
+    const est = recurringPestEstimate({
+      id: 'est-contact-17',
+      token: 'tok-contact-17-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy Sample',
+      customer_email: null,
+    });
+    resetStore(est);
+    const line1 = String(est.address || '').split(',')[0];
+    db.__state.tables.customers = [
+      { id: 'cust-addr', first_name: 'Testy', last_name: 'Sample', email: null, phone: est.customer_phone, address_line1: line1, deleted_at: null, updated_at: new Date('2026-01-01') },
+      { id: 'cust-mail', first_name: 'Other', last_name: 'Person', email: 'someone@example.com', phone: est.customer_phone, address_line1: '1 Elsewhere Rd', deleted_at: null, updated_at: new Date('2026-02-01') },
+    ];
+    conversionOk('cust-addr');
+
+    const res = await putAccept('tok-contact-17-x0123456789', { contactEmail: 'someone@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-addr');
+  });
+
+  test('an estimate addressed to someone else under the account (tenant under landlord) never fills the account holder', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-18',
+      token: 'tok-contact-18-x0123456789',
+      customer_id: 'cust-landlord',
+      customer_phone: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-landlord', first_name: 'Pat', last_name: null, email: null, phone: null }];
+    conversionOk('cust-landlord');
+
+    const res = await putAccept('tok-contact-18-x0123456789', { contactLastName: 'Sample', contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-landlord');
+    expect(cust.last_name).toBeNull();
+    expect(cust.email).toBeNull();
+    // The values stay with the estimate they were typed on.
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(storedEstimate().customer_email).toBe('testy@example.com');
+  });
+
+  test('an existing-profile fill stamps updated_at and runs the name fan-out', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-19',
+      token: 'tok-contact-19-x0123456789',
+      customer_id: 'cust-stamp',
+      customer_phone: null,
+      customer_name: 'Pat',
+      customer_email: null,
+    }));
+    const oldStamp = new Date('2026-01-01T00:00:00Z');
+    db.__state.tables.customers = [{ id: 'cust-stamp', first_name: 'Pat', last_name: 'Customer', email: null, phone: null, updated_at: oldStamp }];
+    conversionOk('cust-stamp');
+    const spy = nameFanoutSpy;
+    {
+      const res = await putAccept('tok-contact-19-x0123456789', { contactLastName: 'Sample', contactEmail: 'pat@example.com' });
+      expect(res.status).toBe(200);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-stamp');
+      expect(cust.last_name).toBe('Sample');
+      expect(cust.email).toBe('pat@example.com');
+      expect(new Date(cust.updated_at).getTime()).toBeGreaterThan(oldStamp.getTime());
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          before: expect.objectContaining({ id: 'cust-stamp', last_name: 'Customer' }),
+          after: expect.objectContaining({ id: 'cust-stamp', last_name: 'Sample' }),
+        }),
+        expect.anything(),
+      );
+    }
+  });
+
+  test('a nameless estimate collects a first name too, and the new profile never gets a placeholder first name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-20',
+      token: 'tok-contact-20-x0123456789',
+      customer_id: null,
+      customer_name: '',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-20-x0123456789', { contactFirstName: 'mary ann', contactLastName: 'sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).toBe('Mary Ann');
+    expect(cust.last_name).toBe('Sample');
+  });
+
+  test('a first name collected on its own (linked profile has a real surname) still lands on the estimate', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-22',
+      token: 'tok-contact-22-x0123456789',
+      customer_id: 'cust-noname',
+      customer_phone: null,
+      customer_name: 'Sample',
+      customer_email: 'testy@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-noname', first_name: '', last_name: 'Sample', email: 'testy@example.com', phone: null }];
+    conversionOk('cust-noname');
+
+    const res = await putAccept('tok-contact-22-x0123456789', { contactFirstName: 'testy' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+  });
+
+  test('a stale tab that sends only a surname for a nameless estimate applies nothing to the name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-21',
+      token: 'tok-contact-21-x0123456789',
+      customer_id: null,
+      customer_name: '',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-21-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).not.toBe('Customer');
+  });
+
+  test('a multi-word profile first name ("Mary Ann") still proves identity and gets filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-23',
+      token: 'tok-contact-23-x0123456789',
+      customer_id: 'cust-maryann',
+      customer_phone: null,
+      customer_name: 'Mary Ann Sample',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-maryann', first_name: 'Mary Ann', last_name: 'Sample', email: null, phone: null }];
+    conversionOk('cust-maryann');
+    const fanout = require('../services/customer-email-fanout');
+    const resolveSpy = jest.spyOn(fanout, 'resolveOpenEmailReviewCards').mockResolvedValue(0);
+    try {
+      const res = await putAccept('tok-contact-23-x0123456789', { contactEmail: 'maryann@example.com' });
+      expect(res.status).toBe(200);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-maryann');
+      expect(cust.email).toBe('maryann@example.com');
+      // Post-commit, open customer_email_missing cards settle.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-maryann', email: 'maryann@example.com', reasonCodes: ['customer_email_missing'],
+      }));
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  test('a multi-word given name with no surname gets the surname appended to the whole given name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-24',
+      token: 'tok-contact-24-x0123456789',
+      customer_id: 'cust-maryann-2',
+      customer_phone: null,
+      customer_name: 'Mary Ann',
+      customer_email: 'maryann@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-maryann-2', first_name: 'Mary Ann', last_name: null, email: 'maryann@example.com', phone: null }];
+    conversionOk('cust-maryann-2');
+
+    const res = await putAccept('tok-contact-24-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-maryann-2');
+    expect(cust.last_name).toBe('Sample');
+  });
+
+  test('the explicitly linked profile with a blank first name takes the collected first name and surname', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-25',
+      token: 'tok-contact-25-x0123456789',
+      customer_id: 'cust-unknown',
+      customer_phone: null,
+      customer_name: '',
+      customer_email: 'testy@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-unknown', first_name: '', last_name: null, email: 'testy@example.com', phone: null }];
+    conversionOk('cust-unknown');
+
+    const res = await putAccept('tok-contact-25-x0123456789', { contactFirstName: 'testy', contactLastName: 'sample' });
+    expect(res.status).toBe(200);
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-unknown');
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Sample');
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(nameFanoutSpy).toHaveBeenCalled();
+  });
+
+  test('a multi-word collected first name stays whole on a new profile', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-28',
+      token: 'tok-contact-28-x0123456789',
+      customer_id: null,
+      customer_name: '',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-28-x0123456789', { contactFirstName: 'mary ann', contactLastName: 'sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).toBe('Mary Ann');
+    expect(cust.last_name).toBe('Sample');
+  });
+
+  test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-10',
+      token: 'tok-contact-10-x0123456789',
+      customer_id: 'cust-blank-2',
+      customer_phone: null,
+      customer_name: 'Pat Original',
+      customer_email: 'original@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-blank-2', first_name: 'Pat', last_name: null, email: null, phone: null }];
+    conversionOk('cust-blank-2');
+
+    const res = await putAccept('tok-contact-10-x0123456789', {
+      contactLastName: 'Injected',
+      contactEmail: 'attacker@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-blank-2');
+    expect(cust.last_name).toBeNull();
+    expect(cust.email).toBeNull();
+    expect(storedEstimate().customer_name).toBe('Pat Original');
+    expect(storedEstimate().customer_email).toBe('original@example.com');
+  });
+
+  test('a legacy "undefined"-prefixed name keeps no "undefined" token when the last name is filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-11',
+      token: 'tok-contact-11-x0123456789',
+      customer_id: null,
+      customer_name: 'undefined Testy',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-11-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+  });
+
+  test('an invalid contactEmail 400s before any mutation — nothing commits', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-5',
+      token: 'tok-contact-5-x0123456789',
+      customer_id: null,
+    }));
+
+    const res = await putAccept('tok-contact-5-x0123456789', { contactEmail: 'not-an-email' });
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('CONTACT_EMAIL_INVALID');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.customers).toHaveLength(0);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a control character in contactLastName 400s before any mutation — nothing commits', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-6',
+      token: 'tok-contact-6-x0123456789',
+      customer_id: null,
+    }));
+
+    const res = await putAccept('tok-contact-6-x0123456789', { contactLastName: 'Sample\u0001Name' });
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('CONTACT_LAST_NAME_INVALID');
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.customers).toHaveLength(0);
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+});
+
+// GitHub Codex #5481 r2 — the accept must bind to exactly what /data showed.
+describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', () => {
+  const RecurringCards = require('../services/recurring-card-on-file');
+  const { AFTER_VISIT_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+  // The accept route rate-limits per token — a fresh token per seed keeps
+  // each case independent of how many accepts the earlier ones sent.
+  let TOKEN = 'tok-pafb-r2-x0123456789';
+  let tokenSeq = 0;
+  let resolverSpy;
+  let retireSpy;
+
+  function seed() {
+    retireSpy = jest.spyOn(RecurringCards, 'retireOrphanedCaptureIntent').mockResolvedValue({ ok: true, retired: true });
+    tokenSeq += 1;
+    TOKEN = `tok-pafb-r2-${tokenSeq}-x0123456789`;
+    resetStore(recurringPestEstimate({ id: 'est-pafb-r2', token: TOKEN }));
+  }
+  function livePolicy(policy) {
+    resolverSpy = jest.spyOn(RecurringCards, 'resolveRecurringCardPolicyForEstimate').mockResolvedValue(policy);
+  }
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+  const CAPTURED = {
+    recurringCardSetupIntentId: 'seti_captured_1',
+    recurringCardConsentVariant: 'after_visit_card',
+    recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+  };
+
+  afterEach(() => {
+    if (resolverSpy) resolverSpy.mockRestore();
+    resolverSpy = null;
+    if (retireSpy) retireSpy.mockRestore();
+    retireSpy = null;
+  });
+
+  test('P0: rollout gate turned off mid-flight (policy no longer enforced) — captured intent + attestation 409, nothing committed', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    // r3 P0: the orphaned capture is retired in Stripe so it can never be recovered later.
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: a captured intent alone (no attestation) is refused the same way', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1' });
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('P0: another tab saved a consented method (saved_method_consented) after this tab captured — 409, intent stays unbound', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: a retire that cannot be confirmed fails closed (503), nothing committed, no 409 that would drop the intent', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(503);
+    expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('r3 P0: an after-visit variant mismatch on a still-required policy also retires the dropped intent', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true, autopayDisabled: true,
+    });
+    const res = await putAccept(TOKEN, CAPTURED);
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+  });
+
+  test('r3 P0: an attestation alone (no intent) retires nothing', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    const res = await putAccept(TOKEN, { recurringCardConsentVariant: 'after_visit_card' });
+    expect(res.status).toBe(409);
+    expect(retireSpy).not.toHaveBeenCalled();
+  });
+
+  test('control: a not-required policy with NO intent / attestation still accepts', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+
+  function acceptedData() {
+    const raw = storedEstimate().estimate_data;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  }
+
+  test('pre-push P0: PAF 409 stale -> reload -> accept on a no-capture path durably marks the accept so the webhook can never enroll the discarded intent', async () => {
+    seed();
+    // Tab 1 captured under the after-visit flow; another tab then saved a
+    // consented method, so the live policy is the PAF saved-method cohort.
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1', afterVisitCard: true,
+    });
+    const stale = await putAccept(TOKEN, CAPTURED);
+    expect(stale.status).toBe(409);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCardSetupIntentId');
+    // The reloaded tab accepts without the (dropped) intent; the locked-row
+    // eligibility recheck is a DB read this in-memory store does not model.
+    const driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    driftSpy.mockRestore();
+    expect(acceptedData().acceptedRecurringCardSetupIntentId).toBe(RecurringCards.ACCEPTED_NO_CAPTURE_MARKER);
+  });
+
+  test('r3 P1: a gate-off no-capture accept writes NO marker (byte-identical to pre-PR-B)', async () => {
+    seed();
+    livePolicy({ enforced: false, required: false, exemptReason: 'feature_disabled' });
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  test.each([
+    ['payer_billed', { enforced: true, required: false, exemptReason: 'payer_billed' }],
+    ['autopay_already_active', { enforced: true, required: false, exemptReason: 'autopay_already_active' }],
+    ['commercial_manual_billing', { enforced: true, required: false, exemptReason: 'commercial_manual_billing' }],
+    ['payer_check_uncertain', { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }],
+    ['existing_plan_customer', { enforced: true, required: false, exemptReason: 'existing_plan_customer' }],
+    ['saved_method_consented (non-PAF)', {
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'cust-1',
+    }],
+  ])('r3 P1: exempt cohort %s writes NO marker — a legacy recovery stays exactly as before', async (_name, policy) => {
+    seed();
+    livePolicy(policy);
+    conversionOk();
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(200);
+    expect(storedEstimate().estimate_data).not.toContain('acceptedRecurringCard');
+  });
+
+  describe('r3 P0: ACCEPT_BILLING_CHANGED drift under the customer lock orphans the verified capture', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent').mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType: 'card',
+      });
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(true);
+    });
+    afterEach(() => {
+      verifySpy.mockRestore();
+      bankSpy.mockRestore();
+      driftSpy.mockRestore();
+    });
+
+    test('drift -> the captured intent is retired before the reloadable 409', async () => {
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('a retire Stripe cannot confirm fails closed (503), nothing committed', async () => {
+      retireSpy.mockResolvedValue({ ok: false, reason: 'retire_failed' });
+      const res = await putAccept(TOKEN, CAPTURED);
+      expect(res.status).toBe(503);
+      expect(res.data.code).toBe('RECURRING_CARD_RETIRE_FAILED');
+      expect(storedEstimate().status).toBe('sent');
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+  });
+
+  // GitHub Codex #5481 r3 (structural): ONE collection promise decided in the
+  // accept transaction from the verified tender + the real invoice outcome.
+  describe('r3: the collection promise the accept records equals what the capture UI attested', () => {
+    let verifySpy;
+    let bankSpy;
+    let driftSpy;
+    let underLockSpy;
+    let enrollSpy;
+    const BASE_VERSION = require('../services/payment-method-consent-text').CONSENT_VERSION;
+    // The in-memory DB keeps a ?::jsonb binding as its string (Postgres stores the object).
+    const asJson = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    const AFTER_VISIT = {
+      recurringCardSetupIntentId: 'seti_captured_1',
+      recurringCardConsentVariant: 'after_visit_card',
+      recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
+      recurringCardConsentTender: 'card',
+      // A current tab attests the "billed after your first visit" timing it shows.
+      afterVisitTimingShown: true,
+    };
+    function verification(methodType) {
+      verifySpy.mockResolvedValue({
+        ok: true, paymentMethodId: 'pm_1', setupIntentId: 'seti_captured_1', methodType,
+      });
+    }
+    function conversion(firstScheduledServiceId) {
+      EstimateConverter.convertEstimate.mockResolvedValueOnce({
+        customerId: 'cust-1',
+        tier: 'Bronze',
+        monthlyRate: 60,
+        firstScheduledServiceId,
+        recurringConversionSkipped: false,
+        welcomeSms: null,
+        membershipEmail: null,
+        deferredFollowUpReminderRows: [],
+      });
+    }
+    beforeEach(() => {
+      seed();
+      livePolicy({
+        enforced: true, required: true, exemptReason: null, customerId: 'cust-1', afterVisitCard: true,
+      });
+      verifySpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntent');
+      verification('card');
+      bankSpy = jest.spyOn(RecurringCards, 'bankTenderAllowedUnderLock').mockResolvedValue(true);
+      driftSpy = jest.spyOn(RecurringCards, 'pafExistingDriftUnderLock').mockResolvedValue(false);
+      underLockSpy = jest.spyOn(RecurringCards, 'verifyRecurringCardIntentUnderLock').mockResolvedValue(true);
+      enrollSpy = jest.spyOn(RecurringCards, 'completeRecurringCardEnrollment').mockResolvedValue({ enrolled: true });
+    });
+    afterEach(() => {
+      [verifySpy, bankSpy, driftSpy, underLockSpy, enrollSpy].forEach((spy) => spy.mockRestore());
+    });
+
+    test('attached first-application invoice + card tender + after-visit attestation: accepted, variant stamped, enrollment records it', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBe('after_visit_card');
+      expect(enrollSpy).toHaveBeenCalledWith(expect.objectContaining({ consentVariant: 'after_visit_card' }));
+      expect(retireSpy).not.toHaveBeenCalled();
+    });
+
+    test('an UNATTACHED standard invoice (setup-only shape / no first visit: pay link at accept) is not the after-visit promise — 409, nothing recorded, dropped intent retired', async () => {
+      conversion(null);
+      // A setup-only page shows no first-visit timing, so it attests none.
+      const { afterVisitTimingShown: _shown, ...noTiming } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, noTiming);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+      // The promise the server would record rides the 409 so the reloaded tab
+      // renders the base text for this selection instead of looping.
+      // deferred:false — the unattached first invoice goes out at accept.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'card', version: require('../services/payment-method-consent-text').CONSENT_VERSION, deferred: false });
+    });
+
+    test('the same unattached shape accepts when the tab rendered (and attests) the base text — recorded variant is base', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+    });
+
+    test('ACH tender captured but the tab attests the after-visit CARD text (rendered ACH) — 409, nothing recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('ACH tender, tab attests the tender-specific base text: accepted, no after-visit variant stamped or recorded', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+      expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
+      expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
+      // r5 P1: the exact text + version shown is persisted for the webhook
+      // recovery and handed to the inline enrollment verbatim.
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: null, version: BASE_VERSION, tender: 'us_bank_account', text: ConsentText.getConsentText('us_bank_account'),
+      });
+      expect(enrollSpy.mock.calls[0][0].renderedConsent).toEqual({ text: ConsentText.getConsentText('us_bank_account'), version: BASE_VERSION });
+    });
+
+    test('r5 audit: a tab that showed "billed after your first visit" timing is refused when the first invoice goes out payable at accept (unattached)', async () => {
+      conversion(null);
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(false);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+
+    test('r6 audit: the timing attestation is judged even after the cohort marker is gone (sub-gate turned off): a payable invoice is refused', async () => {
+      resolverSpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5 audit: the same timing attestation is honored when the invoice really is deferred (attached)', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { ...AFTER_VISIT, afterVisitTimingShown: true });
+      expect(res.status).toBe(200);
+    });
+
+    test('r5: a bank capture whose tab attests an OLDER base ACH version is refused (the newer wording is never recorded)', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+      // The attached first invoice is still deferred: a version refresh is not a timing change.
+      expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION, deferred: true });
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('r5: an after-visit card accept persists the exact v12 text + version for recovery', async () => {
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, AFTER_VISIT);
+      expect(res.status).toBe(200);
+      const ConsentText = require('../services/payment-method-consent-text');
+      expect(asJson(acceptedData().acceptedRecurringCardConsent)).toEqual({
+        variant: 'after_visit_card', version: ConsentText.AFTER_VISIT_CONSENT_VERSION, tender: 'card',
+        text: ConsentText.getConsentText('card', { variant: 'after_visit_card' }),
+      });
+    });
+
+    test('a tab that attests a tender different from the verified one is refused even with no variant', async () => {
+      verification('us_bank_account');
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
+    });
+
+    test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
+      conversion('ss-first');
+      const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, legacy);
+      expect(res.status).toBe(200);
+    });
+
+    test('r7: an after-visit accept that WILL defer its attached invoice but carries no timing attestation (a tab from before the gate) is refused for a refresh', async () => {
+      conversion('ss-first');
+      const { afterVisitTimingShown: _shown, ...unattested } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, unattested);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(true);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
+    });
+  });
+
+  test('P1: the accept transaction lands on a different customer than the resolver judged — 409 ACCEPT_BILLING_CHANGED before conversion', async () => {
+    seed();
+    livePolicy({
+      enforced: true, required: false, exemptReason: 'saved_method_consented', savedMethodRowId: 'pm-row-1', customerId: 'resolver-customer-not-the-trx-one', afterVisitCard: true,
+    });
+    const res = await putAccept(TOKEN, {});
+    expect(res.status).toBe(409);
+    expect(res.data.code).toBe('ACCEPT_BILLING_CHANGED');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 });

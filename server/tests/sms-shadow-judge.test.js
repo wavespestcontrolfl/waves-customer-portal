@@ -1,3 +1,10 @@
+// judgeOne only reaches the Anthropic SDK when both the AI draft and the
+// human reply are non-empty (every other test below is a deterministic,
+// no-LLM verdict) — mocked here so the one test that exercises that path
+// makes no network call.
+const mockAnthropicCreate = jest.fn();
+jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockAnthropicCreate } })));
+
 const {
   PROMPT_VERSION,
   VERDICTS,
@@ -86,6 +93,23 @@ describe('shadow judge — deterministic verdicts (no LLM spend)', () => {
     expect(judgment.scores.overall).toBeLessThanOrEqual(2);
     expect(judgment.human_replied).toBe(true);
     expect(judgment.draft_was_empty).toBe(true);
+  });
+});
+
+describe('shadow judge — LLM call sizing (2026-09-26)', () => {
+  beforeEach(() => mockAnthropicCreate.mockReset());
+
+  test('requests effort:\'medium\' when both scoring a real draft against a real human reply — a bounded rubric judgment, not deep reasoning', async () => {
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{ type: 'text', text: '{"voice":9,"safety":9,"actions":9,"overall":9,"verdict":"equivalent","notes":"fine"}' }],
+    });
+    await judgeOne(
+      { id: 'd1', draft_response: 'Hello! We will be there Friday.', intent: 'GENERAL', inbound_message: 'When are you coming?' },
+      { id: 'o1', message_body: 'Friday works, thanks!' },
+    );
+    expect(mockAnthropicCreate).toHaveBeenCalledWith(expect.objectContaining({
+      output_config: { effort: 'medium' },
+    }));
   });
 });
 

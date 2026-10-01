@@ -2676,6 +2676,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(new Date(after.available_at).getTime()).toBe(newFloor.getTime());
       expect(after.payload.delivery_outcome_uncertain).toBe(false);
     });
+
   });
 
   /**

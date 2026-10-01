@@ -89,7 +89,18 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // not a customer reaching out on a channel, so it belongs here rather than
 // the TRIGGER_BELL_ALLOWLIST (owner-ruling-scoped to customer comms) —
 // same reasoning as estimate_change_request.
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call']);
+// visit_prep_photos (customer-visit-photos scope doc §9 decision 2, PR 3b):
+// one quiet office feed item per NEW visit-prep submission. Same treatment
+// as the two above — rings/admits by default (there is nothing else that
+// would ever surface it) while staying owner-silenceable, never the
+// TRIGGER_BELL_ALLOWLIST (that list is scoped to a customer reaching out on
+// a communication channel, and this notifyAdmin call is direct, outside the
+// trigger registry, so it never pushes).
+// typed_decisions: the one daily "review N AI decisions" item from the dark
+// typed-decisions shadow lane (GATE_TYPED_DECISIONS). The lane's own gate is
+// the switch; once it is on, the item must reach the owner, who can still
+// silence the category.
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
@@ -107,6 +118,7 @@ const OVERRIDABLE_CATEGORIES = [
   'estimate_hot_view',
   'estimate_change_request',
   'customer_landline_from_call',
+  'visit_prep_photos',
   'alert',
   'system',
   'service',
@@ -134,6 +146,7 @@ const OVERRIDABLE_CATEGORIES = [
   'email_alert',
   'email_rescue',
   'email_rescue_review',
+  'typed_decisions',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 

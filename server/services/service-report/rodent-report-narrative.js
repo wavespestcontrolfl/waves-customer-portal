@@ -41,6 +41,7 @@ const {
   normalizeWordNumbers,
 } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
+const { nextVisitProblems, splitSentences, withoutTimedVisitClaims } = require('./next-visit-claims');
 const {
   EXTRA_FORBIDDEN,
   formatNextVisitDate,
@@ -54,7 +55,8 @@ const {
 // renames); rodent remains a thin alias over the same engine.
 // v4: + visitStage, so the first visit of a rodent trapping program reads as
 // the setup it is instead of a routine re-check (owner 2026-08-02).
-const PROMPT_VERSION = 'typed_report_narrative_v4';
+// v5: validate appointment date, window, and time claims through the shared guard.
+const PROMPT_VERSION = 'typed_report_narrative_v7';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -225,8 +227,21 @@ function groundingFacts({
       window: formatArrivalWindow(nextAppointment.windowStart),
     }
     : null;
+  const groundedVisit = nextVisit && nextVisit.date ? nextVisit : null;
+  // With a visit on the schedule, ratified copy enters the facts without any
+  // sentence saying when we return (owner ruling 2026-09-28: the report's
+  // upcoming-visits section is the one place the date appears). Every
+  // consumer reads these facts — the prompt, the deterministic fallback, and
+  // the mandatory-care append after validation — so no path can publish one.
+  // A ratified sentence denying the scheduled visit ("This was our final
+  // visit") leaves too: the fallback and the care append copy ratified text
+  // without the model-output guard (codex P1 on #5262 r3).
+  const withoutDenials = (value) => (groundedVisit
+    ? splitSentences(value).filter((sentence) => !SCHEDULED_VISIT_DENIAL_RE.test(sentence)).join(' ')
+    : value);
+  const ratified = (value) => cleanText(withoutDenials(withoutTimedVisitClaims(cleanText(value), groundedVisit)));
   return {
-    recap: cleanText(recap),
+    recap: ratified(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
     reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
     // The trap-SETUP visit — the traps went out today and nothing has been
@@ -252,9 +267,9 @@ function groundingFacts({
       : null),
     todaysResult: typedReport?.todaysResult
       ? {
-        headline: cleanText(typedReport.todaysResult.headline) || null,
-        body: cleanText(typedReport.todaysResult.body) || null,
-        nextStep: cleanText(typedReport.todaysResult.nextStep) || null,
+        headline: ratified(typedReport.todaysResult.headline) || null,
+        body: ratified(typedReport.todaysResult.body) || null,
+        nextStep: ratified(typedReport.todaysResult.nextStep) || null,
       }
       : null,
     findings: findingFacts(typedReport),
@@ -265,7 +280,7 @@ function groundingFacts({
     // The tech-reviewed consolidated photo analysis, when present — richer
     // grounding than the per-photo captions alone.
     photoSummary: cleanText(typedReport?.photoSummary).slice(0, 400) || null,
-    nextVisit: nextVisit && nextVisit.date ? nextVisit : null,
+    nextVisit: groundedVisit,
   };
 }
 
@@ -361,15 +376,10 @@ function deterministicSummary(facts) {
   if (facts.photoEvidence.length) {
     parts.push('Photos from this visit are included with this report.');
   }
-  if (facts.nextVisit) {
-    parts.push(facts.nextVisit.window
-      ? `Your next visit is scheduled for ${facts.nextVisit.date}, arriving ${facts.nextVisit.window}.`
-      : `Your next visit is scheduled for ${facts.nextVisit.date}.`);
-  }
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
+const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control service report.
 
 ${HUMAN_PROSE_RULES}
 
@@ -388,13 +398,17 @@ Rules:
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
 - When visitStage is "initial_trap_setup" the traps were placed today. Describe them as set/placed on this visit, say what happens next (we return to check them and adjust placements), and never write that traps were checked, re-checked, reset, or that no captures were found — nothing has had a chance to catch yet. A setup can happen on any visit of a service program, so never state or imply that this is the first visit, and never rank it against earlier visits.
 - If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
-- If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
+- Never say when Waves will return: no date, weekday, time, arrival window, or timeframe for a future visit. The report lists upcoming visits separately. When nextVisitScheduled is true you may say the next visit is on the schedule, without saying when.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
 
 Return JSON: {"summary": "<the summary>"}`;
 
 function buildUserMessage(facts) {
-  return `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`;
+  // The model never sees the next visit's date or window, only whether one is
+  // scheduled (owner ruling 2026-09-28); validation still reads facts.nextVisit.
+  const { nextVisit, ...rest } = facts;
+  const promptFacts = { ...rest, nextVisitScheduled: Boolean(nextVisit) };
+  return `Grounding facts:\n${JSON.stringify(promptFacts, null, 2)}\n\nReturn only the JSON object.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +450,11 @@ function collectNumbers(set, value) {
 
 function groundedNumberSet(facts) {
   const set = new Set();
-  collectNumbers(set, facts);
+  // The next visit's date and window never ground a number: the model is
+  // never shown them and may never state them (owner ruling 2026-09-28), so
+  // "3" and "5" from a 3–5 PM window must not authorize "5 improvements".
+  const { nextVisit: _hiddenNextVisit, ...rest } = facts;
+  collectNumbers(set, rest);
   return set;
 }
 
@@ -666,73 +684,6 @@ function unsupportedActivityClaims(text, facts) {
     'unsupported_capture_claim', 'contradicted_capture_negative', 'ungrounded_capture_negative');
   scan(CONSUMPTION_CLAIM_RES, consumptionSupported, consumptionZeroRecorded, ALLOWED_CONSUMPTION_PHRASE,
     'unsupported_consumption_claim', 'contradicted_consumption_negative', 'ungrounded_consumption_negative');
-  return problems;
-}
-
-// Next-visit copy is validated as TEXT, not just numerals (codex round-4
-// P1): "8–10 PM" contains only grounded numbers but contradicts an 8–10 AM
-// appointment. Any arrival-window or month-day mention in the output must
-// match the grounded next visit exactly (weekday too, when written); with
-// no grounded next visit, mentioning either rejects.
-const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
-const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
-const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b`, 'gi');
-
-function normalizeWindowText(value) {
-  return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
-}
-
-function nextVisitProblems(text, facts) {
-  const problems = [];
-  const expected = facts.nextVisit;
-  const expectedWindow = expected?.window ? normalizeWindowText(expected.window) : null;
-  for (const match of String(text).matchAll(new RegExp(WINDOW_TEXT_RE.source, 'gi'))) {
-    if (!expectedWindow || normalizeWindowText(match[0]) !== expectedWindow) {
-      problems.push(`ungrounded_window:${match[0].trim()}`);
-    }
-  }
-  const expectedDate = expected?.date
-    ? new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i').exec(String(expected.date).trim())
-    : null;
-  for (const match of String(text).matchAll(new RegExp(DATE_TEXT_RE.source, 'gi'))) {
-    const [, weekday, month, day] = match;
-    const ok = expectedDate
-      && month.toLowerCase() === expectedDate[2].toLowerCase()
-      && Number(day) === Number(expectedDate[3])
-      && (!weekday || !expectedDate[1] || weekday.toLowerCase() === expectedDate[1].toLowerCase());
-    if (!ok) problems.push(`ungrounded_date:${match[0].trim()}`);
-  }
-  // STANDALONE weekday mentions count too (codex round-6 P1): "your next
-  // visit is Tuesday" contradicts a Monday appointment without ever
-  // matching the month-day pattern. Every weekday word in the output must
-  // be the grounded visit's weekday.
-  const expectedWeekday = expectedDate && expectedDate[1] ? expectedDate[1].toLowerCase() : null;
-  for (const match of String(text).matchAll(new RegExp(`\\b(${WEEKDAY_NAMES})\\b`, 'gi'))) {
-    if (!expectedWeekday || match[1].toLowerCase() !== expectedWeekday) {
-      problems.push(`ungrounded_weekday:${match[1]}`);
-    }
-  }
-  // STANDALONE clock times too (codex round-8 P1): "at 8 PM" reformats the
-  // grounded 8–10 AM range into a wrong single time whose numeral is
-  // grounded. Range mentions are removed first (the window check above
-  // already judged them); every remaining clock time must be one of the
-  // grounded window's boundaries, meridiem included.
-  const allowedTimes = new Set();
-  if (expectedWindow) {
-    const win = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*–\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/.exec(expectedWindow);
-    if (win) {
-      const endMeridiem = win[6];
-      const startMeridiem = win[3] || endMeridiem;
-      allowedTimes.add(`${Number(win[1])}:${win[2] || '00'} ${startMeridiem}`);
-      allowedTimes.add(`${Number(win[4])}:${win[5] || '00'} ${endMeridiem}`);
-    }
-  }
-  const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
-  for (const match of withoutRanges.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/gi)) {
-    const normalized = `${Number(match[1])}:${match[2] || '00'} ${match[3].toUpperCase()}`;
-    if (!allowedTimes.has(normalized)) problems.push(`ungrounded_time:${match[0].trim()}`);
-  }
   return problems;
 }
 
@@ -1383,6 +1334,26 @@ function contradictedCareCopy(text, facts) {
   return problems;
 }
 
+// With a visit on the schedule, copy that denies one ("No follow-up is
+// needed", "You won't need another visit") contradicts it. The ratified
+// follow-up sentence that used to ground contradictedCareCopy for this is
+// removed from the facts once it states timing (owner ruling 2026-09-28),
+// so the schedule itself is the evidence.
+const SCHEDULED_VISIT_DENIAL_RE = new RegExp([
+  String.raw`\bno\s+(?:further\s+|more\s+|additional\s+|other\s+)?(?:follow[-\s]?ups?|visits?|return\s+visits?|re-?treatments?|appointments?)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:needed|necessary|required|planned|scheduled)\b`,
+  String.raw`\b(?:won[’']?t|will\s+not|don[’']?t|do\s+not|doesn[’']?t|does\s+not)\s+need\s+(?:a|another|any)\s+(?:more\s+)?(?:follow[-\s]?ups?|visits?|appointments?|re-?treatments?)\b`,
+  String.raw`\bwe\s+(?:won[’']?t|will\s+not)\s+(?:need\s+to\s+|have\s+to\s+)?(?:return|come\s+back|be\s+back)\b`,
+  String.raw`\b(?:follow[-\s]?ups?|another\s+visit|return\s+visits?)\s+(?:is\s+|are\s+)?(?:not|n[’']?t)\s+(?:needed|necessary|required)\b`,
+  String.raw`\bno\s+need\s+(?:for\s+(?:a\s+|another\s+)?(?:follow[-\s]?up|visit|return)|to\s+(?:come\s+back|return))\b`,
+  String.raw`\bwe\s+(?:do\s+not|don[’']?t|have\s+no|had\s+no)\s+(?:plans?|intention)\s+(?:to|of)\s+(?:return\w*|com\w*\s+back|visit\w*)\b`,
+  String.raw`\bno\s+(?:returns?|return\s+trips?|follow[-\s]?ups?|further\s+(?:visits?|service|treatments?))\s+(?:is|are|was|were|will\s+be)\s+(?:planned|scheduled|needed|necessary|required)\b`,
+  String.raw`\b(?:this|today(?:[’']s)?(?:\s+(?:visit|service|treatment))?)\s+(?:was|is)\s+(?:our|the|your)\s+(?:final|last)\s+(?:visit|service|treatment|appointment|stop)\b`,
+].join('|'), 'i');
+
+function deniedScheduledVisit(text, facts) {
+  return facts.nextVisit && SCHEDULED_VISIT_DENIAL_RE.test(String(text)) ? ['contradicted_scheduled_visit'] : [];
+}
+
 // Returns the list of ungrounded claims found in the text (empty = clean).
 // The global numeral check runs on the RAW text (a word-form "one" in
 // harmless prose must not be flagged as an ungrounded numeral); the
@@ -1410,12 +1381,15 @@ function ungroundedClaims(rawText, facts) {
   }
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
-  problems.push(...nextVisitProblems(text, facts));
+  problems.push(...nextVisitProblems(text, facts, {
+    groundedCareExemptions: mandatoryCareCopy(facts.todaysResult || {}),
+  }));
   problems.push(...ungroundedDomainTerms(text, facts));
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...contradictedZeroStates(text, facts));
   problems.push(...unpairedActionLocations(text, facts));
   problems.push(...contradictedCareCopy(text, facts));
+  problems.push(...deniedScheduledVisit(text, facts));
   problems.push(...contradictedActivityWording(text, facts));
   problems.push(...setupWordingProblems(text, facts));
   problems.push(...inventedProductIdentifiers(text, facts));
@@ -1474,11 +1448,10 @@ const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off
 
 function mandatoryCareCopy(todaysResult) {
   const sentences = [];
-  const split = (block) => String(block || '').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
-  split(todaysResult?.body).forEach((sentence) => {
+  splitSentences(todaysResult?.body).forEach((sentence) => {
     if (CARE_SENTENCE_RE.test(sentence)) sentences.push(sentence);
   });
-  sentences.push(...split(todaysResult?.nextStep));
+  sentences.push(...splitSentences(todaysResult?.nextStep));
   return [...new Set(sentences)];
 }
 

@@ -10,8 +10,6 @@ const {
   REQUIRED_FINDINGS_FIELDS,
   deriveActivityScore,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
-  chipsForType,
   customerLabelForValue,
   validateTypedFindings,
   buildTodaysResult,
@@ -38,13 +36,13 @@ describe('bait station schemas', () => {
     expect(REQUIRED_FINDINGS_FIELDS.rodent_bait_station).toEqual(['stations_checked', 'bait_consumption']);
   });
 
-  test('every station report requires a next step', () => {
-    expect(nextStepRequiredForType('termite_bait_station')).toBe(true);
-    expect(nextStepRequiredForType('rodent_bait_station')).toBe(true);
+  // Owner ruling 2026-09-27: the "Next steps" chip picker/requirement was
+  // retired — Recommendations is the single tech-advice field now.
+  test('neither station type serves the retired next-step picker fields', () => {
     for (const type of ['termite_bait_station', 'rodent_bait_station']) {
       const schema = findingsSchemaForType(type);
-      expect(schema.nextStepRequired).toBe(true);
-      expect(schema.nextStepChips.length).toBeGreaterThanOrEqual(5);
+      expect(schema.nextStepRequired).toBeUndefined();
+      expect(schema.nextStepChips).toBeUndefined();
     }
   });
 
@@ -328,7 +326,6 @@ describe('validation', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'rodent_bait_station',
       values: { stations_checked: '4', bait_consumption: 'Heavy', bait_replaced: 'Yes' },
-      nextStepChips: ['Recheck high-consumption station'],
       serviceKey: 'rodent_bait_quarterly',
       serviceLabel: 'Quarterly Rodent Bait Station Service',
       visitSequence: 1,

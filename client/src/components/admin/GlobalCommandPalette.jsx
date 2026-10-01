@@ -23,12 +23,14 @@ import {
 import { useLocation } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
+import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
+import KnowledgeGapPrompt, { useKnowledgeGaps } from "./KnowledgeGapPrompt";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
@@ -61,6 +63,21 @@ const D = {
   text: "#334155",
   muted: "#64748B",
   white: "#fff",
+};
+
+// Auto-grow composer textareas ------------------------------------------
+// Owner-reported bug: the composer was a single-line <input>, so dictated
+// text longer than the box couldn't be seen or edited past the cut-off.
+// Shared with the tech Intelligence Bar composer — see the hook module for
+// the measurement details (`getMaxHeight` may be a number or a function;
+// mobile factors in the live viewport height, and growth caps there and the
+// box scrolls internally).
+
+// Roughly 6 lines before a composer stops growing and scrolls internally.
+const COMPOSER_MAX_HEIGHT = {
+  desktop: 132, // ~6 lines @ 15px in the main composer
+  followUp: 112, // ~6 lines @ 13px in the follow-up composer
+  mobile: () => Math.min(148, window.innerHeight * 0.4), // ~6 lines @ 16px, capped to ~40% viewport
 };
 
 function adminFetch(path, options = {}) {
@@ -323,6 +340,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const submittingRef = useRef(false);
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
+  // Knowledge searches that came back empty (payload knowledgeMisses):
+  // offered as "add to knowledge gaps", saved only on the operator's tap.
+  // Held here, not in the prompt, so closing the palette keeps each box's
+  // request key and locked text.
+  const knowledgeGaps = useKnowledgeGaps();
   const [conversationHistory, setConversationHistory] = useState([]);
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
@@ -355,12 +377,18 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const followUpRef = useRef(null);
   const openerRef = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
+  // Desktop-only composers. MobileSheet owns inputRef's growth (its own
+  // mobile-viewport cap) when isMobile — `enabled: false` here keeps this
+  // effect from also touching the same shared inputRef node on that render.
+  useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.desktop, !isMobile);
+  useAutoGrowTextarea(followUpRef, prompt, COMPOSER_MAX_HEIGHT.followUp, !isMobile);
   // The shared modal stack consumes Escape before an underlying customer
   // drawer can see it; closing the bar must leave that record open.
   const paletteRef = useModalFocus(open, () => setOpen(false));
@@ -460,6 +488,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     if (!threadsAvailableRef.current) setPendingActions([]);
     else setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
+    // The gap prompts belong to the response: kept while a thread keeps it,
+    // cleared below with it otherwise.
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a
       // context-driven invalidation should let the next palette open retry
@@ -470,6 +500,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setResponse(null);
       setPendingActions([]);
       setToolActivity([]);
+      knowledgeGaps.reset();
       // Detach any persisted thread too — /query evaluates the gate at call
       // time, so a threadId can exist even after the availability probe
       // failed; appending a fresh conversation to it would corrupt the
@@ -493,6 +524,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
     setToolActivity([]);
+    knowledgeGaps.reset();
     // A thread from History is not the open task: its card (and Confirm
     // controls) must not stay attached above another conversation.
     setActiveTask(null);
@@ -579,6 +611,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setLoading(true);
       setResponse(null);
       setToolActivity([]);
+      knowledgeGaps.reset();
       saveRecent(q);
       setRecents(loadRecents());
 
@@ -616,6 +649,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
+          knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
             setThreadId(data.threadId);
@@ -682,6 +716,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
       setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
+      knowledgeGaps.load(data.knowledgeMisses, data.taskId || id);
       setShowThreads(false);
     } catch (err) {
       if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
@@ -690,8 +725,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     }
   };
 
+  const saveKnowledgeGap = (question, requestKey) => adminFetch("/admin/intelligence-bar/knowledge-gap", {
+    method: "POST",
+    body: JSON.stringify({ question, request_key: requestKey }),
+  });
+
   const actionEpoch = threadEpochRef.current;
-  const onActionResolved = (action, decision, body) => {
+  const onActionResolved =(action, decision, body) => {
     if (body?.success && body?.result?.verification?.persisted) {
       notifyMutation?.({ id: action.id, customer_id: body.result.customer_id,
         product_id: body.result.verification.product_id, estimate_id: body.result.estimate_id,
@@ -746,10 +786,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   }, []);
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // isComposing / keyCode 229 is the Enter that confirms an IME
+    // (Japanese/Chinese/Korean, etc.) candidate — it must never submit.
+    const composing = e.nativeEvent?.isComposing || e.keyCode === 229;
+    if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault();
       submit();
     }
+    // Shift+Enter falls through unhandled — the textarea's own default
+    // behavior inserts a newline.
     if (e.key === "Escape") {
       setOpen(false);
     }
@@ -771,6 +816,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setResponse(null);
     setPendingActions([]);
     setToolActivity([]);
+    knowledgeGaps.reset();
     setPrompt("");
     setThreadId(null);
     threadSeqRef.current = null;
@@ -832,6 +878,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         onActionResolved={onActionResolved}
         taskHistory={taskHistory}
         toolActivity={toolActivity}
+        knowledgeGaps={knowledgeGaps}
+        saveKnowledgeGap={saveKnowledgeGap}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
@@ -903,8 +951,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           {" "}
           <div style={{ flex: 1, position: "relative" }}>
             {" "}
-            <input
+            <textarea
               ref={inputRef}
+              rows={1}
               aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -923,6 +972,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
                 boxSizing: "border-box",
+                resize: "none",
               }}
               onFocusCapture={(e) =>
                 (e.target.style.borderColor = accentColor + "66")
@@ -933,8 +983,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               style={{
                 position: "absolute",
                 right: 8,
-                top: "50%",
-                transform: "translateY(-50%)",
+                bottom: 8,
                 display: "flex",
                 gap: 6,
                 alignItems: "center",
@@ -1124,6 +1173,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
+            <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
           </div>
         )}
         {(response || pendingActions.length > 0) && !loading && !showThreads && (
@@ -1133,10 +1183,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               borderTop: `1px solid ${D.border}33`,
               display: "flex",
               gap: 8,
+              alignItems: "flex-end",
             }}
           >
             {" "}
-            <input
+            <textarea
+              ref={followUpRef}
+              rows={1}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1151,6 +1204,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 fontSize: 13,
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
+                boxSizing: "border-box",
+                resize: "none",
               }}
             />{" "}
             <button
@@ -1262,6 +1317,8 @@ function MobileSheet({
   onActionResolved,
   taskHistory,
   toolActivity,
+  knowledgeGaps,
+  saveKnowledgeGap,
   recents,
   quickActions,
   contextLabel,
@@ -1280,6 +1337,7 @@ function MobileSheet({
   removeAttachment,
 }) {
   const fileInputRef = useRef(null);
+  useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
   return (
     <>
       {/* Backdrop */}
@@ -1402,8 +1460,9 @@ function MobileSheet({
           {" "}
           <div style={{ position: "relative" }}>
             {" "}
-            <input
+            <textarea
               ref={inputRef}
+              rows={1}
               aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -1421,6 +1480,7 @@ function MobileSheet({
                 fontSize: 16,
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
+                resize: "none",
               }}
             />{" "}
             {!loading && (
@@ -1428,8 +1488,7 @@ function MobileSheet({
                 style={{
                   position: "absolute",
                   right: 10,
-                  top: "50%",
-                  transform: "translateY(-50%)",
+                  bottom: 10,
                   display: "flex",
                   alignItems: "center",
                   gap: 4,
@@ -1530,6 +1589,9 @@ function MobileSheet({
           )}
           {response && !loading && !showThreads && (
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
+          )}
+          {response && !loading && !showThreads && (
+            <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="light" />
           )}
           {pendingActions.length > 0 && !loading && !showThreads && !activeTask && (
             <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />

@@ -170,8 +170,13 @@ class ConversionFeedbackMiner {
     // Each lead might have an estimate; the estimate's status drives
     // sent/accepted counts and revenue.
     try {
+      // Prospects only (scopeToProspects): leads_total feeds lead-quality and
+      // revenue-per-lead scoring, so 'handled' /book requests and other
+      // non-engaged rows stay out of it (codex #5477 r7).
+      const { scopeToProspects } = require('../lead-statuses');
       const leads = await db('leads')
         .whereNull('leads.deleted_at')
+        .modify((qb) => scopeToProspects(qb, 'leads'))
         .where('leads.first_contact_at', '>=', sinceCutoff)
         .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
         .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')

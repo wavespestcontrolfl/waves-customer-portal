@@ -17,8 +17,9 @@ jest.mock('../services/conversations', () => ({
 }));
 jest.mock('../models/db', () => jest.fn());
 
+const { gates } = require('../config/feature-gates');
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { parseAddOnsForAudit } = voiceRouter._test;
+const { parseAddOnsForAudit, promiseChaserEligibilityStamp } = voiceRouter._test;
 
 describe('parseAddOnsForAudit', () => {
   test('returns null when the AddOns param is absent (absence is signal)', () => {
@@ -56,6 +57,30 @@ describe('parseAddOnsForAudit', () => {
   });
 });
 
+describe('promiseChaserEligibilityStamp (Codex #5019 r20/r21: per-call fact, not a time boundary)', () => {
+  const saved = gates.promiseChaserBell;
+  const savedCommitments = gates.callCommitments;
+  afterEach(() => { gates.promiseChaserBell = saved; gates.callCommitments = savedCommitments; });
+
+  test('both gates on — the stamp is written into the fresh metadata', () => {
+    gates.promiseChaserBell = true;
+    gates.callCommitments = true;
+    expect(promiseChaserEligibilityStamp()).toEqual({ promise_chaser_eligible: true });
+  });
+
+  test('call commitments off (the kill switch) — no stamp, even with the bell gate on (codex r6 P1)', () => {
+    gates.promiseChaserBell = true;
+    gates.callCommitments = false;
+    expect(promiseChaserEligibilityStamp()).toEqual({});
+  });
+
+  test('gate off — the insert payload is byte-identical to before this stamp existed (no key at all, not a false value)', () => {
+    gates.promiseChaserBell = false;
+    expect(promiseChaserEligibilityStamp()).toEqual({});
+    expect(Object.keys(promiseChaserEligibilityStamp())).toHaveLength(0);
+  });
+});
+
 describe('foldVoiceMetadata (fallback-row enrichment after the /call-status race)', () => {
   const { foldVoiceMetadata } = voiceRouter._test;
   const fresh = {
@@ -77,5 +102,14 @@ describe('foldVoiceMetadata (fallback-row enrichment after the /call-status race
     expect(foldVoiceMetadata('{not json', fresh)).toEqual(fresh);
     expect(foldVoiceMetadata(null, fresh)).toEqual(fresh);
     expect(foldVoiceMetadata(undefined, fresh)).toEqual(fresh);
+  });
+
+  test('a redelivered/folded pass never removes an existing promise_chaser_eligible stamp, even when this pass\'s own fresh metadata omits it (e.g. the gate has since flipped off)', () => {
+    const priorStamped = { ...fresh, promise_chaser_eligible: true, source: 'status_callback' };
+    // This pass's fresh build has no stamp key at all — not `false`, absent
+    // — exactly what promiseChaserEligibilityStamp() returns with the gate
+    // off. A plain shallow spread never deletes a key it doesn't mention.
+    const merged = foldVoiceMetadata(priorStamped, fresh);
+    expect(merged.promise_chaser_eligible).toBe(true);
   });
 });

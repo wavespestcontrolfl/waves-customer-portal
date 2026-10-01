@@ -9,7 +9,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106). Owner re-approved 2026-09-28: customer copy says a licensed trapper can \"remove\" it (was \"live-trap and relocate\"); tech_notes unchanged.",
+      "approval_hash": "2bf934dbec579cfef8b4dac2c61cb91a7dbec932dc55df3e2faf5c9b84b094a4"
     },
     "slug": "armadillo",
     "common_name": "Nine-banded Armadillo",
@@ -21,7 +22,7 @@
     "scientific_name": "Dasypus novemcinctus",
     "rank": "species",
     "group": "wild-mammals",
-    "subgroup": null,
+    "subgroup": "contact-risk-wild-mammals",
     "site_category": "Wildlife neighbors",
     "traits": [
       "Shallow, cone-shaped holes dug overnight, 1-3 inches deep",
@@ -33,7 +34,7 @@
       {
         "slug": "feral-hog-rooting",
         "difference": "Armadillo holes are small, cone-shaped, and scattered overnight; feral hog rooting tears up much larger patches of turf and soil in a single visit.",
-        "next_photo": "A wide shot showing the size and shape of the disturbed area.",
+        "next_photo": "From a safe distance, get a wide shot of the disturbed area's size and shape.",
         "photo_can_confirm": true
       }
     ],
@@ -84,9 +85,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. Florida allows a licensed nuisance-wildlife trapper to live-trap and relocate it under FWC rules; don't handle one bare-handed.",
+      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. A licensed nuisance-wildlife trapper can remove it under FWC rules; don't handle one bare-handed.",
       "fact": "When startled it jumps straight up — a reflex that surprises people more than it protects the armadillo.",
-      "blurb": "Digs overnight for grubs and earthworms in soft soil. A wildlife trapper can live-trap and relocate it under FWC rules — don't handle one bare-handed."
+      "blurb": "Digs overnight for grubs and earthworms in soft soil. A licensed wildlife trapper can remove it under FWC rules — don't handle one bare-handed."
     },
     "tech_notes": "Armadillo digging correlates with grub/earthworm presence, but removing grubs is not a documented reliable deterrent per UF/IFAS. Refer to a licensed nuisance-wildlife trapper; FWC rules allow live-trap and release on-site, in-county relocation, or euthanasia. Advise against bare-hand contact (Hansen's disease association in Florida armadillos).",
     "sources": [
@@ -100,6 +101,907 @@
     "risk": "medical",
     "action": "specialist",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "eastern-gray-squirrel",
+    "kind": "organism",
+    "common_name": "Eastern Gray Squirrel",
+    "aka": [],
+    "aliases": [
+      "eastern gray squirrel",
+      "gray squirrel",
+      "sciurus carolinensis"
+    ],
+    "scientific_name": "Sciurus carolinensis",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Gray fur with brownish tints and a large, bushy tail, about 18 to 20 inches long including the tail",
+      "Active by day, climbing and leaping through trees, fences and power lines with ease",
+      "Builds a leaf-and-twig nest ('drey') high in tree branches, or moves into an attic or soffit gap if one is open",
+      "Chews on wood, soffits and electrical wiring, and often raids bird feeders"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-flying-squirrel",
+        "difference": "Gray squirrel is active by day with no skin membrane; flying squirrel is active only at night, has huge dark eyes, and glides on a furry skin flap",
+        "next_photo": "From a safe distance, note the time of day it was active and whether a furry skin flap shows when the legs are spread.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "attic-walls",
+      "trees-shrubs",
+      "garage-storage"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can bite if cornered or handled; leave a wild squirrel alone rather than trying to catch it.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      6,
+      7
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Squirrels in the yard or trees are just neighbors and not a concern. It's a different story if one has actually moved into an attic or soffit gap, since the gnawing there can reach wiring and become a fire risk worth addressing.",
+      "fact": "A gray squirrel can leap distances of well over 6 feet between branches, which is how it gets onto rooflines so easily."
+    },
+    "tech_notes": "Distinguish an outdoor sighting (no action needed) from confirmed attic/soffit entry (exclusion warranted); check for chewed wiring specifically given fire risk.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Eastern_gray_squirrel",
+      "https://ufdcimages.uflib.ufl.edu/IR/00/00/58/89/00001/UW04200.PDF"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel, Dept. of Wildlife Ecology & Conservation), states Florida squirrels \"usually produce 2 litters of 2-4 young each year. The first litter is born in January or February while the second arrives in mid-summer.\" peak_months corrected from the previously unsupported Feb-Mar/Sep-Oct window to Jan-Feb and Jun-Jul, matching this Florida-specific source's two birth pulses. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "83b653584adf05e03706361b06d2b10609055b6414de4cc6ae740215061353a6"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "southern-flying-squirrel",
+    "kind": "organism",
+    "common_name": "Southern Flying Squirrel",
+    "aka": [],
+    "aliases": [
+      "southern flying squirrel",
+      "flying squirrel",
+      "glaucomys volans"
+    ],
+    "scientific_name": "Glaucomys volans",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": "wildlife-removal-mammals",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (8 to 10 inches including tail), soft gray-brown fur with a cream-white belly",
+      "Huge, dark, prominent eyes built for seeing at night",
+      "A loose furry skin flap stretches between the front and back legs, used to glide between trees",
+      "Active only after dark; often first noticed as scratching, squeaking or thumping in an attic at night"
+    ],
+    "look_alikes": [
+      {
+        "slug": "eastern-gray-squirrel",
+        "difference": "Flying squirrel is active only at night, has huge dark eyes, and glides on a furry skin flap; gray squirrel is active by day with no skin membrane",
+        "next_photo": "From a safe distance, note the time of day it was active and whether a furry skin flap shows when the legs are spread.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "brazilian-free-tailed-bat",
+        "difference": "Flying squirrel has fur-covered limbs and glides in short swoops between trees; bat has bare, leathery wings and flies with fast fluttering wingbeats",
+        "next_photo": "From a safe distance at dusk, zoom in on the wing/limb texture (leathery vs. furry) and the flight style (fluttering vs. a single glide).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can bite if handled, but it isn't aggressive and rarely approaches people; the bigger issue is droppings and nesting material building up in an attic.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Unlike a lone gray squirrel, these tend to move into an attic in small groups, so noises at night often mean more than one animal is already denning there. Nighttime scratching or squeaking overhead is worth a wildlife exclusion check.",
+      "fact": "It doesn't actually fly; it glides using a furry skin flap, steering with its tail to cover impressive distances between trees."
+    },
+    "tech_notes": "Confirm nocturnal activity and check for group denning (multiple individuals) before exclusion; distinguish from gray squirrel and bat activity by timing and sound.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Southern_flying_squirrel",
+      "https://ufdcimages.uflib.ufl.edu/IR/00/00/58/89/00001/UW04200.PDF"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Habitat-dependency claim confirmed this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel), states this species is \"found statewide, primarily in hardwood forests and mixed woodlands of pine and hardwood\" and \"require[s] habitat that contains at least some large trees,\" directly supporting the 'favors mature hardwood canopy more than typical new SWFL subdivisions' reasoning behind the 'occasional' range call. No county-level SWFL density figure exists, but the qualitative habitat claim is resolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "9e91dfb4e9d4fcf18f0712443a95013240a86585cec31ffad6dbb09bc88f673a"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "specialist",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "raccoon",
+    "kind": "organism",
+    "common_name": "Raccoon",
+    "aka": [],
+    "aliases": [
+      "raccoon",
+      "raccoons",
+      "procyon lotor"
+    ],
+    "scientific_name": "Procyon lotor",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": "rabies-risk-wild-mammals",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Grayish-brown body 2 to 3 feet long including tail, with a black mask across the eyes and alternating light/dark rings on the tail",
+      "Walks with a distinctive flat-footed, waddling gait, most active at night",
+      "Strong front paws pry open trash cans, pet doors, and loose vents or soffits",
+      "Leaves torn-open garbage, muddy hand-like tracks, and sometimes a den in an attic, chimney, or under a shed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "virginia-opossum",
+        "difference": "Raccoon has a black mask across its eyes and a ringed, bushy tail; opossum has an all-white face with a pointed pink nose and a bare, rat-like tail",
+        "next_photo": "From a safe distance, zoom in on the face and tail; never corner or approach the animal.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "lawn-garden"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Raccoons are a leading rabies carrier in Florida; don't handle one, keep pets away, and see a doctor right away if you're bitten or scratched.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A smart, strong animal that can pry into trash, pet doors and roof gaps, and a real rabies-vector species in Florida. Signs of denning in an attic, chimney or under a structure are worth prompt wildlife removal rather than a wait-and-see approach.",
+      "fact": "Its front paws are dexterous enough to open latches, jars and even some door handles, which is how it gets into so much trouble around a house."
+    },
+    "tech_notes": "Confirm den location and entry point before exclusion; as a rabies vector species, handling/relocation follows state wildlife agency rules rather than simple relocation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Raccoon",
+      "https://ask.ifas.ufl.edu/uw033"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS EDIS WEC-34/UW033 (\"Northern Raccoon\") states raccoons have one litter per year and that birth \"generally occurs in March and April\" in Florida. Given a roughly two-month gestation, that puts mating around January-February, so peak_months is narrowed to January-April (mating through birth) and the previously unsupported October-December spike is removed as not backed by this or any other source checked. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "e516339213a43b733a982fbc7b1d29da77c3fc2207624c3eb48ea2d29515644d"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "virginia-opossum",
+    "kind": "organism",
+    "common_name": "Virginia Opossum",
+    "aka": [
+      "Possum"
+    ],
+    "aliases": [
+      "virginia opossum",
+      "opossum",
+      "possum",
+      "didelphis virginiana"
+    ],
+    "scientific_name": "Didelphis virginiana",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Grayish body about 2.5 to 3 feet long including tail, with a white face and long, pointed pink nose",
+      "Long, bare, hairless tail, unlike a raccoon's bushy ringed tail",
+      "Waddles slowly and will hiss and bare its teeth, or play dead, rather than attack when cornered",
+      "Rarely digs or damages structures; usually just passing through or denning briefly under a shed or deck"
+    ],
+    "look_alikes": [
+      {
+        "slug": "raccoon",
+        "difference": "Opossum has an all-white face with a pointed pink nose and a bare tail; raccoon has a black eye mask and a bushy, ringed tail",
+        "next_photo": "From a safe distance, zoom in on the face and tail; never corner or approach the animal.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its hissing display looks dramatic, but it rarely bites unless cornered, and it rarely carries rabies.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A slow-moving, low-risk visitor that mostly just wants to pass through or den somewhere quiet for a while. A one-time sighting usually isn't worth acting on; a opossum repeatedly denning under a structure is a lower-urgency wildlife exclusion call.",
+      "fact": "Its dramatic hiss-and-bare-teeth act is mostly bluff; if that fails, it goes limp and 'plays possum' instead of fighting."
+    },
+    "tech_notes": "Low rabies risk relative to raccoon/bat; a 2021 study found no ticks in wild opossum stomach contents, so avoid repeating the popular 'eats thousands of ticks' claim as settled fact.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Virginia_opossum",
+      "https://ask.ifas.ufl.edu/publication/UW471/pdf"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS \"Wildlife of Florida Factsheet: Virginia Opossum\" (WEC426/UW471, UF/IFAS Range Cattle Research and Education Center, Ona FL) states \"most young are born between February and June, though breeding may continue through November,\" and flags spring/summer as the breeding icons. peak_months corrected from the previously unsupported Sep-Jan window to Feb-Jun, matching this Florida-specific source directly. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "36c2fd05eec3401279be13546867c7b700004f07c0732d1021c9f4056dfa636e"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "brazilian-free-tailed-bat",
+    "kind": "organism",
+    "common_name": "Brazilian Free-tailed Bat",
+    "aka": [
+      "Mexican Free-tailed Bat"
+    ],
+    "aliases": [
+      "brazilian free-tailed bat",
+      "mexican free-tailed bat",
+      "free-tailed bat",
+      "tadarida brasiliensis"
+    ],
+    "scientific_name": "Tadarida brasiliensis",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": "bats",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (body about 3.5 inches, weighs less than an ounce), dark brown to gray fur, with a tail extending past the edge of the wing membrane",
+      "Long, narrow, pointed wings built for fast, direct flight, unlike a bird's flapping",
+      "Roosts in tight clusters in dark voids: barrel tile roofs, soffits, attics, or under eaves, most active right at dusk",
+      "A pile of small, dark, crumbly droppings (guano) collects directly below an active roost and doesn't hold together like rodent droppings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-flying-squirrel",
+        "difference": "Bat has bare, leathery wings and flies with fast fluttering wingbeats; flying squirrel has fur-covered limbs and glides in a single swoop",
+        "next_photo": "From a safe distance at dusk, zoom in on the wing/limb texture and the flight style (fluttering flight vs. a single glide).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "lights-windows"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": true,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bats are protected in Florida and can carry rabies; never touch one bare-handed, keep pets away, and see a doctor right away if you're bitten, scratched, or wake up with a bat in the room.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral (exclusion only, never trapping)",
+      "inspection_first": true,
+      "referral": "bat_exclusion"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Bats are protected in Florida, and can only be excluded from a building outside maternity season (mid-April through mid-August) without a permit. Trapping or handling isn't legal; a roost in a roof or attic is worth a professional inspection to plan a legal, exclusion-only approach at the right time of year.",
+      "fact": "A single bat can eat its own body weight in insects, including mosquitoes, in one night."
+    },
+    "tech_notes": "Exclusion only, never trapping or handling — bats are a protected species in Florida. Do not seal any opening a colony is actively using without confirming season: Florida law prohibits exclusion device installation April 16–August 14 (maternity season) without a permit. Use one-way exclusion devices outside that window with a minimum multi-night vacancy check before sealing.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://myfwc.com/conservation/you-conserve/wildlife/bats/",
+      "https://en.wikipedia.org/wiki/Mexican_free-tailed_bat"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Included 'bat'/'bats' as aliases even though this is the only bat organism entry; note there is also a 'bat-bug' insect slug elsewhere in the catalog whose name contains the word 'bat', so alias matching logic should be checked for false-positive overlap. Per audit item 20: label and tech_notes now say 'exclusion only, never trapping' since trapping this protected species is illegal; kept referral wildlife_trapper (the enum has no separate exclusion-only referral value, and the same wildlife professional performs legal exclusion) and action specialist. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "e11475ffdb69c5568001b8c6d87d6f4906625e9dda58297dd5fec044c68c8a6d"
+    },
+    "role": "protected_wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "eastern-mole",
+    "kind": "organism",
+    "common_name": "Eastern Mole",
+    "aka": [],
+    "aliases": [
+      "eastern mole",
+      "mole",
+      "moles",
+      "scalopus aquaticus"
+    ],
+    "scientific_name": "Scalopus aquaticus",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Rarely seen above ground; the giveaway is raised, winding ridges of pushed-up soil snaking across the lawn",
+      "Body about 6 inches long, gray-brown with silky fur, a pointed snout, and no visible eyes or ears",
+      "Large, paddle-like front paws turned outward for digging",
+      "Feeds on earthworms and grubs underground, not on grass roots or bulbs directly"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southeastern-pocket-gopher",
+        "difference": "Mole tunneling makes long, snaking surface ridges with no mound; pocket gopher pushes up distinct fan-shaped mounds with the entrance plugged on one side",
+        "next_photo": "A wide shot of the yard damage: a raised ridge line versus a distinct fan-shaped mound",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "mammal",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      11,
+      12
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "It's not eating your grass; it's tunneling after earthworms and grubs beneath it, and the ridges are the side effect. Light ridging is cosmetic. Extensive tunneling that heaves sprinklers or kills turf is worth a wildlife referral, not a lawn treatment — grub control doesn't reliably move a mole on.",
+      "fact": "Its eyes are covered by fur and barely function; it navigates entirely by touch and smell in its tunnel system."
+    },
+    "tech_notes": "Confirm ridge-style surface tunneling (vs. gopher mounds) and check grub/earthworm food source; this is wildlife (trapping referral), not a lawn-treatment fix, and treating the grubs it feeds on is not documented as a reliable way to move it off the property.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Eastern_mole",
+      "https://ask.ifas.ufl.edu/publication/UW080"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months partly confirmed this session: UF/IFAS \"Wildlife of Florida Factsheet: Eastern Mole\" (UW080) states young \"are born in March after a 45-day gestation period,\" which places mating around mid-January -- consistent with this entry's Jan-Mar peak window. The source doesn't separately address general tunneling-activity peaks (as opposed to breeding), so the Nov-Dec portion of peak_months remains a reasonable but not separately source-confirmed estimate tied to cooler/moister soil conditions. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "658d54769553fae01ac1cf44879c9fd72448c50e64312d392436641c85f76be3"
+    },
+    "role": "wildlife",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "southeastern-pocket-gopher",
+    "kind": "organism",
+    "common_name": "Southeastern Pocket Gopher",
+    "aka": [],
+    "aliases": [
+      "southeastern pocket gopher",
+      "pocket gopher",
+      "pocket gophers",
+      "geomys pinetis"
+    ],
+    "scientific_name": "Geomys pinetis",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Rarely seen above ground; the giveaway is a series of fan-shaped soil mounds with the entrance plugged on one side",
+      "Body about 10 inches including tail, cinnamon-brown fur, large front claws, enlarged front teeth visible even with its mouth closed",
+      "Found in well-drained, sandy, sunny soil rather than shady, damp lawns",
+      "Feeds on roots, tubers and nearby green plants, pulled down into the tunnel from below"
+    ],
+    "look_alikes": [
+      {
+        "slug": "eastern-mole",
+        "difference": "Pocket gopher pushes up distinct fan-shaped mounds with the entrance plugged on one side; mole tunneling makes long, snaking surface ridges with no mound",
+        "next_photo": "A wide shot of the yard damage: a distinct fan-shaped mound versus a raised ridge line",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "mammal",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "rare",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A native burrower of north and central Florida sandhills, mainly of interest here as a look-alike to rule out; its fan-shaped, plugged mounds turn up mostly outside typical Southwest Florida yards. Where it does turn up, ongoing mound activity is a wildlife trapping referral rather than a lawn treatment.",
+      "fact": "Each mound entrance is deliberately plugged with soil from the inside, which is why the hole itself is almost never visible."
+    },
+    "tech_notes": "Confirm sandy, well-drained soil and fan-shaped plugged mounds (vs. mole ridges); this is wildlife (trapping referral at active mounds), not a lawn-treatment fix. Its known range is north/central Florida, so weigh eastern mole more heavily first for SWFL yard damage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Southeastern_pocket_gopher",
+      "https://myfwc.com/wildlifehabitats/profiles/mammals/land/pocket-gopher/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Contradicted and corrected this session: FWC's own Land Mammals profile page states plainly, \"Southeastern pocket gophers are found in the northern half of the state,\" with range extending north into Alabama and Georgia -- it does not name Southwest Florida or central Florida as part of the range. This contradicts the draft's 'occasional' range (which implied at least patchy SWFL presence); range corrected to 'rare' and copy/tech_notes reworded to flag it as mainly a north/central Florida species included here as a look-alike for eastern mole damage, not as a species commonly expected in SWFL yards. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "e90bfa63f0d96df97ec6a732819e2f3f985840d3b6c6ea9172b8c6403275c6b0"
+    },
+    "role": "wildlife",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "feral-hog-rooting",
+    "kind": "sign",
+    "common_name": "Feral Hog Rooting",
+    "aka": [],
+    "aliases": [
+      "feral hog rooting",
+      "hog rooting",
+      "wild hog damage",
+      "feral pig damage"
+    ],
+    "scientific_name": "Sus scrofa (sign)",
+    "rank": "group",
+    "group": "wild-mammals",
+    "subgroup": "wildlife-removal-mammals",
+    "site_category": "Lawn",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Large patches of torn-up, overturned soil and shredded sod, sometimes covering a whole yard overnight",
+      "Ground looks plowed or rototilled, with clumps of dirt and grass flipped upside down",
+      "Often found near damp low spots, under oak trees, or along ditches and canal banks",
+      "Two-toed, cloven hoof prints pressed into any soft mud nearby confirm hogs rather than another animal"
+    ],
+    "look_alikes": [
+      {
+        "slug": "armadillo",
+        "difference": "Hog rooting tears up large connected patches like a rototiller went through; armadillo digging leaves small, scattered, cone-shaped holes 1 to 3 inches wide",
+        "next_photo": "From a safe distance, get a wide shot of the damage: one large torn-up area versus many small cone-shaped holes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Adult hogs can act aggressively if cornered; give any hogs you actually see plenty of space and let a wildlife professional handle removal.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This kind of overnight damage can tear up a large area of lawn fast, and it tends to come back if the hogs aren't addressed. Repeated rooting is worth a wildlife referral for the hogs themselves; the torn-up sod itself is a separate lawn repair question once the hogs are dealt with.",
+      "fact": "Feral hogs are an invasive, non-native species in Florida, which is part of why landowners have much more flexibility to remove them than most other wildlife."
+    },
+    "tech_notes": "Confirm cloven hoof prints and torn-sod pattern; feral hogs are an unprotected invasive species in Florida with fewer removal restrictions than native wildlife, so this can move faster than a typical wildlife referral. Sod/lawn repair after the hogs are gone is a separate conversation from the wildlife referral itself.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Wild_boar",
+      "https://myfwc.com/wildlifehabitats/profiles/mammals/land/wild-hog/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "No standalone feral hog organism slug exists anywhere in the 239-entry master list, only this rooting sign, so sign_of self-references this slug; flagging for the owner in case a hog organism entry should exist. Claim confirmed this session: FWC's Land Mammals profile states wild hogs \"occur in all 67 counties of Florida\" (so the species itself is genuinely statewide, not a niche presence), but the same page notes they prefer \"oak-cabbage palm hammocks, freshwater marshes and sloughs, pine flatwoods, and more open agricultural areas\" and that \"adequate fencing should keep them out of small yards and gardens\" -- supporting this entry's framing that rooting concentrates near undeveloped land/canals rather than showing up in an ordinary fenced SWFL yard. Range 'occasional' is consistent with that pattern and is now source-backed rather than a bare judgment call. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5d0a890f609a2b587c90b722f8853f2fa8034d47791d3cc93913cdc07bcbbc60"
+    },
+    "role": "wildlife",
+    "risk": "defensive",
+    "action": "specialist",
+    "season_basis": "unverified",
     "verification": []
   }
 ]

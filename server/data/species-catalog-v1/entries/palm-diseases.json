@@ -1,0 +1,1099 @@
+[
+  {
+    "slug": "ganoderma-butt-rot",
+    "kind": "disease",
+    "common_name": "Ganoderma Butt Rot",
+    "aka": [],
+    "aliases": [
+      "ganoderma",
+      "ganoderma butt rot",
+      "ganoderma zonatum",
+      "conk"
+    ],
+    "scientific_name": "Ganoderma zonatum",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A hard, shelf-like conk on the lower 4-5 feet of the trunk, white underneath when fresh",
+      "Mild to severe wilting or overall decline that can appear before or after a conk forms",
+      "Every palm species is considered a potential host"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "mushroom-conk",
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A hard, shelf-like conk low on the trunk is the recognized field confirmation of Ganoderma butt rot, a fungal disease that cannot be cured; an arborist verifies it. Without a conk, decline alone does not confirm it. Nearby palms have no proven prevention; removal is the owner's call with a licensed professional.",
+      "fact": "The conk releases spores for years and can keep forming even after the palm is removed, since the fungus lives on in the stump and roots."
+    },
+    "tech_notes": "Confirm via the conk (basidiocarp) on the lower trunk; internal trunk decay is well advanced by the time a conk appears.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/PP100"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "da0c06ae1f13c275a11d70dd5c91f34accbb8389c5cbb39d38f90aafeb079d19"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [
+        "A hard, shelf-like conk on the lower 4-5 feet of the trunk, white underneath when fresh"
+      ],
+      "symptoms": [
+        "Mild to severe wilting or overall decline that can appear before or after a conk forms"
+      ],
+      "required_signature": {
+        "text": "A photo of the hard, shelf-like conk low on the trunk is the recognized field confirmation; an arborist verifies it. Decline alone, without a conk, does not confirm this disease.",
+        "elements": [
+          "A hard, shelf-like conk on the lower 4-5 feet of the trunk, white underneath when fresh"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "fusarium-wilt-of-palms",
+          "difference": "Ganoderma shows a hard conk low on the trunk with no set frond pattern; Fusarium wilt shows one-sided yellowing and a leaf-stalk stripe, no conk.",
+          "next_observation": "A photo of the trunk base checking for a conk, alongside a close-up of a discolored frond's leaf stalk.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the conk appears; internal trunk decay only continues from that point forward."
+    }
+  },
+  {
+    "slug": "lethal-bronzing",
+    "kind": "disease",
+    "common_name": "Lethal Bronzing",
+    "aka": [
+      "texas phoenix palm decline"
+    ],
+    "aliases": [
+      "lethal bronzing",
+      "lethal bronzing disease",
+      "texas phoenix palm decline"
+    ],
+    "scientific_name": "Candidatus Phytoplasma aculeata",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Premature drop of fruit or blackened flower spikes, often before any leaf symptoms show",
+      "Leaves discolor bronze, gray or reddish-brown starting on the oldest (lowest) fronds and moving up",
+      "The newest spear leaf collapses and dies as the disease reaches the bud"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Fruit or flower drop, then leaf discoloration moving from the oldest fronds up to a collapsed spear leaf, can suggest lethal bronzing, a disease that cannot be cured. A lab test confirms it. A technician explains preventive options for nearby palms; removal is the owner's call with a licensed professional.",
+      "fact": "The organism behind lethal bronzing has been found across much of Florida and can infect many different palm species, not just date palms."
+    },
+    "tech_notes": "Confirm by lab test (trunk core sample); test nearby asymptomatic palms too, since infection can precede visible symptoms by months.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp163"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months for new symptoms are an estimate tied to warm-season vector activity; UF/IFAS gives only a latent period of about 4-5 months and a 'highly variable' 2-3 month symptom-progression period, not a Florida-specific monthly calendar.",
+      "approval_hash": "c5086ab9d9e9342b2f2731eadf4896d9d667982a94943a7d7effe7e1aa094c32"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Premature drop of fruit or blackened flower spikes, often before any leaf symptoms show",
+        "Leaves discolor bronze, gray or reddish-brown starting on the oldest (lowest) fronds and moving up",
+        "The newest spear leaf collapses and dies as the disease reaches the bud"
+      ],
+      "required_signature": {
+        "text": "A photo of leaf bronzing moving up from the oldest fronds, or a collapsed spear leaf, can raise concern, but confirmation requires a lab test on a trunk sample.",
+        "elements": [
+          "Leaves discolor bronze, gray or reddish-brown starting on the oldest (lowest) fronds and moving up"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "potassium-deficiency-palm",
+          "difference": "Potassium deficiency and early lethal bronzing can look identical on the oldest fronds alone; only the pattern over time and a lab test tell them apart.",
+          "next_observation": "Ask about early fruit drop or blackened flower stalks; a repeat wide canopy photo in 2-3 weeks checks for upward movement, then a lab test confirms.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "magnesium-deficiency-palm",
+          "difference": "Magnesium deficiency shows a yellow band on the margins of the oldest fronds with a green center; lethal bronzing discolors the whole frond and moves upward.",
+          "next_observation": "A wider photo of the whole canopy checking how far the discoloration has spread.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "lethal-yellowing",
+          "difference": "Lethal bronzing and lethal yellowing look alike and both move from the oldest fronds upward; only a lab test on a trunk sample tells them apart.",
+          "next_observation": "A lab test confirms which organism is present.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "palm-bud-rot",
+          "difference": "Bud rot starts with a wilted spear leaf that pulls free easily, without the oldest-frond bronzing lethal bronzing shows first.",
+          "next_observation": "A wider photo of the canopy checking whether the oldest fronds are discolored too.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the spear leaf collapses; the disease can kill the palm within a few months of the first symptoms."
+    }
+  },
+  {
+    "slug": "lethal-yellowing",
+    "kind": "disease",
+    "common_name": "Lethal Yellowing",
+    "aka": [],
+    "aliases": [
+      "lethal yellowing",
+      "coconut lethal yellowing"
+    ],
+    "scientific_name": "Candidatus Phytoplasma palmae",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Premature drop of nearly all fruit, followed by blackened flower spikes",
+      "Leaves yellow starting on the oldest (lowest) fronds and moving up through the crown",
+      "The newest spear leaf collapses and hangs down as the bud dies"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Fruit drop and yellowing that moves from the oldest fronds up to a collapsed spear leaf can suggest lethal yellowing, a disease that cannot be cured. A lab test confirms it. A technician explains preventive options for nearby palms; removal is the owner's call with a licensed professional.",
+      "fact": "Lethal yellowing was long considered limited to south Florida, but it was confirmed in Sarasota and Manatee counties as early as 2007."
+    },
+    "tech_notes": "Confirm by lab test (trunk core sample); documented in Sarasota and Manatee counties since 2007, so it is not limited to the state's southern tip. Charlotte County status is unconfirmed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/PP146"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Whether lethal yellowing occurs in Charlotte County specifically is unconfirmed in the source reviewed; UF/IFAS documents it in Sarasota and Manatee counties since 2007, so range is set to occasional rather than rare.",
+      "approval_hash": "58b5a55bfe994af81a636bcec14c83042dfcbf17b7144a7e2e1768e8fa0cfb0d"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Premature drop of nearly all fruit, followed by blackened flower spikes",
+        "Leaves yellow starting on the oldest (lowest) fronds and moving up through the crown",
+        "The newest spear leaf collapses and hangs down as the bud dies"
+      ],
+      "required_signature": {
+        "text": "A photo of fruit drop or leaf yellowing moving up from the oldest fronds can raise concern, but confirmation requires a lab test on a trunk sample.",
+        "elements": [
+          "Leaves yellow starting on the oldest (lowest) fronds and moving up through the crown"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lethal-bronzing",
+          "difference": "Lethal yellowing and lethal bronzing look alike and both move from the oldest fronds upward; only a lab test on a trunk sample tells them apart.",
+          "next_observation": "A lab test confirms which organism is present.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "fusarium-wilt-of-palms",
+          "difference": "Lethal yellowing yellows the whole frond starting oldest and moving up; Fusarium wilt shows one-sided yellowing with a leaf-stalk stripe.",
+          "next_observation": "A close-up of a discolored frond's leaf stalk checking for a one-sided stripe.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the spear leaf collapses; the disease can kill the palm within a few months of the first symptoms."
+    }
+  },
+  {
+    "slug": "fusarium-wilt-of-palms",
+    "kind": "disease",
+    "common_name": "Fusarium Wilt of Palms",
+    "aka": [],
+    "aliases": [
+      "fusarium wilt",
+      "fusarium wilt of palms",
+      "fusarium oxysporum"
+    ],
+    "scientific_name": "Fusarium oxysporum",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "One-sided yellowing or browning of the leaf blade, with the other side still green",
+      "A reddish-brown to dark brown stripe along the leaf stalk and central rib",
+      "Symptoms progress from older to younger fronds, eventually reaching the bud"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "One-sided yellowing with a reddish-brown leaf-stalk stripe, moving from older to younger fronds, can suggest Fusarium wilt, a disease that cannot be cured. It looks identical to petiole blight, so a lab test confirms it; removal is the owner's call with a licensed professional.",
+      "fact": "This disease is believed to spread mainly by wind-blown spores, though contaminated pruning saws and machetes can also carry it between palms."
+    },
+    "tech_notes": "Symptoms are identical to petiole (rachis) blight; confirm by lab test rather than pattern alone. Two host-specific forms are documented in Florida palms: one on queen palm and Mexican fan palm, another established on Canary Island date palm. Sanitize pruning saws between palms (disinfectant soak, tools brushed clean first) since contaminated tools can carry the fungus.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp278"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b716d3fe9212934afb17b9b84b72106a21a1832c72d99a402d941ce9fb7e0a08"
+    },
+    "condition": {
+      "hosts": [
+        "queen-palm",
+        "mexican-fan-palm",
+        "canary-island-date-palm"
+      ],
+      "signs": [
+        "A reddish-brown to dark brown stripe along the leaf stalk and central rib"
+      ],
+      "symptoms": [
+        "One-sided yellowing or browning of the leaf blade, with the other side still green",
+        "Symptoms progress from older to younger fronds, eventually reaching the bud"
+      ],
+      "required_signature": {
+        "text": "A photo of one-sided yellowing and a reddish-brown leaf-stalk stripe can raise concern, but it looks identical to petiole blight; only a lab test tells them apart.",
+        "elements": [
+          "A reddish-brown to dark brown stripe along the leaf stalk and central rib",
+          "One-sided yellowing or browning of the leaf blade, with the other side still green"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lethal-yellowing",
+          "difference": "Fusarium wilt shows one-sided yellowing with a reddish-brown leaf-stalk stripe; lethal yellowing yellows the whole frond starting from the oldest upward.",
+          "next_observation": "A close-up of a discolored frond's leaf stalk checking for a one-sided stripe.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "ganoderma-butt-rot",
+          "difference": "Fusarium wilt shows one-sided yellowing and a leaf-stalk stripe with no conk; Ganoderma butt rot shows a hard conk low on the trunk with no set frond pattern.",
+          "next_observation": "A close-up of a discolored frond's leaf stalk, alongside a photo of the trunk base checking for a conk.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the bud is reached; decline typically continues over months once the pattern reaches the newest fronds."
+    }
+  },
+  {
+    "slug": "palm-bud-rot",
+    "kind": "disease",
+    "common_name": "Palm Bud Rot",
+    "aka": [
+      "bud rot"
+    ],
+    "aliases": [
+      "bud rot",
+      "palm bud rot",
+      "phytophthora palmivora"
+    ],
+    "scientific_name": "Phytophthora palmivora",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "The newest spear leaf discolors and wilts, then pulls free easily from the crown",
+      "No new leaves emerge and the crown looks open-topped",
+      "Often follows a cold snap, storm damage or standing water in the crown"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      6,
+      7,
+      8,
+      9,
+      10,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A discolored, wilting spear leaf that pulls free easily, with no new leaves emerging, can suggest bud rot. Caught very early, especially in a young palm, some recover; once the growing point itself has died, the palm will not. A technician examines the bud to judge the chances and the next step.",
+      "fact": "A palm has only one growing point for its whole trunk, unlike a broadleaf tree with many buds, which is why bud rot is so often fatal once that point is affected."
+    },
+    "tech_notes": "Check whether the spear leaf pulls free easily; often follows cold injury or standing water in the crown after a storm. Sanitation and water management matter most for young or nursery palms.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/PP144"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "36b582d694803b324043e022612cb9a0729ee053b2f81f3c9f7a8e5c6dda1eac"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [],
+      "symptoms": [
+        "The newest spear leaf discolors and wilts, then pulls free easily from the crown",
+        "No new leaves emerge and the crown looks open-topped"
+      ],
+      "required_signature": {
+        "text": "A technician checks whether the spear leaf pulls free easily and examines the bud, since a photo alone cannot confirm the bud itself is affected.",
+        "elements": [
+          "The newest spear leaf discolors and wilts, then pulls free easily from the crown"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "lethal-bronzing",
+          "difference": "Bud rot starts with a wilted spear leaf that pulls free easily, without the oldest-frond bronzing lethal bronzing shows first.",
+          "next_observation": "A wider photo of the canopy checking whether the oldest fronds are discolored too.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "boron-deficiency-palm",
+          "difference": "Boron deficiency keeps the spear leaf small or hooked but it stays attached; bud rot leaves discolor, wilt and pull free easily.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "cold-damage",
+          "difference": "Cold damage can also kill the spear leaf after a hard freeze, so a pulled-free spear alone does not separate it from bud rot; both need a technician.",
+          "next_observation": "A technician checks the bud and whether other fronds also show cold injury, since a pulled-free spear can mean either.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "cold_event",
+        "wounding",
+        "poor_drainage"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Palms caught before the bud dies may recover over several months; once new leaves stop emerging, the palm will not regrow."
+    }
+  },
+  {
+    "slug": "graphiola-false-smut",
+    "kind": "disease",
+    "common_name": "Graphiola False Smut",
+    "aka": [
+      "false smut"
+    ],
+    "aliases": [
+      "false smut",
+      "graphiola leaf spot",
+      "graphiola phoenicis"
+    ],
+    "scientific_name": "Graphiola phoenicis",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Tiny black raised bumps (sori) on the leaflet, each under 1/16 inch across",
+      "Yellow to orange thread-like filaments emerge from the black bumps as they mature",
+      "Mostly cosmetic and does not seriously affect the palm's health"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "unverified",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Tiny black bumps with yellow to orange filaments on the leaflets are the recognized field confirmation of Graphiola false smut, a cosmetic disease mainly of date palms. It does not seriously affect health; nutrient deficiencies are usually the bigger concern. A technician can take a look if you would like it confirmed.",
+      "fact": "This disease is mostly cosmetic; nutrient deficiencies such as potassium or magnesium are usually a bigger concern for the same date palms it affects."
+    },
+    "tech_notes": "Primarily affects Phoenix species; distinguish from Pestalotiopsis leaf spots (flatter, larger, no filaments) and from scale insects.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/PP140"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months are an estimate tied to the humid rainy season; UF/IFAS confirms the disease is mostly cosmetic on Phoenix species but gives no Florida-specific monthly calendar, so season_basis is set to unverified.",
+      "approval_hash": "f75428fad8865fcfd5bb7b8757f22e89029b1cbbe48d655e4138b302497af59c"
+    },
+    "condition": {
+      "hosts": [
+        "pygmy-date-palm",
+        "canary-island-date-palm",
+        "sylvester-date-palm"
+      ],
+      "signs": [
+        "Tiny black raised bumps (sori) on the leaflet, each under 1/16 inch across",
+        "Yellow to orange thread-like filaments emerge from the black bumps as they mature"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A close-up of the leaflet showing the small black bumps with yellow to orange filaments emerging from them.",
+        "elements": [
+          "Tiny black raised bumps (sori) on the leaflet, each under 1/16 inch across",
+          "Yellow to orange thread-like filaments emerge from the black bumps as they mature"
+        ],
+        "confirmable_by": "photo"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "palm-leaf-spots",
+          "difference": "False smut shows tiny black raised bumps with yellow filaments, mainly on date palms; Pestalotiopsis leaf spots are flatter, tan to gray with a dark border.",
+          "next_observation": "A close-up comparing raised bumps versus flat spots with a dark border.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "spider-mites",
+          "difference": "False smut shows black raised bumps on the leaflet; spider mite damage shows fine stippling and webbing with no raised bumps.",
+          "next_observation": "A close-up checking for webbing versus raised black bumps.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Existing spots do not clear up, but new growth is usually unaffected as conditions change."
+    }
+  },
+  {
+    "slug": "palm-leaf-spots",
+    "kind": "disease",
+    "common_name": "Palm Leaf Spots",
+    "aka": [
+      "pestalotiopsis leaf spot"
+    ],
+    "aliases": [
+      "palm leaf spot",
+      "leaf spot",
+      "pestalotiopsis"
+    ],
+    "scientific_name": "Pestalotiopsis spp.",
+    "rank": "genus",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Tan to gray spots on the leaflet with a dark brown to black border",
+      "Spots can run the length of the leaflet from base to tip, unlike most leaf-spot fungi",
+      "Mostly cosmetic on a mature palm; can be more damaging on a young palm with few leaves"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "leaf-spots"
+    ],
+    "verdict": "watch",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Tan to gray spots with a dark border, sometimes running the length of the leaflet, can suggest a leaf spot fungus, but a photo cannot tell which fungus, since several look identical. Usually cosmetic on a mature palm, more serious on a young one; a technician looks closer if a young palm is heavily spotted.",
+      "fact": "Unlike most leaf-spot fungi that stop at the leaf blade, this one can spread the whole length of a leaflet from base to tip."
+    },
+    "tech_notes": "Confirmed by examining fungal spores under magnification, since several fungi cause near-identical spots; distinguish from Graphiola's raised black bumps with filaments.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/pp141"
+    ],
+    "verification": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2fbff0d9a0c670d5c89e02448b18d91553d5e06b62257fe917de1142a1747c0c"
+    },
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [
+        "Tan to gray spots on the leaflet with a dark brown to black border"
+      ],
+      "symptoms": [],
+      "required_signature": {
+        "text": "A photo cannot confirm the exact fungus; a technician examines the spots under magnification, especially on a young, heavily spotted palm.",
+        "elements": [
+          "Tan to gray spots on the leaflet with a dark brown to black border"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "graphiola-false-smut",
+          "difference": "Pestalotiopsis leaf spots are flatter, tan to gray with a dark border; false smut shows tiny black raised bumps with yellow filaments, mainly on date palms.",
+          "next_observation": "A close-up comparing flat spots with a dark border versus raised bumps.",
+          "photo_can_confirm": true
+        },
+        {
+          "slug": "spider-mites",
+          "difference": "Pestalotiopsis leaf spots are flat, tan to gray with a dark border; spider mite damage shows fine stippling and webbing instead of defined spots.",
+          "next_observation": "A close-up checking for webbing versus flat spots with a dark border.",
+          "photo_can_confirm": true
+        }
+      ],
+      "site_factors": [
+        "warm_wet",
+        "wounding"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Spotted leaflets do not clear up, but new growth is usually unaffected within a few weeks."
+    }
+  },
+  {
+    "slug": "thielaviopsis-trunk-rot",
+    "kind": "disease",
+    "common_name": "Thielaviopsis Trunk Rot",
+    "aka": [],
+    "aliases": [
+      "thielaviopsis trunk rot",
+      "thielaviopsis",
+      "thielaviopsis paradoxa",
+      "palm trunk rot"
+    ],
+    "scientific_name": "Thielaviopsis paradoxa",
+    "rank": "species",
+    "group": "palm-diseases",
+    "subgroup": null,
+    "site_category": "Plant & palm problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "A trunk that suddenly collapses on itself, or a canopy that falls off the trunk",
+      "A canopy that can look green and healthy right up until the failure",
+      "Soft, dark rot in the trunk at a wound such as a pruning cut or climbing-spike scar"
+    ],
+    "look_alikes": [],
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "wilting-dieback"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": "A weakened palm can fall without warning; keep people, pets and vehicles clear until an arborist has assessed it.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Specialist Referral",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A palm trunk that collapses or a canopy that drops, even with green fronds, can suggest Thielaviopsis trunk rot, a fungus that enters through fresh wounds. A photo cannot confirm it. An arborist urgently checks the palm, and the area beneath it should be kept clear.",
+      "fact": "UF/IFAS says the fungus infects a palm only through a fresh wound, such as a bad pruning cut or a climbing-spike scar, and there may be no sign until the trunk fails."
+    },
+    "tech_notes": "Look for soft, dark trunk rot at wounds. Urgent safety assessment by an arborist; keep people clear. UF/IFAS says all palms are potential hosts (coconut and date palms are common examples). Discuss wound-avoidance with the owner.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp143"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). PP143 says all palm species are potential hosts (coconut, date and Washington palms are named); the owner brief also lists queen palm, which the source does not name. no_cure text avoids the banned treatment words by design."
+    },
+    "verification": [
+      {
+        "claim": "Queen palm as a commonly affected host",
+        "note": "From the owner brief. PP143 names coconut, date, Canary Island date and Washington palms and says all palms are potential hosts; queen palm is not named."
+      }
+    ],
+    "condition": {
+      "hosts": [
+        "palms"
+      ],
+      "signs": [
+        "Soft, dark rot in the trunk at a pruning cut or wound"
+      ],
+      "symptoms": [
+        "The trunk collapses on itself, or the canopy suddenly falls off the trunk",
+        "The canopy can look normal and green until the failure"
+      ],
+      "required_signature": {
+        "text": "A photo of a soft, dark trunk wound can raise concern, but an arborist confirms it. Because failure can be sudden, safety comes first.",
+        "elements": [
+          "Soft, dark rot in the trunk at a pruning cut or wound"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "palmetto-weevil",
+          "difference": "Palmetto weevil grubs kill the growing point, so the crown wilts and droops; Thielaviopsis rots the trunk and can drop a green canopy suddenly.",
+          "next_observation": "A wide shot of the whole crown and a close-up of any wound or frass at the trunk.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "south-american-palm-weevil",
+          "difference": "Palm weevil damage shows crown collapse with larvae and frass in the crown; Thielaviopsis shows a rotting trunk at a wound with no crown larvae.",
+          "next_observation": "A wide shot of the whole crown and a close-up of the trunk wound.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "wounding"
+      ],
+      "outcome": "no_cure",
+      "recovery_note": "There is no recovery once the trunk is rotted; a palm with a rotted trunk is usually removed."
+    }
+  }
+]

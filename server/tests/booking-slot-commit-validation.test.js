@@ -466,7 +466,12 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // PR #4623) — the SLOT_TAKEN shape still sits directly after it.
     // 1000: grew again by the travel probe's expected-minutes credit
     // (#4664, offer/commit parity).
-    const probeBlock = src.slice(probeIdx, probeIdx + 1000);
+    // 1400: grew again by the GATE_BOOK_ARRIVAL_GRACE waiver clause between
+    // the probe and its throw (2026-09-29) — the throw is still the same
+    // SLOT_TAKEN shape, now skipped only for a graced offer's waivable
+    // previous-side clashes (booking-arrival-grace.test.js). The tech-aware
+    // scope option (GATE_MULTI_TECH_CONFIRM) also lives in this window.
+    const probeBlock = src.slice(probeIdx, probeIdx + 1600);
     expect(probeBlock).toMatch(/code: 'SLOT_TAKEN',/);
     expect(probeBlock).toMatch(/statusCode: 409/);
     // Shared module import rides the same lazy require as the lock helper.
@@ -529,7 +534,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(gateEndIdx).toBeGreaterThan(gateIdx);
     const gateBlock = src.slice(gateIdx, gateEndIdx + 120);
     // linked estimate → must be THIS customer's
-    expect(gateBlock).toMatch(/String\(sourceEstimateRow\.customer_id\) === String\(custId\)/);
+    expect(gateBlock).toMatch(/estimateBelongsToCustomerAccount\(db, sourceEstimateRow, customer\)/);
     // unlinked estimate → contact match: last-10 phone, email only when the
     // estimate has no phone (estimates.customer_phone may be freeform/E.164)
     expect(gateBlock).toMatch(/customer_phone/);
@@ -555,14 +560,18 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(conditionLine).toMatch(/txErr\.code === 'LOCATION_CHANGED_RETRY'/);
     // Codex #4737 r9 P2: the fingerprint-side twin of the same race.
     expect(conditionLine).toMatch(/txErr\.code === 'CUSTOMER_CHANGED_RETRY'/);
+    // The prepared-proof verifier uses SLOT_UNAVAILABLE internally. The
+    // public booking contract keeps its existing SLOT_TAKEN recovery code.
+    expect(conditionLine).toMatch(/txErr\.code === 'SLOT_UNAVAILABLE'/);
     // Still inside the same branch that returns { ok:false, status:409, ...
     // code } rather than re-throwing — pin the branch body, not just the
     // condition line, so moving LOCATION_CHANGED_RETRY to its own
     // differently-shaped branch would also fail this test.
     const throwIdx = src.indexOf('throw txErr;', convertIdx);
-    const returnIdx = src.indexOf("return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };", convertIdx);
+    const returnIdx = src.indexOf('return { ok: false, status: 409, error: txErr.message,', convertIdx);
     expect(returnIdx).toBeGreaterThan(convertIdx);
     expect(returnIdx).toBeLessThan(throwIdx);
+    expect(src.slice(returnIdx, throwIdx)).toContain("txErr.code === 'SLOT_UNAVAILABLE' ? 'SLOT_TAKEN'");
   });
 
   // Codex #4737 r9 P1: the consultation page's lead-scoped dedupe — the lead
@@ -571,14 +580,20 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   // assessment, refusing ALREADY_BOOKED.
   // Codex #4737 r10 pre-push P0: the caller's authority is re-checked
   // under the lead lock, before the replay / insert.
-  // Codex #4737 r22 P0: every profile of the lead is fenced, sorted, before
-  // the booked customer's own comms fence.
-  test('leadDedupe.fenceIds fences are taken before the booked customer\'s own comms fence', () => {
-    const fences = src.indexOf('for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);');
-    const own = src.indexOf('await lockCustomerComms(trx, custId);', fences);
-    expect(fences).toBeGreaterThan(-1);
-    expect(own).toBeGreaterThan(fences);
-    expect(own - fences).toBeLessThan(400);
+  // Codex #4737 r22 P0: every profile of the lead is fenced before row locks.
+  // Estimate owners now join the same set; one sorted acquisition prevents
+  // multi-profile bookings from reversing customer-comms key order.
+  test('leadDedupe profiles, the booked customer, and estimate owners share one sorted comms-fence set', () => {
+    const fenceSet = src.indexOf('const commsFenceIds = new Set(');
+    const estimateOwners = src.indexOf('...estimateOwnershipSnapshots.map(snapshot => snapshot.customerId)', fenceSet);
+    const leadFences = src.indexOf('for (const id of await callbackVisit.leadDedupe.fenceIds(trx))', fenceSet);
+    const acquire = src.indexOf('for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);', leadFences);
+    const customerRowLock = src.indexOf("const freshBookingCustomer = await trx('customers')", acquire);
+    expect(fenceSet).toBeGreaterThan(-1);
+    expect(estimateOwners).toBeGreaterThan(fenceSet);
+    expect(leadFences).toBeGreaterThan(fenceSet);
+    expect(acquire).toBeGreaterThan(leadFences);
+    expect(customerRowLock).toBeGreaterThan(acquire);
   });
 
   test('leadDedupe.revalidate runs right after the inspection-lead lock and refuses CUSTOMER_CHANGED_RETRY', () => {
@@ -700,6 +715,20 @@ describe('signed slot offers on the /book surface (source guards)', () => {
     expect((src.match(/const serviceKey = normalizeBookingServiceKey\(service_type\);/g) || []).length).toBe(2);
     // …and pass it into the builder that signs
     expect((src.match(/^\s*serviceKey,$/gm) || []).length).toBeGreaterThanOrEqual(3); // 2 routes + sign payload
+  });
+
+  test('/availability and /find-slots pass only middleware-resolved bearer identity into offer binding', () => {
+    const availabilityAt = src.indexOf("router.get('/availability'");
+    const findSlotsAt = src.indexOf("router.post('/find-slots'", availabilityAt);
+    const availabilityBlock = src.slice(availabilityAt, findSlotsAt);
+    const findSlotsBlock = src.slice(findSlotsAt, src.indexOf('// POST /api/booking/capture-intent', findSlotsAt));
+    for (const block of [availabilityBlock, findSlotsBlock]) {
+      expect(block).toMatch(/const customersOnly = isEnabled\('bookingCustomersOnly'\);/);
+      expect(block).toMatch(/const authedCustomer = customersOnly \? await resolveBearerCustomer\(req\) : null;/);
+      expect(block).toMatch(/resolveOfferCoords\(\{[\s\S]*authedCustomer,/);
+      expect(block).toMatch(/if \(customersOnly && !authedCustomer && req\.bearerTokenExpired\)/);
+      expect(block).not.toMatch(/req\.(?:body|query)\.customer_id/);
+    }
   });
 
   test('createSelfBooking requires the signed offer — service + location bound — and rejects with the plain-string 409', () => {
@@ -906,7 +935,10 @@ describe('self-serve notice window — offer/commit parity (source guards)', () 
 
   test('every self-serve caller in this file opts in with selfServeNotice: true', () => {
     const occurrences = src.split('selfServeNotice: true,').length - 1;
-    // GET /availability, POST /find-slots, and the capture-intent revalidation.
-    expect(occurrences).toBe(3);
+    // buildFunnelAvailability — the one builder GET /availability, POST
+    // /find-slots, the capture-intent revalidation and the texting AI's OPEN
+    // TIMES all offer through (booking-capacity-placement-wiring pins each
+    // caller to it).
+    expect(occurrences).toBe(1);
   });
 });

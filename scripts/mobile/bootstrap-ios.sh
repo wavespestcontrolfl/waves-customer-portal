@@ -20,6 +20,58 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT/client"
 
+install_brand_assets() {
+  local asset_catalog="${WAVES_IOS_ASSET_ROOT:-ios/App/App/Assets.xcassets}"
+  local icon_src="resources/icon.png"
+  local icon_set="$asset_catalog/AppIcon.appiconset"
+  local icon_dest="$icon_set/AppIcon-512@2x.png"
+  if [ -f "$icon_src" ] && [ -d "$icon_set" ]; then
+    cp "$icon_src" "$icon_dest"
+    cat > "$icon_set/Contents.json" <<'JSON'
+{
+  "images" : [
+    {
+      "filename" : "AppIcon-512@2x.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+JSON
+    echo "==> Waves app icon installed into AppIcon.appiconset ✓"
+  else
+    echo "==> ERROR: icon source or app-icon set missing — refusing to ship the Capacitor default." >&2
+    return 1
+  fi
+
+  # Replace the stock Capacitor launch screen (white background + Capacitor
+  # logo) with the tracked Waves splash. The generated storyboard renders the
+  # Splash imageset full-bleed (aspectFill), so overwriting its PNGs is enough.
+  local splash_src="resources/splash-2732x2732.png"
+  local splash_set="$asset_catalog/Splash.imageset"
+  if [ -f "$splash_src" ] && [ -d "$splash_set" ]; then
+    for f in "$splash_set"/splash-*.png; do
+      [ -e "$f" ] && cp "$splash_src" "$f"
+    done
+    echo "==> Waves splash installed into Splash.imageset ✓"
+  else
+    echo "==> WARNING: splash source or imageset missing — launch screen keeps the Capacitor default."
+  fi
+}
+
+# Reinstall the tracked branding into an existing/generated catalog without
+# running npm, Capacitor, CocoaPods, or Xcode. This is also safe for isolated
+# fixture verification because WAVES_IOS_ASSET_ROOT can name a scratch catalog.
+if [ "${1:-}" = "--assets-only" ]; then
+  install_brand_assets
+  exit 0
+fi
+
 echo "==> 1/5  Installing lockfile-pinned native dependencies…"
 # Run from client/ intentionally: npm resolves the workspace root lockfile.
 # `npm ci` refuses drift instead of silently moving Capacitor/plugin versions
@@ -49,22 +101,10 @@ fi
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
 
-# Replace the stock Capacitor launch screen (white background + Capacitor logo)
-# with the Waves splash checked in at client/resources/. The generated template's
-# LaunchScreen.storyboard renders the "Splash" imageset full-bleed (aspectFill),
-# so overwriting its PNGs is all that's needed. Idempotent: overwrites every
-# splash-*.png in the imageset each run, so `cap add ios` regenerations can never
-# resurrect the Capacitor-logo default.
-SPLASH_SRC="resources/splash-2732x2732.png"
-SPLASH_SET="ios/App/App/Assets.xcassets/Splash.imageset"
-if [ -f "$SPLASH_SRC" ] && [ -d "$SPLASH_SET" ]; then
-  for f in "$SPLASH_SET"/splash-*.png; do
-    [ -e "$f" ] && cp "$SPLASH_SRC" "$f"
-  done
-  echo "==> Waves splash installed into Splash.imageset ✓"
-else
-  echo "==> WARNING: splash source or imageset missing — launch screen keeps the Capacitor default."
-fi
+# Reapply the tracked app icon and splash after every add/sync. Capacitor's
+# native project is generated and ignored, so this is the durable source of
+# both assets for clean projects and repeat bootstraps of existing projects.
+install_brand_assets
 
 # Capacitor's iOS push plugin only fires the JS 'registration' event if
 # AppDelegate forwards the UIKit APNs callbacks to Capacitor's NotificationCenter

@@ -1,0 +1,6 @@
+[
+  { "text": "What did you find?", "intent": "findings" },
+  { "text": "What was treated?", "intent": "treatment" },
+  { "text": "What should I do next?", "intent": "recommendations" },
+  { "text": "When is my next visit?", "intent": "next_visit" }
+]

@@ -104,6 +104,29 @@
 .tech-visit-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .tech-visit-products { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .ui-action.tech-visit-product { border-radius: 24px; white-space: normal; }
+/* Fast Complete (PR C): a deselected default-mix tile stays visible, struck
+   through, rather than disappearing — tapping again restores it. */
+.ui-action.tech-visit-product--off { text-decoration: line-through; opacity: 0.55; }
+/* Fast Complete's one-screen tile sections (products / pests / where /
+   activity) — a fixed 2-column grid instead of the recap modal's wrapping
+   flex row, per the owner's one-screen spec. */
+.tech-visit-tile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+/* Compact choice rows so the Fast Complete choices fit a typical phone
+   screen: three- or four-across tiles, tighter section rhythm. */
+.tech-visit-tile-grid--1 { grid-template-columns: minmax(0, 1fr); }
+.tech-visit-tile-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tech-visit-tile-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tech-visit-choice-section { margin-bottom: 12px; }
+.tech-visit-choice-section .tech-visit-tile-grid { margin-bottom: 0; }
+.tech-visit-amount-block { margin-bottom: 8px; }
+/* Fast Complete: the visit note leads the sheet, mic beside a multi-line box. */
+.tech-visit-note-row { display: flex; align-items: flex-start; gap: 10px; }
+.tech-visit-note-row .ui-control.tech-visit-control { flex: 1; min-width: 0; }
+/* Fast Complete tip options: label over one line of the customer copy. */
+.tech-visit-tip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.ui-action.tech-visit-tip { justify-content: flex-start; height: auto; min-height: 56px; padding: 8px 12px; text-align: left; white-space: normal; }
+.tech-visit-tip-copy { display: block; color: var(--tech-muted); font-size: 14px; font-weight: 400; }
+.ui-action.tech-visit-tip[aria-pressed='true'] .tech-visit-tip-copy { color: #e0f2fe; }
 .tech-visit-timeline-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
 .tech-visit-choice { display: flex; gap: 12px; color: var(--tech-text); margin-top: 8px; font-size: 14px; }
 .tech-visit-checkbox { flex-shrink: 0; background: var(--tech-card); border-color: var(--tech-muted); }
@@ -159,3 +182,82 @@
 }
 .tech-visit-mark-badge--above { bottom: 13px; }
 .tech-visit-mark-badge--below { top: 13px; }
+.tech-visit-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tech-visit-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 88px; align-items: center; gap: 8px; margin: 8px 0; }
+.tech-visit-amount-label { font-size: 14px; color: var(--tech-text); overflow-wrap: anywhere; }
+
+/* Fast Complete "+ Other product" (slice 1b). The form area under the sheet
+   header holds the phone picker, so the header stays in view above it. */
+.tech-visit-form-area { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ui-action.tech-visit-action.tech-visit-product--added { background: #075985; border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-action.tech-visit-product--editing { background: var(--tech-card); border-color: #38bdf8; box-shadow: inset 0 0 0 1px #38bdf8; }
+/* A tracked stock at zero: /complete would refuse the whole visit. */
+.ui-action.tech-visit-action.tech-visit-product--stock { flex-direction: column; gap: 2px; border-color: #b45309; background: #422006; color: #fef3c7; }
+.tech-visit-stock-flag { display: inline-flex; align-items: center; gap: 4px; color: #fcd34d; font-size: 14px; font-weight: 600; }
+.tech-product-other { position: relative; margin-top: 8px; }
+
+/* An added product's editor, under the product grid. */
+.tech-product-editor { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; padding: 14px; border: 1px solid var(--tech-accent); border-radius: 12px; background: var(--tech-card); }
+.tech-product-editor-head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }
+.tech-product-editor-name { margin: 0; font-size: 17px; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.tech-product-editor-label { display: block; margin-bottom: 8px; font-size: 15px; font-weight: 600; }
+.tech-product-editor-amount { display: flex; gap: 8px; }
+.ui-control.tech-visit-control.tech-product-amount-input { flex-shrink: 0; width: 120px; min-height: 56px; background: var(--tech-bg); font-size: 22px; font-weight: 700; text-align: right; }
+/* No stepper arrows: they cover the right-aligned amount at desktop width. */
+.tech-product-amount-input { -moz-appearance: textfield; appearance: textfield; }
+.tech-product-amount-input::-webkit-inner-spin-button,
+.tech-product-amount-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.tech-product-units { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ui-action.tech-visit-action.tech-product-unit { min-height: 56px; padding: 0 4px; border-radius: 10px; background: var(--tech-bg); }
+.ui-action.tech-visit-action.tech-product-unit[aria-pressed='true'] { background: #075985; border-color: var(--tech-accent); color: #fff; }
+.tech-product-editor-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ui-action.tech-visit-action.tech-product-remove { background: transparent; border-color: #7f1d1d; color: #fca5a5; font-weight: 600; }
+
+/* The product picker: a bottom sheet on a phone, a popover at desktop width. */
+.tech-product-picker-backdrop { position: absolute; inset: 0; z-index: 2; background: rgba(2, 6, 12, .72); }
+.tech-product-picker { z-index: 3; display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; border: 1px solid var(--tech-border); background: var(--tech-bg); color: var(--tech-text); }
+.tech-product-picker:focus { outline: none; }
+.tech-product-picker--sheet { position: absolute; top: 24px; left: 0; right: 0; bottom: 0; border-bottom: 0; border-radius: 16px 16px 0 0; }
+.tech-product-picker--popover { position: absolute; top: calc(100% + 6px); left: 0; width: min(420px, 100%); max-height: min(460px, 70vh); border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
+.tech-product-picker-head { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 6px 0 18px; }
+.tech-product-picker-title { margin: 0; font-family: 'Montserrat', sans-serif; font-size: 18px; font-weight: 600; }
+.tech-product-search { position: relative; flex-shrink: 0; padding: 2px 18px 0; }
+.tech-product-search > svg { position: absolute; left: 30px; top: calc(50% + 1px); transform: translateY(-50%); color: var(--tech-muted); pointer-events: none; }
+.ui-control.tech-visit-control.tech-product-search-input { padding-left: 42px; font-size: 16px; }
+.tech-product-picker-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 10px 18px 12px; }
+.tech-product-group-title { margin: 0 0 4px; color: var(--tech-muted); font-size: 14px; font-weight: 600; line-height: 1.25; }
+.tech-product-list { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--tech-border); border-radius: 12px; background: var(--tech-card); }
+.ui-action.tech-visit-action.tech-product-option { justify-content: space-between; gap: 10px; width: 100%; height: auto; min-height: 56px; padding: 8px 12px; border: 0; border-radius: 0; background: transparent; text-align: left; white-space: normal; }
+.ui-action.tech-visit-action.tech-product-option + .tech-product-option { border-top: 1px solid var(--tech-border); }
+.ui-action.tech-visit-action.tech-product-option:hover:not(:disabled) { background: #243244; }
+.ui-action.tech-visit-action.tech-product-option:focus-visible { outline-offset: -2px; }
+.tech-product-option-text { display: flex; flex-direction: column; min-width: 0; }
+.tech-product-option-name { font-size: 16px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; }
+.tech-product-option-detail { color: var(--tech-muted); font-size: 14px; font-weight: 400; }
+.tech-product-pill { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid #b45309; border-radius: 999px; background: #422006; color: #fcd34d; font-size: 14px; font-weight: 600; line-height: 1.3; }
+.tech-product-picker-foot { flex-shrink: 0; padding: 8px 18px 10px; border-top: 1px solid var(--tech-border); }
+
+/* Fast Complete's footer stacks the reason above full-width actions (the
+   approved sheet), so a short reason never squeezes Complete beside it. */
+.tech-visit-footer.tech-visit-footer--stacked { flex-direction: column; flex-wrap: nowrap; }
+.tech-visit-footer--stacked .tech-visit-actions { flex: none; }
+.tech-visit-footer--stacked .tech-visit-error-banner { flex-basis: auto; }
+.tech-visit-footer--stacked .tech-visit-muted { margin: 0; }
+/* The stock hold is a warning: amber like its tile. */
+.tech-visit-muted.tech-visit-status--warn { color: #fcd34d; }
+/* A product tile: name, then amount on its own line (the approved tiles). */
+.ui-action.tech-visit-action.tech-visit-product-tile { flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 2px; min-height: 60px; padding: 8px 10px; border-radius: 12px; text-align: left; line-height: 1.25; }
+.tech-visit-product-name { font-weight: 700; overflow-wrap: anywhere; }
+.tech-visit-product-amount { font-size: 14px; font-weight: 400; white-space: nowrap; }
+/* Tree & Shrub Fast Complete: five photo slots (label, one-line caption,
+   thumbnail, add / retake), then the photo read's finding tiles. */
+.tech-ts-slots { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
+.tech-ts-slot { padding: 10px 12px; border: 1px solid var(--tech-border); border-radius: 12px; background: var(--tech-card); }
+.tech-ts-slot-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; column-gap: 8px; }
+.tech-ts-slot-label { font-size: 16px; font-weight: 700; }
+.tech-ts-slot-image { display: block; width: 100%; max-height: 160px; margin: 8px 0 0; border-radius: 8px; object-fit: cover; }
+.tech-ts-slot-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.tech-ts-findings { margin-top: 12px; }
+.tech-ts-finding { margin-bottom: 8px; }
+.tech-ts-finding-label { margin: 0; font-weight: 700; }
+.tech-ts-finding--rejected .tech-ts-finding-label { text-decoration: line-through; opacity: 0.7; }

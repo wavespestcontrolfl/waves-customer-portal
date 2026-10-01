@@ -68,6 +68,11 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { cleanText } = require('../utils/intake-normalize');
 
+// estimates.customer_name is varchar(100): cap by whole code points, never
+// UTF-16 units, so an emoji at the boundary is not split into a lone
+// surrogate (codex #5102 r13).
+const capName100 = (value) => Array.from(String(value ?? '')).slice(0, 100).join('');
+
 // Mirrors customer-email-fanout / customer-address-fanout (which mirror
 // SENDABLE_ESTIMATE_STATUSES in routes/admin-estimates.js and CLOSED_STATUSES
 // in intelligence-bar/leads-tools.js). 'sending' name rows get a COLUMN-ONLY
@@ -75,7 +80,7 @@ const { cleanText } = require('../utils/intake-normalize');
 // service is diff-gated like the email fan-out, so a skipped row could never
 // heal on a later pass.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 // Mirrors document-contract-delivery TERMINAL_STATUSES (same list the email
 // fan-out uses for recipient_email).
 const TERMINAL_CONTRACT_STATUSES = ['signed', 'cancelled', 'voided'];
@@ -169,7 +174,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     const data = typeof row.estimate_data === 'string'
       ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
       : row.estimate_data;
-    const targetName = newFull.slice(0, 100);
+    const targetName = capName100(newFull);
     const preparedFor = data?.proposal?.preparedFor;
     const patchPreparedFor = !!(preparedFor && nameKey(preparedFor) === oldFullKey && preparedFor !== targetName);
     // A case-only edit (old key == new key) also matches rows that ALREADY
@@ -230,8 +235,8 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
     .whereIn('status', [...OPEN_ESTIMATE_STATUSES, 'sending'])
     .whereNull('archived_at')
     .whereRaw(`${NAME_KEY_SQL('customer_name')} = ?`, [oldFullKey])
-    .whereRaw('customer_name IS DISTINCT FROM ?', [newFull.slice(0, 100)])
-    .update({ customer_name: newFull.slice(0, 100), updated_at: now });
+    .whereRaw('customer_name IS DISTINCT FROM ?', [capName100(newFull)])
+    .update({ customer_name: capName100(newFull), updated_at: now });
 
   // Guarded preparedFor repair — keyed on the PROPOSAL'S OWN copy, not the
   // column, so it reaches rows the per-row pass could not touch: a row inside
@@ -258,7 +263,7 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
       ? (() => { try { return JSON.parse(row.estimate_data); } catch { return null; } })()
       : row.estimate_data;
     const preparedFor = data?.proposal?.preparedFor;
-    const targetName = newFull.slice(0, 100);
+    const targetName = capName100(newFull);
     if (!preparedFor || nameKey(preparedFor) !== oldFullKey || preparedFor === targetName) continue;
     // The keep-or-drop decision for the delivery marker is made IN the
     // update from the status AT UPDATE TIME (a row selected as 'sending' can

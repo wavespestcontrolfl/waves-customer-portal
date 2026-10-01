@@ -9,12 +9,16 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
-const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
+const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
+const { resolveBillingLane } = require('../billing-lane');
+const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
+const { discountStackingLive } = require('../../config/feature-gates');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -298,7 +302,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-This tool sets no price. It refuses a visit that would then complete with no invoice (a customer billed per visit, one-time, annual prepay, or per application with no fee on file) unless the visit type is free (appointment, estimate, re-service, follow-up); tell the user to book those from the Schedule screen with a price.`,
+price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -309,6 +313,7 @@ This tool sets no price. It refuses a visit that would then complete with no inv
         technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
+        price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -341,7 +346,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Appointment cancellation is unavailable in this bar because fees and invoice effects require Dispatch review. Direct the operator to the Dispatch cancellation controls; do not promise a confirmation card.',
+    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (customer name, date, and any comms/tech notice) before anything changes. Only BARE visits qualify: no invoice of any kind on record (any status), no inspection-credit offer tied to it, no prepayment or prepaid plan coverage, no saved card, card request, fee agreement or card hold of any status, no plan make-up visit, not a follow-up visit, not part of a grouped visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1220,6 +1225,13 @@ async function createCustomer(input) {
   }
 
   const created = await db.transaction(async (trx) => {
+    // codex #5196 P1-A: fence this admin-UI mint against
+    // call-booking-link-text.js's phone-locked handoff (same lockSmsPhone
+    // key/namespace) — the FIRST statement of this transaction, nothing
+    // else held before it, so no lock-order inversion risk (see
+    // routes/admin-customers.js ensureCustomerAccount's lockPhone comment
+    // for the full contract this mirrors).
+    await lockSmsPhone(trx, phone);
     const [account] = await trx('customer_accounts').insert({
       first_name: firstName,
       last_name: lastName,
@@ -2428,50 +2440,410 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-// ADMIN-BUG-R12: this tool has no price input and stamps no price, so a
-// booking for a customer whose billing needs a number ON THE VISIT (per-visit
-// and one-time lanes, annual prepay, per-application with no fee on file, a
-// member with no monthly rate, a legacy row with no membership tier) would
-// complete with no invoice. The verdict is the Schedule screen's own
-// billable-amount booking gate — one classifier, never a local lane list — so
-// dues-covered members, per-application customers with a fee, and
-// free-by-design visit types (appointment / estimate / re-service /
-// follow-up) still book here. Returns the model-facing refusal, or null when
-// the booking bills or is free.
-function ibBookingBillingRefusal(customer, serviceType) {
+// The catalog's WaveGuard member discounts, by their stable keys — never
+// inferred from shared attributes, so an unrelated Bronze promotion can
+// never pose as one. The discount engine's own eligibility then picks the
+// row that fits this service. The free-WDO member row is left out: a WDO
+// inspection bills from its project's inspection fee, which never reads the
+// visit's price, so a $0 booking would still be invoiced (owner 2026-09-27:
+// WDO stays out until that fee honors the member perk).
+const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
+
+// Live recurring coverage: the "or recurring customers" half of the owner's
+// rule (2026-09-27), through the canonical lifecycle in
+// waveguard-existing-services.js (callbacks and one-time sources excluded,
+// in-progress rows across ET midnight kept, inactive customers rejected) —
+// the customer's live recurring obligation ROWS being non-empty, not the
+// owned-keys set: a palm-injection or termite-bond plan is a live recurring
+// plan that maps to no ownership family (Codex r5, r7). A catalog-join
+// failure fails CLOSED (no automatic discount).
+// The customer's live recurring obligation rows (the canonical lifecycle in
+// waveguard-existing-services). On the locked recheck (conn is the booking
+// transaction) they are share-locked and re-read (Codex r10, r11): a series
+// cancel that ends them concurrently either commits first — and the re-read
+// drops them — or waits for this booking. Locks are taken in the series
+// writers' own order (admin-dispatch.js: scheduled_date, window_start, id)
+// so the two paths can never deadlock. Throws on a loader failure.
+async function liveRecurringObligationRows(customerId, conn = db) {
+  const { loadLiveRecurringObligationRows, TERMINAL_STATUSES } = require('../waveguard-existing-services');
+  const rows = await loadLiveRecurringObligationRows(conn, customerId);
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  if (conn === db) return rows;
+  const locked = await conn('scheduled_services')
+    .whereIn('id', rows.map((r) => r.id))
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .orderBy(['scheduled_date', 'window_start', 'id'])
+    .forShare()
+    .select('id');
+  const live = new Set((Array.isArray(locked) ? locked : []).map((r) => r.id));
+  return rows.filter((r) => live.has(r.id));
+}
+
+async function hasLiveRecurringCoverage(customerId, conn = db) {
+  try {
+    return (await liveRecurringObligationRows(customerId, conn)).length > 0;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] live recurring obligation read failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
+    return false;
+  }
+}
+
+// Live recurring coverage counts toward the "or recurring customers" member
+// floor only for an ACTIVE customer (Codex r2 on #5093, P1) — a churned
+// account (active === false) can carry a stale future recurring row no one
+// closed out, and that row must not grant a member discount. Mirrors
+// isActivePlanCustomer / loadActiveRecurringServiceRows's own active===false
+// fail-closed guard (waveguard-existing-services.js:70-77, 151-155). Every
+// caller of the recurring-coverage evidence (the member line discount AND
+// the mosquito ladder default) goes through this, not the raw row query.
+async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
+  if (!customer?.id || customer.active === false) return false;
+  return hasLiveRecurringCoverage(customer.id, conn);
+}
+
+// The WaveGuard member discount a member's one-off catalog visit carries
+// (owner 2026-09-27: "members or recurring customers get 15% off"): the
+// first member row the discount engine finds eligible — for a member by
+// tier or monthly rate, or for a customer with live recurring coverage,
+// which meets the same Bronze floor the engine opens for recurring
+// coverage (the only extra query, run only when the plain check fails).
+// Returns { row, recurringCustomer } or null.
+async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
+  // An inactive customer is no member, whatever tier a cancellation left on
+  // the row (the wind-down gate can retain it) — isActivePlanCustomer's rule.
+  if (!customer || customer.active === false) return null;
+  // WDO bills from the project's inspection fee, not the visit (see
+  // MEMBER_DISCOUNT_KEYS) — a line discount here would promise what the
+  // invoice ignores.
+  if (catalogRow.service_key === 'wdo_inspection') return null;
+  const rows = await conn('discounts')
+    .whereIn('discount_key', MEMBER_DISCOUNT_KEYS)
+    .where({ is_active: true, show_in_invoices: true })
+    .orderBy('priority', 'asc')
+    .orderBy('id', 'asc')
+    .select('*');
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const DiscountEngine = require('../discount-engine');
+  // The same catalog exclusion the Schedule screen's own appointment-level
+  // discount already enforces (admin-schedule.js lineExcludedFromPercentDiscount,
+  // POLICY.md 155-163) — Codex r2 on #5093, P1: the generic waveguard_member
+  // row carries no service filter, so without this guard an excluded service
+  // (bed bug, Bora-Care, pre-slab, termite bond, rodent bait, ...) would get
+  // 15% off through this AUTOMATIC application, which no operator picked and
+  // no service-scoped filter caught. A row is skipped only when it is BOTH a
+  // percentage type AND the booked service is excluded — the WDO free perk
+  // (waveguard_member_wdo, also `percentage`) survives because wdo_inspection
+  // itself is not an excluded family.
+  const {
+    lineExcludedFromPercentDiscount, isPercentDiscountType,
+    assertPercentExclusionCatalogReady, primePercentDiscountExclusions,
+  } = require('../../routes/admin-schedule');
+  // The in-router calculators get this catalog primed for free (the
+  // admin-schedule router awaits primePercentDiscountExclusions before any
+  // handler runs, then calls assertPercentExclusionCatalogReady synchronously)
+  // — this path has no such middleware, so without awaiting the prime here a
+  // variant key excluded ONLY via the catalog's engine_keys link (e.g.
+  // bed_bug_treatment, not a literal WAVEGUARD family key) would resolve
+  // against an empty/stale catalog and wrongly qualify for the automatic
+  // 15% (Codex r3 on #5093, P1: "first booking after boot"). Await the same
+  // prime the middleware runs, then assert the same readiness the
+  // calculators do — fail closed (refuse the automatic discount lookup)
+  // rather than price it against a catalog that never loaded.
+  // Only the unlocked pass refreshes: the prime reads on the global pool, and
+  // the locked recheck already holds a transaction connection (a small pool
+  // could stall both). Readiness never lapses once loaded, so the locked pass
+  // just asserts it.
+  if (conn === db) await primePercentDiscountExclusions();
+  assertPercentExclusionCatalogReady();
+  const serviceExcluded = lineExcludedFromPercentDiscount(catalogRow.service_key || null);
+  const context = { subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null };
+  const firstEligible = async (recurringMembershipBooking) => {
+    for (const row of rows) {
+      if (serviceExcluded && isPercentDiscountType(row.discount_type)) continue;
+      const failures = await DiscountEngine.manualEligibilityFailures(row, customer, { ...context, recurringMembershipBooking }, conn);
+      if (!failures.length) return row;
+    }
+    return null;
+  };
+  const byMembership = await firstEligible(false);
+  if (byMembership) return { row: byMembership, recurringCustomer: false };
+  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn))) return null;
+  const byRecurring = await firstEligible(true);
+  return byRecurring ? { row: byRecurring, recurringCustomer: true } : null;
+}
+
+// The booking's price, the way a Schedule-screen booking gets one (owner
+// 2026-09-27: the Intelligence Bar books like the Schedule screen, it does
+// not send the operator there). Both paths run the Schedule POST's own
+// buildAppointmentPricing: an operator-stated price is the primary line
+// price; with none, the price the Schedule screen pre-fills for the named
+// catalog service (the one-time mosquito lot ladder, else the catalog price
+// range minimum, else its base price). The catalog row resolves through
+// resolveBookingCatalogRow — one identity or a refusal, never a guess: a
+// price must come from the service the operator named. A free visit type
+// (appointment / estimate / re-service / follow-up) never carries a price —
+// completion never bills one. Returns { price, source, catalogRow, pricing }
+// or { error }.
+// The one catalog row a booking names, or an ambiguity. An exact name (with
+// the rename-bridging candidates) or a service key identifies a row; a short
+// name only counts when exactly ONE active row carries it. The live catalog
+// shares "Lawn Care" across five services and "Mosquito" across a recurring
+// and a one-time row, and a first match there prices — and bills — the
+// wrong service (the fail-closed rule of catalog-shortname-ambiguity.test.js).
+function resolveBookingCatalogRow(services, serviceType) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const { serviceNameCandidates } = require('../service-completion-profiles');
+  for (const candidate of serviceNameCandidates(serviceType)) {
+    const want = norm(candidate);
+    const hits = services.filter((s) => norm(s.name) === want || norm(s.service_key) === want);
+    if (hits.length === 1) return { row: hits[0] };
+    if (hits.length > 1) return { ambiguous: hits };
+  }
+  const byShortName = services.filter((s) => s.short_name && norm(s.short_name) === norm(serviceType));
+  if (byShortName.length === 1) return { row: byShortName[0] };
+  if (byShortName.length > 1) return { ambiguous: byShortName };
+  return { row: null };
+}
+
+async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
+  const services = await conn('services').where({ is_active: true })
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
+  const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
+  if (match.ambiguous) {
+    const names = match.ambiguous.map((r) => r.name).join(', ');
+    return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
+  }
+  const catalogRow = match.row;
+  const stated = statedPrice !== undefined && statedPrice !== null;
+  if (isAlwaysFreeServiceType(serviceType)) {
+    if (stated) {
+      return { error: `"${serviceType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
+    }
+    return { price: null, source: null, catalogRow, pricing: null };
+  }
+  // A price rides a real catalog service, as on the Schedule screen (its
+  // modal prices only a picked catalog row) — never an invented service
+  // type with a null service_id, the shape AGENTS.md bars for bookings.
+  if (stated && !catalogRow) {
+    return { error: `"${serviceType}" is not a catalog service, so the price has nothing to attach to. Use the service's exact catalog name and propose again. Nothing was booked.` };
+  }
+  if (!catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
+  // A dues-billed member's PLAN service carries no catalog default: the
+  // Schedule POST strips the price and create-invoice stamps from a member's
+  // recurring series (memberSeriesCovered — monthly lane, no payer), and
+  // completion prices a non-recurring visit out of dues coverage, so a
+  // defaulted price here would invoice a plan visit on top of the dues. An
+  // operator-stated price still stands: an extra visit they chose to bill.
+  //
+  // "Dues-covered" requires actually OWNING the booked row's service family
+  // (Codex round 5, P2) — the billing_type/mode/payer check above only says
+  // this customer is a dues member on SOME recurring plan, not that THIS
+  // catalog row is that plan. A lawn-only member booking a one-off pest
+  // visit is not dues coverage for pest — it is a one-off extra, priced at
+  // catalog less the member 15% like any other one-off member booking below.
+  // Ownership is the families of the customer's live recurring obligation
+  // rows (the canonical lifecycle, share-locked on the locked recheck like
+  // the discount evidence — Codex r11) against the booked row's OWN family
+  // (ownershipKeysForRow) — never a fresh approximation. Only a POSITIVE ownership match is dues coverage (Codex
+  // r6): a row with no ownership family (a termite bond is recurring and
+  // priced, yet owns no family) prices as a one-off, shown on the card; a
+  // failed ownership read refuses rather than guess either way.
+  if (!stated && catalogRow.billing_type === 'recurring' && !customer?.payer_id
+    && resolveBillingLane(customer).mode === 'monthly_membership') {
+    const { ownershipKeysForRow } = require('../waveguard-existing-services');
+    const bookedFamilyKeys = ownershipKeysForRow({ service_key: catalogRow.service_key, service_name: catalogRow.name });
+    let duesCovered = false;
+    if (bookedFamilyKeys.length && customer?.id) {
+      try {
+        const owned = new Set();
+        for (const row of await liveRecurringObligationRows(customer.id, conn)) ownershipKeysForRow(row).forEach((k) => owned.add(k));
+        duesCovered = bookedFamilyKeys.some((key) => owned.has(key));
+      } catch (err) {
+        logger.warn(`[intelligence-bar] live recurring ownership read failed for monthly-lane customer ${customer.id}: ${err.message}`);
+        return { error: 'Could not read which plan services this member owns, so whether their dues cover this visit is unknown. Try again in a moment, or state the price. Nothing was booked.' };
+      }
+    }
+    if (duesCovered) {
+      return { price: null, source: null, catalogRow, pricing: null };
+    }
+    // Not owned: falls through as an ordinary one-off catalog booking, which
+    // picks up the member discount below exactly like any other one-off.
+  }
+  // The Schedule modal's own pre-fill for a picked catalog line
+  // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
+  // blank for the one-time mosquito line, so the server's lot ladder prices
+  // it; otherwise the price range minimum, else the base price. A $0
+  // default is no price here (unpriced is NULL, never $0), and the
+  // billable-amount gate below decides.
+  const catalogDefault = catalogRow.service_key === 'mosquito_one_time'
+    ? undefined
+    : (catalogRow.price_range_min ?? catalogRow.base_price ?? undefined);
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
+  const { buildAppointmentPricing } = require('../../routes/admin-schedule');
+  // A member's one-off visit carries the member discount, as a line
+  // discount through the same builder a picked discount rides on the
+  // Schedule screen. This tool books ONE non-recurring visit, so any
+  // catalog-priced visit here is a one-off (a dues member's plan visit
+  // already returned unpriced above). Not for a stated price (the
+  // operator's own number) or the one-time mosquito line (its lot ladder
+  // already prices members as recurring customers).
+  const memberDiscount = !stated && Number(catalogDefault) > 0
+    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
+    : null;
+  // The mosquito ladder's OWN "or recurring customers" floor (Codex r2 on
+  // #5093, P1): mosquitoOneTimeDefaultPrice (admin-schedule.js) only ORs in
+  // whatever recurringMembershipBooking carries — a tierless customer whose
+  // ONLY qualifying evidence is live recurring coverage never reaches
+  // memberOneOffDiscount above (mosquito's catalogDefault is `undefined`,
+  // so `Number(catalogDefault) > 0` is false), so without this the ladder
+  // silently prices them at the flat nonmember rate. hasMembership is
+  // checked first so the extra query only runs when it's actually needed.
+  const { hasMembership } = require('../project-completion');
+  const mosquitoRecurringOverride = !stated && catalogRow.service_key === 'mosquito_one_time' && !hasMembership(customer)
+    ? await activeCustomerHasLiveRecurringCoverage(customer, conn)
+    : false;
+  const pricing = await buildAppointmentPricing({
+    serviceRecord: catalogRow,
+    serviceType,
+    serviceId: catalogRow.id,
+    primaryLinePrice: stated ? statedPrice : catalogDefault,
+    ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
+    // The builder re-checks the discount's eligibility; a recurring
+    // customer's Bronze floor rides the same recurring-coverage flag — ORed
+    // with the mosquito ladder's own override above so a tierless recurring
+    // customer's one-time mosquito line prices at the member rate too.
+    recurringMembershipBooking: !!memberDiscount?.recurringCustomer || mosquitoRecurringOverride,
+    customer,
+    // The locked recheck (create_appointment's commit-time re-derivation)
+    // must read the discount row and its eligibility on the SAME trx as the
+    // locked customer row, not a racing global-db read (Codex r2 on #5093,
+    // P2) — conn defaults to db, so the unlocked preflight pass is unchanged.
+    conn,
+  });
+  // A $0 price is no price at all.
+  const priced = Number(pricing.finalPrice) > 0;
+  if (!priced) return { price: null, source: null, catalogRow, pricing: null };
+  return { price: Number(pricing.finalPrice), source: stated ? 'stated' : 'catalog', catalogRow, pricing };
+}
+
+// A discounted booking's line-discount columns and pricing-regime marker,
+// through the same shared stamps the Schedule create writes. Only a
+// discounted booking pays for the column read.
+async function bookingDiscountStamps(trx, pricing) {
+  if (!pricing?.primaryDiscount) return {};
+  const cols = await trx('scheduled_services').columnInfo();
+  const stamps = {};
+  stampPrimaryLineDiscount(stamps, pricing, cols);
+  if (discountStackingLive()) stampPricingRegimeMarker(stamps, cols, capsSnapshotFromPricing(pricing));
+  return stamps;
+}
+
+// Cent-exact comparison of two booking prices (null = no price).
+function sameBookingPrice(a, b) {
+  if (a == null || b == null) return a == null && b == null;
+  return Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+}
+
+// The discount identity + terms a booking's pricing carries, in the same
+// shape the proposal pins (Codex r2 on #5093, P1): the card shows the GROSS
+// list price and the discount's name/percent, but the executor previously
+// compared only the NET _booking_price and the service id — a discount
+// that changed (a different row, a re-typed percent, a deactivated preset
+// swapped for another that nets the same dollars) could commit a visit the
+// card never actually showed. null when the booking carries no discount.
+function bookingDiscountFingerprint(booking) {
+  const discount = booking?.pricing?.primaryDiscount || null;
+  return {
+    listPrice: discount ? Number(booking.pricing.primaryBase) : null,
+    discountId: discount?.discountId ?? null,
+    discountName: discount?.discountName ?? null,
+    discountType: discount?.discountType ?? null,
+    discountAmount: discount ? Number(discount.discountAmount) : null,
+  };
+}
+
+// True when two fingerprints (or a fingerprint and the proposal's pinned
+// fields) name the SAME discount at the SAME terms on the SAME gross price.
+// discountName rides the comparison too (Codex r3 on #5093, P2): id/type/
+// amount alone miss a preset RENAMED between the proposal read and the
+// locked recheck (resolveLineDiscount re-reads the row fresh each pass) —
+// the card would show the old name while the stamped line_discount_name
+// carries the new one, an undisclosed drift the id/type/amount match alone
+// would let through.
+function sameBookingDiscount(a, b) {
+  return sameBookingPrice(a.listPrice, b.listPrice)
+    && String(a.discountId || '') === String(b.discountId || '')
+    && String(a.discountName || '') === String(b.discountName || '')
+    && String(a.discountType || '') === String(b.discountType || '')
+    && sameBookingPrice(a.discountAmount, b.discountAmount);
+}
+
+const BOOKING_PRICE_CHANGED_ERROR = 'This visit\'s price or catalog service changed since the card was shown — nothing was booked. Ask again for a fresh confirmation card.';
+
+// ADMIN-BUG-R12: a booking must never complete with no invoice when the
+// customer's billing needs a number on the visit (per-visit and one-time
+// lanes, annual prepay, per-application with no fee on file, a member with
+// no monthly rate, a legacy row with no membership tier). The verdict is the
+// Schedule screen's own billable-amount booking gate — one classifier, never
+// a local lane list — so dues-covered members, per-application customers
+// with a fee, free-by-design visit types, and every PRICED booking pass.
+// Returns the model-facing refusal, or null when the booking bills or is free.
+function ibBookingBillingRefusal(customer, serviceType, price) {
   const { recurringWithoutBillableAmount } = require('../../routes/admin-schedule');
+  const priced = Number(price) > 0;
   // Below its recurring early return, the gate asks a question that does not
   // depend on recurrence: would completing a visit at this price, for this
   // customer, cut an invoice (or be dues-covered, or free by design)? Asked
-  // for ONE visit at a $0 floor with the stamps this insert writes: no
-  // create-invoice flag, no callback marker, and no typed one-time profile
-  // (that mint trigger needs a PRICED visit, so it cannot change a $0 verdict).
+  // for ONE visit with the stamps this insert writes: a priced booking
+  // carries create_invoice_on_complete (the Schedule modal's own default), an
+  // unpriced one carries neither, and no callback marker or typed one-time
+  // profile (that mint trigger needs a price, and a priced booking already
+  // mints through the create-invoice stamp).
   const verdict = recurringWithoutBillableAmount({
     isRecurring: true,
-    recurringFloorPrice: 0,
+    recurringFloorPrice: priced ? price : 0,
     customer,
-    createInvoiceOnComplete: false,
+    createInvoiceOnComplete: priced,
     typedOneTimeBilling: false,
     isCallback: false,
     serviceType,
   });
   if (!verdict) return null;
-  const remedy = verdict.fix?.perApplicationFee
-    ? 'Set a per-application fee on the customer profile, or book it from the Schedule screen with a visit price'
-    : 'Book it from the Schedule screen with a visit price';
-  return `This visit would complete with no invoice: the Intelligence Bar books without a price, and this customer's billing needs one on the visit. ${remedy}. Nothing was booked.`;
+  const orFee = verdict.fix?.perApplicationFee ? ', or set a per-application fee on the customer profile' : '';
+  return `This visit needs a price: "${serviceType}" has no catalog price, and nothing in this customer's billing would invoice it. Ask the user for the visit price and propose the booking again with price${orFee}. Nothing was booked.`;
 }
 
-// Proposal-time twin for the confirm-card route: reads the customer and asks
-// the same verdict, so a booking that would be refused never reaches a card.
-// A read error THROWS (the caller fails the proposal closed); a missing
+// Proposal-time twin for the confirm-card route: the same price and billing
+// verdict the executor asks at commit, so the card shows the price the
+// booking will carry and a booking that would be refused never reaches a
+// card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingBillingRefusalFor(customerId, serviceType) {
+async function ibBookingProposal(customerId, serviceType, statedPrice) {
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
-  return ibBookingBillingRefusal(customer, serviceType);
+  const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
+  if (booking.error) return { error: booking.error };
+  const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
+  if (refusal) return { error: refusal };
+  const discount = booking.pricing?.primaryDiscount || null;
+  return {
+    price: booking.price,
+    source: booking.source,
+    serviceId: booking.catalogRow?.id || null,
+    serviceName: booking.catalogRow?.name || null,
+    listPrice: discount ? Number(booking.pricing.primaryBase) : null,
+    discountName: discount?.discountName || null,
+    discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
+    // The discount's own identity/terms (Codex r2 on #5093, P1) — carried
+    // so the route can pin them alongside _booking_price/_booking_service_id
+    // and the executor can refuse a commit whose discount drifted from what
+    // this exact card showed (a different row, a re-typed percent, or a
+    // preset swapped for one that happens to net the same dollars).
+    discountId: discount?.discountId || null,
+    discountType: discount?.discountType || null,
+    discountAmount: discount ? Number(discount.discountAmount) : null,
+  };
 }
 
 async function createAppointment(input, actionContext = {}) {
@@ -2522,10 +2894,35 @@ async function createAppointment(input, actionContext = {}) {
   if (customer.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
   }
+  // The visit's price: the operator's stated price, else the Schedule
+  // screen's catalog default. The card showed exactly this price (or none)
+  // through the proposal's pins, so drift since then refuses — a booking
+  // never carries a price the operator did not approve. A call with no pins
+  // (never proposed through a card) may only book unpriced.
+  const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
+  if (booking.error) return { error: booking.error };
+  const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
+  const approvedServiceId = input._booking_service_id === undefined
+    ? (booking.catalogRow?.id || null) : input._booking_service_id;
+  // The discount identity/terms the card pinned (Codex r2 on #5093, P1) — a
+  // call with no pins (never proposed through a card) approved no discount,
+  // so it matches only a booking that also carries none.
+  const approvedDiscount = {
+    listPrice: input._booking_list_price === undefined ? null : input._booking_list_price,
+    discountId: input._booking_discount_id === undefined ? null : input._booking_discount_id,
+    discountName: input._booking_discount_name === undefined ? null : input._booking_discount_name,
+    discountType: input._booking_discount_type === undefined ? null : input._booking_discount_type,
+    discountAmount: input._booking_discount_amount === undefined ? null : input._booking_discount_amount,
+  };
+  if (!sameBookingPrice(approvedPrice, booking.price)
+    || String(approvedServiceId || '') !== String(booking.catalogRow?.id || '')
+    || !sameBookingDiscount(approvedDiscount, bookingDiscountFingerprint(booking))) {
+    return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+  }
   // Refused before any lock or write when the visit could never bill
   // (ADMIN-BUG-R12); re-asserted on the locked row inside the booking
   // transaction below, since this read is unlocked.
-  const billingRefusal = ibBookingBillingRefusal(customer, service_type);
+  const billingRefusal = ibBookingBillingRefusal(customer, service_type, booking.price);
   if (billingRefusal) return { error: billingRefusal };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
@@ -2610,11 +3007,22 @@ async function createAppointment(input, actionContext = {}) {
       err.customerNoLongerLive = true;
       throw err;
     }
-    // The billing verdict on the LOCKED row (ADMIN-BUG-R12): a lane, rate or
-    // fee edit committed since the preflight must not slip an unbillable
-    // visit through. The customer row stays locked through the insert, so
-    // the verdict holds for the row this booking writes against.
-    const lockedBillingRefusal = ibBookingBillingRefusal(lockedCustomer, service_type);
+    // Price and billing verdict on the LOCKED row (ADMIN-BUG-R12): a lane,
+    // rate, fee, lot-size or catalog edit committed since the preflight must
+    // neither change the approved price nor slip an unbillable visit
+    // through. The customer row stays locked through the insert, so both
+    // hold for the row this booking writes against.
+    const lockedBooking = await ibBookingPricing({
+      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, conn: trx,
+    });
+    if (lockedBooking.error || !sameBookingPrice(lockedBooking.price, booking.price)
+      || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')
+      || !sameBookingDiscount(bookingDiscountFingerprint(lockedBooking), bookingDiscountFingerprint(booking))) {
+      const err = new Error('booking_price_changed');
+      err.bookingPriceChanged = true;
+      throw err;
+    }
+    const lockedBillingRefusal = ibBookingBillingRefusal(lockedCustomer, service_type, lockedBooking.price);
     if (lockedBillingRefusal) {
       const err = new Error('booking_unbillable');
       err.bookingUnbillable = lockedBillingRefusal;
@@ -2623,6 +3031,7 @@ async function createAppointment(input, actionContext = {}) {
     // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
     // ran before this transaction opened.
     await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
+    const discountStamps = await bookingDiscountStamps(trx, lockedBooking.pricing);
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —
@@ -2635,6 +3044,21 @@ async function createAppointment(input, actionContext = {}) {
       window_start: win.start,
       window_end: windowEnd,
       notes: notes || null,
+      // The catalog link and the price exactly as the Schedule POST stamps
+      // them: service_id + key/category snapshots, and for a priced visit
+      // estimated_price, the primary line's gross, and the create-invoice
+      // flag its booking modal always sends.
+      ...(lockedBooking.catalogRow ? {
+        service_id: lockedBooking.catalogRow.id,
+        service_key_snapshot: lockedBooking.catalogRow.service_key || null,
+        service_category_snapshot: lockedBooking.catalogRow.category || null,
+      } : {}),
+      ...(lockedBooking.price != null ? {
+        estimated_price: lockedBooking.price,
+        primary_line_price: lockedBooking.pricing.primaryBase,
+        create_invoice_on_complete: true,
+      } : {}),
+      ...discountStamps,
       created_at: new Date(),
       updated_at: new Date(),
     }).returning('*');
@@ -2701,6 +3125,9 @@ async function createAppointment(input, actionContext = {}) {
     if (err && err.bookingUnbillable) {
       return { error: err.bookingUnbillable, preview_changed: true };
     }
+    if (err && err.bookingPriceChanged) {
+      return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+    }
     if (err && err.previewChanged) {
       return {
         error: 'This customer\'s inspection credit changed after the card was shown — nothing was booked. Ask again for a fresh confirmation card.',
@@ -2745,10 +3172,10 @@ async function createAppointment(input, actionContext = {}) {
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
-  // without it the 72h/24h reminder cron never sees the visit. Registration
-  // only: sendConfirmation:false marks the confirmation not-applicable
-  // (mirroring an admin-created visit with the "Send confirmation SMS"
-  // checkbox off), so no SMS goes out — sends stay operator-initiated.
+  // without it the 72h/24h reminder cron never sees the visit. The booking
+  // confirmation text goes out exactly as a Schedule-screen booking's does
+  // (owner 2026-09-27): registered deferred here, sent after the result is
+  // built (below), and the card discloses it.
   //
   // Windowless creates ("put this customer on Friday") register at the
   // canonical date+08:00 slot time — the convention the reminder DB sync
@@ -2765,14 +3192,65 @@ async function createAppointment(input, actionContext = {}) {
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
   let reminderWarning = null;
+  // Set only when the visit turned terminal (cancelled/completed/skipped/
+  // no_show) in the window between the insert commit and registration
+  // finishing — same race window admin-schedule.js:~1468-1488 covers for
+  // spawned visits (Codex r3 on #5093, P1: this create path registers a
+  // reminder post-commit too, and had no equivalent recheck).
+  let visitWentTerminal = false;
+  // Set only when the visit's status is 'rescheduled' after registration
+  // (P2, round 5): cancelSpawnedReminderIfVisitTerminal correctly treats
+  // 'rescheduled' as NON-terminal (the reminder must stay armed for the
+  // rebook — the coverage module's own terminal list excludes it), but a
+  // visit awaiting rebooking is not a visit to send "see you then" for
+  // either. Read once, after registration, on db — same status this
+  // customer-portal reschedule flow just committed.
+  let visitNotLive = false;
+  const AppointmentReminders = require('../appointment-reminders');
   try {
-    const AppointmentReminders = require('../appointment-reminders');
-    await AppointmentReminders.registerAppointment(
+    // The Schedule create's own options: fromCommittedRow reads the time
+    // from the committed row, and a windowless booking's row is a
+    // non-delivering placeholder (it never texts an 08:00 nobody chose).
+    const registered = await AppointmentReminders.registerAppointment(
       appointment.id, customer_id,
       `${dateStr}T${win.start || '08:00'}`,
       service_type, 'admin_ib',
-      { sendConfirmation: false, closeReminderWindows: !win.start },
+      { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: !win.start, fromCommittedRow: true },
     );
+    // registerAppointment reports its own failures as null (it alerts and
+    // never rejects) — the same partial failure as a throw.
+    if (!registered) throw new Error('registerAppointment returned no reminder row');
+    // Reuse the canonical spawned-visit recheck (admin-schedule.js) rather
+    // than a parallel copy: it re-reads the visit's current status and, if
+    // terminal, cancels the fresh reminder row itself — the same cleanup a
+    // series cancel landing in this window gets on every other registration
+    // path.
+    const { cancelSpawnedReminderIfVisitTerminal } = require('../../routes/admin-schedule');
+    visitWentTerminal = await cancelSpawnedReminderIfVisitTerminal(db, appointment.id, 'intelligence-bar');
+    if (!visitWentTerminal) {
+      // Best-effort, like the terminal recheck above: a lookup failure here
+      // must not turn into a spurious reminder-registration warning (the
+      // registration itself succeeded) — it only means the confirmation send
+      // proceeds exactly as it did before this check existed.
+      try {
+        // Any not-live status vetoes the send (Codex r9): 'rescheduled' keeps
+        // its reminder armed, and a terminal status the recheck above could
+        // not act on (a transient read failure there) must still never get
+        // a "see you then".
+        const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
+        const visitNow = await db('scheduled_services').where({ id: appointment.id }).first('status');
+        visitNotLive = TERMINAL_STATUSES.includes(String(visitNow?.status || '').toLowerCase());
+        // Persist the veto: a row left with its confirmation pending would
+        // be sent later by the recovery sweep. The reminders stay armed.
+        if (visitNotLive) {
+          await db('appointment_reminders')
+            .where({ scheduled_service_id: appointment.id, confirmation_sent: false })
+            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        }
+      } catch (statusErr) {
+        logger.warn(`[intelligence-bar] post-registration rescheduled-status check failed for appointment ${appointment.id}: ${statusErr.message}`);
+      }
+    }
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
     // Surfaced on the confirm card as a partial-failure warning (W0B): the
@@ -2782,6 +3260,24 @@ async function createAppointment(input, actionContext = {}) {
 
   // Ids only — customer names/phones/addresses never go to logs (PII rule).
   logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
+
+  // The booking confirmation text, deferred past the result exactly as the
+  // Schedule create defers it (the landline lookup + send are slow). A
+  // failed registration has no row to send from, so nothing is attempted;
+  // neither does a visit that turned terminal in the registration window —
+  // sending "see you then" for an already-cancelled/completed visit is
+  // exactly what the recheck above exists to prevent — nor one that instead
+  // turned 'rescheduled' (awaiting rebooking): the reminder stays armed, but
+  // "see you then" for a visit with no settled time is exactly as wrong.
+  if (!reminderWarning && !visitWentTerminal && !visitNotLive) {
+    setImmediate(async () => {
+      try {
+        await AppointmentReminders.sendConfirmation(appointment.id);
+      } catch (err) {
+        logger.error(`[intelligence-bar] booking confirmation failed for appointment ${appointment.id}: ${err.message}`);
+      }
+    });
+  }
 
   // One `warning` key — both the reminder failure and the occupancy advisory
   // must survive when they coincide (the card renders result.warning).
@@ -2793,6 +3289,7 @@ async function createAppointment(input, actionContext = {}) {
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
     service_type,
+    price: appointment.estimated_price != null ? Number(appointment.estimated_price) : null,
     // The RESOLVED tech's canonical name — never the raw input, which can be
     // absent on an id-only retry or disagree with the id it rode in with.
     technician: resolvedTechnicianName || 'Unassigned',
@@ -3149,6 +3646,13 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
+// Owner ruling 2026-09-28, "bare visits only" (supersedes the earlier
+// "simple visits only" wording this message carried): a bare visit has no
+// invoice, no inspection-credit offer, and is neither a follow-up child nor
+// grouped — nothing this card would need to void, reverse, or disclose a
+// group/follow-up side effect for. Anything else cancels from Dispatch.
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
@@ -3161,6 +3665,17 @@ async function cancelAppointment(input, actionContext = {}) {
   // trigger the follow-up re-park hook for a treatment that already
   // happened. Idempotent on an already-cancelled row; every other terminal
   // state is an error, matching rescheduleAppointment above.
+  if (String(appt.status) === 'cancelled' && input._frozen_cancellation_impact) {
+    // A card confirm whose visit was cancelled ELSEWHERE since the card was
+    // shown (Codex round 6 P1): the replay below would run follow-through
+    // for effects the card never approved. The bar's own card cancel has no
+    // post-commit money obligations to retry (bare visits only; the shared
+    // status-writer seam runs them), so refuse as stale — never replay.
+    return {
+      error: 'This visit was already cancelled since the card was shown — nothing was changed.',
+      preview_changed: true,
+    };
+  }
   if (String(appt.status) === 'cancelled') {
     // Retry of an already-committed cancellation: the post-commit re-park
     // hook may have failed transiently on the first attempt, and this early
@@ -3205,6 +3720,12 @@ async function cancelAppointment(input, actionContext = {}) {
       // judged by the REAL clock) must never charge weeks later — waive.
       const staleReplay = cancelledAtReplay
         && (Date.now() - new Date(cancelledAtReplay).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
+      // Owner ruling 2026-09-28, "bare visits only": a card-confirmed cancel
+      // is now, by construction, always a visit with NO invoice, NO
+      // inspection-credit offer, and NO card fee rail — there is nothing
+      // for a PINNED, scoped follow-through to do that this UNPINNED call
+      // wouldn't already find empty. Run it exactly like every other
+      // cancel caller (Dispatch included); no pinnedEffects.
       if (cancelledAtReplay && !staleReplay) {
         await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtReplay) });
       } else {
@@ -3216,10 +3737,14 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Counted-plan reseed on the replay too (Codex #4814 r7 P1): a first
     // reseed that failed without its stamp gets its retry here, like the
-    // other post-commit obligations this branch replays. Idempotent.
-    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-      db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
-    });
+    // other post-commit obligations this branch replays. Idempotent. A
+    // card-confirmed cancel never reseeds: the card only confirms visits
+    // that cannot add a make-up visit (cancelMayReseedPlan).
+    if (!input._frozen_cancellation_impact) {
+      await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
+      });
+    }
     return {
       success: true,
       appointment_id,
@@ -3230,6 +3755,34 @@ async function cancelAppointment(input, actionContext = {}) {
   }
   if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
     return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
+  }
+
+  // Exact-effect confirm (W0B / PR A of the cancel-pinned-effects lane): a
+  // pending action proposed against a frozen impact snapshot (fee, invoices,
+  // inspection-credit — see appointment-cancel-impact.js) pins it on
+  // `_frozen_cancellation_impact`. Recompute the SAME snapshot fresh, right
+  // before committing anything, and refuse if state moved since the
+  // operator approved the card — never settle a different verdict than what
+  // was shown. No frozen pin (every caller today — the route refuses
+  // cancel_appointment before any pending action can carry one; see
+  // CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE in admin-intelligence-bar.js) means
+  // this check is a no-op.
+  if (input._frozen_cancellation_impact) {
+    const { computeCancelAppointmentImpact, cancelImpactsMatch } = require('../appointment-cancel-impact');
+    let freshImpact;
+    try {
+      freshImpact = await computeCancelAppointmentImpact(appointment_id, { actorId: actionContext.technicianId || null });
+    } catch (err) {
+      logger.warn(`[intelligence-bar] cancel impact unavailable for ${appointment_id}: ${err.message}`);
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) could not be verified right now — nothing was changed. Try again in a moment.' };
+    }
+    if (!cancelImpactsMatch(freshImpact, input._frozen_cancellation_impact)) {
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+    // Owner ruling 2026-09-28: the bar cancels bare visits only.
+    if ((freshImpact?.card_cancel_refusals || []).length) {
+      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+    }
   }
 
   // Route through the SHARED status writer, not a direct status update
@@ -3244,6 +3797,147 @@ async function cancelAppointment(input, actionContext = {}) {
   try {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
+      // Exact-effect confirm, INSIDE the mutation transaction (Codex round-3
+      // P1a): the pre-check above (input._frozen_cancellation_impact
+      // block) reads OUTSIDE any lock — a same-day reschedule (window or
+      // customer change, status unchanged) that commits in the gap between
+      // that read and this transaction's own lock would slip through
+      // undetected, since transitionJobStatus's own atomic guard only
+      // checks fromStatus, never the full identity. Lock the row FIRST —
+      // a reschedule racing to commit AFTER this point blocks on the lock
+      // until this transaction resolves, and one that already committed
+      // BEFORE it is caught by the fingerprint recompute below — then
+      // refuse before transitioning anything if the SAME whole-row
+      // fingerprint (appointment-cancel-impact.js's computeRowFingerprint
+      // — every scheduled_services column bar its own tiny denylist, the
+      // identical fingerprint computed at proposal time) no longer matches
+      // what the operator approved. Replaces the earlier hand-picked
+      // normalizeAppointmentPin/appointmentPinFingerprint identity subset
+      // (proposal-pins.js) — rounds 2 through 4 of review each found one
+      // more column that subset missed (identity, then property, then
+      // recurrence flags, then the window label, then visit_id); pinning
+      // the whole row closes that class of gap structurally.
+      if (input._frozen_cancellation_impact) {
+        // The shared scheduled-invoice lock chain (mint advisory lock →
+        // customer KEY SHARE → visit row FOR UPDATE), not a bare row lock
+        // (Codex round 6 P1): InvoiceService.create fences scheduled-service
+        // mints with the advisory lock, and a row lock does not protect the
+        // ABSENCE of invoice rows — joining the same protocol, in the same
+        // order, makes the no-invoice check below hold through the status
+        // transition in this trx.
+        const { acquireScheduledMintLockChain } = require('../scheduled-invoice-mint');
+        const lockedRow = await acquireScheduledMintLockChain(trx, { scheduledServiceId: appointment_id, visitColumns: ['*'] });
+        if (!lockedRow) throw new Error('__cancel_target_missing__');
+        const { computeRowFingerprint } = require('../appointment-cancel-impact');
+        if (computeRowFingerprint(lockedRow) !== input._frozen_cancellation_impact.identity_fingerprint) {
+          throw new Error('__cancel_identity_drift__');
+        }
+        // Explicit reseed-eligibility recheck FROM THE LOCKED ROW (Codex
+        // round-4 P1): the whole-row fingerprint match above already
+        // implies this (recurring_parent_id/is_callback/followup_included/
+        // is_recurring are all part of the pinned row, unlike the identity
+        // subset this replaced), but a card-approved cancel refuses on the
+        // committed row's OWN eligibility verdict rather than only on
+        // fingerprint equality — the same discipline as the grouped-visit
+        // check below, decided on the row that is about to be transitioned,
+        // not inferred from a hash.
+        const { cancelMayReseedPlan } = require('../recurring-series-cancel-reseed');
+        if (cancelMayReseedPlan(lockedRow)) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // Grouped-visit refusal, same discipline (Codex round-4 P2): the
+        // proposal/pre-check already refuse a grouped visit via
+        // card_cancel_refusals ('grouped_visit'), so a frozen pin can only
+        // reach here already ungrouped — this is the same belt-and-
+        // suspenders recheck on the row that will actually commit.
+        if (lockedRow.visit_id) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // NOT a follow-up child, same discipline (owner ruling 2026-09-28,
+        // "bare visits only"). followup_source_service_id is a plain
+        // scheduled_services column, so the whole-row fingerprint match
+        // above already implies this — rechecked explicitly anyway on the
+        // row about to be transitioned, not only inferred from a hash.
+        if (lockedRow.followup_source_service_id) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // NO invoice or inspection-credit offer of any kind, re-verified
+        // UNDER THIS LOCK — neither lives on scheduled_services, so the
+        // fingerprint match above cannot catch one created in the gap
+        // between the pre-check (outside any lock) and this lock.
+        //
+        // Verified against inspection-credit.js's redeemSpecificOffer,
+        // which is the only writer that could mint a credit against THIS
+        // visit concurrently (redeemed_scheduled_service_id = bookingId):
+        // inside its own transaction it (1) UPDATEs the offer to 'redeemed'
+        // (uncommitted so far), THEN (2) SELECTs this SAME scheduled_services
+        // row FOR UPDATE to re-verify the booking is still live before it
+        // mints, all in ONE transaction. Two lock orderings, both safe:
+        //   - We acquire this row's lock first: their step (2) blocks on
+        //     us. Our read of inspection_credit_offers here (read
+        //     committed) cannot see their still-uncommitted step (1), so we
+        //     find nothing and proceed — but once we commit (status →
+        //     'cancelled'), their blocked SELECT unblocks, reads that
+        //     committed status, and their own NON_LIVE_APPOINTMENT_STATUSES
+        //     guard throws — rolling back their WHOLE transaction, step (1)
+        //     included. The offer is never actually redeemed.
+        //   - They acquire this row's lock first: our own lockedRow read
+        //     above (trx('scheduled_services')...forUpdate()) blocks until
+        //     THEIR transaction resolves. If their liveness check passes
+        //     (we haven't cancelled anything yet — we're blocked), they
+        //     mint and commit; our lock then acquires and our read here
+        //     (now past their commit) sees the redeemed offer and refuses.
+        //     If their check fails for some other reason, they roll back
+        //     and we see nothing, same as above.
+        // Either way, a credit can never end up minted against a visit this
+        // transaction goes on to cancel.
+        const { anyInvoiceLinkedToVisit } = require('../invoice');
+        if (await anyInvoiceLinkedToVisit(trx, appointment_id).first('id')) {
+          throw new Error('__cancel_card_refused__');
+        }
+        const { anyInspectionCreditOfferForVisit } = require('../inspection-credit');
+        if (await anyInspectionCreditOfferForVisit(trx, appointment_id).first('id')) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // Legacy unstamped-address fallback (Codex round-5 P2): a row with
+        // no stamped service_address_* shows the CUSTOMER's primary address
+        // on the card (appointment-cancel-impact.js#effectiveAddress) — a
+        // `customers` column the whole-row fingerprint above (deliberately
+        // scheduled_services-only) can never cover. Re-read it FOR SHARE
+        // under this SAME lock and refuse if it moved since the frozen
+        // proposal; the identity fingerprint itself stays row-only.
+        if (!lockedRow.service_address_line1 && lockedRow.customer_id) {
+          const { legacyAddressFingerprint } = require('../appointment-cancel-impact');
+          const liveCustomer = await trx('customers').where('id', lockedRow.customer_id).forShare()
+            .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+          const liveFingerprint = legacyAddressFingerprint({
+            line1: liveCustomer?.address_line1, line2: liveCustomer?.address_line2,
+            city: liveCustomer?.city, state: liveCustomer?.state, zip: liveCustomer?.zip,
+          });
+          if (liveFingerprint !== input._frozen_cancellation_impact.legacy_address_fingerprint) {
+            throw new Error('__cancel_identity_drift__');
+          }
+        }
+        // Card-fee rails (Codex round 7 P1): a hold accepted or a /secure
+        // capture committed since the proposal lives outside the row
+        // fingerprint. Re-read under this lock (their writers lock the same
+        // visit row) and refuse on any change — the unpinned follow-through
+        // must never charge a fee the card said did not exist.
+        // Prepaid coverage (Codex round 9 P1): estimate-level deposits and
+        // prepay invoices live outside the row fingerprint — re-run the
+        // canonical readers on this trx under the lock (the deposit-ledger
+        // lock is taken after the visit lock, the same order the schedule's
+        // price path uses).
+        const { prepaidCommitmentReason } = require('../appointment-cancel-impact');
+        const { cardRailRows } = require('../appointment-cancel-impact');
+        if (await prepaidCommitmentReason(trx, lockedRow) || (await cardRailRows(trx, appointment_id)).length > 0) {
+          throw new Error('__cancel_card_refused__');
+        }
+        const { cardRailFingerprint } = require('../appointment-cancel-impact');
+        if (await cardRailFingerprint(trx, appointment_id) !== input._frozen_cancellation_impact.card_rail_fingerprint) {
+          throw new Error('__cancel_identity_drift__');
+        }
+      }
       await transitionJobStatus({
         jobId: appointment_id,
         fromStatus: appt.status,
@@ -3253,16 +3947,45 @@ async function cancelAppointment(input, actionContext = {}) {
         // silent for — an operator cancelling their own visit gets no card.
         transitionedBy: actionContext.technicianId || null,
         notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+        // Owner ruling 2026-09-28, "bare visits only": every check above
+        // (proposal-side and, again, under this lock) guarantees this visit
+        // has no invoice and no inspection-credit offer at all — there is
+        // nothing left for a scoped, pinned money seam to protect against
+        // racing. The shared status writer's own UNPINNED
+        // voidOpenInvoicesForCancelledService post-commit seam
+        // (job-status.js#maybeReparkFollowupObligation) now runs exactly as
+        // it would for a Dispatch cancel — no skip.
         trx,
       });
       if (reason) {
         await trx('scheduled_services').where('id', appointment_id).update({
-          notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
+          // SQL-side concat against the LIVE column (Codex round-1 P1): a
+          // JS-side `${appt.notes || ''}` read from BEFORE this transaction
+          // opened would overwrite a note a concurrent writer appended in
+          // between. concat_ws + NULLIF drop the separator entirely when
+          // notes is still empty, matching the old `.trim()`'s leading-
+          // newline behavior without reading a stale value.
+          notes: trx.raw("concat_ws(E'\\n', NULLIF(notes, ''), ?::text)", [`Cancelled: ${reason}`]),
           updated_at: new Date(),
         });
       }
     });
   } catch (err) {
+    if (err && err.message === '__cancel_identity_drift__') {
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+    if (err && err.message === '__cancel_target_missing__') {
+      return { error: 'Appointment not found — nothing was changed.' };
+    }
+    if (err && err.message === '__cancel_card_refused__') {
+      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+    }
+    // The visit went cancelled / no_show / skipped between the initial read
+    // and the lock chain, which refuses a never-ran visit (Codex round-10
+    // P2): a stale card, not an invoice error.
+    if (err && err.code === 'SCHEDULED_VISIT_NOT_LIVE') {
+      return { error: 'This visit was cancelled or closed since the card was shown — nothing was changed.', preview_changed: true };
+    }
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
     }
@@ -3313,9 +4036,12 @@ async function cancelAppointment(input, actionContext = {}) {
   // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
   // inside a 9-application plan adds one back at the end of the series.
   // Gated, failure-isolated, post-commit.
-  await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-    db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
-  });
+  // A card-confirmed cancel never reseeds (see the replay branch above).
+  if (!input._frozen_cancellation_impact) {
+    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+      db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
+    });
+  }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 
@@ -3450,7 +4176,7 @@ async function searchFieldIntelligence(input) {
   } catch { /* table may not exist */ }
 
   // Operational corpus hits (hybrid only): services, protocols, product
-  // labels, county fertilizer rules, prep guides, ops rules.
+  // labels, county fertilizer rules, prep guides, ops rules, species catalog.
   const operationalKnowledge = (hybrid?.results || [])
     .filter((r) => r.source !== 'wiki' && r.source !== 'kb')
     .slice(0, 6)
@@ -3478,7 +4204,7 @@ async function searchFieldIntelligence(input) {
     ...(hybrid ? { searchMode: hybrid.usedVector ? 'hybrid' : 'hybrid_fts_only' } : {}),
     bridgedPairs: (bridged || []).length,
     openContradictions,
-    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide/past-resolution matches — cite source + ref; "resolution" entries are how similar past calls/visits were actually handled (PII-redacted, recency-decayed). Cite slugs, state confidence, and surface open contradictions.',
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide/past-resolution/species-catalog matches — cite source + ref; "species" (customer copy) and "species_tech" (tech notes) entries are the owner-approved, UF/IFAS-cited species catalog and win any disagreement with the wiki or knowledge base on what an organism is, its verdict, or its safety; "resolution" entries are how similar past calls/visits were actually handled (PII-redacted, recency-decayed). Cite slugs, state confidence, and surface open contradictions.',
   };
 }
 
@@ -3490,5 +4216,9 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingBillingRefusalFor,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
+  // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
+  // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
+  // non-simple visit reuses this exact wording rather than a second copy.
+  CARD_CANCEL_REFUSED_MESSAGE,
 };

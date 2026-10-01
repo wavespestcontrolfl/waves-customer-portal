@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const logger = require('../services/logger');
 
@@ -66,7 +67,7 @@ router.post('/generate', requireAdmin, async (req, res) => {
 });
 
 // POST /:id/approve — approve action + write seo_decisions
-router.post('/:id/approve', requireAdmin, async (req, res) => {
+router.post('/:id/approve', requireAdmin, requireFullAccess, async (req, res) => {
   try {
     const result = await db.transaction(async (trx) => {
       const action = await trx('seo_actions').where('id', req.params.id).first();
@@ -207,8 +208,11 @@ router.post('/generate-drafts', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /auto-approve
-router.post('/auto-approve', requireAdmin, async (req, res) => {
+// POST /auto-approve — approves every auto-tier open action for the domain in
+// one call: the same approval transition as /:id/approve, so the same
+// owner-only gate (owner ruling 2026-09-28). /auto-execute stays open — it
+// runs only actions already approved.
+router.post('/auto-approve', requireAdmin, requireFullAccess, async (req, res) => {
   try {
     if (!req.body.domain) return res.status(400).json({ error: 'domain is required' });
     const result = await SeoActionGenerator.autoApprove(req.body.domain);

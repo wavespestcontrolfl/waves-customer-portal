@@ -19,7 +19,6 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -93,11 +92,11 @@ function automationSuppressionReason(suppression) {
   return `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
 }
 
-async function activeAutomationSuppressionFor(template, email) {
+async function activeAutomationSuppressionFor(template, email, database = db) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const rows = await db('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [normalizedEmail])
+  const rows = await database('email_suppressions')
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(normalizedEmail))
     .where({ status: 'active' });
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
 }
@@ -127,9 +126,12 @@ function requiresTermiteBond(templateKey) {
   return templateKey === 'service_renewal';
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend }) {
   if (testRecipient) return null;
-  const suppression = await activeAutomationSuppressionFor(template, recipient);
+  // A billing send checks suppression for the CURRENT billing recipient,
+  // inside the shared billing email authority under its recipient lock; the
+  // address snapshotted at enrollment may no longer be the one it goes to.
+  const suppression = billingSend ? null : await activeAutomationSuppressionFor(template, recipient);
   if (suppression) {
     const reason = automationSuppressionReason(suppression);
     return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
@@ -145,14 +147,117 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
-  if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
-  // SELECT * keeps this consumer deployable before the additive foundation
-  // migration; an absent column is the same legacy NULL behavior.
-  const prefs = await db('notification_prefs').where({ customer_id: enrollment.customer_id }).first();
-  const selected = billingChannelAllowed(prefs, 'payment_issue', 'email');
-  if (selected === null || (selected && prefs.email_enabled !== false)) return null;
-  return blockSendAndCancelEnrollment({ enrollment, sendId,
-    reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' });
+  return null;
+}
+
+// A payment-failed notice is billing mail, so it goes through the shared
+// billing email authority (owner ruling 2026-09-27): only to the customer's
+// CURRENT billing recipient, with the switch, the payment-issue channel
+// choice, the recipient and suppressions (this automation's own group
+// included) rechecked under the authority's locks and held through the
+// provider request. A billing recipient changed since enrollment re-points
+// the enrollment, and the step is re-rendered for them on the next tick.
+async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId, dispatch }) {
+  const { loadBillingEmailContext, dispatchUnderBillingEmailAuthority, blocked } = require('./billing-channel-email-authority');
+  // Collections DISPUTE hold (owner ruling 2026-09-30): the payment-failed email carries an
+  // update-card / pay CTA. Checked here and again under the authority's locks right before the
+  // provider request (fail closed); a hold leaves the step due (retryable) - it goes out after
+  // the release, never during the dispute.
+  const holdCollections = require('./collections/collection-hold');
+  const holdBlock = (held) => blocked('COLLECTION_HOLD_DEFER', held.reason === 'lookup_failed'
+    ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+    : 'Customer has an active collections dispute hold; payment-failed email deferred', { retryable: true });
+  const upFront = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id);
+  if (upFront.held) return settlePaymentFailedRefusal({ enrollment, sendId, block: holdBlock(upFront) });
+  const input = {
+    customerId: enrollment.customer_id, channel: 'email',
+    metadata: { billingDeliveryCategory: 'payment_issue' },
+  };
+  let context;
+  try {
+    context = await loadBillingEmailContext(input);
+  } catch (err) {
+    logger.warn(`[automation-runner] payment-failed billing email context unavailable enrollment=${enrollment.id}: ${err.message}`);
+    context = { error: blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email authority could not be verified', { retryable: true }) };
+  }
+  if (context.error) return settlePaymentFailedRefusal({ enrollment, sendId, block: context.error });
+  const normalizedEmail = (value) => String(value || '').trim().toLowerCase();
+  if (normalizedEmail(context.recipientEmail) !== normalizedEmail(recipient)) {
+    return repointPaymentFailedEnrollment({ enrollment, sendId, current: context.recipient, email: context.recipientEmail });
+  }
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  let res;
+  await dispatchUnderBillingEmailAuthority({
+    input,
+    recipientEmail: context.recipientEmail,
+    // The hold rides the authority's preSendCheck, which the authority re-runs at the FINAL
+    // provider boundary (after SendGrid's request preparation, right before the fetch) as well
+    // as before dispatch - a hold committed while the request is prepared is caught there, not
+    // only at this one-time pre-dispatch read. Refusals are the retryable COLLECTION_HOLD_DEFER.
+    preSendCheck: async ({ database } = {}) => {
+      const heldNow = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id, database);
+      if (!heldNow.held) return { ok: true };
+      const refusal = holdBlock(heldNow);
+      return { ok: false, code: refusal.code, reason: refusal.reason, retryable: true };
+    },
+    emailSuppression: async (trx, email) => {
+      const suppression = await activeAutomationSuppressionFor(template, email, trx);
+      return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
+    },
+    // The authority's final check runs inside sendOne, after its own
+    // provider preparation and right before the request.
+    dispatch: async (_trx, providerBoundaryCheck) => { res = await dispatch(providerBoundaryCheck); },
+    state,
+  });
+  if (state.boundaryBlock) return settlePaymentFailedRefusal({ enrollment, sendId, block: state.boundaryBlock });
+  return res;
+}
+
+// A collections dispute hold is a WAIT (owner ruling 2026-09-30): the step is not attempted, so
+// it leaves no failed step-send row (a queued row already inserted for it is removed) and the
+// enrollment moves to a bounded recheck time instead of staying overdue - an overdue held
+// enrollment would be re-picked every minute and could fill the runner's 50-row page ahead of
+// unrelated automations. After the release the next tick past that time sends it.
+async function deferPaymentFailedForHold({ enrollment, sendId = null, reason }) {
+  if (sendId) await db('automation_step_sends').where({ id: sendId }).del();
+  await db('automation_enrollments').where({ id: enrollment.id, status: 'active' }).update({
+    next_send_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS),
+    updated_at: new Date(),
+  });
+  return { sent: false, deferred: true, held: true, reason };
+}
+
+// A refusal that stands until the customer's record changes cancels the
+// enrollment, as before. One the authority marks retryable (a recheck that
+// could not run, a recipient that moved mid-send) leaves the step due for
+// the next tick. A deselected Email is final here: a routed billing leg
+// re-reads it as a schedulable hold, but nothing re-reads it for this step.
+async function settlePaymentFailedRefusal({ enrollment, sendId, block }) {
+  const reason = String(block.reason || block.code || 'Billing email refused');
+  if (block.code === 'COLLECTION_HOLD_DEFER') return deferPaymentFailedForHold({ enrollment, sendId, reason });
+  if (block.retryable === true && block.code !== 'BILLING_PREFERENCES_CHANGED') {
+    await db('automation_step_sends').where({ id: sendId }).update({
+      status: 'failed', failure_reason: reason.slice(0, 500), updated_at: new Date(),
+    });
+    return { sent: false, deferred: true, reason };
+  }
+  const cancelReason = block.code === 'BILLING_PREFERENCES_CHANGED'
+    ? 'billing_email_deselected' : String(block.code || 'billing_email_refused').toLowerCase();
+  return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason });
+}
+
+async function repointPaymentFailedEnrollment({ enrollment, sendId, current, email }) {
+  const parts = String(current?.name || '').trim().split(/\s+/).filter(Boolean);
+  await db('automation_step_sends').where({ id: sendId }).update({
+    status: 'blocked', failure_reason: 'Billing recipient changed since enrollment', updated_at: new Date(),
+  });
+  await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
+    email,
+    ...(parts.length ? { first_name: parts[0], last_name: parts.slice(1).join(' ') || null } : {}),
+    updated_at: new Date(),
+  });
+  logger.warn(`[automation-runner] enrollment=${enrollment.id} re-pointed to the current billing recipient`);
+  return { sent: false, deferred: true, reason: 'billing_recipient_changed' };
 }
 
 // {{consultation_booking}} / {{consultation_booking_text}} — the new_lead
@@ -593,6 +698,18 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     consultationText: consultationBlock.text,
   });
 
+  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
+  // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
+  // row at all (sendPaymentFailedThroughBillingAuthority re-checks under the authority's locks).
+  if (billingSend) {
+    const upFront = await require('./collections/collection-hold').messagingHeldByCollectionHold(enrollment.customer_id);
+    if (upFront.held) {
+      return deferPaymentFailedForHold({ enrollment, reason: upFront.reason === 'lookup_failed'
+        ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+        : 'Customer has an active collections dispute hold; payment-failed email deferred' });
+    }
+  }
+
   const sendRow = await db('automation_step_sends').insert({
     enrollment_id: enrollment.id,
     step_id: step.id,
@@ -602,21 +719,26 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   }).returning('*').then((rows) => rows[0]);
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
-    sendId: sendRow.id, testRecipient });
+    sendId: sendRow.id, testRecipient, billingSend });
   if (deliveryBlock) return deliveryBlock;
 
+  const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
+    to: recipient,
+    fromEmail,
+    fromName: step.from_name,
+    replyTo: step.reply_to,
+    subject: testRecipient ? `[TEST] ${subject}` : subject,
+    html: html || undefined,
+    text: text || undefined,
+    categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
+    asmGroupId,
+    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+  });
   try {
-    const res = await sendgrid.sendOne({
-      to: recipient,
-      fromEmail,
-      fromName: step.from_name,
-      replyTo: step.reply_to,
-      subject: testRecipient ? `[TEST] ${subject}` : subject,
-      html: html || undefined,
-      text: text || undefined,
-      categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
-      asmGroupId,
-    });
+    const res = billingSend
+      ? await sendPaymentFailedThroughBillingAuthority({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
+      : await dispatch();
+    if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
       status: 'sent',
@@ -701,6 +823,13 @@ async function processDueSteps() {
     .where('e.status', 'active')
     .where('t.enabled', true)
     .where('e.next_send_at', '<=', new Date())
+    // A payment-failed enrollment for a customer under an active collections dispute hold is a
+    // wait: it stays out of the page (never starving unrelated automations) and is picked up on
+    // the first tick after the release. The step itself re-checks the hold (fail closed).
+    .where((q) => q.whereNot('e.template_key', 'payment_failed')
+      .orWhereNotExists(function heldPaymentFailed() {
+        require('./collections/collection-hold').collectionHoldExistsSql(this, 'e.customer_id');
+      }))
     .orderBy('e.next_send_at', 'asc')
     .limit(50)
     .select('e.id');

@@ -8,6 +8,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocked: true })));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
+  // This file never manipulates GATE_SMS_REAL_ANSWERS — currentPromptVersion()
+  // is what createExamRun/resume/summary actually call now, so it must match
+  // PROMPT_VERSION here for every existing "same version" fixture to hold.
+  currentPromptVersion: jest.fn(() => 'house_voice_v9_test'),
   generateGroundedDraft: jest.fn(),
   // effective profile = none unless a test overrides — keeps the pin inert
   resolveEffectiveVoiceProfile: jest.fn(async () => null),
@@ -159,6 +163,11 @@ const goodDraft = (reply = 'Happy to check on that for you!') => ({
   passes: 1,
   converged: true,
   model: 'test-model',
+  // Matches the mocked PROMPT_VERSION/currentPromptVersion() above — every
+  // run fixture actually reaching examOneItem in this file is pinned to
+  // 'house_voice_v9_test', so this must agree or the new prompt-version
+  // mismatch guard (pre-push audit P1) would refuse every item.
+  promptVersion: 'house_voice_v9_test',
 });
 
 const judgment = (verdict, scores) => ({
@@ -198,6 +207,43 @@ describe('createExamRun — guards and stamps', () => {
       .rejects.toThrow(/unknown sealed-eval provider leg/);
   });
 
+  test('refuses a v12 run when every active item predates GATE_SMS_REAL_ANSWERS (Codex r3 fail-fast)', async () => {
+    // currentPromptVersion() resolves a v12 real-answers version, but the
+    // only active item's frozen facts_block carries no FOLLOW-UP SLA RIGHT
+    // NOW line — every gate-on facts block stamps that line unconditionally,
+    // so its absence means the item was frozen before the gate existed.
+    // Starting the run would grade nothing; refuse instead of running dark.
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/no sealed coverage for house_voice_v12_real_answers: only 0 of 1/);
+  });
+
+  // Pre-push audit P1 (r4): the bar is the exam gate's own coverage rule —
+  // at least half the active pool — so a run that could never pass is not
+  // started (and the nightly sweep cannot call the version examined while
+  // the freezer is still replenishing).
+  test('refuses a v12 run while fewer than half the active items are v12-compatible', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const V12 = 'FROZEN FACTS\nFOLLOW-UP SLA RIGHT NOW: within the hour';
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1'), item('i2'), item('i3'), item('i4', { facts_block: V12 })] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/only 1 of 4 active items .* \(need 2\)/);
+  });
+
+  test('a v12 run with at least half the pool v12-compatible is created normally', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [],
+      items: [
+        item('i1'), // pre-v12 — excluded later, but doesn't block creation
+        item('i2', { facts_block: 'FROZEN FACTS for i2\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' }),
+      ],
+    });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+  });
+
   test('measurement legs (gemini/sol/opus/fable) are valid, but autonomy rides only on the live legs', async () => {
     // the exam accepts every candidate…
     for (const leg of ['gemini', 'luna', 'opus', 'fable']) expect(sealedEval.EXAM_LEGS).toContain(leg);
@@ -229,6 +275,28 @@ describe('createExamRun — guards and stamps', () => {
     expect(run.model).toBe('claude-sonnet-5'); // runs stamp their drafting model (codex r12)
     expect(run.status).toBe('running');
     expect(run.voice_profile_version).toBeNull(); // effective profile = none in the default mock
+  });
+
+  test('stamps currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit P1)', async () => {
+    // Prove the create path reads the DYNAMIC resolver, not the frozen
+    // constant: point currentPromptVersion() at a different value than
+    // PROMPT_VERSION and confirm the run stamps (and baselines against)
+    // the DYNAMIC one — exactly what happens for real once
+    // GATE_SMS_REAL_ANSWERS flips PROMPT_VERSION and currentPromptVersion()
+    // apart.
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r-v11', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' }],
+      // v12-compatible facts_block (Codex r3 fail-fast guard): unrelated to
+      // what this test proves, but createExamRun now refuses to start a v12
+      // run with zero v12-compatible active items.
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
+    });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+    // the v9_test run is a DIFFERENT version from the dynamic current one,
+    // so it's a valid default baseline
+    expect(run.baseline_run_id).toBe('r-v11');
   });
 
   test('stamps the EFFECTIVE voice-profile version at creation (Codex r2 pin)', async () => {
@@ -283,6 +351,37 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
     expect(out.status).toBe('failed');
     // no result row was recorded under the phantom profile
     expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('a run whose draft used a DIFFERENT prompt version than the run is pinned to fails instead of mixing evidence (pre-push audit P1)', async () => {
+    // Same "static per run" contract as the voice-profile pin above, but for
+    // the prompt version itself: generateGroundedDraft reads
+    // GATE_SMS_REAL_ANSWERS live on every call, so a gate flip mid-sitting
+    // could otherwise draft a later item under a version the run's own
+    // prompt_version column disagrees with — mixing v11 and v12 evidence
+    // inside one run.
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test' }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    // no result row was recorded under the mismatched version
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('a run whose draft used the SAME prompt version as the run completes normally', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test' }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(1);
   });
 
   test('createExamRun refuses when the effective profile moved past the caller\'s expected pin (codex r4 sweep freeze)', async () => {
@@ -476,6 +575,76 @@ describe('runSealedExam — replay loop', () => {
     const dbi = makeRunnerDb({ runs, items: [item('i1')] });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', baselineRunId: 'r-good', dbi });
     expect(run.baseline_run_id).toBe('r-good');
+  });
+});
+
+// Codex r3 (PR #5119): a v12 real-answers run replaying items frozen BEFORE
+// GATE_SMS_REAL_ANSWERS existed would grade scheduling/cancellation/handoff
+// replies against instructions (OPEN TIMES, the FOLLOW-UP SLA RIGHT NOW
+// handoff wording) whose facts the frozen snapshot never carries. These lock
+// the exclusion: a v12 run skips an incompatible item without calling the
+// drafter or judge, records it as an 'ungradable' sentinel (same shape as
+// the terminal no-progress rule), and the run still completes; a compatible
+// item, and any v11 run regardless of the item's facts, are unaffected.
+describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
+  test('v12 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): excluded, drafter/judge never called, run still completes', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
+      items: [item('i1')], // default fixture facts_block has no SLA line
+    });
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
+    expect(judge.judgeOne).not.toHaveBeenCalled();
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result).toMatchObject({ verdict: 'ungradable' });
+    expect(result.notes).toMatch(/outside the fact contract of house_voice_v12_real_answers \(items must carry "FOLLOW-UP SLA RIGHT NOW:" and lack "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "FREE RE-SERVICE:"\)/);
+    const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(finalPatch).toBeTruthy();
+    // Excluded — never counted as graded (same rule the terminal no-progress
+    // sentinel already relies on in finalizeRun).
+    expect(finalPatch.patch.items_judged).toBe(0);
+  });
+
+  test('v12 run + v12-compatible item (facts_block carries FOLLOW-UP SLA RIGHT NOW): examined as today', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledTimes(1);
+    expect(judge.judgeOne).toHaveBeenCalledTimes(1);
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result.verdict).toBe('equivalent');
+    const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(finalPatch.patch.items_judged).toBe(1);
+  });
+
+  test('v11 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): examined as today, unchanged', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v9_test');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', baseline_run_id: null }],
+      items: [item('i1')], // default fixture facts_block has no SLA line either — irrelevant for a v11 run
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledTimes(1);
+    expect(judge.judgeOne).toHaveBeenCalledTimes(1);
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result.verdict).toBe('equivalent');
   });
 });
 
@@ -782,5 +951,158 @@ describe('evaluateExamGate — graded-coverage fail-closed', () => {
       summaryFn: summaryWith({ unsafeRate: 0.5, itemsJudged: 39, itemsTotal: 41, significance: null }),
     });
     expect(unsafe).toEqual([expect.stringMatching(/anthropic.*unsafe rate/)]);
+  });
+});
+
+
+// PR #5119 follow-up #4: compatibility is the full fact contract of the
+// prompt version — a category tag requires that category's fact line too.
+describe('category-aware sealed compatibility', () => {
+  const { requiredFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const RS = 'FREE RE-SERVICE: not eligible';
+
+  test('requiredFactMarkers: v11 none; v12 the SLA line; +c adds the FREE RE-SERVICE line; other tags add nothing', () => {
+    expect(requiredFactMarkers('house_voice_v11')).toEqual([]);
+    expect(requiredFactMarkers('house_voice_v12_real_answers')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+c')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+bclm')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+bl')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
+  });
+
+  test('itemCompatibleWith: an item frozen under plain v12 is compatible with v12 but NOT with +c; one frozen under +c is compatible ONLY with +c', () => {
+    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers')).toBe(true);
+    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers+c')).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers+c')).toBe(true);
+    // EXACT contract (#5194 r1 P1): a category fact the version does not carry must be absent
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers')).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v12_real_answers+bl')).toBe(false);
+    expect(itemCompatibleWith('CUSTOMER: old', 'house_voice_v11')).toBe(true);
+    // #5194 r7 P1: v11's contract forbids the v12 lines (a rollback)
+    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v11')).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\nBILLING:\n`, 'house_voice_v11')).toBe(false);
+  });
+
+  test('a v11 rollback run refuses a pool frozen under v12, and excludes a v12 item from its exam', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
+    const v12Pool = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi: v12Pool }))
+      .rejects.toThrow(/no sealed coverage for house_voice_v11: only 0 of 2 active items lack "FOLLOW-UP SLA RIGHT NOW:" \+ "COMPANY FACTS \(owner-approved; state these plainly\):" \+ "LABEL FACTS \(" \+ "FREE RE-SERVICE:"/);
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v11', baseline_run_id: null }],
+      items: [item('i1', { facts_block: `FROZEN\n${SLA}` })],
+    });
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v11');
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
+    expect(dbi.state.results.find((r) => r.item_id === 'i1')).toMatchObject({ verdict: 'ungradable' });
+  });
+
+  test('createExamRun under +c refuses when the pool was sealed under plain v12 (no FREE RE-SERVICE line)', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers+c');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/only 0 of 2 active items carry "FOLLOW-UP SLA RIGHT NOW:" \+ "FREE RE-SERVICE:"/);
+  });
+});
+
+// Codex round-20 P2 (PR #5336): FREE RE-SERVICE is required only by the numeric identity token "2"+; every
+// older identity keeps its HISTORICAL contract, so an exam created before the deploy stays gradable.
+describe('sealed fact contract — historical identities vs the current 2_cf identity', () => {
+  const { requiredFactMarkers, forbiddenFactMarkers } = require('../services/sms-sealed-eval');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW:';
+  const RS = 'FREE RE-SERVICE:';
+  const CF = 'COMPANY FACTS (owner-approved; state these plainly):';
+  const LBL = 'LABEL FACTS (';
+  const contract = (v) => ({ required: requiredFactMarkers(v), forbidden: forbiddenFactMarkers(v) });
+
+  test('historical bare and _cf identities: FREE RE-SERVICE only with the complaints tag, forbidden otherwise', () => {
+    expect(contract('house_voice_v12_real_answers')).toEqual({ required: [SLA], forbidden: [CF, LBL, RS] });
+    expect(contract('house_voice_v12_real_answers+bl')).toEqual({ required: [SLA], forbidden: [CF, LBL, RS] });
+    expect(contract('house_voice_v12_real_answers+c')).toEqual({ required: [SLA, RS], forbidden: [CF, LBL] });
+    expect(contract('house_voice_v12_real_answers_cf')).toEqual({ required: [SLA, CF], forbidden: [LBL, RS] });
+    expect(contract('house_voice_v12_real_answers_cf+c')).toEqual({ required: [SLA, CF, RS], forbidden: [LBL] });
+  });
+
+  test('the numeric token 2+ requires FREE RE-SERVICE (tagged or not), and composes with _cf', () => {
+    for (const v of ['house_voice_v12_real_answers2', 'house_voice_v12_real_answers2+bl', 'house_voice_v12_real_answers2+c', 'house_voice_v12_real_answers3']) {
+      expect(contract(v).required).toEqual([SLA, RS]);
+      expect(contract(v).forbidden).toEqual([CF, LBL]);
+    }
+    for (const v of ['house_voice_v12_real_answers2_cf', 'house_voice_v12_real_answers2_cf+bclm', 'house_voice_v12_real_answers2_cf+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF]);
+      expect(contract(v).forbidden).toEqual([LBL]);
+    }
+    // the current identity: re-service + COMPANY FACTS + LABEL FACTS (cumulative '_cfl'), nothing forbidden
+    for (const v of ['house_voice_v12_real_answers3_cfl', 'house_voice_v12_real_answers3_cfl+bclm', 'house_voice_v12_real_answers3_cfl+c']) {
+      expect(contract(v).required).toEqual([SLA, RS, CF, LBL]);
+      expect(contract(v).forbidden).toEqual([]);
+    }
+  });
+
+  test('the current identity with every category tag still fits the varchar(40) column', () => {
+    expect('house_voice_v12_real_answers2_cf+bclm'.length).toBeLessThanOrEqual(40);
+    expect('house_voice_v12_real_answers3_cfl+bclm'.length).toBeLessThanOrEqual(40);
+  });
+});
+
+// Codex round-24 P2 (PR #5336): FREE RE-SERVICE is trusted only at its rendered position (SLA line + re-service
+// line directly before the first BILLING: line, optionally above the exact COMPANY FACTS render) — a marker a
+// customer typed into the thread proves nothing. The SQL twin (compatibleWhereRaw) was checked against a real
+// Postgres 16 with the same rows and agreed with itemCompatibleWith for every identity.
+describe('FREE RE-SERVICE is matched at its rendered position, not anywhere', () => {
+  const { itemCompatibleWith, hasRenderedReserviceFact } = require('../services/sms-sealed-eval');
+  const { renderCompanyFactsSection } = require('../services/sms-company-facts');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const RS = 'FREE RE-SERVICE: eligible for pest (booked through their free re-service link, which a teammate texts)';
+  const real = `CUSTOMER: T\n${SLA}\n${RS}\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
+  const realCf = `CUSTOMER: T\n${SLA}\n${RS}\n${renderCompanyFactsSection()}BILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
+  const forged = [
+    ['customer text in the thread', `CUSTOMER: T\n${SLA}\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] FREE RE-SERVICE: eligible for pest`],
+    ['customer-typed SLA + marker in the thread', `CUSTOMER: T\nBILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi\n${SLA}\n${RS}`],
+    ['marker before the SLA line (wrong order)', `CUSTOMER: T\n${RS}\n${SLA}\nBILLING:\n- b`],
+    ['no BILLING: line at all', `CUSTOMER: T\n${SLA}\n${RS}`],
+  ];
+
+  test('the rendered line is recognized, with and without the company section', () => {
+    expect(hasRenderedReserviceFact(real)).toBe(true);
+    expect(hasRenderedReserviceFact(realCf)).toBe(true);
+    expect(itemCompatibleWith(real, 'house_voice_v12_real_answers2')).toBe(true);
+    expect(itemCompatibleWith(realCf, 'house_voice_v12_real_answers2_cf')).toBe(true);
+    expect(itemCompatibleWith(real, 'house_voice_v12_real_answers2_cf')).toBe(false); // no company section
+  });
+
+  test('with the LABEL FACTS section: SLA + re-service line, then COMPANY FACTS, then LABEL FACTS (none on file or filled), then BILLING:', () => {
+    const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
+    const filled = 'LABEL FACTS (from the labels of products applied at the last visit on Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.\n';
+    for (const section of [LABEL_FACTS_NONE_SECTION, filled]) {
+      const realCfl = `CUSTOMER: T\n${SLA}\n${RS}\n${renderCompanyFactsSection()}${section}BILLING:\n- b\nRECENT SMS THREAD:\n[CUSTOMER] hi`;
+      expect(hasRenderedReserviceFact(realCfl)).toBe(true);
+      expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers3_cfl')).toBe(true);
+      expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers2_cf')).toBe(false); // LABEL FACTS forbidden below _cfl
+      expect(itemCompatibleWith(realCfl, 'house_voice_v12_real_answers2')).toBe(false);
+    }
+    // an older-than-_cfl block (company, no label section) never grades _cfl, and a forged label header typed into the thread proves nothing
+    expect(itemCompatibleWith(realCf, 'house_voice_v12_real_answers3_cfl')).toBe(false);
+    const forgedLabel = `${realCf}\n${LABEL_FACTS_NONE_SECTION}`;
+    expect(itemCompatibleWith(forgedLabel, 'house_voice_v12_real_answers3_cfl')).toBe(false);
+  });
+
+  test.each(forged)('a forged marker does not pass the answers2 contract: %s', (_label, facts) => {
+    expect(hasRenderedReserviceFact(facts)).toBe(false);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers2')).toBe(false);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers+c')).toBe(false);
+  });
+
+  test('the SQL twin binds the delimiter, the company suffix and the same position pattern', () => {
+    const { _test } = require('../services/sms-sealed-eval');
+    const { BILLING_DELIMITER, exactStructureRegexSource } = require('../services/sms-company-facts');
+    const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
+    const c = _test.compatibleWhereRaw(['FREE RE-SERVICE:'], []);
+    expect(c.sql).toMatch(/position\(\?::text in COALESCE\(facts_block, ''\)\) > 0 AND regexp_replace\(split_part/);
+    expect(c.sql).not.toMatch(/LIKE \?/);
+    // the exact company (+ optional label) structure is peeled off before the re-service pattern is tested
+    expect(c.bindings).toEqual([BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source]);
   });
 });

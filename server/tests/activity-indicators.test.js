@@ -4,10 +4,8 @@ const {
   SCHEMA_VERSION,
   SCORE_LEVEL_WORDS,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
   deriveActivityScore,
   validateTypedFindings,
-  validateNextStepChips,
   trendWordForScores,
   trendDirection,
   buildTypedReportSnapshot,
@@ -92,6 +90,39 @@ describe('deriveActivityScore', () => {
     expect(deriveActivityScore('wildlife_trapping', {})).toBeNull();
     expect(deriveActivityScore('cockroach', { activity_level: 'Bananas' })).toBeNull();
     expect(deriveActivityScore('mosquito_event', {})).toBeNull();
+  });
+
+  // Owner ruling 2026-09-26: a derive-mapped type's separate gauge is
+  // hidden from the completion panel — the score comes from the findings
+  // field alone. An empty findings value means the indicator is simply
+  // absent this visit, never an error (complete-scheduled-service.js and
+  // companion-completions.js both stop 422ing on this case).
+  test('a derive-mapped type with no findings value yet is absent, not an error', () => {
+    expect(deriveActivityScore('cockroach', {})).toBeNull();
+    expect(deriveActivityScore('flea', {})).toBeNull();
+    expect(deriveActivityScore('termite_bait_station', {})).toBeNull();
+  });
+});
+
+// Owner ruling 2026-09-26: the redundant activity gauge is hidden for every
+// indicator with a derive mapping — the findings field alone drives the
+// score. These pin the resulting contract at the module level (the client
+// and route mirrors are covered in SchedulePage and combined-completions
+// tests).
+describe('gauge/findings merge (owner ruling 2026-09-26)', () => {
+  test('every indicator with a derive mapping serves deriveField/deriveScores so the client can hide its gauge', () => {
+    const derivedTypes = Object.entries(ACTIVITY_INDICATORS).filter(([, cfg]) => cfg.derive);
+    expect(derivedTypes.length).toBeGreaterThan(0);
+    for (const [type, cfg] of derivedTypes) {
+      const schema = findingsSchemaForType(type);
+      expect(schema.activity.deriveField).toBe(cfg.derive.field);
+      expect(schema.activity.deriveScores).toEqual(cfg.derive.scores);
+    }
+    // Tech-set-only indicators serve no deriveField — the client keeps
+    // their gauge visible.
+    for (const [type] of Object.entries(ACTIVITY_INDICATORS).filter(([, c]) => !c.derive)) {
+      expect(findingsSchemaForType(type).activity.deriveField).toBeNull();
+    }
   });
 });
 
@@ -284,22 +315,17 @@ describe('validateTypedFindings', () => {
   });
 });
 
-describe('validateNextStepChips', () => {
-  test('accepts known chips, dedupes, rejects unknown and oversize', () => {
-    expect(validateNextStepChips(null)).toEqual({ ok: true, chips: [] });
-    expect(validateNextStepChips(['Monitor activity', 'Monitor activity']).chips).toEqual(['Monitor activity']);
-    expect(validateNextStepChips(['Definitely Not A Chip']).ok).toBe(false);
-    expect(validateNextStepChips(['Monitor activity', 'Sanitation recommended', 'Reduce moisture', 'Seal entry gaps', 'No action needed']).ok).toBe(false);
-  });
-
-  test('chips are scoped per type — lawn/mosquito copy cannot enter a cockroach snapshot', () => {
-    expect(validateNextStepChips(['Follow watering guidance'], 'cockroach').ok).toBe(false);
-    expect(validateNextStepChips(['Dump standing water weekly'], 'bed_bug').ok).toBe(false);
-    expect(validateNextStepChips(['Monitor activity'], 'cockroach').ok).toBe(true);
-    expect(validateNextStepChips(['14-day follow-up scheduled'], 'bed_bug').ok).toBe(true);
+// The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
+// Recommendations replaces it. The schema slice no longer serves the retired
+// picker fields, and a new snapshot never composes a next-step sentence.
+describe('Next steps chip picker retired 2026-09-27', () => {
+  test('the schema slice no longer serves the retired picker fields', () => {
     const schema = findingsSchemaForType('mosquito_event');
-    expect(schema.nextStepChips).toContain('Dump standing water weekly');
-    expect(schema.nextStepChips).not.toContain('Trap check scheduled');
+    expect(schema.nextStepChips).toBeUndefined();
+    expect(schema.nextStepRequired).toBeUndefined();
+    const trapping = findingsSchemaForType('rodent_trapping');
+    expect(trapping.nextStepChips).toBeUndefined();
+    expect(trapping.nextStepRequired).toBeUndefined();
   });
 });
 
@@ -327,7 +353,6 @@ describe('buildTypedReportSnapshot', () => {
         treatment_performed: 'Gel bait placements, IGR application',
         areas_inspected: 'Kitchen, both bathrooms',
       },
-      nextStepChips: ['Follow-up recommended'],
       serviceKey: 'cockroach_control',
       serviceLabel: 'Cockroach Control Service',
       visitSequence: 1,
@@ -358,7 +383,6 @@ describe('buildTypedReportSnapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'rodent_trapping',
       values: { species: 'Roof rat', traps_set: 'Reset 6 attic traps' },
-      nextStepChips: ['Trap check scheduled'],
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
       visitSequence: 3,
@@ -381,7 +405,6 @@ describe('buildTypedReportSnapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'rodent_trapping',
       values: { species: 'Roof rat', traps_set: 'Reset traps' },
-      nextStepChips: ['Trap check scheduled'],
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
       visitSequence: 2,
@@ -399,7 +422,6 @@ describe('buildTypedReportSnapshot', () => {
     const worsening = buildTypedReportSnapshot({
       projectType: 'rodent_trapping',
       values: { species: 'Roof rat' },
-      nextStepChips: [],
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
       visitSequence: 2,
@@ -420,7 +442,6 @@ describe('buildTypedReportSnapshot', () => {
         evidence_level: 'No active signs observed',
         treatment_method: 'Steam + chemical',
       },
-      nextStepChips: ['Continue monitoring'],
       serviceKey: 'bed_bug_treatment',
       serviceLabel: 'Bed Bug Treatment',
       visitSequence: 2,
@@ -446,7 +467,6 @@ describe('buildTypedReportSnapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'pest_inspection',
       values: { severity: 'None observed', areas_inspected: 'Kitchen, garage' },
-      nextStepChips: ['No action needed'],
       serviceKey: 'pest_inspection',
       serviceLabel: 'Pest Inspection',
       visitSequence: 1,
@@ -462,7 +482,6 @@ describe('buildTypedReportSnapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'one_time_pest_treatment',
       values: { target_pest: 'Paper wasps', activity_level: 'Moderate', treatment_performed: 'Removed two nests' },
-      nextStepChips: ['Monitor activity'],
       serviceKey: 'bee_wasp_removal',
       serviceLabel: 'Bee/Wasp Removal',
       visitSequence: 1,
@@ -481,7 +500,6 @@ describe('buildTypedReportSnapshot', () => {
         areas_inspected: '',
         harborage_locations: null,
       },
-      nextStepChips: [],
       serviceKey: 'cockroach_control',
       serviceLabel: 'Cockroach Control Service',
       visitSequence: 1,
@@ -599,7 +617,6 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values: V2_VALUES,
-      nextStepChips: ['Continue trapping', 'Await exclusion approval'],
       visitSequence: 2,
       activity: {
         indicatorKey: 'rodent_activity',
@@ -614,7 +631,9 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     expect(snapshot.todaysResult.body).toContain('checked 8 traps');
     expect(snapshot.todaysResult.body).toContain('removed 2 captures');
     expect(snapshot.todaysResult.body).toContain('refreshed the bait');
-    expect(snapshot.todaysResult.nextStep).toContain('Trapping will continue until activity is reduced.');
+    // Next-step chip picker retired (owner ruling 2026-09-27) — a new
+    // completion's todaysResult.nextStep is always null now.
+    expect(snapshot.todaysResult.nextStep).toBeNull();
 
     const exclusion = snapshot.findings.find((f) => f.fieldKey === 'exclusion_recommendation');
     expect(exclusion.customerValueLabel).toBe('Exclusion repairs are recommended to reduce rodent access once trapping activity stops.');
@@ -637,7 +656,6 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
       serviceKey: 'rodent_trapping_check',
       serviceLabel: 'Rodent Trapping',
       values: { species: 'Roof rat', traps_checked: '6', captures: '0' },
-      nextStepChips: ['Monitor after no activity'],
       visitSequence: 3,
       activity: {
         indicatorKey: 'rodent_activity',
@@ -659,12 +677,11 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     expect(findBannedCustomerCopy('Exclusion repairs are recommended to reduce rodent access.')).toEqual([]);
   });
 
-  test('schema slice carries sections and the required next step flag', () => {
+  test('schema slice carries sections (next-step picker fields retired 2026-09-27)', () => {
     // Unscoped slice = full registry (AI-draft labeling); a per-service-key
     // slice scopes the §3 combo modules — covered in rodent-family-typed.
     const schema = findingsSchemaForType('rodent_trapping');
-    expect(schema.nextStepRequired).toBe(true);
-    expect(nextStepRequiredForType('one_time_pest_treatment')).toBe(false);
+    expect(schema.nextStepRequired).toBeUndefined();
     // Simplified 2026-07-23: the base checklist is three sections; the §3
     // combo modules stay serviceKey-scoped.
     const sections = [...new Set(schema.fields.map((f) => f.section))];
@@ -679,8 +696,6 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     expect(plainSections).toEqual([
       'Evidence observed', 'Trap activity', 'Recommendations',
     ]);
-    expect(schema.nextStepChips).toContain('Continue trapping');
-    expect(schema.nextStepChips).toContain('Remove traps after inactivity');
     const chips = schema.fields.filter((f) => f.type === 'chips');
     expect(chips.length).toBeGreaterThanOrEqual(6);
     for (const field of chips) {

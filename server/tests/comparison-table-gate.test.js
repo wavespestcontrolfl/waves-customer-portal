@@ -159,8 +159,8 @@ describe('comparison-table-gate', () => {
       expect(attr.source).toMatch(/^https:\/\/www\.trugreen\.com\//);
       expect(attr.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
-    // Named in a table without sourced captions: routes to review with
-    // known-competitor findings, never the UNKNOWN_COMPETITOR P0 block.
+    // Named in a table: routes to review with known-competitor findings,
+    // never the UNKNOWN_COMPETITOR P0 block.
     const t = CATEGORY_TABLE.replace('National chain', 'TruGreen');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
@@ -168,13 +168,12 @@ describe('comparison-table-gate', () => {
 
   test('a citation URL containing a brand token is NOT a prose mention — anchor text still is (Codex r2 P1)', () => {
     // Required citation link whose DESTINATION contains "trugreen": with a
-    // table present, must not produce COMPETITOR_IN_PROSE or poison the
-    // unsourced-known set; with no table, must not produce IN_PROSE either.
+    // table present, must not produce COMPETITOR_IN_PROSE; with no table,
+    // must not produce IN_PROSE either.
     const citation = 'Per [the company\'s published plan page](https://www.trugreen.com/why-choose-trugreen/professional-lawn-care), plans are annual.';
     const withTable = { body: `# Guide\n\n${citation}\n\n${CATEGORY_TABLE}\n\nClosing prose.` };
     const r1 = gate.evaluate(withTable, { namedCompetitorEnabled: true });
     expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
-    expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
     const r2 = gate.evaluate({ body: `# Guide\n\n${citation}\n\nNo table here.` }, { namedCompetitorEnabled: true });
     expect(r2.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
     // Anchor TEXT naming the competitor is still a prose mention.
@@ -213,7 +212,6 @@ describe('comparison-table-gate', () => {
     const rClean = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
     expect(rClean.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
     expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
-    expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
     expect(rClean.pass).toBe(true);
     expect(rClean.requiresHumanReview).toBe(true);
   });
@@ -418,13 +416,6 @@ describe('comparison-table-gate', () => {
     expect(r.pass).toBe(true);
   });
 
-  test('an apostrophe inside a double-quoted caption does not truncate attribution detection', () => {
-    const caption = "Attributes as of June 2026, per each company's public website.";
-    const block = `<ComparisonTable columns={["A","Orkin"]} rows={[{ label: "Reach", values: ["x","National"] }]} caption="${caption}" />`;
-    expect(gate.extractCaption(block)).toBe(caption);
-    expect(gate.hasAttribution(gate.extractCaption(block))).toBe(true);
-  });
-
   test('"#1" ranking framing is caught', () => {
     const t = CATEGORY_TABLE.replace('Local SWFL company', '#1 in Venice');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
@@ -462,10 +453,26 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.severity === 'P0')).toBe(false);
   });
 
-  test('a known competitor with feature ENABLED but UNSOURCED caption is flagged (P1, routes to review)', () => {
-    const r = gate.evaluate(wrap(NAMED_TABLE('A quick look at your options.')), { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && f.severity === 'P1')).toBe(true);
+  test('a named-competitor table needs no "as of" date or source caption (owner ruling 2026-09-28)', () => {
+    // Competitor facts are stated plainly: an undated, unsourced caption, or
+    // no caption at all, passes, and the draft still routes as a
+    // named-competitor draft.
+    const undated = NAMED_TABLE('A quick look at your options.');
+    const noCaption = undated.replace(/\n\s*caption="[^"]*"/, '');
+    expect(noCaption).not.toContain('caption=');
+    for (const table of [undated, noCaption]) {
+      const r = gate.evaluate(wrap(table), { namedCompetitorEnabled: true });
+      expect(r.findings).toHaveLength(0);
+      expect(r.pass).toBe(true);
+      expect(r.requiresHumanReview).toBe(true);
+    }
+    // In a multi-table guide, the named table needs no caption of its own either.
+    const sourcedCategory = CATEGORY_TABLE.replace(
+      'Trade-offs to weigh when choosing pest control in Venice.',
+      'Trade-offs as of June 2026, per public sources.');
+    const multi = gate.evaluate({ body: `${sourcedCategory}\n\n${noCaption}` }, { namedCompetitorEnabled: true });
+    expect(multi.findings).toHaveLength(0);
+    expect(multi.pass).toBe(true);
   });
 
   test('finding C: a known competitor with feature ENABLED + sourced caption PASSES but requiresHumanReview', () => {
@@ -479,19 +486,6 @@ describe('comparison-table-gate', () => {
     const r = gate.evaluate(wrap(CATEGORY_TABLE), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(false);
-  });
-
-  test('extractCaption handles caption="..." and caption={\'...\'}', () => {
-    expect(gate.extractCaption('<ComparisonTable caption="hello" />')).toBe('hello');
-    expect(gate.extractCaption("<ComparisonTable caption={'world'} />")).toBe('world');
-  });
-
-  test('hasAttribution requires as-of + date + source together', () => {
-    expect(gate.hasAttribution('Attributes as of June 2026, per company websites.')).toBe(true);
-    expect(gate.hasAttribution('As of 2026, source: orkin.com')).toBe(true);
-    expect(gate.hasAttribution('As of last week.')).toBe(false); // no date, no source
-    expect(gate.hasAttribution('Per their website.')).toBe(false); // no as-of/date
-    expect(gate.hasAttribution('')).toBe(false);
   });
 
   // ── Round-3 findings ──
@@ -509,16 +503,6 @@ describe('comparison-table-gate', () => {
       .some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
     const prose = gate.evaluate({ body: `The worst infestation we saw was termites.\n\n${CATEGORY_TABLE}` }, {});
     expect(prose.pass).toBe(true);
-  });
-
-  test('R3-3: in a multi-table guide, attribution must be on the table that names the competitor', () => {
-    const sourcedCategory = CATEGORY_TABLE.replace(
-      'Trade-offs to weigh when choosing pest control in Venice.',
-      'Trade-offs as of June 2026, per public sources.');
-    const unsourcedNamed = NAMED_TABLE('A quick look at your options.');
-    const r = gate.evaluate({ body: `${sourcedCategory}\n\n${unsourcedNamed}` }, { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && /Orkin/.test(f.message))).toBe(true);
   });
 
   test('R3-4: bare "best/top <service>" rankings are caught; generic "best pest control method" is not', () => {
@@ -561,14 +545,6 @@ describe('comparison-table-gate', () => {
       caption="Attributes as of June 2026, per each company public website." />`;
     const r = gate.evaluate({ body: t }, { namedCompetitorEnabled: true });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNSUPPORTED_COMPETITOR_FACT')).toBe(true);
-  });
-
-  test('R4-3: a later UNsourced table naming the same competitor is flagged even if an earlier one is sourced', () => {
-    const sourced = NAMED_TABLE('Attributes as of June 2026, per each company public website.');
-    const unsourced = NAMED_TABLE('A second quick look.');
-    const r = gate.evaluate({ body: `${sourced}\n\n${unsourced}` }, { namedCompetitorEnabled: true });
-    expect(r.pass).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED' && /Orkin/.test(f.message))).toBe(true);
   });
 
   test('R4-4: an uncurated fact in the ROW LABEL with an affirmative cell is rejected', () => {
@@ -825,11 +801,6 @@ describe('comparison-table-gate', () => {
   // truncate at the inner quote) and name-detection must read it as one name
   // rather than the fragment "Need Pest Control".
 
-  test('escaped-quote parsing: a JSX-escaped quote in a caption is read in full, not truncated', () => {
-    const block = `<ComparisonTable caption="All \\"U\\" Need is national; as of June 2026 per alluneedpest.com." />`;
-    expect(gate.extractCaption(block)).toBe('All "U" Need is national; as of June 2026 per alluneedpest.com.');
-  });
-
   test('escaped-quote parsing: an escaped apostrophe in a single-quoted row label is read in full', () => {
     const block = `rows={[{ label: 'Keller\\'s Pest Control', values: ["Yes","No"] }]}`;
     expect(gate.extractRows(block)[0]).toEqual({ label: "Keller's Pest Control", values: ['Yes', 'No'] });
@@ -973,40 +944,43 @@ describe('table-less drafts: directed-scan tightening (Codex round 2)', () => {
 });
 
 describe('table-less drafts: operator-authorized competitor naming (Codex round 3)', () => {
-  // The Aptive intercept brief's own text — the operator personally named
+  // Hawx stands in for a DETECTION-ONLY brand (no curated record); these
+  // cases used Aptive until the owner added Aptive to the curated list
+  // (2026-09-28).
+  // The Hawx intercept brief's own text — the operator personally named
   // the competitor, so the draft routes to the APPROVABLE named-competitor
   // review path instead of a hard UNKNOWN_COMPETITOR block.
   const BRIEF_TEXT = [
-    "Aptive's Cancellation Fee, Explained",
-    'aptive cancellation fee',
-    "What Aptive's contract actually costs and how the cancellation fee works",
-    'how to cancel aptive',
+    "Hawx's Cancellation Fee, Explained",
+    'hawx cancellation fee',
+    "What Hawx's contract actually costs and how the cancellation fee works",
+    'how to cancel hawx',
   ].join('\n');
 
   test('an operator-named recognized competitor passes with requiresHumanReview', () => {
     const r = gate.evaluate({
-      body: 'Aptive charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
-      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+      body: 'Hawx charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
+      frontmatter: { title: "Hawx's Cancellation Fee, Explained" },
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(true);
     expect(r.findings).toHaveLength(0);
   });
   test('the same draft with NO operator brief text stays hard-blocked (mined lane unchanged)', () => {
-    const r = gate.evaluate({ body: 'Aptive charges a $199 early-cancel fee per its contract terms.' }, {});
+    const r = gate.evaluate({ body: 'Hawx charges a $199 early-cancel fee per its contract terms.' }, {});
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
   });
   test('a competitor the operator did NOT name still flags', () => {
     const r = gate.evaluate({
-      body: 'Aptive charges a cancellation fee, and Terminix has similar terms in its contracts.',
+      body: 'Hawx charges a cancellation fee, and Terminix has similar terms in its contracts.',
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
   test('disparaging the operator-authorized name still blocks (full curated strictness)', () => {
     const r = gate.evaluate({
-      body: 'Aptive is dishonest and scams customers out of hundreds every year.',
+      body: 'Hawx is dishonest and scams customers out of hundreds every year.',
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
@@ -1029,12 +1003,12 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.findings).toHaveLength(0);
   });
   test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
-    // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
+    // "Hawx" (brief) and "Hawx Services" (draft) canonicalize to
     // DIFFERENT unknown names — exact-string matching sent the operator's
-    // own Aptive draft to the hard UNKNOWN_COMPETITOR block.
+    // own Hawx draft to the hard UNKNOWN_COMPETITOR block.
     const r = gate.evaluate({
-      body: 'Aptive Environmental charges a $199 early-cancel fee per its published contract.',
-    }, { operatorBriefText: 'aptive cancellation fee explained\nhow to cancel aptive' });
+      body: 'Hawx Services charges a $199 early-cancel fee per its published contract.',
+    }, { operatorBriefText: 'hawx cancellation fee explained\nhow to cancel hawx' });
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(true);
     expect(r.findings).toHaveLength(0);
@@ -2729,9 +2703,9 @@ describe('operator-authorized prose mentions on table-backed drafts', () => {
     const r = gate.evaluate({
       body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
     }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
-    // TruGreen named in a table whose cells state non-curated facts with no
-    // sourced caption → the known-competitor findings still fire;
-    // authorization changed nothing about cell validation.
+    // TruGreen named in a table whose cells state non-curated facts → the
+    // known-competitor findings still fire; authorization changed nothing
+    // about cell validation.
     expect(r.pass).toBe(false);
   });
 
@@ -2745,9 +2719,9 @@ describe('operator-authorized prose mentions on table-backed drafts', () => {
 
 describe('operator authorization: detection-only unknowns + feature-flag exemption on table drafts (Codex r3 on #3256)', () => {
   const B3_BRIEF = [
-    "Aptive's Cancellation Fee, Explained",
-    'aptive cancellation fee',
-    "What Aptive's contract actually costs, with a trade-off comparison table",
+    "Hawx's Cancellation Fee, Explained",
+    'hawx cancellation fee',
+    "What Hawx's contract actually costs, with a trade-off comparison table",
   ].join('\n');
   const NEUTRAL_TABLE = `<ComparisonTable
   columns={["What to weigh","National chain","Local SWFL company","DIY"]}
@@ -2759,8 +2733,8 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
 
   test('detection-only operator-named competitor in prose + table → review, no UNKNOWN_COMPETITOR', () => {
     const r = gate.evaluate({
-      body: `# Guide\n\nAptive contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
-      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+      body: `# Guide\n\nHawx contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: "Hawx's Cancellation Fee, Explained" },
     }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
     expect(r.pass).toBe(true);
@@ -2768,7 +2742,7 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
   });
 
   test('the same detection-only name INSIDE a table cell stays fail-closed regardless of authorization', () => {
-    const t = NEUTRAL_TABLE.replace('National chain', 'Aptive');
+    const t = NEUTRAL_TABLE.replace('National chain', 'Hawx');
     const r = gate.evaluate({
       body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
     }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
@@ -2827,5 +2801,111 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
     expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(true);
+  });
+});
+
+// Owner rulings 2026-09-27 (D2) + 2026-09-28: the verdict carries every
+// competitor it detected, and namedCompetitorListVerdict holds unattended
+// blog publishing to the owner list.
+describe('owner competitor list', () => {
+  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner, Aptive, Truly Nolen and Hughes Exterminators alternatives' };
+  // The runner stores a successful whole-draft extraction on the verdict.
+  const ext = (r, companies = []) => ({ ...r, companyExtraction: { ok: true, key: 'k', companies } });
+
+  test('namedCompetitors lists every detected name; the verdict clears only the owner list', () => {
+    const approved = gate.evaluate({ body: 'Orkin and Massey both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
+    expect(gate.namedCompetitorListVerdict(ext(approved))).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
+
+    // Hughes is curated but NOT on the owner list.
+    const offList = gate.evaluate({ body: 'Orkin and Hughes Exterminators both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
+
+    // Owner ruling 2026-09-28 (~07:05Z): Aptive and Truly Nolen joined the list.
+    for (const [body, name] of [
+      ['Aptive offers recurring residential plans.', 'Aptive Environmental'],
+      ['Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+    ]) {
+      const r = gate.evaluate({ body, title: 'x' }, OPTS);
+      expect(r.namedCompetitors).toEqual([name]);
+      expect(gate.namedCompetitorListVerdict(ext(r))).toEqual({ ok: true, approved: [name] });
+    }
+    // Alias-only disparagement of an approved name still blocks.
+    expect(gate.evaluate({ body: 'Aptive is dishonest and scams customers.', title: 'x' }, OPTS).findings
+      .some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+
+    // A name only a link destination carries still counts, and the bare
+    // HomeTeam / Turner aliases match lowercase URL slugs (Codex r2 P1) —
+    // while prose casing stays case-sensitive.
+    for (const [body, name] of [
+      ['See [the published terms](https://example.com/providers/hometeam).', 'HomeTeam Pest Defense'],
+      ['See [their terms](https://example.com/pest/turner-plan-terms).', 'Turner Pest Control'],
+    ]) {
+      const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true });
+      expect(r).toMatchObject({ pass: true, requiresHumanReview: true, namedCompetitors: [name] });
+    }
+    expect(gate.evaluate({ body: 'Cheer the home team; hometeam spirit; a pancake turner.', title: 'x' }, {}).namedCompetitors).toEqual([]);
+    // …but only in a pest / provider context URL: a surname or common noun
+    // in an unrelated link is not Turner or HomeTeam (Codex r8 on #5146).
+    for (const [url, names] of [
+      ['https://www.turnerpest.com/plans', ['Turner Pest Control']],
+      ['https://example.com/turnerpest/', ['Turner Pest Control']],
+      ['https://example.com/wiki/Tina_Turner', []],
+      ['https://example.com/tools/compost-turner', []],
+      ['https://example.com/turner-field', []],
+      ['https://example.com/sports/hometeam-advantage', []],
+      ['https://www.goaptive.com/terms', ['Aptive Environmental']],
+      // Declared official hosts resolve by host, whatever the path.
+      ['https://goaptive.com/', ['Aptive Environmental']],
+      ['https://aptivepestcontrol.com/pest-control/', ['Aptive Environmental']],
+      ['https://aptive.com/solutions', []],
+    ]) {
+      expect(gate.evaluate({ body: `See [this](${url}).`, title: 'x' }, { namedCompetitorEnabled: true }).namedCompetitors).toEqual(names);
+    }
+
+    // The owner's short "Turner" is recognized (Codex r1 P1 on #5146).
+    const turner = gate.evaluate({ body: 'Turner does not offer a termite bond in every county.', title: 'x' }, OPTS);
+    expect(turner.namedCompetitors).toEqual(['Turner Pest Control']);
+    expect(gate.namedCompetitorListVerdict(ext(turner))).toEqual({ ok: true, approved: ['Turner Pest Control'] });
+
+    const linked = gate.evaluate({ body: 'Compare plans on [their site](https://www.trulynolen.com/plans).', title: 'x' }, OPTS);
+    expect(linked.namedCompetitors).toContain('Truly Nolen');
+  });
+
+  // Uncurated business names: high-recall candidates here, semantic
+  // confirmation in business-name-confirmer.js (Codex r2 on #5146).
+  test('the whole-draft company extraction joins the names; a missing or failed extraction fails closed', () => {
+    const r = gate.evaluate({ body: 'Orkin offers recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict({ ...r, companyExtraction: undefined })).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict({ ...r, companyExtraction: { ok: false, reason: 'timeout' } })).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Bug Out']))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toEqual({ ok: true, approved: ['Orkin'] });
+  });
+
+  test('table columns add no heuristic names: the whole-draft company extraction judges a compared retailer or category (Codex r10)', () => {
+    const T = (cols) => `Intro.\n\n<ComparisonTable columns={${JSON.stringify(cols)}} rows={[{ label: "Recurring plans", values: ["Yes","Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.`;
+    // A Title-Cased category is not a provider in any casing ("Local SWFL
+    // Company" kept reading as one under the old column-casing heuristic).
+    for (const cols of [['What to weigh', 'Orkin', 'Local SWFL Company', 'Waves'], ['What to weigh', 'Orkin (national)', 'Local SWFL company', 'Waves'], ['What to weigh', 'Orkin', 'Gulf Coast Company', 'Waves']]) {
+      expect(gate.evaluate({ body: T(cols), title: 'x' }, OPTS).namedCompetitors).toEqual(['Orkin']);
+    }
+    expect(gate.evaluate({ body: T(['What to weigh', 'National chain', 'Local SWFL company', 'DIY']), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+    // A compared retailer is the extraction's call; the verdict holds it to the owner list.
+    const r = gate.evaluate({ body: T(['What to weigh', 'Orkin', 'Home Depot', 'Waves']), title: 'x' }, OPTS);
+    expect(r.namedCompetitors).toEqual(['Orkin']);
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin', 'Home Depot']))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Home Depot'] });
+  });
+
+  test('a table draft records a competitor it names only through a link destination', () => {
+    const body = 'Intro. See [their plans](https://prodigypest.com/plans).\n\n<ComparisonTable columns={["What to weigh","Orkin","Waves"]} rows={[{ label: "Recurring plans", values: ["Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.';
+    const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true, operatorBriefText: 'Orkin and Prodigy Pest alternatives' });
+    expect(r.namedCompetitors).toEqual(['Orkin', 'Prodigy Pest Solutions']);
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toMatchObject({ ok: false, offList: ['Prodigy Pest Solutions'] });
+  });
+
+  test('a verdict without recorded names fails closed', () => {
+    expect(gate.namedCompetitorListVerdict({ pass: true, findings: [], requiresHumanReview: true }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_off_list' });
+    expect(gate.namedCompetitorListVerdict(null)).toMatchObject({ ok: false });
   });
 });

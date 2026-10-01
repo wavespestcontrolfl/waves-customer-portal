@@ -51,6 +51,7 @@ import api from '../../utils/api';
 import { cardBrandLabel } from '../../lib/cardBrand';
 import { etDateString, addETDays } from '../../lib/timezone';
 import { getStripe } from '../../lib/stripeLoader';
+import { microdepositSavedPhrases } from '../../lib/microdeposit';
 import {
   buildSetupIntentReturnUrl,
   clearReturnedSetupIntent,
@@ -172,6 +173,7 @@ export default function AutopayCard({
   const [achOffered, setAchOffered] = useState(false);
   const [bankPending, setBankPending] = useState(false);
   const [bankVerifyUrl, setBankVerifyUrl] = useState('');
+  const [bankMicrodepositType, setBankMicrodepositType] = useState(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -442,6 +444,7 @@ export default function AutopayCard({
       if (awaitingMicrodeposits && setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
         setBankVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
+        setBankMicrodepositType(setupIntent?.next_action?.verify_with_microdeposits?.microdeposit_type || null);
         resetAddCard();
         setModal(null);
         setBankPending(true);
@@ -549,14 +552,14 @@ export default function AutopayCard({
 
       {!modal && bankPending && (
         <div style={{ padding: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: PORTAL_BILLING.body, marginBottom: 10 }}>
-          Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and Auto Pay can use it.
+          Bank account saved. Stripe will send {microdepositSavedPhrases(bankMicrodepositType).deposits} in 1–2 business days — once you {microdepositSavedPhrases(bankMicrodepositType).confirmStep}, the account is verified and Auto Pay can use it.
           {bankVerifyUrl && (
             <>
               {' '}
               <a href={bankVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: PORTAL_BILLING.body, fontWeight: 700 }}>
-                Confirm the deposits here
+                {microdepositSavedPhrases(bankMicrodepositType).linkLabel}
               </a>
-              {' '}once they arrive.
+              {' '}{microdepositSavedPhrases(bankMicrodepositType).arrival}.
             </>
           )}
         </div>

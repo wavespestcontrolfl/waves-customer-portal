@@ -35,11 +35,13 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { isTrackTokenLive } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
+const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
 const {
   calculateBoundedTrackingEta,
   finiteNumber,
+  techMappingCutoff,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
@@ -47,6 +49,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-add
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
+const { customerTrackState } = require('../services/track-transitions');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -150,6 +153,8 @@ async function buildApproxVehicle(row) {
     const pos = await resolveFreshTechPosition({
       techId: row.technician_id,
       allowBouncieFallback: false,
+      // Same remap cutoff as the precise feed (round-37 P2).
+      cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'track-public-approx',
     });
     if (!pos) return null;
@@ -174,7 +179,10 @@ async function buildVehicle(service) {
 
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
-    bouncieImei: service.tech_bouncie_imei,
+    // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
+    // reported before the technician's tracker mapping was last edited may be the
+    // OLD vehicle's, so the text and the tracking page never show different vehicles.
+    cachedNotBefore: techMappingCutoff(service.tech_mapping_changed_at),
     logPrefix: 'track-public',
   });
   if (!position) return null;
@@ -438,7 +446,7 @@ router.get('/:token', async (req, res, next) => {
         db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
         db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
-        't.bouncie_imei as tech_bouncie_imei',
+        't.bouncie_imei_changed_at as tech_mapping_changed_at',
         't.photo_url as tech_photo_url',
         't.photo_s3_key as tech_photo_s3_key',
         // Customer-friendly description from the service library. Used
@@ -472,10 +480,7 @@ router.get('/:token', async (req, res, next) => {
     // stale track_state='en_route' kept streaming live tech GPS until
     // token expiry for a visit that was already cancelled. Everything
     // non-terminal maps 1:1 from the canonical track_state machine.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
 
     // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
     // other customers' info. Scheduled state only (the en-route card's
@@ -623,10 +628,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
     }
     // Same terminal-status precedence as the GET: only the scheduled
     // customer state carries a planned count.
-    let customerState = row.track_state;
-    if (row.status === 'no_show') customerState = 'no_show';
-    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
-    else if (row.status === 'completed') customerState = 'complete';
+    const customerState = customerTrackState(row);
     const stops = customerState === 'scheduled'
       ? await computeStopsAhead(db, row.id)
       : null;
@@ -641,10 +643,45 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
   }
 });
 
+// Customer-page-view write companion. The GET above is contractually
+// read-only (it is also the 30s en-route poll), so the page opens ONE view by
+// POSTing here once, on its first successful load, never on polls. Same token
+// resolution and expiry fence as the GET (unknown / malformed / expired = the
+// same generic 404, no write), same router-level rate limit, body ignored.
+// Answers 204 immediately; the insert is fire-and-forget (bots, staff
+// browsers and repeat opens inside the dedupe window are skipped by the
+// recorder).
+router.post('/:token/view', async (req, res) => {
+  res.set(PRIVACY_HEADERS);
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const row = await db('scheduled_services as s')
+      .where('s.track_view_token', req.params.token)
+      .first('s.id', 's.customer_id', 's.track_token_expires_at');
+    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    void recordPageView({
+      req, page: 'track', customerId: row.customer_id, subjectType: 'scheduled_service', subjectId: row.id,
+    });
+    return res.status(204).end();
+  } catch (err) {
+    // Never forward the raw error: Knex text can carry the bound
+    // track_view_token and the global handler logs err.message/stack.
+    // Code-only log; the beacon is best-effort telemetry, so answer 204.
+    logViewFailure('lookup', 'track', 'scheduled_service', err);
+    return res.status(204).end();
+  }
+});
+
 router._test = {
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
   buildSummary,
+  buildVehicle,
+  buildApproxVehicle,
 };
 
 module.exports = router;

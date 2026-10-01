@@ -94,6 +94,26 @@ describe("Reports Tier 2 token pass", () => {
     expect(within(projectRow).getByText("Synthetic inspection")).toHaveClass("text-14");
   });
 
+  it("previews Poison Control and the applicator ID exactly as the sent report prints them", async () => {
+    const saved = { ...project };
+    Object.assign(project, { poison_control: true, applicator_name: "Alex", applicator_fdacs_id: "JE000001" });
+    try {
+      mount();
+      const block = await screen.findByTestId("preview-poison-control");
+      expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+      expect(within(block).getByTestId("preview-applicator-id")).toHaveTextContent("Applicator: Alex · FDACS ID card #JE000001");
+    } finally {
+      for (const key of Object.keys(project)) delete project[key];
+      Object.assign(project, saved);
+    }
+  });
+
+  it("previews no Poison Control block without the server verdict", async () => {
+    mount();
+    await screen.findByText("Customer report preview");
+    expect(screen.queryByTestId("preview-poison-control")).toBeNull();
+  });
+
   it("preserves filter queries and the create-report action", async () => {
     mount("/admin/projects");
     await screen.findByText("Synthetic customer");

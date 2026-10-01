@@ -9,10 +9,12 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import ReportViewPage from '../pages/ReportViewPage';
+import WavesShell from '../components/brand/WavesShell';
 import legacyLawnReport from '../pages/__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from '../pages/__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from '../pages/__fixtures__/mosquito-report-v2.json';
 import pestReportV2 from '../pages/__fixtures__/pest-report-v2.json';
+import pestReportV2Expectations from '../pages/__fixtures__/pest-report-v2-expectations.json';
 import treeShrubReportV2 from '../pages/__fixtures__/tree-shrub-report-v2.json';
 
 // Client-built coverage: strip the API serviceCoverage so the page's own
@@ -68,6 +70,10 @@ const SCENARIOS = {
   'lawn-v2': lawnReportV2,
   'mosquito-v2': mosquitoReportV2,
   'pest-v2': pestReportV2,
+  // Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —
+  // same pest-v2 fixture plus pestReportV2.expectations so the owner can
+  // eyeball the three new cards without flipping the gate in a real env.
+  'pest-v2-expectations': pestReportV2Expectations,
   'tree-shrub-v2': treeShrubReportV2,
 };
 const params = new URLSearchParams(window.location.search);
@@ -141,7 +147,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <>
     <MemoryRouter initialEntries={['/report/preview-token-000']}>
       <Routes>
-        <Route path="/report/:token" element={<ReportViewPage />} />
+        <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
       </Routes>
     </MemoryRouter>
     <ScenarioBar />

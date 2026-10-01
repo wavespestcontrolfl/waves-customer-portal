@@ -9,6 +9,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import SchedulePicker from '../components/booking/SchedulePicker';
+import CantFindTimeBlock from '../components/booking/CantFindTimeBlock';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
@@ -24,6 +25,16 @@ const phoneDigits = (raw) => {
   const d = String(raw || '').replace(/\D/g, '');
   return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
 };
+
+function bookingOfferAddress(address = {}) {
+  return Object.fromEntries(Object.entries({
+    address: address.line1 || address.formatted,
+    city: address.city,
+    state: address.state,
+    zip: address.zip,
+    unit: address.line2,
+  }).filter(([, value]) => value));
+}
 
 const SERVICES = [
   { id: 'pest_control', label: 'Pest Control', duration: 60, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
@@ -159,6 +170,12 @@ export default function PublicBookingPage() {
   // client-side — the server enforces the gate at /confirm regardless, and
   // its refusal carries the quote link, so nothing insecure leaks through.
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
+  // Bare signed-in entries build offers under the same server-proven account
+  // that /confirm uses. Estimate/accept links carry their own identity and
+  // must not inherit an unrelated ambient portal session.
+  const fetchBookingOffer = useCallback((url, options) => (
+    isAuthenticated && !tokenEntry ? api.fetchRaw(url, options) : fetch(url, options)
+  ), [isAuthenticated, tokenEntry]);
   const [customersOnly, setCustomersOnly] = useState(null);
   // GATE_VAN_SCENE via /booking/config — the confirmation step's van scene.
   const [vanScene, setVanScene] = useState(false);
@@ -166,6 +183,14 @@ export default function PublicBookingPage() {
   // renders only when /booking/config affirms; the server also refuses
   // composite service keys while the gate is off.
   const [multiServiceEnabled, setMultiServiceEnabled] = useState(false);
+  // "Can't find a time?" block + preferred-time form (GATE_BOOK_PREFERRED_TIME)
+  // — fail-closed: renders only when /booking/config affirms.
+  const [preferredTimeEnabled, setPreferredTimeEnabled] = useState(false);
+  // True once a preferred-time request was filed: stop staging the
+  // abandoned-booking capture for this visit (the office is following up).
+  const preferredSubmittedRef = useRef(false);
+  // The base availability fetch came back with no times at all.
+  const [noTimesOffered, setNoTimesOffered] = useState(false);
   const [gatePhone, setGatePhone] = useState('');
   const [gateCode, setGateCode] = useState('');
   const [gateStep, setGateStep] = useState('phone');
@@ -185,6 +210,7 @@ export default function PublicBookingPage() {
         if (cancelled) return;
         setCustomersOnly(cfg?.customers_only === true);
         setVanScene(cfg?.van_scene === true);
+        setPreferredTimeEnabled(cfg?.preferred_time === true);
         const multiOn = cfg?.multi_service === true;
         setMultiServiceEnabled(multiOn);
         // Kill-switch fail-closed for deep/recovery links: a composite
@@ -355,21 +381,28 @@ export default function PublicBookingPage() {
     const seq = addressLookupSeqRef.current;
     setLoading(true);
     setError('');
+    setNoTimesOffered(false);
     try {
-      const fullAddress = address.formatted || address.line1;
+      // The unit has one authority: the dedicated `unit` parameter. Google
+      // formatted text can retain the originally selected subpremise after
+      // the visitor edits the unit box, which would otherwise submit Apt A
+      // inline beside `unit=Apt B` and make the offer identity contradictory.
+      const offerAddress = bookingOfferAddress(address);
+      const fullAddress = offerAddress.address;
       const params = new URLSearchParams({
-        address: fullAddress,
+        ...offerAddress,
         service_type: service.id,
         duration_minutes: String(service.duration),
         // Expand each open day into its full block of 1-hour windows so the
         // day → time picker can show real per-day openings, not a single slot.
         expand: 'open',
       });
+      if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) {
         params.set('lat', String(coords.lat));
         params.set('lng', String(coords.lng));
       }
-      const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      const res = await fetchBookingOffer(`${API_BASE}/booking/availability?${params}`);
       // Address edited mid-flight: don't apply this address's slots, capture
       // token, geocode echo, error, OR loading state onto the new one — the
       // re-triggered load owns those now. Checked before the ok/throw branch
@@ -404,6 +437,7 @@ export default function PublicBookingPage() {
       }
       if ((!data.slots || data.slots.length === 0) && (!data.days || data.days.length === 0)) {
         setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
+        setNoTimesOffered(true);
       }
     } catch (err) {
       // A stale request's failure must not clear the current request's slots
@@ -416,7 +450,7 @@ export default function PublicBookingPage() {
       // Only the current request owns the loading flag.
       if (seq === addressLookupSeqRef.current) setLoading(false);
     }
-  }, [service, address, coords]);
+  }, [service, address, coords, fetchBookingOffer]);
 
   const applyCustomer = useCallback((customer) => {
     setExistingCustomerId(customer.id);
@@ -527,6 +561,7 @@ export default function PublicBookingPage() {
   const captureBookingIntent = () => {
     const digits = phoneDigits(contact.phone);
     if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current) return;
+    if (preferredSubmittedRef.current) return;
     try {
       fetch(`${API_BASE}/booking/capture-intent`, {
         method: 'POST',
@@ -764,7 +799,8 @@ export default function PublicBookingPage() {
   const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
 
   const slotSearchBody = () => ({
-    address: address.formatted || address.line1,
+    ...bookingOfferAddress(address),
+    ...(estimateIdParam ? { estimate_id: estimateIdParam } : {}),
     service_type: service.id,
     duration_minutes: service.duration,
     ...(coords?.lat && coords?.lng ? { lat: coords.lat, lng: coords.lng } : {}),
@@ -774,7 +810,7 @@ export default function PublicBookingPage() {
     const seq = addressLookupSeqRef.current;
     setAiSearching(true);
     try {
-      const res = await fetch(`${API_BASE}/booking/find-slots`, {
+      const res = await fetchBookingOffer(`${API_BASE}/booking/find-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, ...slotSearchBody() }),
@@ -816,15 +852,16 @@ export default function PublicBookingPage() {
     setBrowseLoading(true);
     try {
       const params = new URLSearchParams({
-        address: address.formatted || address.line1,
+        ...bookingOfferAddress(address),
         service_type: service.id,
         duration_minutes: String(service.duration),
         expand: 'open',
         date_from: date,
         date_to: date,
       });
+      if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
-      const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      const res = await fetchBookingOffer(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (!isCurrent()) return;
@@ -1098,30 +1135,19 @@ export default function PublicBookingPage() {
                 />
               </div>
               <div>
-                {/* Availability/slots key off the street line, so typing here
-                    must not reset them (plain setAddress, not updateAddress).
-                    The address-matched account AND any phone-looked-up contact
-                    MUST reset though — Apt B is not Apt A's household, and the
-                    prior household's name/email must not prefill the contact
-                    step. The match re-checks on blur with the unit included. */}
+                {/* Unit is part of the offer identity: Apt B must never keep
+                    Apt A's slots, coordinates, account match, or contact.
+                    The match re-checks on blur with the unit included. */}
                 <input
                   type="text"
                   aria-label="Apartment or unit (optional)"
                   value={address.line2}
                   onChange={(e) => {
                     const v = e.target.value;
-                    setAddress(a => ({ ...a, line2: v }));
-                    // Invalidate any in-flight address/phone lookup: a late
-                    // response for Apt A must not re-bind onto Apt B (and this
-                    // handler just cleared the matched account + contact).
-                    addressLookupSeqRef.current += 1;
+                    updateAddress(a => ({ ...a, line2: v }));
+                    // Invalidate any in-flight phone lookup too: a late
+                    // response for Apt A must not re-bind onto Apt B.
                     phoneLookupSeqRef.current += 1;
-                    // A pending browse's finally is now short-circuited by the
-                    // seq bump — clear its loading flag so it can't stick.
-                    setBrowseLoading(false);
-                    setExistingCustomerId(null);
-                    setAddressMayMatchCustomer(false);
-                    setContact({ firstName: '', lastName: '', phone: '', email: '' });
                   }}
                   onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"
@@ -1208,6 +1234,20 @@ export default function PublicBookingPage() {
                     Show all open times
                   </button>
                 ) : null}
+                {preferredTimeEnabled && (
+                  <CantFindTimeBlock
+                    zeroTimes={noTimesOffered}
+                    contact={contact}
+                    address={address}
+                    serviceId={service.id}
+                    serviceLabel={quotedServiceLabel || service.label}
+                    getCaptureToken={() => captureTokenRef.current}
+                    getAttribution={captureBookingAttribution}
+                    sessionId={sessionIdRef.current}
+                    apiBase={API_BASE}
+                    onSubmitted={() => { preferredSubmittedRef.current = true; }}
+                  />
+                )}
               </>
             )}
 

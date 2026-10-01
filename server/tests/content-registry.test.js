@@ -703,12 +703,107 @@ describe('content-registry reconciliation', () => {
         http_status: '301',
         live_status: 'redirected',
         sitemap_present: true,
+        live_status_checked_at: new Date('2026-09-26T12:00:00Z'),
       }],
     }).rows[0];
 
     expect(row.http_status).toBe('unknown');
     expect(row.live_status).toBe('unknown');
     expect(row.sitemap_present).toBeNull();
+    expect(row.live_status_checked_at).toBeNull();
+  });
+
+  test('resets live truth when only the effective checked host changes', () => {
+    const row = registry.preserveLiveMirrorFields(
+      {
+        astro_source_path: 'src/content/blog/post.md',
+        live_url: '/termite/topic/',
+        canonical_url: 'https://www.sarasotaflpestcontrol.com/termite/topic/',
+      },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          live_url: '/termite/topic/',
+          canonical_url: 'https://www.wavespestcontrol.com/termite/topic/',
+          live_status: 'live',
+          live_status_checked_at: new Date('2026-09-27T03:00:00Z'),
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+
+    expect(row.live_status).toBeUndefined();
+    expect(row.live_status_checked_at).toBeNull();
+  });
+
+  test('rejects off-fleet live targets and invalidates truth when Astro source changes at the same URL', () => {
+    expect(registry.registryLiveTargetUrl({ live_url: 'http://127.0.0.1/internal/' })).toBe('');
+    expect(registry.registryLiveTargetUrl({ live_url: 'https://www.wavespestcontrol.com:8443/internal/' })).toBe('');
+    expect(registry.registryLiveTargetUrl({
+      live_url: '/post/',
+      canonical_url: 'https://example.com/post/',
+    })).toBe('');
+
+    const row = registry.reconcileContent({
+      astroItems: [{
+        canonical_url_normalized: '/same-url/',
+        live_url: '/same-url/',
+        slug: 'same-url',
+        astro_source_path: 'src/content/blog/same-url.md',
+        content_type: 'blog',
+        astro_status: 'present',
+        astro_file_hash: 'new-hash',
+      }],
+      previousRows: [{
+        astro_source_path: 'src/content/blog/same-url.md',
+        canonical_url_normalized: '/same-url/',
+        live_url: '/same-url/',
+        astro_file_hash: 'old-hash',
+        live_status: 'live',
+        noindex_detected: false,
+        live_status_checked_at: new Date('2026-09-27T03:00:00Z'),
+      }],
+    }).rows[0];
+
+    expect(row.reconciliation_status).toBe('astro_changed_since_sync');
+    expect(row.live_status).toBe('unknown');
+    expect(row.live_status_checked_at).toBeNull();
+  });
+
+  test('invalidates changed Astro truth while conflicted before the duplicate resolves', () => {
+    const previous = {
+      astro_source_path: 'src/content/blog/conflicted.md',
+      canonical_url_normalized: '/conflicted/',
+      live_url: '/conflicted/',
+      astro_file_hash: 'old-hash',
+      live_status: 'live',
+      noindex_detected: false,
+      live_status_checked_at: new Date('2026-09-27T03:00:00Z'),
+    };
+    const conflicted = registry.preserveLiveMirrorFields({
+      ...previous,
+      reconciliation_status: 'conflict',
+      astro_file_hash: 'new-hash',
+      live_status: 'unknown',
+      noindex_detected: true,
+    }, {
+      byAstroPath: new Map([[previous.astro_source_path, previous]]),
+      byDbId: new Map(),
+    });
+
+    expect(conflicted.live_status).toBe('unknown');
+    expect(conflicted.noindex_detected).toBe(true);
+    expect(conflicted.live_status_checked_at).toBeNull();
+
+    const resolved = registry.preserveLiveMirrorFields({
+      ...conflicted,
+      reconciliation_status: 'astro_only',
+    }, {
+      byAstroPath: new Map([[previous.astro_source_path, conflicted]]),
+      byDbId: new Map(),
+    });
+    expect(resolved.live_status).toBe('unknown');
+    expect(resolved.noindex_detected).toBe(true);
   });
 
   test('does not preserve live-check mirror fields when URL is gained or lost', () => {

@@ -18,7 +18,6 @@ const cockroachSchema = {
   fields: [
     { key: 'species', label: 'Species', type: 'text', placeholder: 'Synthetic species' },
   ],
-  nextStepChips: [],
 };
 
 const cockroachCatalog = [
@@ -219,6 +218,98 @@ it('does NOT seed on top of a restored draft’s own products', async () => {
   // must never get added on top of it.
   expect(screen.queryByText('Gentrol IGR')).toBeNull();
   expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
+});
+
+it('a restored pre-retirement draft with Next steps chips drops its stale generated report (Codex r1 #5116)', async () => {
+  const visit = cockroachService();
+  const report = 'WHAT WE DID:\nPlaced gel bait in the kitchen.\nWHAT WE FOUND:\nRoach activity under the sink.';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report,
+    generatedReportText: report,
+    aiReportUsed: true,
+    // Retired field: copy generated while these were selected fed the old
+    // "Next steps selected" prompt line, so the report must not survive.
+    typedNextStepChips: ['Monitor activity'],
+  }));
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
+});
+
+it('a chips-only pre-retirement draft restored after its profile went untyped drops its stale generated report (Codex r2 #5116)', async () => {
+  const visit = cockroachService({
+    id: 'cockroach-visit-untyped',
+    completionProfile: { serviceKey: 'cockroach_control', findingsType: null, requiresProducts: true },
+    findingsSchema: null,
+  });
+  const report = 'WHAT WE DID:\nPlaced gel bait in the kitchen.';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report,
+    generatedReportText: report,
+    aiReportUsed: true,
+    typedNextStepChips: ['Monitor activity'],
+  }));
+  const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  stubFetchWithImmediateDefaults();
+  try {
+    await act(async () => {
+      render(
+        <CompletionPanel
+          service={visit}
+          products={cockroachCatalog}
+          onClose={() => {}}
+          onSubmit={vi.fn().mockResolvedValue({})}
+        />,
+      );
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
+  } finally {
+    alertSpy.mockRestore();
+  }
+});
+
+it('a removed companion whose saved draft held only retired chips still drops the stale generated report (pre-push audit #5116)', async () => {
+  const visit = cockroachService({ id: 'cockroach-visit-removed-companion' });
+  const report = 'WHAT WE DID:\nPlaced gel bait in the kitchen.';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report,
+    generatedReportText: report,
+    aiReportUsed: true,
+    // A companion the profile no longer declares; its only saved input was
+    // the retired Next steps chips.
+    companionState: { termite_bait_station: { values: {}, chips: ['Continue scheduled monitoring'], score: null } },
+  }));
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
 });
 
 it('clears the seeded rows on customer_declined, then reseeds once the outcome returns to completed (pre-push audit P1, PR #5049 r1)', async () => {

@@ -420,6 +420,10 @@ const GeoGrid = require('../services/seo/geo-grid-tracker');
 const { geoGridToCSV } = require('../services/csv-generators');
 const { isEnabled } = require('../config/feature-gates');
 const { isEntityQuestion } = require('../services/seo/aeo-entity-facts');
+// Benchmark questions are keyed by their exact prompt too (the dashboard's
+// fixed cohort and the aeo_question_gap miner both match on it), so their
+// text is frozen like the entity cohort's; a new prompt is a new version.
+const BENCHMARK_PROMPTS = new Set(require('../data/aeo-benchmark-v1.json').questions.map((q) => q.query));
 
 // Geo-grid map-pack tracker (Pillar 3). Needs BOTH the feature gate AND the SEO
 // master gate (DataForSEO calls are blocked by seoIntelligence) — report ungated
@@ -656,7 +660,27 @@ router.post('/backlinks/llm-mentions', requireAdmin, async (req, res, next) => {
 router.get('/llm-mentions', async (req, res, next) => {
   try {
     const prober = require('../services/seo/llm-mention-prober');
-    res.json(await prober.getDashboard());
+    const dashboard = await prober.getDashboard();
+    // Owned cited-URL health is a separate signal (are the pages engines
+    // cite still there?) — additive, never blocks the rest of the payload.
+    try {
+      const { getCitedUrlHealthDashboard } = require('../services/seo/owned-url-health');
+      dashboard.citedUrlHealth = await getCitedUrlHealthDashboard();
+    } catch (err) {
+      logger.warn(`[llm-mentions] cited-URL health block failed: ${err.message}`);
+      dashboard.citedUrlHealth = null;
+    }
+    // Third-party pages the engines cite, ranked page by page (cited-pages.js)
+    // — additive like the health block above.
+    try {
+      const { loadCitedPages, loadPlacementRechecks } = require('../services/seo/cited-pages');
+      const [{ since, scanned, pages }, placements] = await Promise.all([loadCitedPages(db, { limit: 25 }), loadPlacementRechecks(db)]);
+      dashboard.citedPageRanking = { since, scanned, pages, placements };
+    } catch (err) {
+      logger.warn(`[llm-mentions] cited-pages block failed: ${err.message}`);
+      dashboard.citedPageRanking = null;
+    }
+    res.json(dashboard);
   } catch (err) { next(err); }
 });
 
@@ -701,13 +725,14 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
     if ('city' in (req.body || {})) patch.city = req.body.city || null;
     if ('service' in (req.body || {})) patch.service = req.body.service || null;
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to update' });
-    // Entity-cohort rows are keyed by their exact prompt: the text is frozen
-    // (toggle `active` instead; a new prompt is a new cohort version).
+    // Entity-cohort and benchmark rows are keyed by their exact prompt: the
+    // text is frozen (toggle `active` instead; a new prompt is a new cohort
+    // version).
     if (patch.query) {
       const current = await db('seo_llm_mention_queries').where('id', req.params.id).first('query');
       if (!current) return res.status(404).json({ error: 'not found' });
-      if (isEntityQuestion(current.query) && patch.query !== current.query) {
-        return res.status(409).json({ error: 'entity cohort question text is frozen; toggle active instead' });
+      if (patch.query !== current.query && (isEntityQuestion(current.query) || BENCHMARK_PROMPTS.has(current.query))) {
+        return res.status(409).json({ error: 'entity cohort and benchmark question text is frozen; toggle active instead' });
       }
     }
     patch.updated_at = db.fn.now();
@@ -810,7 +835,10 @@ router.put('/citations/:id', requireAdmin, async (req, res, next) => {
   try {
     await CitationAuditor.updateCitation(req.params.id, req.body);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'INVALID_CITATION_UPDATE') return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // Conversion Funnel

@@ -15,6 +15,7 @@
 import { useState, useEffect, useId, useRef } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
+import ReportText from '../ReportSections';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -112,7 +113,7 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null, reportSections = null, nextVisitLabel = null }) {
   const tracedLive = mode === 'live';
   // The embedded trend chart is built from the page's ORIGINAL payload — a
   // successful rating submit recalculates the score, so the chart's current
@@ -175,7 +176,13 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
-        <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
+        <ReportText
+          text={aiSummary.body}
+          sections={reportSections}
+          nextVisitLabel={nextVisitLabel}
+          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
+          titleStyle={{ color: TEXT }}
+        />
       ) : null}
       {/* Where we sprayed — the tech-traced application, combined into the
           status card so status + narrative + map read as one story
@@ -717,6 +724,52 @@ function Line({ label, value }) {
       <span style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
       <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45 }}>{value}</div>
     </div>
+  );
+}
+
+// ── Expectations: rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS) ─
+// Three small, honest, deterministic cards driven by `pestReportV2.expectations`
+// (server/services/service-report/pest-report-expectations.js). Each renders
+// nothing when its own payload key is absent — the gate being off, or that
+// visit simply having no relevant data, look identical to the client.
+// Body copy in these three expectation cards is 16px — the customer-surface
+// body floor (docs/design/waves-customer-facing-design-brief.md); 14px is
+// reserved for the eyebrow labels (codex P2 #5137 round 4).
+export function PestRainExpectation({ rain }) {
+  if (!rain?.lines?.length) return null;
+  return (
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>Rain and your treatment</div>
+      {rain.lines.map((line) => (
+        <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '4px 0' }}>{line}</p>
+      ))}
+    </section>
+  );
+}
+
+export function PestSpiderExpectation({ spiders }) {
+  if (!spiders?.expectation) return null;
+  return (
+    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.glassNavy}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>{spiders.headline || 'Spiders'}</div>
+      {spiders.whatWeDid ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.whatWeDid}</p> : null}
+      <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.expectation}</p>
+      {spiders.nextStep ? <p style={{ fontSize: 16, color: MUTED, lineHeight: 1.5, margin: 0 }}>{spiders.nextStep}</p> : null}
+    </section>
+  );
+}
+
+export function PestWhatToExpect({ whatToExpect }) {
+  if (!whatToExpect?.lines?.length) return null;
+  return (
+    <section data-glass="card" style={card}>
+      <div data-gt="eyebrow" style={eyebrow}>What to expect</div>
+      <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+        {whatToExpect.lines.map((line) => (
+          <li key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginBottom: 6 }}>{line}</li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

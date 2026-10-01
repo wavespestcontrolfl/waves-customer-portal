@@ -99,6 +99,31 @@ Use for: "standard payout", "send money to the bank without instant fees", "tran
     },
   },
   {
+    name: 'list_pending_payouts',
+    description: `List Stripe payouts still pending (not yet in transit or paid) — the only payouts eligible to be cancelled. Read live from Stripe (id, amount, currency, arrival date, method, status), not the local sync table, so status is current.
+Use for: "what payouts can I cancel?", "show pending payouts", "is any payout still pending?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max results (default 20, max 100)' },
+      },
+    },
+  },
+  {
+    name: 'cancel_pending_payout',
+    description: `Cancel a Stripe payout while it is still pending. Stripe only allows cancelling a payout whose status is 'pending' — one that is already in_transit, paid, failed, or canceled cannot be cancelled, and an INSTANT payout can never be cancelled (it settles within minutes). THIS IS A WRITE OPERATION — confirm the payout id and amount with the operator before executing.
+Use for: "cancel that payout", "stop the pending payout before it goes out", "cancel po_xxx"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        payout_id: { type: 'string', description: 'Stripe payout ID (po_xxx) to cancel' },
+        idempotency_key: { type: 'string', description: 'Stable per-confirmation idempotency key' },
+      },
+      required: ['payout_id'],
+    },
+    _sideEffects: true,
+  },
+  {
     name: 'get_unreconciled_payouts',
     description: `Get payouts that haven't been reconciled against bank statements. Shows expected amounts, arrival dates, and reconciliation status.
 Use for: "unreconciled payouts", "what needs reconciling?", "bank reconciliation status"`,
@@ -124,12 +149,17 @@ Use for: "export payouts for QuickBooks", "download payout CSV", "OFX export for
   },
 ];
 
-const BANKING_WRITE_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout']);
+const BANKING_WRITE_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout', 'cancel_pending_payout']);
 const BANKING_QUERY_TOOLS = BANKING_TOOLS.filter(t => !BANKING_WRITE_TOOL_NAMES.has(t.name));
 
 function getValidPayoutAmount(input) {
   const amount = input?.amount;
   return typeof amount === 'number' && Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function getValidPayoutId(input) {
+  const id = typeof input?.payout_id === 'string' ? input.payout_id.trim() : '';
+  return id || null;
 }
 
 function getPayoutOptions(input) {
@@ -156,6 +186,8 @@ async function executeBankingTool(toolName, input, context = {}) {
       case 'get_fee_analysis': return await getFeeAnalysis(input);
       case 'request_instant_payout': return await requestInstantPayout(input, context);
       case 'request_standard_payout': return await requestStandardPayout(input, context);
+      case 'list_pending_payouts': return await getListPendingPayouts(input);
+      case 'cancel_pending_payout': return await cancelPendingPayoutTool(input, context);
       case 'get_unreconciled_payouts': return await getUnreconciledPayouts(input);
       case 'export_payouts': return await exportPayouts(input);
       default: return { error: `Unknown banking tool: ${toolName}` };
@@ -413,6 +445,38 @@ async function requestStandardPayout(input, context) {
   }
 }
 
+
+async function getListPendingPayouts(input) {
+  const { limit } = input || {};
+  try {
+    return await StripeBanking.listPendingPayouts(limit);
+  } catch (err) {
+    return { error: `Could not list pending payouts: ${err.message}` };
+  }
+}
+
+async function cancelPendingPayoutTool(input, context) {
+  const refused = payoutNotConfirmed(context);
+  if (refused) return refused;
+
+  const payoutId = getValidPayoutId(input);
+  if (!payoutId) {
+    return { error: 'A Stripe payout id is required.' };
+  }
+
+  try {
+    const options = getPayoutOptions(input);
+    const result = await StripeBanking.cancelPayout(payoutId, options);
+    return {
+      ...result,
+      note: result.already_canceled
+        ? `Payout ${result.payout_id} was already cancelled (status: ${result.status}); nothing further was done.`
+        : `Payout ${result.payout_id} cancelled (status: ${result.status}).`,
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
 
 async function getUnreconciledPayouts(input) {
   const { limit: rawLimit } = input;

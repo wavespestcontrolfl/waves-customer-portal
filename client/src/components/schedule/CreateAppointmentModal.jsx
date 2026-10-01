@@ -34,6 +34,7 @@ import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
+import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
@@ -801,7 +802,28 @@ export function canSubmitGroup({
 // Multiple same-family seasonal lines on one estimate are not producible by
 // the estimate builder today, so this conservative surface is the
 // operator-decides path, not a workflow regression.
-export function classifySubmitGroupFailure(e, {
+// Phone-agent double-booking guard (server/routes/admin-schedule.js): a
+// 409 duplicate_call_booking is NOT recoverable, same as a genuine
+// (non-owned) duplicate-series conflict — the submit loop must stop here
+// so the operator sees the phone agent's existing visit before choosing to
+// book another anyway. Split out of classifySubmitGroupFailure (called
+// ahead of it, at the one call site in submitAppointments) purely to keep
+// that function's own complexity at its pre-existing baseline — this check
+// is independent of every duplicate-SERIES branch below it.
+// separateProgram: the separate-recurring-program approval the refused
+// submit already carried — "Book another anyway" re-sends it, so a group
+// that hit BOTH guards is not bounced back to the series conflict.
+export function classifyCallBookingConflict(e, { key, groupLabelText, separateProgram = null }) {
+  if (e?.body?.code !== 'duplicate_call_booking') return null;
+  return {
+    recoverable: false,
+    duplicateConflict: null,
+    callBookingConflict: { ...e.body, key, separateProgram: separateProgram || null },
+    firstError: { label: groupLabelText, message: e.message, callBooking: true },
+  };
+}
+
+function classifyDuplicateSeriesFailure(e, {
   group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount = false,
 }) {
   const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
@@ -829,7 +851,7 @@ export function classifySubmitGroupFailure(e, {
   // separately — not this slice's file-ownership scope for
   // duplicateSeriesConflictBody itself).
   if (ownSeriesProven && !carriesAppointmentDiscount) {
-    return { recoverable: true, duplicateConflict: null, firstError: null };
+    return { recoverable: true, duplicateConflict: null, callBookingConflict: null, firstError: null };
   }
   const duplicateConflict = dupBody
     ? { ...dupBody, key, retryUncertain: separateProgram?.key === key }
@@ -840,8 +862,16 @@ export function classifySubmitGroupFailure(e, {
   return {
     recoverable: false,
     duplicateConflict,
+    callBookingConflict: null,
     firstError: { label: groupLabelText, message, duplicate: !!dupBody },
   };
+}
+
+// The classifier for a failed group save: each 409 conflict code has its own
+// classifier — the phone-agent double-booking conflict, then the
+// duplicate-series one, which also owns every other failure.
+export function classifySubmitGroupFailure(e, context) {
+  return classifyCallBookingConflict(e, context) || classifyDuplicateSeriesFailure(e, context);
 }
 
 // The 5-key discount shape a request-body line carries — the primary line
@@ -965,6 +995,12 @@ export function appointmentGroupRequestBody({
   // has no field for an operator-chosen override, so this slice never sends
   // one (see the PR body's "Not in this slice").
   appointmentDiscount,
+  // Phone-agent double-booking guard override: true only for the ONE group
+  // this specific "Book another anyway" retry targets (threaded from a
+  // ref the caller sets just for that retry — see callBookingConflict's
+  // "Book another anyway" button — never a persisted flag on the form, so
+  // it never rides along on a later, unrelated submit).
+  callBookingReviewedIds = null,
 }) {
   return {
     ...(appointmentDiscount ? {
@@ -979,6 +1015,7 @@ export function appointmentGroupRequestBody({
         existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
       },
     } : {}),
+    ...(callBookingReviewedIds ? { allowCallBookingDuplicate: true, callBookingReviewedIds } : {}),
     customerId,
     scheduledDate,
     serviceType: primaryName,
@@ -1032,6 +1069,45 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
     sendConfirmationSms: firstGroupOfBooking ? sendSms : false,
     sendConfirmation: firstGroupOfBooking ? sendSms : false,
     sendCardOnFileLink: (cardLinkAvailable && sendCardLink && firstGroupOfBooking) ? true : undefined,
+  };
+}
+
+// "Customer's words" (GATE_RESERVICE_OFFICE_REQUEST): the pest/lawn re-service
+// catalog rows an office booking may attach the customer's own words to. The
+// server re-checks the catalog key and the gate; this only decides whether the
+// section renders and the field rides the POST.
+export const OFFICE_REQUEST_SERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
+export const CUSTOMER_WORDS_MAX = 400;
+
+export function isOfficeRequestLine(svc) {
+  return OFFICE_REQUEST_SERVICE_KEYS.includes((svc?.service_key ?? svc?.serviceKey) || '');
+}
+
+// "Text, 3 h ago" / "Call, yesterday" — the suggestion's source and age.
+export function suggestionSourceLabel(suggestion, now = Date.now()) {
+  if (!suggestion) return '';
+  const kind = suggestion.kind === 'call' ? 'Call' : 'Text';
+  const ms = now - new Date(suggestion.at).getTime();
+  if (!Number.isFinite(ms)) return kind;
+  const hours = Math.floor(ms / 3600000);
+  if (hours < 1) return `${kind}, just now`;
+  if (hours < 24) return `${kind}, ${hours} h ago`;
+  if (hours < 48) return `${kind}, yesterday`;
+  return `${kind}, ${Math.floor(hours / 24)} days ago`;
+}
+
+// The POST field for the staff-saved words. The client names the suggestion
+// it filled from (id + kind) and NEVER a source — the server re-reads that
+// suggestion and decides text / call / office. Empty = nothing sent.
+export function customerRequestBodyField({ active, text, usedSuggestion }) {
+  if (!active) return {};
+  const trimmed = String(text || '').trim().slice(0, CUSTOMER_WORDS_MAX);
+  if (!trimmed) return {};
+  return {
+    customerRequest: {
+      text: trimmed,
+      ...(usedSuggestion ? { suggestionId: usedSuggestion.id, suggestionKind: usedSuggestion.kind } : {}),
+    },
   };
 }
 
@@ -1129,6 +1205,14 @@ export function matchesPrepayTarget({ targetKey, key, result }) {
 // blocking alert (a genuine error) or a toast (a duplicate-program conflict
 // the operator resolves via the conflict UI below).
 export function submitFailureNotice({ firstError, created, total }) {
+  if (firstError.callBooking) {
+    return {
+      toastText: created
+        ? `${created} of ${total} appointment series saved. The phone agent already booked the rest — review it below.`
+        : 'The phone agent already booked this visit — review it below.',
+      alertText: null,
+    };
+  }
   if (firstError.duplicate) {
     return {
       toastText: created
@@ -2046,6 +2130,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
+  // "Customer's words" on a pest/lawn re-service (GATE_RESERVICE_OFFICE_REQUEST).
+  // The probe doubles as the gate read: the route answers {enabled:false} while
+  // the lane is dark, and a failed fetch hides the section too, so a dark lane
+  // renders byte-identical. Probed only once a re-service line is on the form.
+  const [customerWords, setCustomerWords] = useState('');
+  const [usedSuggestion, setUsedSuggestion] = useState(null);
+  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', enabled: false, suggestion: null });
+  const hasReServiceLine = services.some(isOfficeRequestLine);
+  const reserviceProbeCustomerId = hasReServiceLine && selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
+  useEffect(() => {
+    if (!reserviceProbeCustomerId) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/reservice-request-suggestion?customerId=${encodeURIComponent(reserviceProbeCustomerId)}`)
+      .then((r) => {
+        if (cancelled) return;
+        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: !!r?.enabled, suggestion: r?.suggestion || null });
+      })
+      .catch(() => {
+        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: false, suggestion: null });
+      });
+    return () => { cancelled = true; };
+  }, [reserviceProbeCustomerId]);
+  // A different customer's suggestion or words never carry over.
+  useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
+  const reserviceRequestActive = !!reserviceProbeCustomerId
+    && reserviceRequestProbe.customerId === reserviceProbeCustomerId
+    && reserviceRequestProbe.enabled;
   const [saving, setSaving] = useState(false);
   // State updates are async — two clicks in one tick both saw saving=false
   // during the awaited re-quote and booked twice; the ref is synchronous.
@@ -2066,13 +2177,32 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [separateProgramReason, setSeparateProgramReason] = useState('');
   const duplicateConflictRef = useRef(null);
   const submitLockRef = useRef(false);
+  // Phone-agent double-booking guard: mirrors duplicateConflict/
+  // duplicateConflictRef above. callBookingDuplicateOverrideRef maps the ONE
+  // group key a "Book another anyway" click targets to the visit ids its box
+  // listed (the server honors the override only for exactly those) — set
+  // right before that retry's handleSubmit() call and consumed (read +
+  // reset) at the very start of the next submitAppointments run, so it can
+  // never apply to a later, unrelated submit.
+  const [callBookingConflict, setCallBookingConflict] = useState(null);
+  const callBookingConflictRef = useRef(null);
+  const callBookingDuplicateOverrideRef = useRef(new Map());
   useEffect(() => {
     if (duplicateConflict) duplicateConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
   }, [duplicateConflict]);
   useEffect(() => {
+    if (callBookingConflict) callBookingConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  }, [callBookingConflict]);
+  useEffect(() => {
     setDuplicateConflict(null);
     setSeparateProgramReason('');
+    setCallBookingConflict(null);
   }, [selectedCustomer?.id, selectedPropertyId, services]);
+  // The phone agent's visit was matched to THIS date (±1 day): a new date is
+  // a new check, so the stale box never offers "Book another anyway" for it.
+  useEffect(() => {
+    setCallBookingConflict(null);
+  }, [apptDate]);
 
   // Per-line helpers. Each entry in `services` carries its own `price`
   // string (so an operator can override goodwill / loyalty pricing on one
@@ -3003,6 +3133,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Placed AFTER the cadence-grouping helpers below: these read them
   // during render, so they must not run before those consts initialize.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  // "Customer's words" shows only when the words would actually be saved: the
+  // server stamps a group's PRIMARY row, and grouping can promote a recurring
+  // service ahead of a one-time re-service, so a re-service line riding as an
+  // add-on has no row to hold them. Same predicate the submit loop uses.
+  const reserviceRequestShown = reserviceRequestActive
+    && appointmentSubmitGroups.some((g) => isOfficeRequestLine(g.lines[0]));
   const submitGroupLinesFor = (svc) => submitGroupLinesForService(appointmentSubmitGroups, svc, services);
   const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
     appointmentSubmitGroups, services,
@@ -3842,6 +3978,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Submit
   const submitAppointments = async (separateProgram) => {
+    // Consumed once, atomically, at the top of this submit — never read
+    // again after this line, so a "Book another anyway" click can only
+    // ever affect the ONE submit it triggered, never a later unrelated one.
+    const callBookingOverrides = callBookingDuplicateOverrideRef.current;
+    callBookingDuplicateOverrideRef.current = new Map();
     submittingRef.current = true;
     setSaving(true);
     const releaseSubmit = () => {
@@ -3937,6 +4078,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // null price — see appointmentGroupRequestBody. Named locally so the &&
       // that decides it lives in its own scope, not submitAppointments's.
       const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
+      const firstOfficeRequestGroup = groups.find((g) => isOfficeRequestLine(g.lines[0]));
       for (const group of groups) {
         const key = groupKey(group);
         // Skip groups already created in a prior attempt of this submit
@@ -4030,7 +4172,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               customerNotes,
               internalNotes,
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
+              callBookingReviewedIds: callBookingOverrides.get(key),
             }),
+            // Staff-saved "Customer's words": rides only the first group whose
+            // primary line is a pest/lawn re-service (the server stamps the
+            // primary row and decides the source itself).
+            ...(group === firstOfficeRequestGroup
+              ? customerRequestBodyField({ active: reserviceRequestShown, text: customerWords, usedSuggestion })
+              : {}),
             // Only the FIRST created group of a booking asks for the customer
             // confirmation text and carries the card-link flag — a split
             // seasonal/year-round save posts multiple series for the same
@@ -4244,6 +4393,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             setDuplicateConflict(decision.duplicateConflict);
             setSeparateProgramReason('');
           }
+          if (decision.callBookingConflict) setCallBookingConflict(decision.callBookingConflict);
           firstError = decision.firstError;
           break;
         }
@@ -6187,6 +6337,27 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
             </section>
           )}
+          <CallBookingConflictNotice
+            conflict={callBookingConflict}
+            sectionRef={callBookingConflictRef}
+            canSubmit={canSubmit}
+            onBookAnother={async () => {
+              // One submit only: cleared even when handleSubmit returns
+              // before the submit loop reads it (a blocked save), so a
+              // later ordinary save never carries the override.
+              // The override names exactly the visits this box listed: one
+              // that arrives after it was shown is a new conflict.
+              callBookingDuplicateOverrideRef.current = new Map([[
+                callBookingConflict.key,
+                (callBookingConflict.existingVisits || []).map((v) => v.id),
+              ]]);
+              try {
+                await handleSubmit(callBookingConflict.separateProgram || undefined);
+              } finally {
+                callBookingDuplicateOverrideRef.current = new Map();
+              }
+            }}
+          />
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
@@ -6249,6 +6420,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B', marginBottom: 10 }}>Notes</div>
+          {reserviceRequestShown && (
+            <div style={{ marginBottom: 10 }} data-testid="customer-words-section">
+              <label style={labelStyle} htmlFor="customer-words-input">Customer's words</label>
+              {reserviceRequestProbe.suggestion && (
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8, padding: '8px 10px', border: `1px solid ${D.border}`, borderRadius: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: D.muted, marginBottom: 2 }}>{suggestionSourceLabel(reserviceRequestProbe.suggestion)}</div>
+                    <div style={{ fontSize: 14, color: D.text, wordBreak: 'break-word' }}>{reserviceRequestProbe.suggestion.text}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomerWords(String(reserviceRequestProbe.suggestion.text || '').slice(0, CUSTOMER_WORDS_MAX));
+                      setUsedSuggestion(reserviceRequestProbe.suggestion);
+                    }}
+                    style={{ minHeight: 44, padding: '0 12px', background: 'transparent', border: `1px solid ${D.border}`, borderRadius: 6, color: D.teal, fontSize: 13, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                  >Use this</button>
+                </div>
+              )}
+              <textarea
+                id="customer-words-input"
+                value={customerWords}
+                maxLength={CUSTOMER_WORDS_MAX}
+                onChange={e => setCustomerWords(e.target.value)}
+                rows={2}
+                placeholder="Optional — what the customer said is wrong"
+                style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }}
+              />
+            </div>
+          )}
           <div style={{ marginBottom: 10 }}>
             <label style={labelStyle}>Customer Notes</label>
             <textarea value={customerNotes} onChange={e => setCustomerNotes(e.target.value)} rows={2} style={{ ...inputStyle, resize: 'vertical', minHeight: 60 }} />

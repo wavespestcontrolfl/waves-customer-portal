@@ -1,12 +1,23 @@
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+// LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
+// the public tracking page uses (server/routes/track-public.js) — never
+// reimplemented here — so the minutes the AI states match what the
+// customer would see on their own tracking link.
+const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
+const { calculateBoundedTrackingEta, finiteNumber, techMappingCutoff, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
+const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay, mappingGeneration } = require('./live-eta-destination');
+const { sendTimeTrackTokenLive } = require('./sms-track-links');
+const { publicPortalUrl } = require('../utils/portal-url');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -17,7 +28,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
 // case a texting customer may hit. The value lives in the canonical
 // visit-context module; the rationale above is this consumer's.
-const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
@@ -114,6 +125,18 @@ function redactAccessCodes(text) {
 // route exports only its router). Modern rows trust the stored overall_score;
 // legacy rows recompute under the four-category weighting so this fact can
 // never disagree with the portal/report score.
+// The scheduled_services id of an upcoming visit, carried on the context
+// entry for the texting AI's scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER,
+// sms-shadow-drafter). NON-ENUMERABLE on purpose: this context is serialized
+// whole into LLM-visible payloads elsewhere (lead-response get_customer_context
+// tool result, the managed assistant snapshot, email reply facts), and an
+// internal row id must never ride there. A direct property read still works;
+// JSON.stringify, spread and Object.keys do not see it.
+function withScheduledServiceId(entry, id) {
+  if (id != null) Object.defineProperty(entry, 'scheduledServiceId', { value: id, enumerable: false });
+  return entry;
+}
+
 function lawnStressDamage(row = {}) {
   if (row.stress_damage != null) return row.stress_damage;
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
@@ -128,18 +151,60 @@ function lawnOverall(row = {}) {
   );
 }
 
-// The ONLY sanctioned customer copy inside technician_notes is the reviewed
-// WHAT WE DID / WHAT WE FOUND parse (owner ruling 2026-07-16; the raw field
-// carries access codes, billing notes, and candid remarks). Anything that
-// doesn't parse renders as NO notes — never the raw text.
-function customerSafeVisitNotes(notes) {
+function visitStructuredNotes(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value) return {};
   try {
-    const parsed = technicianReportCustomerCopy(notes);
-    // Contract (Codex r5 — the earlier did/found read silently discarded
-    // EVERY approved note): the parser returns { whatWeDid, whatWeFound,
-    // body, violations } and body is already the vetted joined copy — null
-    // when the banned-copy guard flagged it, which stays null here.
-    return parsed?.body || null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+
+// The ONLY sanctioned customer copy inside technician_notes is the reviewed
+// report parse (owner ruling 2026-07-16; the raw field carries access codes,
+// billing notes, and candid remarks). Anything that doesn't parse renders as
+// NO notes — never the raw text. One rule for every customer render of the
+// note (owner ruling 2026-10-01: customers see only the report text, never
+// the tech's raw note): the texting AI's context and the pre-visit brief
+// here, the voice agent's visit report and history, the portal's service
+// history, the service-report PDF and the pay page.
+//
+// Takes the service_records row (technician_notes, structured_notes,
+// service_data, and completion_source for `projectLine`):
+//   - a typed report held from customers (typedReportDelivery other than
+//     auto_send) shows none;
+//   - the parse's body (null when a banned-copy screen flagged it; Codex r5:
+//     the vetted joined copy) stands only where the web report would let it
+//     (activity-indicators technicianReportDrivesSummary: the frozen
+//     rejection, the governing typed story, the rodent trapping screens);
+//   - the WDO inspection-fee scrub and the access-code redactor run on top
+//     (parser-approved is not code-free).
+// `projectLine`: a project completion's note is not a technician's note:
+// project-completion.js writes it from the project's own title and
+// recommendations, which the customer's project report already shows, so
+// the portal's own renders keep it, scrubbed and redacted.
+// Fails closed: anything unreadable or throwing is no notes.
+function customerSafeVisitNotes(record, { projectLine = false } = {}) {
+  if (!record || typeof record !== 'object') return null;
+  try {
+    const structured = visitStructuredNotes(record.structured_notes);
+    const { suppressesCustomerArtifacts } = require('../routes/services');
+    if (suppressesCustomerArtifacts(structured)) return null;
+    const { customerSafeServiceNotes } = require('./project-types');
+    let copy = null;
+    if (projectLine && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
+      copy = customerSafeServiceNotes(record.technician_notes, structured);
+    } else {
+      const serviceData = typeof record.service_data === 'string'
+        ? JSON.parse(record.service_data || '{}')
+        : (record.service_data || {});
+      const body = technicianReportCustomerCopy(record.technician_notes)?.body || null;
+      const { technicianReportDrivesSummary } = require('./service-report/activity-indicators');
+      if (!technicianReportDrivesSummary({ serviceData, body })) return null;
+      copy = customerSafeServiceNotes(body, structured);
+    }
+    const safe = copy ? redactAccessCodes(copy) : null;
+    return safe && String(safe).trim() ? safe : null;
   } catch { return null; }
 }
 
@@ -508,8 +573,469 @@ async function fetchDuesChargeCandidates(customer) {
   return rows;
 }
 
+// The destination a live-ETA lookup resolves to for one scheduled_services
+// row: the visit's own stamped pin, else the customer's primary coords
+// unless the stamped address diverges from it ("no pin beats a wrong pin",
+// same rule track-transitions.js applies). Factored out of resolveLiveEtaFact
+// so getContextForCustomer can also use it to DEDUPE grouped-stop siblings
+// (see the LIVE ETA block there) without duplicating the divergence logic.
+function liveEtaDestination(row, customer) {
+  // Resolution lives in live-eta-destination.js so the send-time freshness check
+  // re-derives the SAME destination (round-21 P2). No complete pair → null.
+  const { lat, lng, source } = resolveLiveEtaDestination(row, customer);
+  return source ? { lat, lng } : null;
+}
+
+// calendarDay (Postgres DATE -> 'YYYY-MM-DD') lives in live-eta-destination.js so
+// liveEtaEligible below and the send-time recheck share ONE day rule.
+
+// LIVE ETA eligibility (Codex round-1 finding, PR #5334): a visit is worth
+// a GPS lookup only when it's TODAY, en_route, AND its customer-facing
+// tracker state agrees — never raw status alone. See the track_state select
+// comment in getContextForCustomer for why status and track_state can
+// disagree. Exported as a plain function (not folded into the class) so it
+// is directly testable without a DB-backed context build.
+function liveEtaEligible(row, todayStr = etDateString()) {
+  const { customerTrackState } = require('./track-transitions');
+  // The customer-facing tracker state alone decides (Codex r3): markEnRoute
+  // writes track_state first and syncs the operational status best-effort,
+  // so status can lag at pending/confirmed while the tracking page already
+  // shows the live vehicle. customerTrackState still rejects terminal
+  // statuses.
+  return Boolean(row)
+    && calendarDay(row.scheduled_date) === todayStr
+    && customerTrackState(row) === 'en_route';
+}
+
+// The customer-facing tracker state for one upcomingServices row, normalized
+// to buildFactsBlock's operational-style labels (Codex round-4 P2, PR
+// #5334): sms-shadow-drafter's LIVE STATUS/LIVE ETA rendering must read the
+// SAME source liveEtaEligible above already uses, never raw `status` alone
+// (see the track_state select comment above and customerTrackState's own
+// comment in track-transitions.js for why the two can disagree).
+function customerFacingTrackState(row) {
+  const { customerTrackState, operationalStatusForTrackState } = require('./track-transitions');
+  return operationalStatusForTrackState(customerTrackState(row));
+}
+
+// The (technician, destination) key grouped-stop siblings dedupe on: a
+// fan-out (visit-groups.js) advances every scheduled_services row at one
+// physical stop to en_route together, each with its OWN track_view_token —
+// naive per-row resolution would call the GPS + Distance Matrix lookup once
+// per sibling and could hand back two different minute counts for the same
+// stop (a fresh Google figure on one row, the haversine timeout fallback on
+// another). null means "resolve (or fail) this row on its own" — a sibling
+// missing a technician or a destination never merges with one that has both.
+function liveEtaDedupeKey(row, customer) {
+  if (!row?.technician_id) return null;
+  const dest = liveEtaDestination(row, customer);
+  return dest ? liveEtaIdentityKey(row, dest) : null;
+}
+// The ONE identity tuple an ETA is about: technician + tracker device
+// (fingerprint) + resolved destination (Codex round-23 P2). It keys grouped-stop
+// dedupe AND the cross-request memo, and mirrors what the send-time snapshot
+// records (technicianId / deviceImei / mappingChangedAt / destinations), so a device
+// repointed inside the memo window — even A->B->A, which only the mapping GENERATION
+// (bouncie_imei_changed_at) tells apart — can never reuse the old vehicle's minutes.
+function liveEtaIdentityKey(row, dest) {
+  return `${row.technician_id}:${dest.lat}:${dest.lng}:${deviceFingerprint(row.tech_bouncie_imei) || ''}:${mappingGeneration(row.tech_mapping_changed_at) || ''}`;
+}
+
+// LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
+// en-route visit gets a live GPS ETA + tracking link in the SMS facts block,
+// so the texting AI can answer "where's the tech" instead of always handing
+// off. Reuses the exact public-tracking-page path (resolveFreshTechPosition
+// + calculateBoundedTrackingEta — same staleness window and provider
+// timeout the customer's own tracking link uses) rather than
+// track-transitions.js's separate resolveEnRouteEtaMinutes (that one only
+// fires once, at the moment a visit flips to en_route, for the initial
+// notification text — this runs on every drafted reply while the visit
+// stays en_route, so it needs the SAME staleness re-check the tracking page
+// makes on every poll, not a one-shot lookup).
+// FAILS CLOSED on every edge: no technician, no destination coordinates
+// (stamped-address divergence with no visit-level pin — "no pin beats a
+// wrong pin", same rule track-transitions.js applies), no track token, a
+// stale/missing GPS position, a provider timeout/error, or a resolved ETA
+// that isn't a real route-provider result (calculateBoundedTrackingEta's own
+// haversine straight-line fallback, source: 'haversine' — see the check
+// below) all resolve to null — the caller then falls back to today's LIVE
+// STATUS-only line with no invented ETA. Errors are logged with the
+// scheduled_service id only, never customer PII. Called at most once per
+// unique (technician, destination) by getContextForCustomer — see the LIVE
+// ETA block there.
+//
+// Cross-request memo (Codex round-4 P2, PR #5334): twilio-webhook.js fires
+// estimate-conversion-agent.processInboundSms and
+// sms-shadow-drafter.draftShadowReply for the SAME inbound message, and each
+// builds its OWN context (includeLiveEta: true) independently — without
+// this, that's two separate GPS + Distance Matrix lookups for what is
+// really one stop, which can (rarely) hand the two concurrent drafts two
+// different minute counts for the same tech. Keyed exactly like
+// liveEtaDedupeKey (technician + destination), with the in-flight PROMISE
+// stored (not just the resolved value) so a second caller arriving before
+// the first lookup finishes awaits that same request instead of starting
+// its own. A resolved null is cached too — a lookup that just failed/timed
+// out is unlikely to succeed a second time inside the same short window, and
+// repeating it would only cost another provider round-trip. 60s TTL: about
+// the cadence a technician's GPS position actually refreshes at, so a later
+// poll still gets a fresh number. Bounded (LIVE_ETA_MEMO_MAX_ENTRIES) so many
+// concurrent customers/technicians can never grow this without limit; the
+// oldest entries are evicted first.
+//
+// Codex round-5 P1, PR #5334 — memoize ONLY the tech-position/route-minutes
+// lookup, never the per-visit result: the key is technician+destination
+// ONLY, with no customer or visit in it, so TWO DIFFERENT customers at the
+// same coordinates (e.g. two units of one property) with the same tech
+// inside the 60s TTL must never be handed the same cached trackUrl — that
+// would leak one customer's /track/:token link (and thus their live map) to
+// the other. resolveLiveEtaMinutesUncached below returns ONLY
+// { minutes, asOf } and is what the memo stores/shares; resolveLiveEtaFact
+// always builds the { minutes, asOf, trackUrl } result the caller sees from
+// THAT caller's own row, after awaiting the (possibly shared) minutes
+// lookup — so the expensive GPS + Distance Matrix call is still shared
+// across concurrent callers for the same stop, but no customer- or
+// visit-specific data (the tracking token) ever lives in the shared cache.
+const LIVE_ETA_MEMO_TTL_MS = 60 * 1000;
+// A failed / no-fix (null) lookup is cached only briefly (Codex round-16 P1):
+// one GPS or Distance Matrix hiccup must not blank the fact for a whole minute.
+const LIVE_ETA_NULL_MEMO_TTL_MS = 10 * 1000;
+const LIVE_ETA_MEMO_MAX_ENTRIES = 200;
+const liveEtaMemo = new Map(); // key -> { expiresAt, promise }
+
+function pruneLiveEtaMemo(now) {
+  for (const [key, entry] of liveEtaMemo) {
+    if (entry.expiresAt <= now) liveEtaMemo.delete(key);
+  }
+  while (liveEtaMemo.size > LIVE_ETA_MEMO_MAX_ENTRIES) {
+    const oldestKey = liveEtaMemo.keys().next().value;
+    liveEtaMemo.delete(oldestKey);
+  }
+}
+
+// `dbh` + `cacheOnly` (Codex #5334 P1/P2): a caller that is INSIDE a provider handoff transaction passes its connection and asks
+// for a READ-ONLY lookup — no Bouncie fallback, so nothing is written to tech_status and nothing is broadcast from within a
+// transaction that may still roll back. A stale/absent cache then reads as "no position" (retryable at the caller).
+async function resolveLiveEtaMinutesUncached(row, dest, { dbh, cacheOnly = false } = {}) {
+  try {
+    const { lat: destLat, lng: destLng } = dest;
+
+    const position = await resolveFreshTechPosition({
+      techId: row.technician_id,
+      // Round-24/35 P2: tech_status carries no device identity, so a cached fix
+      // reported before the technician's tracker mapping last CHANGED
+      // (technicians.bouncie_imei_changed_at, set only when bouncie_imei changes;
+      // NULL = no known remap = no cutoff) may be the OLD vehicle's and is bypassed
+      // for the configured device's own position. Shared with the public tracker.
+      cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
+      logPrefix: 'sms-shadow-live-eta',
+      // Send-time recompute inside a provider handoff: stay on the handoff's connection, read-only (Codex #5334 P1/P2).
+      ...(dbh ? { dbh } : {}),
+      ...(cacheOnly ? { allowBouncieFallback: false } : {}),
+    });
+    if (!position) return null;
+
+    const eta = await calculateBoundedTrackingEta({
+      techLat: position.lat,
+      techLng: position.lng,
+      customerLat: destLat,
+      customerLng: destLng,
+      techUpdatedAt: position.lastReportedAt,
+      logPrefix: 'sms-shadow-live-eta',
+    });
+    if (!eta || !Number.isFinite(eta.minutes)) return null;
+    // Real route-provider result ONLY (Codex round-2 P2): calculateBoundedTrackingEta
+    // (customer-tracking-eta.js) falls back to a straight-line haversine
+    // estimate — a 30mph-average, 1.4x-road-factor guess, source: 'haversine'
+    // — whenever Google Distance Matrix times out, fails, or is unconfigured
+    // (mirrors bouncie.js#calculateETAFromCoords, whose OWN haversine
+    // fallback is also 'haversine'; only a genuine provider hit is
+    // source: 'google'). That guess is fine as a floor for the live map
+    // (never showing "—"), but a customer text stating an exact minutes
+    // figure must never publish it — "never compute, round, or invent one"
+    // applies to a distance-formula guess exactly like it applies to the
+    // model doing its own math. Fails closed to null, same as every other
+    // edge above, and the caller falls back to the LIVE STATUS-only line.
+    if (eta.source !== 'google') return null;
+
+    return {
+      minutes: eta.minutes,
+      asOf: `${formatETTime(new Date(position.lastReportedAt))} ET`,
+      // The GPS fix's own timestamp (ms), carried ONLY so the memo can cap
+      // its expiry at the fix's freshness deadline (Codex round-9 P2, PR
+      // #5334) — never rendered into any prompt.
+      fixAtMs: new Date(position.lastReportedAt).getTime(),
+    };
+  } catch (err) {
+    logger.warn(`[context] live ETA lookup failed for scheduled_service ${row?.id}: ${err.message}`);
+    return null;
+  }
+}
+
+async function resolveLiveEtaFact(row, customer) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  if (!row?.technician_id || !liveEtaLiveToken(row)) return null;
+  const dest = liveEtaDestination(row, customer);
+  if (!dest) return null;
+
+  const memoKey = liveEtaIdentityKey(row, dest);
+  const now = Date.now();
+  const cached = liveEtaMemo.get(memoKey);
+  let minutesPromise;
+  if (cached && cached.expiresAt > now) {
+    minutesPromise = cached.promise;
+  } else {
+    const entry = { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise: null };
+    // Codex round-9 P2 (PR #5334): the 60 s TTL above counts from INSERTION,
+    // but resolveFreshTechPosition already accepted a fix up to
+    // STALE_TECH_STATUS_MS old (the SAME constant the public tracking page's
+    // freshness check uses) — a fix 4 min 50 s old at lookup time would
+    // otherwise be reused for 60 s more, well past the moment the tracker
+    // itself rejects it as stale. Cap expiry at min(insert + TTL, fix time +
+    // STALE_TECH_STATUS_MS) once the lookup resolves (a null result keeps
+    // the plain insert-time TTL). Tightened BEFORE the promise resolves to
+    // any caller, so a follow-up caller can never observe the looser expiry.
+    minutesPromise = resolveLiveEtaMinutesUncached(row, dest).then((fact) => {
+      if (!fact) entry.expiresAt = Math.min(entry.expiresAt, now + LIVE_ETA_NULL_MEMO_TTL_MS);
+      if (fact && Number.isFinite(fact.fixAtMs)) {
+        entry.expiresAt = Math.min(entry.expiresAt, fact.fixAtMs + STALE_TECH_STATUS_MS);
+      }
+      return fact;
+    });
+    entry.promise = minutesPromise;
+    liveEtaMemo.set(memoKey, entry);
+    // Pruned AFTER inserting (never before): an eviction pass that ran first
+    // would trim to the cap and then this insert would push it one back
+    // over — pruning last is what actually keeps the map at or under the
+    // cap.
+    pruneLiveEtaMemo(now);
+  }
+
+  const minutesFact = await minutesPromise;
+  if (!minutesFact) return null;
+  // Built OUTSIDE the shared memo, from THIS caller's own row — never the
+  // representative/first row that happened to populate the memo entry — so
+  // each visit/customer always gets its own tracking link (Codex round-5 P1).
+  return {
+    minutes: minutesFact.minutes,
+    asOf: minutesFact.asOf,
+    trackUrl: liveEtaTrackUrl(row),
+    // When the GPS fix behind this figure goes stale to the public tracker
+    // (fix time + STALE_TECH_STATUS_MS) — Codex round-11 P2, PR #5334. Carried
+    // into the persisted snapshot entry so send-time revalidation
+    // (sms-eta-freshness.js) rejects a minutes claim once min(15-minute
+    // draft window, this instant) passes, never only the draft window.
+    fixExpiresAtMs: minutesFact.fixAtMs + STALE_TECH_STATUS_MS,
+    // The fix's own timestamp, persisted so send time can refuse a draft a newer
+    // GPS ping has superseded (round-24 P2).
+    fixAtMs: minutesFact.fixAtMs,
+  };
+}
+
+// The visit's tracking token, but only while it is still live by the SAME
+// fail-closed rule the send-time check applies (Codex round-22 P2): an expired
+// (or expiry-less) token is never exposed to the drafter, so it cannot be copied
+// into a suggestion that the send-time guard would then have to reject. The
+// send-time recheck stays for races.
+function liveEtaLiveToken(row) {
+  return row?.track_view_token && sendTimeTrackTokenLive(row.track_token_expires_at) ? row.track_view_token : null;
+}
+// One visit's own customer tracking link — null when that row has no
+// track_view_token (never falls back to another visit's token).
+function liveEtaTrackUrl(row) {
+  const token = liveEtaLiveToken(row);
+  return token ? `${publicPortalUrl()}/track/${token}` : null;
+}
+
+// Per-visit LIVE ETA facts for a customer's upcoming services (Codex round-9
+// P2, PR #5334): the resolved minutes + timestamp are shared across a grouped
+// stop's siblings (one physical stop, one figure), but each sibling's
+// trackUrl is built from ITS OWN track_view_token — never copied from the
+// representative row whose lookup produced the shared result. A sibling with
+// no token gets trackUrl null (buildFactsBlock then renders no LIVE ETA /
+// TRACKING LINK line for it).
+function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
+  return liveEtaKeys.map((key, i) => {
+    const shared = key != null ? liveEtaResultByKey.get(key) || null : null;
+    if (!shared) return null;
+    return { minutes: shared.minutes, asOf: shared.asOf, trackUrl: liveEtaTrackUrl(upcomingServices[i]) };
+  });
+}
+
+// The upcoming-services row set: the same query getContextForCustomer always
+// ran (next three by date), plus — when the caller resolves LIVE ETA — any
+// currently-live visit (customer-facing track_state en_route/on_property) the
+// limit would have dropped (Codex round-13 P2, PR #5334): a 4-service day
+// (pest + lawn + mosquito + tree stop) could push the en-route row past
+// limit(3), so "where's the tech" reported no live location while the public
+// tracker was active. A customer with no live row, or whose live row is
+// already in the first three, gets EXACTLY the old rows in the old order.
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+function upcomingServicesBase(customer) {
+  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
+}
+const UPCOMING_SERVICE_COLUMNS = [
+  'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
+  // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
+  // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
+  // own track_view_token for the SAME "Track live" link the en-route
+  // SMS sends, and the stamped-vs-primary destination coords
+  // track-transitions.js's resolveEnRouteEtaMinutes already reads the
+  // same way for the initial en-route text.
+  // track_state (Codex round-1 finding, PR #5334): the admin-side
+  // status flip and the customer-facing tracker flip are two separate
+  // writes (server/routes/tech-track.js commits status='en_route'
+  // BEFORE calling track-transitions.markEnRoute, and does not roll
+  // the status back if that second write fails) — a LIVE ETA fact
+  // must require the SAME customer-facing tracker state the public
+  // tracking page requires for a live vehicle, never raw status alone,
+  // or it can advertise "Track live" for a stop the tracking page
+  // itself still renders as scheduled. See customerTrackState below.
+  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei', 'tech.bouncie_imei_changed_at as tech_mapping_changed_at',
+  'ss.lat as service_lat', 'ss.lng as service_lng',
+  'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
+];
+// The live-row query selects by customer + customer-facing track_state +
+// TODAY, independent of the operational status list (Codex round-14 P2, PR
+// #5334): markEnRoute writes track_state first and syncs `status` best-effort,
+// so a row can read `rescheduled` (or any other non-UPCOMING status) while the
+// tracking page already shows the live vehicle — UPCOMING_SERVICE_STATUSES
+// would have excluded it. Terminal rows (completed / cancelled / skipped /
+// no_show) stay excluded: customerTrackState treats those as not live.
+function liveServicesQuery(customer) {
+  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+    .where('ss.customer_id', customer.id)
+    .where('ss.scheduled_date', etDateString())
+    .whereIn('ss.track_state', LIVE_TRACK_STATES)
+    .whereNotIn('ss.status', TERMINAL_ROW_STATUSES);
+}
+const dateOrderKey = (row) => (row.scheduled_date instanceof Date ? row.scheduled_date.getTime() : Date.parse(row.scheduled_date) || 0);
+// Live rows the limited list is missing go IN; non-live rows come off the end
+// to stay at `cap`; the original date order is restored (stable).
+function mergeLiveUpcoming(limited, liveRows, cap = 3) {
+  const have = new Set(limited.map((r) => r.id));
+  const missing = liveRows.filter((r) => !have.has(r.id));
+  if (!missing.length) return limited;
+  const liveIds = new Set(liveRows.map((r) => r.id));
+  const merged = [...missing, ...limited];
+  while (merged.length > cap) {
+    const drop = merged.map((r) => liveIds.has(r.id)).lastIndexOf(false);
+    if (drop === -1) break;
+    merged.splice(drop, 1);
+  }
+  return merged.sort((a, b) => dateOrderKey(a) - dateOrderKey(b));
+}
+async function loadUpcomingServices(customer, includeLiveEta) {
+  const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
+  if (!includeLiveEta) return limited;
+  const liveRows = await liveServicesQuery(customer).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
+  return mergeLiveUpcoming(limited, liveRows);
+}
+
+// The send-time snapshot input: one group per distinct live STOP (Codex
+// round-16 P2, PR #5334). A stop whose LIVE ETA resolved carries its minutes;
+// a live (en-route, today) stop whose GPS / Distance Matrix lookup failed — or
+// that has no technician/destination to resolve at all — still gets a group
+// with `minutes: null`, so status-only copy ("the tech is on the way") is
+// rechecked against the visit's current tracker state at send time. Grouped
+// siblings sharing one physical stop share one group; each keeps its own
+// /track/ token (round-4) and the GPS-fix expiry rides along (round-11).
+// Destination identity of one visit row (round-20 P2): the property it is
+// stamped to plus the stamped coordinates and street/ZIP. Numbers are compared
+// numerically and strings case/space-folded by sms-eta-freshness, so pg's
+// numeric-as-string and trimming differences never read as a move.
+function liveEtaDestinationIdentity(row, customer = null) {
+  // Round-21 P2: also the RESOLVED destination and its source. A visit with no
+  // pin resolves to the customer's coordinates; a re-geocoded customer address
+  // must then invalidate the figure, so the customer id + resolved pair ride
+  // along and send time re-derives the same resolution from current rows.
+  const resolved = resolveLiveEtaDestination(row, customer);
+  return {
+    id: row.id,
+    propertyId: row.property_id ?? null,
+    lat: finiteNumber(row.service_lat),
+    lng: finiteNumber(row.service_lng),
+    line1: row.service_address_line1 ?? null,
+    zip: row.service_address_zip ?? null,
+    city: row.service_address_city ?? null,
+    resolved: { source: resolved.source, lat: resolved.lat, lng: resolved.lng },
+    ...(usesCustomerCoordinates(resolved.source) && customer?.id != null ? { customerId: customer.id } : {}),
+  };
+}
+function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
+  const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
+  const deviceImei = deviceFingerprint(members.find((s) => s.tech_bouncie_imei)?.tech_bouncie_imei);
+  // Technician first name(s) as shown in UPCOMING SERVICES (tech.name) — names only.
+  // The tracker-mapping generation, when the technician row carried it (round-41 P2).
+  const mappingMember = members.find((s) => s && 'tech_mapping_changed_at' in s);
+  const technicianNames = [...new Set(members.map((s) => String(s.technician_name || '').trim().split(/\s+/)[0]).filter(Boolean))];
+  return {
+    minutes: result ? result.minutes : null,
+    scheduledServiceIds: members.map((s) => s.id),
+    trackTokens: members.map(liveEtaLiveToken).filter(Boolean),
+    // The tracker state this group was drafted under (Codex round-18 P2): an
+    // on-site group lets a completed-arrival claim ("has arrived") be
+    // rechecked at send time too.
+    state,
+    // Which technician the ETA/status was about (round-18 P2): send time
+    // refuses when a reassignment changed the row's technician_id.
+    ...(technicianId != null ? { technicianId } : {}),
+    // Round-22 P2: the tracker device (Bouncie IMEI) the ETA was read from.
+    // Send time refuses when an admin re-pointed the technician at another vehicle.
+    ...(deviceImei ? { deviceImei } : {}),
+    // Codex #5334 P2: no technician on the row = no mapping to re-check; carrying a (null) generation would make send time query
+    // technicians with an undefined id and refuse a plain "your technician is on the way" status.
+    ...(mappingMember && technicianId != null ? { mappingChangedAt: mappingGeneration(mappingMember.tech_mapping_changed_at) } : {}),
+    ...(technicianNames.length ? { technicianNames } : {}),
+    // Round-20 P2: WHERE the ETA/status was about — each member's property id +
+    // the coordinates/address stamp the destination came from. Send time
+    // refuses when staff moved the appointment to another property.
+    destinations: members.map((m) => liveEtaDestinationIdentity(m, customer)),
+    ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
+    ...(result && Number.isFinite(result.fixAtMs) ? { fixAtMs: result.fixAtMs } : {}),
+  };
+}
+function liveEtaOnSite(row, todayStr = etDateString()) {
+  const { customerTrackState } = require('./track-transitions');
+  return Boolean(row) && calendarDay(row.scheduled_date) === todayStr && customerTrackState(row) === 'on_property';
+}
+function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer = null }) {
+  if (!includeLiveEta) return [];
+  const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key), 'en_route', customer));
+  // Live rows with no dedupe key (no technician / destination): singleton groups.
+  const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null, 'en_route', customer));
+  // On-site (on_property) visits today: status-only groups, so a completed
+  // arrival claim is rechecked against the visit's state at send time.
+  // Round-19 P2: on-site grouped siblings sharing one physical stop (same
+  // technician + destination key) form ONE group, so "The technician has
+  // arrived" isn't ambiguous across the siblings; keyless rows stay singletons.
+  const onSiteRows = upcomingServices.filter((s) => liveEtaOnSite(s));
+  const onSiteByKey = new Map();
+  const onSite = [];
+  for (const row of onSiteRows) {
+    const key = customer ? liveEtaDedupeKey(row, customer) : null;
+    if (key == null) { onSite.push(liveEtaGroupFor([row], null, 'on_property', customer)); continue; }
+    if (!onSiteByKey.has(key)) onSiteByKey.set(key, []);
+    onSiteByKey.get(key).push(row);
+  }
+  for (const members of onSiteByKey.values()) onSite.push(liveEtaGroupFor(members, null, 'on_property', customer));
+  return [...keyed, ...keyless, ...onSite];
+}
+
+// Test-only: clears the cross-request memo so unrelated test cases sharing a
+// (technician, destination) key never see a previous test's cached lookup.
+// Never called from production code.
+function _resetLiveEtaMemoForTests() {
+  liveEtaMemo.clear();
+}
+
+// Test-only: the memo's current entry count, so a test can assert the bound
+// actually holds under many distinct keys. Never called from production code.
+function _liveEtaMemoSizeForTests() {
+  return liveEtaMemo.size;
+}
+
 class ContextAggregator {
-  async getFullCustomerContext(phone) {
+  async getFullCustomerContext(phone, options = {}) {
     const clean = (phone || '').replace(/\D/g, '');
     const variants = [clean, `1${clean}`, `+1${clean}`, clean.slice(-10)];
 
@@ -519,14 +1045,26 @@ class ContextAggregator {
 
     if (!customer) return { known: false, phone: clean, summary: 'Unknown number — no customer record.' };
 
-    return this.getContextForCustomer(customer);
+    return this.getContextForCustomer(customer, options);
   }
 
   // Build context from an already-matched customer row. Callers like the
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  async getContextForCustomer(customer) {
+  // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
+  // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
+  // Distance Matrix call, so it defaults OFF and every caller that discards
+  // the fact — sms-amount-recheck's send-time revalidation, the legacy
+  // response-drafter path, previsit-brief, lead-response-tools,
+  // sms-shadow-backfill, the managed-assistant snapshot, email-reply-context
+  // — pays nothing for it. Only the SMS drafting paths that actually render
+  // context.upcomingServices[].liveEta / liveEtaGroups into a prompt
+  // (sms-shadow-drafter's draftShadowReply, estimate-conversion-agent's
+  // generateLlmReviewDraft) opt in explicitly with { includeLiveEta: true }.
+  // false leaves upcomingServices[].liveEta and liveEtaGroups at their
+  // empty/null defaults; every other field is unaffected.
+  async getContextForCustomer(customer, { includeLiveEta = false } = {}) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
@@ -539,11 +1077,14 @@ class ContextAggregator {
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
+      loadUpcomingServices(customer, includeLiveEta),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
-      db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
+      // A never-attempted dispute-hold deferral is not a payment the customer
+      // made: out of the recent-payments sample (SQL, so it cannot use up one
+      // of the 5 rows), consistent with failedStandalone below.
+      excludeNeverAttemptedHoldDeferrals(db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming'), 'payments').orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -646,7 +1187,7 @@ class ContextAggregator {
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(p))
       // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
       // the invoice lifecycle owns that money — EXCEPT when the linked
       // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
@@ -740,8 +1281,63 @@ class ContextAggregator {
 
     const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance, billingLane);
 
+    // LIVE ETA: only a visit that's TODAY and en_route has a tech worth
+    // tracking — every other row resolves instantly to null with no lookup.
+    // liveEtaEligible (Codex round-1 finding) also requires the SAME
+    // customer-facing tracker state track-public.js requires for a live
+    // vehicle: terminal operational statuses win over a stale track_state,
+    // and status='en_route' alone is not enough (see the track_state select
+    // comment above).
+    // Grouped-stop siblings (visit-groups.js fan-out) share one physical
+    // stop and advance to en_route together — resolved once per unique
+    // (technician, destination) key and the SAME minutes + timestamp are
+    // reused by every sibling that shares it (liveEtaDedupeKey/
+    // liveEtaDestination above), so the facts block can never carry two
+    // different minute counts for what is really one stop; each sibling's
+    // tracking link is its OWN (perVisitLiveEtas, Codex round-9 P2).
+    // includeLiveEta default false: every key resolves to null, so the
+    // Promise.all below has nothing to await and resolveLiveEtaFact is
+    // never called — no GPS or Distance Matrix request at all.
+    const liveEtaKeys = upcomingServices.map((s) => (includeLiveEta && liveEtaEligible(s) ? liveEtaDedupeKey(s, customer) : null));
+    const uniqueLiveEtaKeys = [...new Set(liveEtaKeys.filter((k) => k != null))];
+    const uniqueLiveEtaResults = await Promise.all(uniqueLiveEtaKeys.map((key) => {
+      // Prefer a sibling that actually carries a track_view_token as the
+      // representative lookup — every row in a real fan-out has its own,
+      // but the representative should never accidentally be the one row
+      // missing it (resolveLiveEtaFact would then fail closed for the
+      // whole group).
+      const representative = upcomingServices.find((s, i) => liveEtaKeys[i] === key && liveEtaLiveToken(s))
+        || upcomingServices[liveEtaKeys.findIndex((k) => k === key)];
+      return resolveLiveEtaFact(representative, customer);
+    }));
+    const liveEtaResultByKey = new Map(uniqueLiveEtaKeys.map((key, i) => [key, uniqueLiveEtaResults[i]]));
+    // Codex round-9 P2 (PR #5334): a grouped stop shares ONE resolved
+    // minutes figure + timestamp across its siblings, but each sibling gets
+    // its OWN trackUrl built from its own track_view_token — copying the
+    // representative's whole result would hand a Pest visit's tracking link
+    // to the Lawn line (and a sibling with no token would silently inherit
+    // a link that is not its own). A sibling with no token gets trackUrl
+    // null, which buildFactsBlock renders as no LIVE ETA/TRACKING LINK line.
+    const liveEtas = perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey);
+    // LIVE ETA send-time freshness (independent review + Codex round-1
+    // finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round
+    // 2): one entry per unique (technician, destination) key that actually
+    // resolved a LIVE ETA, each carrying that group's own minutes figure and
+    // the scheduled_service ids it covers (grouped-stop siblings sharing one
+    // physical stop share one entry — they were resolved once, above). A
+    // FLAT list of every id that ever backed ANY live ETA would let a reply
+    // that quotes one stop's number pass sms-eta-freshness.js's recheck on a
+    // DIFFERENT stop's still-en_route status — grouping preserves which
+    // ids each distinct minutes figure actually came from. Threaded through
+    // generateGroundedDraft's context param, never persisted here.
+    const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
+
     return {
       known: true,
+      // LIVE ETA send-time freshness snapshot input (see the comment above
+      // where this is built) — [{ minutes, scheduledServiceIds }], never
+      // rendered into any prompt.
+      liveEtaGroups,
       customer: {
         id: customer.id, name: `${customer.first_name} ${customer.last_name}`,
         firstName: customer.first_name, phone: customer.phone, email: customer.email,
@@ -753,21 +1349,37 @@ class ContextAggregator {
         // as this customer's price (codex #3128 r6).
         billingLane,
       },
-      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
+      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type, fromPhone: m.from_phone ?? null, toPhone: m.to_phone ?? null })),
       // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
       // billing notes, candid remarks live there) — only the reviewed
       // WHAT WE DID / WHAT WE FOUND parse may reach customer-facing prompts
       // (Codex r1); unparseable notes render as none, never raw.
-      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService.technician_notes) } : null,
+      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService) } : null,
       // v10 grounding: the last few visits with reviewed notes + areas —
       // "what did you do last time" is a routine customer text.
       serviceHistory: serviceHistory.slice(0, 3).map(s => ({
         type: s.service_type,
         date: s.service_date,
-        notes: customerSafeVisitNotes(s.technician_notes),
+        notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
+      upcomingServices: upcomingServices.map((s, i) => withScheduledServiceId({
+        type: s.service_type,
+        date: s.scheduled_date,
+        window: this.deriveWindow(s),
+        status: s.status,
+        // The customer-facing tracker state (Codex round-4 P2, PR #5334),
+        // normalized to the same operational-style labels buildFactsBlock's
+        // status checks already use ('en_route' / 'on_site' / ...) — ONE
+        // source of truth shared with liveEtaEligible above, instead of
+        // buildFactsBlock re-deriving en-route/on-site from raw `status`,
+        // which can lag the tracker (see the track_state select comment
+        // above / customerTrackState's own comment in track-transitions.js).
+        trackState: customerFacingTrackState(s),
+        tech: s.technician_name || null,
+        isToday: this.calendarDay(s.scheduled_date) === etDateString(),
+        liveEta: liveEtas[i] || null,
+      }, s.id)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,
@@ -975,19 +1587,22 @@ class ContextAggregator {
     } catch { return false; }
   }
 
-  // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
-  // over as Date objects at local midnight, so the local calendar parts are
-  // the true day (same idiom as the shadow drafter's formatEtDate); strings
-  // pass through their date prefix. Never treat these as instants — a UTC
-  // reparse shifts the day.
+  // Calendar day 'YYYY-MM-DD' of a Postgres DATE value — see the module-level
+  // calendarDay() this delegates to (kept as an instance method too since
+  // every existing call site reads it off `this`).
   calendarDay(value) {
-    if (!value) return null;
-    if (value instanceof Date) {
-      const pad = (n) => String(n).padStart(2, '0');
-      return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
-    }
-    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
-    return m ? m[1] : null;
+    return calendarDay(value);
+  }
+
+  // 'M/D/YYYY' label for a DATE column in the one-line summary. Built from
+  // calendarDay, never new Date(value).toLocaleDateString(..., ET): on a UTC
+  // host pg's local-midnight Date is 00:00Z, which ET renders as the day
+  // before (a Thu Oct 1 visit read "Next: ... 9/30/2026").
+  summaryDay(value) {
+    const day = this.calendarDay(value);
+    if (!day) return '';
+    const [y, m, d] = day.split('-').map(Number);
+    return `${m}/${d}/${y}`;
   }
 
   // The arrival window lives in window_start (Postgres `time`, ET wall-clock
@@ -1066,8 +1681,8 @@ class ContextAggregator {
         || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
       s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
     }
-    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
-    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
+    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${this.summaryDay(lastSvc.service_date)}`;
+    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${this.summaryDay(upcoming[0].scheduled_date)}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
     if (flags.some(f => f.type === 'open_complaint')) s += ` | ⚠️ Open complaint`;
     if (flags.some(f => f.type === 'cancel_save_active')) s += ` | 🚨 Cancel save active`;
@@ -1092,3 +1707,14 @@ module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
 module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
 module.exports.authorizedDuesCents = authorizedDuesCents;
 module.exports.resolveAnnualCoverageState = resolveAnnualCoverageState;
+module.exports.resolveLiveEtaFact = resolveLiveEtaFact;
+module.exports.resolveLiveEtaMinutesUncached = resolveLiveEtaMinutesUncached;
+module.exports.liveEtaDestination = liveEtaDestination;
+module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
+module.exports.liveEtaEligible = liveEtaEligible;
+module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
+module.exports.perVisitLiveEtas = perVisitLiveEtas;
+module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
+module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
+module.exports.loadUpcomingServices = loadUpcomingServices;
+module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

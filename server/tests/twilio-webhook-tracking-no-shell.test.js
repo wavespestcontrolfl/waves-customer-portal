@@ -97,7 +97,7 @@ test.each([0, 1])('tracking line %s logs unknown senders without creating custom
   const sid = await receive('Please quote service for the garden shed.', to);
   expect(mockState.sms[0].customer_id).toBeNull();
   expect(triggerNotification).toHaveBeenCalledWith('new_lead', expect.objectContaining({
-    twilioSid: sid, name: 'Unknown sender', link: '/admin/communications',
+    twilioSid: sid, name: 'Unknown sender', link: `/admin/communications?message=${sid}`,
   }));
   expect(require('../services/conversations').recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ customerId: undefined }));
 });

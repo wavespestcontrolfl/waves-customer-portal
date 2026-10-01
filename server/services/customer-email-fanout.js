@@ -60,7 +60,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 // in-flight send) but gets its own column-only customer_email sync below —
 // this service is diff-gated, so "heal on the next fan-out" never comes.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 // Mirrors OPEN_STATES in routes/admin-triage.js.
 const OPEN_REVIEW_STATES = ['open', 'in_progress'];
@@ -160,6 +160,38 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
     return updated;
   };
   return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
+}
+
+/**
+ * Merge helper: re-point a soon-to-be-deleted newsletter subscriber's delivery
+ * history at the surviving subscriber. newsletter_send_deliveries.subscriber_id
+ * is ON DELETE SET NULL, so without this the person's send history is orphaned
+ * (the activity timeline joins deliveries through the subscriber). Runs in the
+ * caller's transaction, BEFORE the old row's delete. Delivery rows carry their
+ * own email snapshot, so each keeps the address it was actually mailed at.
+ *  - Only onto a survivor that belongs to THIS customer (already linked, or
+ *    adopted just before): a row linked to ANOTHER customer must never inherit
+ *    this history (it would show on their timeline and take this customer's
+ *    bounce/unsubscribe events).
+ *  - SETTLED deliveries only. queued/failed/sending rows are still retryable
+ *    (newsletter-sender's Resume sends to the survivor's CURRENT address while
+ *    the SendGrid webhook matches events on the delivery's recipient snapshot),
+ *    so re-pointing them would mis-record the recipient and lose tracking; they
+ *    fall to SET NULL exactly as before.
+ *  - UNIQUE (send_id, subscriber_id): an issue the survivor already has its own
+ *    delivery for is skipped (re-pointing it would abort the whole edit); those
+ *    rows fall to SET NULL as before.
+ * @returns {Promise<number>} deliveries re-pointed
+ */
+async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now }) {
+  return conn('newsletter_send_deliveries')
+    .where({ subscriber_id: fromId })
+    .whereRaw("COALESCE(status, 'queued') NOT IN ('queued', 'failed', 'sending')")
+    .whereExists(conn('newsletter_subscribers')
+      .where({ id: toId, customer_id: customerId }).select(conn.raw('1')))
+    .whereNotIn('send_id', conn('newsletter_send_deliveries')
+      .where({ subscriber_id: toId }).select('send_id'))
+    .update({ subscriber_id: toId, updated_at: now });
 }
 
 /**
@@ -385,6 +417,34 @@ async function propagateCustomerEmailChange({
         });
     }
 
+    // Pending email-template-automation INTENT markers (#5154, codex P1
+    // round 5) are the step BEFORE a queued run: a marker still 'pending'
+    // (the automation gate off, or a direct emit that failed transiently)
+    // replays through processTrigger later, and the executor looks the
+    // customer's live address up only when the payload carries NONE — an
+    // estimate.expired marker snapshots the estimate's customer_email at
+    // the flip. The estimates rewrite above deliberately skips the
+    // now-expired row (terminal), so without this the replayed expiry email
+    // would go to the old address. Same ownership rule as the queued runs:
+    // customer-linked markers only
+    // (payload.customer_id), only a payload address still equal to the OLD
+    // one (a tenant's estimate with its own address is left alone), and
+    // only while still 'pending', so a replay that already settled the
+    // marker wins. ONE set-based jsonb_set statement — no per-row JS parse
+    // that a malformed payload could throw out of, aborting the whole
+    // customer email change (pre-push audit P1). Counted with templateRuns —
+    // both are not-yet-sent template sends. Residual (same as the 'running'
+    // run exclusion above): a replay that read the marker just before this
+    // commit sends from its in-memory copy.
+    counts.templateRuns += await conn('email_template_automation_intents')
+      .where({ status: 'pending' })
+      .whereRaw("payload->>'customer_id' = ?", [String(customerId)])
+      .whereRaw("LOWER(payload->>'customer_email') = ?", [oldEmail])
+      .update({
+        payload: conn.raw("jsonb_set(payload, '{customer_email}', to_jsonb(?::text))", [newEmail]),
+        updated_at: now,
+      });
+
     // Referral promoter rows snapshot the email at enrollment; reward
     // notifications send directly to it (referral-engine).
     counts.promoters += await conn('referral_promoters')
@@ -480,7 +540,11 @@ async function propagateCustomerEmailChange({
             .update({ customer_id: customerId, updated_at: now });
         }
         // Status CAS (r44): an unsubscribe committing after the snapshot
-        // wins — the opt-out record is never deleted.
+        // wins — the opt-out record is never deleted. oldSub is the FOR UPDATE
+        // re-read, so its status cannot change under us before the del below.
+        if (['pending', 'active'].includes(String(oldSub.status || ''))) {
+          await repointNewsletterDeliveries(conn, { fromId: oldSub.id, toId: targetSub.id, customerId, now });
+        }
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
           .whereIn('status', ['pending', 'active'])
@@ -1243,6 +1307,9 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
+        // Address key first (writers take it before rows); the send below
+        // re-enters it and runs its vetoes on this same connection (B13).
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         for (const holdId of holdIds) {
           // Target-bound (r35): a correction retargeting a releasing row
           // preserves its fence, so only the held_email CAS can refuse
@@ -1286,7 +1353,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         // stamps the rollback restored.
         Object.assign(holdClaims, gatedStamps);
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;
@@ -1350,6 +1417,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // read lock, and the pre-stamp is already durable.
     try {
       await conn.transaction(async (trx) => {
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: pendingConfirmation.id,
@@ -1365,7 +1433,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           throw lost;
         }
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;
@@ -1426,6 +1494,15 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
+    if (e.deliveryAmbiguous) {
+      // A provider timeout / 5xx / network failure AFTER dispatch: the DOI may
+      // have been accepted. Keep the pre-stamp (the dedupe evidence) and re-pend
+      // under the neutral marker — never clear the stamp, never arm the forced
+      // resend (the retry's dedupe guard then settles on the stamp).
+      logger.warn(`[email-fanout] DOI delivery is ambiguous for subscriber ${pendingConfirmation.id} — pre-stamp stands, holds re-pended neutral`);
+      await repenHolds('doi_delivery_ambiguous');
+      return false;
+    }
     // The pre-stamp must not bury an undelivered DOI: clear it, conditional
     // on the row still being OUR verified payload (a rotation landing
     // mid-send already replaced or cleared it, and B's callback owns
@@ -1530,6 +1607,70 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
 // new synced surface.
 const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send still targeting the old email address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
 
+// The guarded body of applyCustomerUpdatesWithEmailClaimGuard, run on a
+// caller-supplied transaction: customer row FOR UPDATE, then the shared
+// 'customer-email:' advisory lock, then the undone-merge holder recheck.
+async function claimGuardedCustomerUpdateInTrx(trx, {
+  customerId, updates, emailKeyNorm, replaceExpectedEmail = null, applyWithEmailInTrx = null,
+}) {
+  const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
+  if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+  const standingValueBlocks = replaceExpectedEmail == null
+    ? !!fresh.email
+    : String(fresh.email || '') !== String(replaceExpectedEmail);
+  if (standingValueBlocks) {
+    // Filled (or fixed) while we waited — operator edit, merge
+    // backfill, a racing intake. The standing value wins; automated
+    // intake never overwrites an email it did not read pre-lock, only
+    // backfills an empty one or replaces the exact garbled value it
+    // saw.
+    const { email: _dropped, ...rest } = updates;
+    if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+    return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
+  }
+  await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
+  // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
+  // ruling every other claimant site adopted): customers.email is
+  // deliberately non-unique, so a spouse/tenant/shared-household
+  // holder must not leave the matched customer email-less. Only a
+  // live holder who is the restored LOSER of an UNDONE merge whose
+  // winner is THIS customer proves the address is a stale pre-undo
+  // capture. One joined existence query; if the joined read fails,
+  // fall back to the conservative bare-holder block.
+  let undoneHolder = null;
+  try {
+    undoneHolder = await trx('customers as c')
+      .join('customer_merge_journal as j', function joinUndone() {
+        this.on('j.loser_customer_id', 'c.id');
+      })
+      .where('j.winner_customer_id', customerId)
+      .whereNotNull('j.undone_at')
+      .whereRaw('lower(c.email) = ?', [emailKeyNorm])
+      .whereNot('c.id', customerId)
+      .where('c.active', true)
+      .whereNull('c.deleted_at')
+      .first('c.id');
+  } catch {
+    undoneHolder = await trx('customers')
+      .whereRaw('lower(email) = ?', [emailKeyNorm])
+      .whereNot({ id: customerId })
+      .where('active', true)
+      .whereNull('deleted_at')
+      .first('id');
+  }
+  if (undoneHolder) {
+    const { email: _dropped, ...rest } = updates;
+    if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+    return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
+  }
+  if (applyWithEmailInTrx) {
+    await applyWithEmailInTrx(trx);
+  } else {
+    await trx('customers').where({ id: customerId }).update(updates);
+  }
+  return { emailApplied: true, emailDroppedReason: null };
+}
+
 /**
  * Apply an AUTOMATED intake writer's updates to an existing customer row,
  * serializing an email backfill against a concurrent customer-merge UNDO.
@@ -1591,64 +1732,9 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
     return { emailApplied: false, emailDroppedReason: null };
   }
   try {
-    return await db.transaction(async (trx) => {
-      const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
-      if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
-      const standingValueBlocks = replaceExpectedEmail == null
-        ? !!fresh.email
-        : String(fresh.email || '') !== String(replaceExpectedEmail);
-      if (standingValueBlocks) {
-        // Filled (or fixed) while we waited — operator edit, merge
-        // backfill, a racing intake. The standing value wins; automated
-        // intake never overwrites an email it did not read pre-lock, only
-        // backfills an empty one or replaces the exact garbled value it
-        // saw.
-        const { email: _dropped, ...rest } = updates;
-        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
-        return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
-      }
-      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
-      // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
-      // ruling every other claimant site adopted): customers.email is
-      // deliberately non-unique, so a spouse/tenant/shared-household
-      // holder must not leave the matched customer email-less. Only a
-      // live holder who is the restored LOSER of an UNDONE merge whose
-      // winner is THIS customer proves the address is a stale pre-undo
-      // capture. One joined existence query; if the joined read fails,
-      // fall back to the conservative bare-holder block.
-      let undoneHolder = null;
-      try {
-        undoneHolder = await trx('customers as c')
-          .join('customer_merge_journal as j', function joinUndone() {
-            this.on('j.loser_customer_id', 'c.id');
-          })
-          .where('j.winner_customer_id', customerId)
-          .whereNotNull('j.undone_at')
-          .whereRaw('lower(c.email) = ?', [emailKeyNorm])
-          .whereNot('c.id', customerId)
-          .where('c.active', true)
-          .whereNull('c.deleted_at')
-          .first('c.id');
-      } catch {
-        undoneHolder = await trx('customers')
-          .whereRaw('lower(email) = ?', [emailKeyNorm])
-          .whereNot({ id: customerId })
-          .where('active', true)
-          .whereNull('deleted_at')
-          .first('id');
-      }
-      if (undoneHolder) {
-        const { email: _dropped, ...rest } = updates;
-        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
-        return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
-      }
-      if (applyWithEmailInTrx) {
-        await applyWithEmailInTrx(trx);
-      } else {
-        await trx('customers').where({ id: customerId }).update(updates);
-      }
-      return { emailApplied: true, emailDroppedReason: null };
-    });
+    return await db.transaction((trx) => claimGuardedCustomerUpdateInTrx(trx, {
+      customerId, updates, emailKeyNorm, replaceExpectedEmail, applyWithEmailInTrx,
+    }));
   } catch (e) {
     // The guard must never block the intake write into failure: drop the
     // email fill (the lead/quote/call record still carries the address for
@@ -1663,6 +1749,44 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
   }
 }
 
+/**
+ * Blank-email backfill INSIDE a caller's transaction (the public estimate
+ * accept fills an existing customer's missing email from the accept card).
+ * Same claim guard as applyCustomerUpdatesWithEmailClaimGuard, run in a
+ * SAVEPOINT so a guard failure drops only the email fill — never the
+ * caller's transaction. A whitespace-only stored email counts as blank:
+ * it is replaced only if still that exact value under the row lock.
+ * Returns { emailApplied, emailDroppedReason }.
+ */
+async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'intake' }) {
+  const emailKeyNorm = emailKey(email);
+  if (!customerId || !email || !emailKeyNorm) return { emailApplied: false, emailDroppedReason: null };
+  try {
+    // The blank check runs INSIDE the savepoint too: a statement-level
+    // failure here (lock/statement timeout) must drop only the backfill,
+    // never abort the caller's transaction.
+    return await trx.transaction(async (sp) => {
+      const current = await sp('customers').where({ id: customerId }).first('email');
+      if (!current) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+      if (String(current.email || '').trim()) return { emailApplied: false, emailDroppedReason: 'email already on file' };
+      const replaceExpectedEmail = current.email ? current.email : null;
+      // The write stamps updated_at (the optimistic-lock version operator
+      // confirmations compare) only when the email actually lands.
+      return claimGuardedCustomerUpdateInTrx(sp, {
+        customerId,
+        updates: { email },
+        emailKeyNorm,
+        replaceExpectedEmail,
+        applyWithEmailInTrx: (inner) => inner('customers').where({ id: customerId })
+          .update({ email, updated_at: new Date() }),
+      });
+    });
+  } catch (e) {
+    logger.warn(`[email-fanout] in-transaction email-claim guard failed for ${source} (customer ${customerId}) — skipping the email backfill: ${e.message}`);
+    return { emailApplied: false, emailDroppedReason: `guard failed: ${e.message}` };
+  }
+}
+
 module.exports = {
   propagateCustomerEmailChange,
   resolveOpenEmailReviewCards,
@@ -1670,4 +1794,6 @@ module.exports = {
   emailKey,
   EMAIL_FANOUT_DISCLOSURE,
   applyCustomerUpdatesWithEmailClaimGuard,
+  backfillCustomerEmailInTrx,
+  repointNewsletterDeliveries,
 };

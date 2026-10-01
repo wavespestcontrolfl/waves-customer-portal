@@ -43,7 +43,11 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY } = require('../services/ops-digest');
+const {
+  inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord, alertClassFor,
+  decideRingForNewRow, ringOnRefreshFrom, normalizeItemKeys, itemSetHashFor, itemKeysMetaFor,
+} = require('../services/ops-digest');
+const { ACTIVITY_LINK, routeFor } = require('../config/ops-alert-routes');
 
 const router = express.Router();
 // Token-route privacy baseline on every outcome (dark 404, 401, 4xx, 201):
@@ -57,6 +61,15 @@ const MAX_SUBJECT_CHARS = 180;   // + "KIND: " stays inside the varchar(200) tit
 const MAX_BODY_CHARS = 60000;
 const MAX_LINK_CHARS = 300;
 const MAX_METADATA_BYTES = 4096;
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the bell title/body
+// budgets — same numbers as notification-service.js's admin brevity guard
+// and ops-digest.js's deliverOpsDigest.
+const MAX_HEADLINE_CHARS = 60;
+const MAX_SUMMARY_CHARS = 110;
+const AUDIENCES = new Set(['owner', 'engineering', 'fyi']);
+// admin-alerts-ring scope (2026-09-28): the ring-only-on-change test's two
+// numbers — see validateCount below.
+const MAX_COUNT = Number.MAX_SAFE_INTEGER;
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SOURCE = 'ops-crons';
 
@@ -137,7 +150,122 @@ function validateDigest(body) {
   if (link.error) return link;
   const metadata = validateMetadata(body.metadata);
   if (metadata.error) return metadata;
-  return { value: { key, kind, subject, text, link: link.value, metadata: metadata.value, observedAt: observedAtFrom(body.observedAt) } };
+  const headline = validateHeadline(body.headline);
+  if (headline.error) return headline;
+  const summary = validateSummary(body.summary);
+  if (summary.error) return summary;
+  const audience = validateAudience(body.audience);
+  if (audience.error) return audience;
+  const count = validateCount(body.count, 'count');
+  if (count.error) return count;
+  const newCount = validateCount(body.newCount, 'newCount');
+  if (newCount.error) return newCount;
+  const itemIds = validateItemIds(body.itemIds);
+  if (itemIds.error) return itemIds;
+  return {
+    value: {
+      key, kind, subject, text, link: link.value, metadata: metadata.value,
+      observedAt: observedAtFrom(body.observedAt),
+      headline: headline.value, summary: summary.value, audience: audience.value,
+      count: count.value, newCount: newCount.value, itemIds: itemIds.value,
+    },
+  };
+}
+
+// `count` and `newCount` resolve INDEPENDENTLY — each caller-supplied value
+// wins on its own; only a value the caller left out falls back to the
+// check-map's own counts(subject) (data-hygiene: open backlog + how many
+// are new), then to the first integer anywhere in the subject as a generic
+// `count` (never a `newCount`: a bare number's meaning isn't safely
+// guessable for an unconverted check, so an unmatched check simply never
+// reports newCount). `{ newCount: 1 }` with no `count` must still resolve
+// the check-map's own count, not fall through to null alongside it. Only a
+// LEADING number is a count ("42 scheduled-visit pair(s) overlap"); a
+// number further in is usually a date or time ("… — Mon 09-28 10:00"),
+// which would compare two different findings as the same count.
+function firstIntegerInSubject(subject) {
+  const m = /^\s*(\d+)\b/.exec(String(subject || ''));
+  return m ? Number(m[1]) : null;
+}
+function resolveCounts({ count, newCount, subject, route }) {
+  const routeCounts = typeof route.counts === 'function' ? route.counts(subject) : null;
+  const resolvedCount = count !== null && count !== undefined
+    ? count
+    : (routeCounts && Number.isFinite(routeCounts.count) ? routeCounts.count : firstIntegerInSubject(subject));
+  const resolvedNewCount = newCount !== null && newCount !== undefined
+    ? newCount
+    : (routeCounts && Number.isFinite(routeCounts.newCount) ? routeCounts.newCount : null);
+  return { count: resolvedCount, newCount: resolvedNewCount };
+}
+
+// A caller-composed bell title, 60 chars or less. Optional — the route
+// falls back to `${area} — ${subject}` (routeFor's area) when omitted.
+function validateHeadline(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string') return { error: 'headline must be a string' };
+  const headline = raw.trim();
+  if (!headline) return { value: null };
+  if (headline.length > MAX_HEADLINE_CHARS) return { error: `headline exceeds ${MAX_HEADLINE_CHARS} chars` };
+  return { value: headline };
+}
+
+// A caller-composed bell body, one sentence, 110 chars or less. Optional —
+// omitted means no second line (the full `body` still lands in `detail`).
+function validateSummary(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string') return { error: 'summary must be a string' };
+  const summary = raw.trim();
+  if (!summary) return { value: null };
+  if (summary.length > MAX_SUMMARY_CHARS) return { error: `summary exceeds ${MAX_SUMMARY_CHARS} chars` };
+  return { value: summary };
+}
+
+// Overrides the check-map's derived audience. Optional.
+// Trimmed like headline/summary; blank reads as omitted (the documented
+// contract — codex r2 P0 on #5236).
+function validateAudience(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string') return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
+  const audience = raw.trim();
+  if (!audience) return { value: null };
+  if (!AUDIENCES.has(audience)) return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
+  return { value: audience };
+}
+
+// admin-alerts-ring scope (2026-09-28): the ring-only-on-change test's
+// headline number (`count`) and how many of it are new (`newCount`) — both
+// optional; absent, the route falls back to the check-map's own counts(),
+// then to the first integer in the subject (see resolveCounts below).
+function validateCount(raw, label) {
+  // Only an OMITTED field falls back; an explicit null is a malformed value.
+  if (raw === undefined) return { value: null };
+  if (!Number.isInteger(raw) || raw < 0 || raw > MAX_COUNT) return { error: `${label} must be a non-negative integer` };
+  return { value: raw };
+}
+
+// Follow-up to #5269 (codex r8 P1): a date-only ops-cron key (e.g. e22's
+// "N overlapping visits") carries no identity of its own once its run date
+// is stripped, so the key-derived same-set test can't tell today's finding
+// from a different one tomorrow. `itemIds` lets such a check hand over its
+// own item identity — the same shape and semantics as an in-process
+// sender's `itemKeys` (ops-digest.js's deliverOpsDigest): deduped, sorted,
+// capped at 500 for the stored list; the full-set hash is kept regardless
+// of size. Only an OMITTED field falls back (leaves prior identity alone,
+// same convention as count/newCount); an explicit null is malformed, like
+// count.
+const MAX_ITEM_IDS = 2000;
+const MAX_ITEM_ID_CHARS = 200;
+function validateItemIds(raw) {
+  if (raw === undefined) return { value: undefined };
+  if (!Array.isArray(raw) || raw.length > MAX_ITEM_IDS) return { error: `itemIds must be an array of at most ${MAX_ITEM_IDS} strings` };
+  const cleaned = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') return { error: 'itemIds entries must be strings' };
+    const trimmed = entry.trim();
+    if (!trimmed || trimmed.length > MAX_ITEM_ID_CHARS) return { error: `itemIds entries must be 1-${MAX_ITEM_ID_CHARS} chars after trim` };
+    cleaned.push(trimmed);
+  }
+  return { value: cleaned };
 }
 
 // Admin-relative only: a digest never deep-links off the portal, and a
@@ -154,7 +282,7 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet', 'rungAt', 'itemKeys', 'itemSetHash'];
 
 // Observation time of a finding / clean run: the caller's ISO timestamp when
 // valid and not in the future, else now. Ordering resolves against ingests
@@ -182,9 +310,38 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { error, value } = validateDigest(req.body);
   if (error) return res.status(400).json({ ok: false, reason: 'invalid_payload', error });
 
-  const { key, kind, subject, text, link, metadata, observedAt } = value;
-  const title = `${kind}: ${subject}`;
+  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience, count, newCount, itemIds } = value;
+  // The check → destination map fills in what an unconverted ops-crons
+  // check doesn't send itself: a fallback title area, where the bell should
+  // land, and who it's for. A caller's own headline/summary/audience/link
+  // always wins over the map.
+  const route = routeFor(key, kind);
+  const resolvedAudience = audience || route.audience;
+  // No prefix on the title any more (admin-alerts-brevity scope) — `kind`
+  // rides in metadata instead (agent-activity.js's digestItem reads it).
+  // Fallback order: the caller's own headline, then the check's own
+  // headline(subject) (e.g. the data-hygiene sweep's parsed "N new, M open"),
+  // then the generic `${area} — ${subject}`.
+  const routeHeadline = !headline && typeof route.headline === 'function' ? route.headline(subject) : null;
+  const title = headline || truncateAtWord(routeHeadline || `${route.area} — ${subject}`, MAX_HEADLINE_CHARS);
+  const bellBody = summary || null;
+  // "Absent or the Activity feed" — a caller that already points at the
+  // feed its own row will sit in gets the map's more specific page instead.
+  const resolvedLink = (!link || link === ACTIVITY_LINK) ? route.link : link;
   const dedupeKey = `${SOURCE}:${key}`;
+  // admin-alerts-ring scope (2026-09-28): the ring-only-on-change identity
+  // and its two numbers — caller-supplied count/newCount win outright, else
+  // the check-map's own counts(subject), else the subject's first integer.
+  const alertClass = alertClassFor(key, SOURCE);
+  const { count: resolvedCount, newCount: resolvedNewCount } = resolveCounts({ count, newCount, subject, route });
+  // Follow-up to #5269 (codex r8 P1): a date-only key's identity is UNKNOWN
+  // (ops-digest.js's decideRingForNewRow) — `itemIds` lets the check hand
+  // over its own item identity instead, normalized/capped/hashed exactly
+  // like an in-process sender's `itemKeys` (deliverOpsDigest), so the same
+  // ring test can tell a genuinely repeated finding from a different one.
+  const itemKeys = normalizeItemKeys(itemIds);
+  const itemSetHash = itemSetHashFor(itemIds);
+  const itemKeysMeta = itemKeysMetaFor(itemIds, itemKeys, itemSetHash);
   let outcome = null;
   try {
     // ONE transaction under the dedupe's advisory lock — the same lock
@@ -206,18 +363,72 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       const standing = await standingObservation(trx, dedupeKey);
       if (standing && Date.parse(observedAt) < Date.parse(standing)) return { stale: true };
       const effectiveObservedAt = laterOf(standing, observedAt);
+      // Ring-only-on-change (owner audience only), decided under the SAME
+      // lock/transaction taken above — see ops-digest.js's own comment for
+      // the full rationale. This covers the FRESH-insert case only (no
+      // standing row yet for this dedupeKey); a REFRESH of an existing row
+      // is decided by ringOnRefresh below, against that row's own content.
+      const quiet = resolvedAudience === 'owner'
+        ? !(await decideRingForNewRow(trx, {
+          alertClass, source: SOURCE, key: null, opsKey: key, count: resolvedCount, newCount: resolvedNewCount, itemKeys, itemSetHash,
+        }))
+        : false;
       // A later run's recurrence changes dedupeVersion and refreshes the
       // standing row. A repeat of the same observation remains deduped.
-      const row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
-        link,
+      // The full report goes to `detail` — the bell shows only the short
+      // title + optional one-line summary; `body` (`text`) is never stored
+      // on the row any more (admin-alerts-brevity scope, owner 2026-09-28).
+      const row = await NotificationService.notifyAdmin(CATEGORY, title, bellBody, {
+        link: resolvedLink,
+        // bell: true is the GATE_ADMIN_BELL_POLICY persist tag, not a ring: with
+        // the policy on, `false` would suppress the ROW (no Activity entry, and
+        // the email fallback fires). Bell visibility is `metadata.feed` below —
+        // an Activity-only row never reaches the bell list/count, and admin
+        // notifyAdmin rows never push.
         bell: true,
+        detail: text,
         dedupeKey,
         dedupeWindowMs: DEDUPE_WINDOW_MS,
         refreshOnDedupe: true,
+        // Owner rows only: an engineering/fyi refresh keeps notifyAdmin's
+        // default (any content change re-surfaces it), same as in-process.
+        ...(resolvedAudience === 'owner' ? { ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount, itemKeys, itemSetHash }) } : {}),
         // Without a caller timestamp, identical content has no new event
         // identity. Let content changes refresh; retries keep their read state.
         dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,
-        metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
+        metadata: {
+          ...metadata,
+          opsKey: key,
+          subject,
+          kind,
+          audience: resolvedAudience,
+          source: SOURCE,
+          observedAt: effectiveObservedAt,
+          alertClass,
+          ...(Number.isFinite(resolvedCount) ? { count: resolvedCount } : {}),
+          ...(Number.isFinite(resolvedNewCount) ? { newCount: resolvedNewCount } : {}),
+          ...itemKeysMeta,
+          // Written LAST and unconditionally: a check whose kind flips
+          // between runs under the SAME dedupeKey must have notifyAdmin's
+          // refresh merge actually overwrite a stale feed value — an
+          // omitted key would leave the old one standing and a row that
+          // became owner-audience again would never reach the bell
+          // (notification-service.js's excludeActivityOnlyFromBell). The
+          // caller's own metadata (RESERVED_METADATA_KEYS-stripped above)
+          // can never shadow this either way. `quiet` is the same kind of
+          // ring-decision output (see ops-digest.js's deliverOpsDigest for
+          // why a refresh that doesn't ring drops both from its merge).
+          feed: resolvedAudience === 'owner' ? (quiet ? 'activity' : null) : 'activity',
+          ...(resolvedAudience === 'owner' ? { quiet } : {}),
+          // Age baseline (admin-alerts-ring-v2 follow-up): findPriorRungRow's
+          // 7-day window reads metadata.rungAt, not created_at. This only
+          // takes effect on the FRESH-insert path (notifyAdmin's create()
+          // persists this object as-is) — a REFRESH recomputes its own
+          // rungAt from notification-service.js's mergeRefreshMetadata,
+          // which ignores this precomputed value entirely on a quiet
+          // refresh (shouldRing decided separately, by ringOnRefresh above).
+          ...(!quiet ? { rungAt: new Date().toISOString() } : {}),
+        },
         trx,
       });
       // Timestamp-less identical repeats must preserve read state, but they
@@ -293,4 +504,9 @@ const ingestPreParsers = [noStore, darkUnlessConfigured, ingestLimiter, ingestAu
 
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS };
+module.exports._private = {
+  validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound,
+  observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS,
+  validateHeadline, validateSummary, validateAudience, MAX_HEADLINE_CHARS, MAX_SUMMARY_CHARS,
+  validateCount, resolveCounts, firstIntegerInSubject, validateItemIds,
+};

@@ -2,6 +2,7 @@ const {
   getAppointmentContacts,
   getBillingContact,
   getInvoiceEmailRecipients,
+  getReceiptEmailRecipients,
   getServiceReportEmailRecipients,
 } = require('../services/customer-contact');
 
@@ -33,6 +34,15 @@ describe('customer contact recipient routing', () => {
     }));
     expect(getInvoiceEmailRecipients(customer, { billing_email: 'ap@example.com' }))
       .toEqual([expect.objectContaining({ email: 'ap@example.com' })]);
+  });
+
+  test('a receipt goes to the same billing recipient as an invoice', () => {
+    // The routed receipt resolves its recipient through the shared billing
+    // email authority, which picks getInvoiceEmailRecipients: the two must
+    // stay one rule, or the authority would re-point receipts.
+    for (const prefs of [{}, { billing_email: 'ap@example.com', billing_contact_name: 'Accounts Payable' }, null]) {
+      expect(getReceiptEmailRecipients(customer, prefs || {})).toEqual(getInvoiceEmailRecipients(customer, prefs || {}));
+    }
   });
 
   test('ignores stale billing contact name when billing email is cleared', () => {

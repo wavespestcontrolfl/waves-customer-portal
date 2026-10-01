@@ -311,6 +311,7 @@ You are the backlink path investigator. Given fetched pages from ONE candidate w
 - Report only what the pages show. Quote price and renewal text VERBATIM as displayed — digits inside those quoted strings are expected; never compute, convert or round an amount, and never invent a standalone number the page does not show.
 - currency_evidence is only an AUTHORITATIVE marker you actually observed (USD/US$ in the quote, JSON-LD priceCurrency, a payment processor's currency). A bare "$" is NOT evidence.
 - "not_reproducible" is a good answer (an editorial mention with no submission route, a private partnership); use verdict "watching" when a real path exists but is closed today (applications closed, waitlist) and say why.
+- Discovery provenance "ai_citation" means an AI answer engine cites a page on this site. When that page is a best-of, comparison or roundup of local service companies, asking its author or editor to consider Waves for it is an "editorial_outreach" path if the pages show a way to reach them (an email, a contact page, an author page); it is "not_reproducible" only when they show none.
 - replaces_path_id ONLY when you can see an existing path's submission URL is gone/redirected/renamed to a new one you are reporting.
 - Answer every required field explicitly. Output ONLY the JSON object.`;
 
@@ -334,7 +335,11 @@ ${JSON.stringify(INVESTIGATION_SCHEMA)}`;
 /** One call + one repair retry. Returns { ok, data } | { ok:false, reason }. */
 async function investigateWithModel(llmDispatch, prompt) {
   const route = { provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.WORKHORSE };
-  const payload = { laneId: 'link_investigator', system: SYSTEM_PROMPT, jsonMode: true, maxTokens: 4096, temperature: 0, timeoutMs: LLM_TIMEOUT_MS };
+  // maxTokens 8192 (was 4096, 2026-09-26): Sonnet 5 thinks by default and
+  // thinking spends from this same cap ahead of the JSON reply — 3 of 106
+  // prod calls were truncating at 4096 with the overflow being thinking, not
+  // the investigation JSON.
+  const payload = { laneId: 'link_investigator', system: SYSTEM_PROMPT, jsonMode: true, maxTokens: 8192, temperature: 0, timeoutMs: LLM_TIMEOUT_MS };
   let res = await llmDispatch(route, { ...payload, text: prompt });
   let calls = 1;
   let check = res.ok && res.json ? validateInvestigation(res.json) : { valid: false, errors: [res.reason || 'no_json'] };

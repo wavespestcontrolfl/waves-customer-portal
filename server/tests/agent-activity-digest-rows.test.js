@@ -17,7 +17,11 @@ function builder(rows) {
   return q;
 }
 const mockQueue = [];
-jest.mock('../models/db', () => jest.fn(() => { const b = mockQueue.shift(); mockCalls.push(b); return b; }));
+jest.mock('../models/db', () => {
+  const fn = jest.fn(() => { const b = mockQueue.shift(); mockCalls.push(b); return b; });
+  fn.raw = jest.fn((sql) => ({ raw: sql }));
+  return fn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { _private } = require('../services/agent-activity');
@@ -40,6 +44,18 @@ test('pinned rows are loaded without the window, merged with windowed rows, dedu
   expect(windowed._ops.some((o) => o[0] === 'where' && o[1] === 'created_at' && o[2] === '>=')).toBe(true);
 });
 
+test('every digest select (pinned, windowed, focus) carries the shared content-version expression AS version', async () => {
+  const { NOTIFICATION_VERSION_SQL } = require('../services/notification-service')._private;
+  const pinned = builder([]); const windowed = builder([]); const focused = builder([]);
+  mockQueue.push(pinned, windowed, focused);
+  const db = require('../models/db');
+  await _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z'), 'some-id');
+  for (const q of [pinned, windowed, focused]) {
+    const select = q._ops.find((o) => o[0] === 'select');
+    expect(select).toEqual(expect.arrayContaining([{ raw: `${NOTIFICATION_VERSION_SQL} AS version` }]));
+  }
+});
+
 test('the pinned predicate keeps unresolved FIX rows only when something can resolve them (source ops-crons or fallOff), else the read-or-window rule; cleared rows re-enter via resolvedAt', () => {
   const pinned = builder([]); const windowed = builder([]);
   mockQueue.push(pinned, windowed);
@@ -52,8 +68,56 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
       "metadata->>'source' = 'ops-crons'",
       "metadata->>'fallOff' = 'true'", // the in-process senders that call retireIfClean stamp this
     ]));
-    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(2); // ACT/[Review] rule + legacy FIX rule
+    expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(1); // legacy FIX rule only: an opened ACT/[Review] stays pinned until done (read is not done)
     // the windowed query admits rows resolved inside the window
     expect(windowed._ops.some((o) => o[0] === 'orWhereRaw' && /resolvedAt/.test(String(o[1])))).toBe(true);
+  });
+});
+
+// Admin-alerts-brevity scope (2026-09-28): the bell's ?focus=<id> deep link
+// (server/routes/admin-agents.js -> agent-activity.js) must reach a row
+// that is READ and OLDER than the window — already dropped from the pinned
+// set (read ACT/REVIEW rows only pin while unread) and from the windowed
+// set (its created_at is outside `since`). loadDigestRows loads that one
+// row by id, unconditionally, and merges it via the existing dedupe-by-id.
+test('a focus id loads that ONE row by id, whatever its read state or age, and merges it in', async () => {
+  const old = { id: 'old-read-act', title: 'Estimates — 3 promised quotes not sent', created_at: '2026-01-01T00:00:00Z', read_at: '2026-01-02T00:00:00Z', metadata: { kind: 'ACT' } };
+  const recent = { id: 'recent', title: 'FYI: x', created_at: '2026-09-11T01:00:00Z', read_at: null, metadata: null };
+  const pinned = builder([]); // old-read-act is read -> not pinned
+  const windowed = builder([recent]); // old-read-act is outside the window -> not windowed
+  const focused = builder([old]);
+  mockQueue.push(pinned, windowed, focused);
+  const db = require('../models/db');
+  const rows = await _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z'), 'old-read-act');
+  expect(rows.map((r) => r.id)).toEqual(['recent', 'old-read-act']);
+  // The focused query scopes to this exact id, no window/read-state filter.
+  expect(focused._ops.some((o) => o[0] === 'where' && o[1] === 'id' && o[2] === 'old-read-act')).toBe(true);
+});
+
+test('no focus id: no third query is issued at all', async () => {
+  const pinned = builder([]); const windowed = builder([]);
+  mockQueue.push(pinned, windowed);
+  const db = require('../models/db');
+  const before = mockCalls.length;
+  await _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z'), null);
+  expect(mockCalls.length - before).toBe(2); // only pinned + windowed, no focused query
+});
+
+// Admin-alerts-brevity scope (2026-09-28): new rows carry metadata.kind and
+// no title prefix — the pinned query's ACT/REVIEW and FIX predicates must
+// check metadata.kind FIRST, falling back to the legacy title regex only
+// when metadata.kind is absent (a pre-scope row).
+test("the pinned predicate checks metadata->>'kind' first, falling back to the legacy title regex only when kind is absent", () => {
+  const pinned = builder([]); const windowed = builder([]);
+  mockQueue.push(pinned, windowed);
+  const db = require('../models/db');
+  return _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z')).then(() => {
+    const raws = pinned._ops.filter((o) => o[0] === 'whereRaw' || o[0] === 'andWhereRaw' || o[0] === 'orWhereRaw').map((o) => String(o[1]));
+    const actOrReview = raws.find((sql) => sql.includes("kind' IN ('ACT', 'REVIEW')"));
+    expect(actOrReview).toBeDefined();
+    expect(actOrReview).toContain("metadata->>'kind' IS NULL AND title ~* '^(ACT:|\\[Review\\])'");
+    const isFix = raws.find((sql) => sql.includes("kind' = 'FIX'"));
+    expect(isFix).toBeDefined();
+    expect(isFix).toContain("metadata->>'kind' IS NULL AND title ~* '^FIX:'");
   });
 });

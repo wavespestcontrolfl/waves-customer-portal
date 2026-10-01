@@ -23,6 +23,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 
 async function recordContact({
   customerId,
@@ -58,19 +59,22 @@ async function recordContact({
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
   const existing = await db('collections_contact_ledger')
     .where({ idempotency_key: idempotencyKey })
-    .first('id', 'metadata');
+    .first('id', 'metadata', 'occurred_at');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
-  // A reused reservation is being re-attempted NOW (codex r5): refresh
-  // occurred_at so the 24h frequency window starts at the actual delivery
-  // attempt, not the first failed one. Later timestamp = longer window —
-  // the safe direction; a refresh failure propagates (caller holds).
-  await db('collections_contact_ledger')
-    .where({ id: existing.id })
-    .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
-    ? JSON.parse(existing.metadata)
-    : (existing.metadata || {});
-  return { id: existing.id, metadata: existingMeta, reused: true };
+    ? JSON.parse(existing.metadata) : (existing.metadata || {});
+  // Preserve settled event windows, including a concurrent stamp. Unsettled
+  // reservations still refresh for legacy deferred callers before dispatch.
+  let contactAt = existing.occurred_at;
+  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
+    const changed = await db('collections_contact_ledger').where({ id: existing.id })
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ]).update({ occurred_at: occurredAt });
+    if (Number(changed) === 1) contactAt = occurredAt;
+  }
+  return { id: existing.id, metadata: existingMeta, reused: true,
+    ...(contactAt ? { occurred_at: contactAt } : {}) };
 }
 
 /**
@@ -93,7 +97,7 @@ function applyReservationMatch(query, match = {}) {
   return query;
 }
 
-async function markDelivered(target, { database = db, match = {} } = {}) {
+async function markDelivered(target, { database = db, match = {}, occurredAt } = {}) {
   if (!target) return false;
   try {
     const stamp = async (conn) => {
@@ -104,6 +108,8 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
       applyReservationMatch(query, match);
       const changed = await query.update({
         metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+        // A repaired App event restores its original contact window.
+        ...(occurredAt ? { occurred_at: occurredAt } : {}),
       });
       return Number(changed) === 1;
     };
@@ -112,28 +118,49 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
     // whole transaction aborted.
     return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
-    logger.warn(`[collections-ledger] delivered stamp failed: ${err.message}`);
+    logger.warn(`[collections-ledger] delivered stamp failed: ${redactContact(err.message)}`);
     return false;
   }
+}
+
+// Outcome flags belong to the ledger's own stamps, never a caller's snapshot.
+function reservationSnapshot(metadata) {
+  const snapshot = { ...(metadata || {}) };
+  for (const key of ['delivered', 'resolved', 'resolution', 'send_failed']) delete snapshot[key];
+  return snapshot;
 }
 
 // A keyed reservation permits one provider attempt. Only a confirmed failed
 // attempt may be retried; an unstamped reused reservation is ambiguous. Clear
 // the old failure before retrying so a later acceptance-stamp failure cannot
 // make that accepted attempt look safe to send again.
-async function claimAttempt(entry) {
+// A retry can quote different debt than the failed attempt that created the
+// reservation. `refresh` ({ invoiceIds, metadata }: what this attempt sends)
+// is written in the same claim, so the row records what the retry quoted.
+// The claim decision before any write (pure, so a read-only caller can ask it too):
+// `reopen` = a confirmed failed attempt whose failure flag the claim must clear.
+function claimVerdict(entry) {
   if (!entry?.id) return { allowed: false, held: true };
   if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
   if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
   if (!entry.reused) return { allowed: true };
   if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
+  return { allowed: true, reopen: true };
+}
+
+async function claimAttempt(entry, refresh = null) {
+  const verdict = claimVerdict(entry);
+  if (!verdict.reopen) return verdict;
   const changed = await db('collections_contact_ledger').where({ id: entry.id })
     .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
       JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
-      JSON.stringify({ send_failed: false }),
-    ]) });
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+        JSON.stringify({ ...reservationSnapshot(refresh?.metadata), send_failed: false }),
+      ]),
+      ...(Array.isArray(refresh?.invoiceIds) ? { invoice_ids: JSON.stringify(refresh.invoiceIds) } : {}),
+    });
   return changed === 1 ? { allowed: true } : { allowed: false, held: true };
 }
 
@@ -164,9 +191,41 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
     };
     return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
-    logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${err.message}`);
+    logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${redactContact(err.message)}`);
     return false;
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt };
+/**
+ * A dispute-hold suppression is a WAIT, not a failed send (owner ruling 2026-09-30): the customer-
+ * message boundary or the email authority refused BEFORE the provider, so nothing reached the
+ * customer and nothing failed. The reservation this attempt just took is released (deleted) so it
+ * neither counts as a contact in a spacing window nor stands as a failed row; the next tick after
+ * the hold is released reserves the leg afresh. Only a reservation that is neither delivered nor
+ * resolved is released. Best-effort and never throws. If the row cannot be deleted it falls back
+ * to the retryable send_failed stamp (the safe direction: over-suppression) and returns whether
+ * either settled it. Call it only for a hold suppression (collection-hold isHoldSuppression).
+ */
+async function releaseHeldReservation(entry, { database = db } = {}) {
+  if (!entry || !entry.id) return false;
+  const released = await deleteUnsettledReservation(entry, database);
+  return released || markSendFailed(entry, { code: 'COLLECTION_HOLD_DEFER' }, { database });
+}
+
+async function deleteUnsettledReservation(entry, database) {
+  try {
+    const release = async (conn) => {
+      const removed = await conn('collections_contact_ledger').where({ id: entry.id })
+        .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+          JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+        ]).del();
+      return Number(removed) === 1;
+    };
+    return database.isTransaction ? await database.transaction(release) : await release(database);
+  } catch (err) {
+    logger.warn(`[collections-ledger] hold release failed for ledger row ${entry.id}: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, claimVerdict, releaseHeldReservation };

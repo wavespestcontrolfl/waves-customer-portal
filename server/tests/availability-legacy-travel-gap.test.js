@@ -24,7 +24,14 @@ const db = require('../models/db');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
 const engine = require('../services/availability');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { clearExpectedServiceMinutesCache } = require('../services/scheduling/expected-service-minutes');
+// Passthrough spy (PR #5119 Codex r3): availability.js destructures
+// expectedMinutesSync at load, so a later jest.spyOn cannot see its calls;
+// this wrapper keeps the real behavior and records the serviceType asked for.
+jest.mock('../services/scheduling/expected-service-minutes', () => {
+  const real = jest.requireActual('../services/scheduling/expected-service-minutes');
+  return { ...real, expectedMinutesSync: jest.fn((...args) => real.expectedMinutesSync(...args)) };
+});
+const { clearExpectedServiceMinutesCache, expectedMinutesSync } = require('../services/scheduling/expected-service-minutes');
 
 const ZONE = { id: 'zone-a', zone_name: 'Palmetto', cities: ['Palmetto'] };
 const CONFIG = {
@@ -442,4 +449,26 @@ test('findGaps packed-ends: a lunch block contained inside a real stop keeps tha
   // 10:00 packed before the 11:00 stop; 14:00 packed after it (the
   // contained lunch block must not erase the after-stop anchor).
   expect(slots.map((g) => g.start / 60)).toEqual([10, 14]);
+});
+
+
+// PR #5119 Codex r3: the SMS drafter's live reschedule path has no estimate
+// but knows the customer's own service; opts.serviceType names it so the
+// expected-minutes credit is that service's, not the General Pest default.
+test('gate on, no estimate: opts.serviceType names the candidate service; an estimate still wins over it', async () => {
+  process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+  listOccupiedWindows.mockResolvedValue([]);
+  expectedMinutesSync.mockClear();
+  await engine.getAvailableSlots('Palmetto', null, { customerId: 'cust-1', serviceType: 'Lawn Fertilization' });
+  expect(expectedMinutesSync).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'Lawn Fertilization' }));
+
+  expectedMinutesSync.mockClear();
+  await engine.getAvailableSlots('Palmetto', null, { customerId: 'cust-1' });
+  expect(expectedMinutesSync).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'General Pest Control' }));
+
+  // With an estimate whose service_interest is unset (this fixture's est-1),
+  // the option is still the fallback — an estimate only wins when it names one.
+  expectedMinutesSync.mockClear();
+  await engine.getAvailableSlots('Palmetto', 'est-1', { serviceType: 'Lawn Fertilization' });
+  expect(expectedMinutesSync).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'Lawn Fertilization' }));
 });

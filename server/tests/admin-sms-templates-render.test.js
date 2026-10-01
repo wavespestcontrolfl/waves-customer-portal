@@ -141,4 +141,98 @@ describe('admin SMS template renderer', () => {
     expect(gutted).toBeNull();
     SmsTemplateVariants.selectVariant.mockResolvedValue(null);
   });
+
+  describe('brand dedupe — never say "Waves" twice (owner report 2026-09-28)', () => {
+    afterEach(() => {
+      SmsTemplateVariants.selectVariant.mockResolvedValue(null);
+    });
+
+    test('drops the leading "Waves " from service_type when the body already says Waves', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Hello {first_name}! Waves {service_type}: tomorrow, {window}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves Assessment',
+        window: '8-10 AM',
+      });
+      expect(body).toBe('Hello Jordan! Waves Assessment: tomorrow, 8-10 AM.');
+    });
+
+    test('drops the leading "Waves " from service_type before "with Waves"', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Your {service_type} with Waves is booked, {first_name}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves Assessment',
+      });
+      expect(body).toBe('Your Assessment with Waves is booked, Jordan.');
+    });
+
+    test('strips only the leading "Waves " on a longer catalog name', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Hello {first_name}! Waves visit: {service_type}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves Pest Control Appointment Service',
+      });
+      expect(body).toBe('Hello Jordan! Waves visit: Pest Control Appointment Service.');
+    });
+
+    test('a body that never says Waves leaves the service value alone', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Hello {first_name}! Your appointment: {service_type}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves Assessment',
+      });
+      expect(body).toBe('Hello Jordan! Your appointment: Waves Assessment.');
+    });
+
+    test('strips the brand only at a joined-component start, not mid-word', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Waves update for {first_name}: {service_type}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Quarterly Pest Control Service & Waves Assessment',
+      });
+      expect(body).toBe('Waves update for Jordan: Quarterly Pest Control Service & Assessment.');
+    });
+
+    test('a value that is exactly "Waves" is left unchanged', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Waves update for {first_name}: {service_type}.',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves',
+      });
+      expect(body).toBe('Waves update for Jordan: Waves.');
+    });
+
+    test('never touches a non-service variable even when it carries the brand', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'Waves update: {custom_message}',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        custom_message: 'Waves techs are running early today.',
+      });
+      expect(body).toBe('Waves update: Waves techs are running early today.');
+    });
+
+    test('"WaveGuard" and the lowercase domain in the body do not count as saying "Waves"', async () => {
+      SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+        body: 'WaveGuard update for {first_name}: {service_type}. Details: wavespestcontrol.com',
+      });
+      const body = await smsTemplates.getTemplate('sample_template', {
+        first_name: 'Jordan',
+        service_type: 'Waves Assessment',
+      });
+      expect(body).toBe('WaveGuard update for Jordan: Waves Assessment. Details: wavespestcontrol.com');
+    });
+  });
 });

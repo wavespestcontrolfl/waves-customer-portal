@@ -301,3 +301,142 @@ describe('buildPestReportV2 — technician AI report copy in the hero summary sl
     expect(out.aiSummary).toBe(null);
   });
 });
+
+describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIONS)', () => {
+  const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+  afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
+
+  const APPLICATIONS = [
+    { product: { name: 'Taurus SC', active_ingredient: 'Fipronil', category: 'insecticide' }, targets: ['ants'] },
+  ];
+  const ACTION_LABELS = ['Swept eaves, window frames, door frames, and lanai'];
+
+  it('gate off: payload has no expectations key (byte-identical to before this lane)', () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    // codex P0 #5137 r6: the key is ABSENT, never a serialized null — the
+    // gate-off payload must be byte-identical to a build without this feature.
+    expect(out).not.toHaveProperty('expectations');
+    expect(JSON.stringify(out)).not.toContain('expectations');
+  });
+
+  it('gate on: composes rain, spiders, and what-to-expect from the passed-in facts', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
+    expect(out.expectations.spiders.headline).toBe('Spiders');
+    expect(out.expectations.whatToExpect.lines[0]).toMatch(/non-repellent/);
+  });
+
+  it('gate on but no relevant facts: the expectations key is omitted (no data → no block)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestReportV2({ premiumExperience: premium() });
+    expect(out).not.toHaveProperty('expectations');
+  });
+
+  it('gate on with only one block: the other child keys are omitted, never null (codex P0 #5137 r6)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      applications: APPLICATIONS,
+      actionLabels: [],
+      weekWeather: null,
+      serviceMonth: 7,
+    });
+    expect(out.expectations.whatToExpect.lines.length).toBeGreaterThan(0);
+    expect(out.expectations).not.toHaveProperty('rain');
+    expect(out.expectations).not.toHaveProperty('spiders');
+    expect(Object.keys(out.expectations)).toEqual(['whatToExpect']);
+  });
+
+  // codex P2 2026-09-29 round 3: a sparse callback report (suppressDefense,
+  // no primary move / metric / AI summary / concern) used to hit the
+  // emptiness predicate and return null BEFORE the expectations builder
+  // ever ran — discarding a recorded rain / eave-sweeping / product
+  // expectation exactly where it would have been the section's ONLY
+  // content.
+  it('sparse callback: expectations alone keeps the section alive (gate on)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const sparsePremium = premium({
+      primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null, aiSummaryPersonality: null,
+    });
+    const out = buildPestReportV2({
+      premiumExperience: sparsePremium,
+      suppressDefense: true,
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    expect(out).not.toBeNull();
+    expect(out.expectations).toBeTruthy();
+    expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
+    // Confirm nothing else kept the shell alive — expectations alone did.
+    expect(out.primaryMove).toBeNull();
+    expect(out.supportingMetric).toBeFalsy();
+    expect(out.aiSummary).toBeNull();
+    expect(out.customerConcern).toBeNull();
+  });
+
+  it('sparse callback: the same payload returns null with the gate off (old emptiness behavior, unchanged)', () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const sparsePremium = premium({
+      primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null, aiSummaryPersonality: null,
+    });
+    const out = buildPestReportV2({
+      premiumExperience: sparsePremium,
+      suppressDefense: true,
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    expect(out).toBeNull();
+  });
+
+  it('forecastHeavyRain never reaches the payload unless the caller passes it (PDF/static safety)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      applications: [],
+      actionLabels: [],
+      weekWeather: { rainInches: 0.2, rainConfidence: null },
+      serviceMonth: 2,
+      forecastHeavyRain: false,
+    });
+    expect(out.expectations.rain.lines[0]).not.toMatch(/Heavy rain right after a treatment/);
+  });
+});
+
+describe('pestReportV2PdfSignature — expectations gate suffix', () => {
+  const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+  afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
+
+  it('appends -pex2 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
+    delete process.env.PEST_REPORT_V2;
+    try {
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex2');
+    } finally {
+      process.env.PEST_REPORT_V2 = ORIGINAL_V2;
+    }
+  });
+
+  it('is absent when the gate is off', () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+  });
+});

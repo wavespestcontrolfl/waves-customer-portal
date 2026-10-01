@@ -22,13 +22,24 @@ function makeDbMock() {
         onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })) })),
       })),
       where: jest.fn(function where(...args) { chain._wheres.push(args); return chain; }),
+      whereRaw: jest.fn(function whereRaw(...args) { chain._wheres.push(['raw', ...args]); return chain; }),
       update: jest.fn((patch) => { updates.push({ table, wheres: chain._wheres, patch }); return Promise.resolve(1); }),
     };
     return chain;
   });
-  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  dbMock.raw = jest.fn((sql, bindings = []) => ({ __raw: sql, bindings }));
   dbMock._updates = updates;
   return dbMock;
+}
+
+// The runner records a retry marker with one atomic jsonb_set write; the
+// marker key and its JSON payload ride as the raw expression's bindings.
+function retryMarkerWrites(dbMock, marker) {
+  return dbMock._updates
+    .filter((u) => u.table === 'opportunity_queue')
+    .map((u) => u.patch.signal_metadata)
+    .filter((m) => m && Array.isArray(m.bindings) && m.bindings[0] === marker)
+    .map((m) => JSON.parse(m.bindings[1]));
 }
 
 const IN_WALL = {
@@ -331,6 +342,10 @@ describe('approval path — the stored draft is re-validated for topic targeting
     const queue = makeQueue({ id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
     const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }), dbMock: approvalDb({ draft }), corpusError });
     jest.doMock('../services/content/comparison-table-gate', () => ({ evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) }));
+    // These tests isolate the topic-targeting recheck — the quality-gate
+    // recheck below it (Codex r10 on #5216) has its own describe block
+    // further down with the real module.
+    jest.doMock('../services/content/content-quality-gate', () => ({ evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 0, checks: {} }) }));
     runner._loadReviewedBrief = jest.fn().mockResolvedValue({ page_type: 'supporting-blog', service: 'pest', target_keyword: 'new home pest control lakewood ranch', voice_constraints: {} });
     runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
     runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: true });
@@ -362,6 +377,85 @@ describe('approval path — the stored draft is re-validated for topic targeting
   });
 });
 
+// Codex r10 on #5216 ("Revalidate quality before approving a parked
+// refresh"): approveAndPublishNamedCompetitor re-ran guardrails and topic
+// targeting on the stored draft, but never the quality gate itself, so an
+// edited draft_payload could move the verdict box or add an unlicensed
+// photo and still publish on approval. These tests isolate the NEW
+// quality-gate recheck: the topic-targeting gate is stubbed applicable:false
+// so those checks — covered by the describe block above — never interfere.
+describe('approval path — the stored draft is re-validated against the quality gate before publishing (Codex r10 on #5216)', () => {
+  const DRAFT = {
+    url: '/pest-control/new-home-pest-control-lakewood-ranch/',
+    title: 'New-Home Pest Control in Lakewood Ranch: The First Year',
+    frontmatter: { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch', meta_description: 'x' },
+    body: '## Body\n\nprose',
+  };
+  function approvalDb({ draft }) {
+    const rows = {
+      autonomous_runs: { id: 'run_x', opportunity_id: 'opp_x', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false, action_type: 'new_supporting_blog', draft_payload: JSON.stringify(draft), seo_completion_gate_result: '{}' },
+      opportunity_queue: { id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', status: 'pending_review' },
+    };
+    const dbMock = jest.fn((table) => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'whereIn', 'limit', 'select']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn().mockResolvedValue(rows[table] || null);
+      chain.update = jest.fn().mockResolvedValue(1);
+      chain.insert = jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) }));
+      chain.then = (resolve) => resolve([]);
+      return chain;
+    });
+    dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+    return dbMock;
+  }
+  function loadApproval({ draft = DRAFT, qualityGateResult } = {}) {
+    const queue = makeQueue({ id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    // isApplicable: false takes the topic-targeting recheck out of the
+    // path entirely — it is exercised by the describe block above.
+    const { runner } = loadRunner({
+      queue,
+      briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }),
+      dbMock: approvalDb({ draft }),
+      topicGate: { isApplicable: jest.fn().mockReturnValue(false) },
+    });
+    jest.doMock('../services/content/comparison-table-gate', () => ({ evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) }));
+    if (qualityGateResult) jest.doMock('../services/content/content-quality-gate', () => ({ evaluate: jest.fn().mockReturnValue(qualityGateResult) }));
+    else jest.dontMock('../services/content/content-quality-gate');
+    runner._loadReviewedBrief = jest.fn().mockResolvedValue({ page_type: 'supporting-blog', service: 'pest', target_keyword: 'new home pest control lakewood ranch', voice_constraints: {} });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: true });
+    return runner;
+  }
+
+  test('a stored draft that now fails verdict_box_first is refused with a 409, never published', async () => {
+    const runner = loadApproval({
+      qualityGateResult: { ok: false, total_score: 40, min_total_score: 40, hard_failures: [{ name: 'verdict_box_first', reason: 'verdict_box_not_first_block' }], soft_failures: [], checks: {} },
+    });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Quality gate no longer passes on the stored draft: verdict_box_first/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a stored diagnostic draft that now carries an unlicensed image is refused with a 409, never published', async () => {
+    const runner = loadApproval({
+      qualityGateResult: { ok: false, total_score: 40, min_total_score: 40, hard_failures: [{ name: 'photo_slots_licensed_only', reason: 'unlicensed_or_unknown_identification_photo:/images/stray.webp' }], soft_failures: [], checks: {} },
+    });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Quality gate no longer passes on the stored draft: photo_slots_licensed_only/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a clean stored draft still passes the quality-gate recheck and reaches the publishing guards', async () => {
+    const runner = loadApproval({
+      qualityGateResult: { ok: true, total_score: 100, min_total_score: 0, hard_failures: [], soft_failures: [], checks: {} },
+    });
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: false, reason: 'stop_here' });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' }))
+      .rejects.toMatchObject({ message: expect.stringMatching(/Publishing guard blocked: stop_here/) });
+    expect(runner._evaluatePublishingGuards).toHaveBeenCalled();
+  });
+});
+
 describe('PR codex r16 — one retry, every finding', () => {
   const draftWith = (title) => ({
     runWithBrief: jest.fn().mockResolvedValue({
@@ -379,9 +473,9 @@ describe('PR codex r16 — one retry, every finding', () => {
     expect(result.outcome).toBe('deferred_gate_retry');
     expect(result.skip_reason).toBe('content_guardrails_failed');
     expect(result.reviewer_notes).toMatch(/topic targeting also failed: P0 TOPIC_GEO_STATEWIDE/);
-    const retry = dbMock._updates.map((u) => u.patch).find((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'));
+    const [retry] = retryMarkerWrites(dbMock, 'gate_retry');
     expect(retry).toBeDefined();
-    const codes = JSON.parse(retry.signal_metadata).gate_retry.findings.map((f) => f.code);
+    const codes = retry.findings.map((f) => f.code);
     expect(codes).toEqual(expect.arrayContaining(['PRICE_CLAIM', 'TOPIC_GEO_STATEWIDE']));
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
   });
@@ -401,7 +495,7 @@ describe('post-draft topic-gate ENGINE failure parks for review (hook, PR codex 
     expect(result.skip_reason).toBe('topic_targeting_unavailable');
     expect(queue.skip).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
     expect(queue.defer).not.toHaveBeenCalled();
-    expect(dbMock._updates.map((u) => u.patch).some((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'))).toBe(false);
+    expect(retryMarkerWrites(dbMock, 'gate_retry')).toEqual([]);
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_TARGETING_ERROR');
   });
 });

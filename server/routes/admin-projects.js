@@ -55,6 +55,7 @@ const ProjectEmail = require('../services/project-email');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
+const { resolveProjectReportPreviewFields } = require('../services/service-report/report-data');
 const {
   buildProjectCloseoutPreview,
   completeProjectBackedService,
@@ -957,7 +958,7 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
 
 ## CONTEXT
 
-This generates customer-facing narrative copy for a Waves Pest Control & Lawn Care inspection / documentation report. The report is a branded PDF + web page delivered to the customer after a field visit.
+This generates customer-facing narrative copy for a Waves Pest Control inspection / documentation report. The report is a branded PDF + web page delivered to the customer after a field visit.
 
 Project types this prompt handles:
 - WDO inspection (wood-destroying organism, often pre-home-purchase)
@@ -1448,9 +1449,27 @@ router.get('/:id', async (req, res, next) => {
       ? await resolveProjectApplicator(project).catch(() => null)
       : null;
 
+    // Applicator identity + Poison Control verdict for the customer-report
+    // preview (Codex P1, 2026-09-26): the SAME shared resolver the public
+    // project report uses (report-data.js), so the preview can never show a
+    // different applicator or Poison Control line than the sent report —
+    // the technician who actually PERFORMED the linked service, never
+    // merely `tech_name` (the project's created_by_tech_id, which can be an
+    // admin typing up someone else's visit), judged against the same date
+    // absent a WDO filing (project_date, or created_at when blank).
+    const previewFields = await resolveProjectReportPreviewFields(
+      project, project.project_date || project.created_at, db,
+    ).catch(() => ({ applicatorFdacsId: null, applicatorName: null, poisonControl: false }));
+    const applicator_fdacs_id = previewFields.applicatorFdacsId;
+    const applicator_name = previewFields.applicatorName;
+    const poison_control = previewFields.poisonControl;
+
     res.json({
       project: {
         ...project,
+        applicator_fdacs_id,
+        applicator_name,
+        poison_control,
         wdo_signature: wdoSignature,
         // Heavy archive index (carries as-sent findings snapshots) — the UI
         // lists filings via GET /:id/wdo-filings instead.

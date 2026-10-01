@@ -39,7 +39,34 @@ const {
 
 // ── anchorCandidates ────────────────────────────────────────────────
 
+describe('planForTarget excludeSource', () => {
+  test('protected sources are skipped before the cap, so unprotected ones fill it', () => {
+    const body = (title) => `---\ntitle: ${title}\n---\nLearn how neem oil controls whiteflies on hibiscus in Florida gardens.\n`;
+    const corpus = [
+      { file: 'src/content/services/pest-control-sarasota-fl.md', url: '/pest-control-sarasota-fl/', body: body('Pest Control in Sarasota, FL') },
+      { file: 'src/content/blog/garden-pests.md', url: '/garden-pests/', body: body('Garden Pests') },
+      { file: 'src/content/blog/neem-oil-for-whiteflies.md', url: '/neem-oil-for-whiteflies/', body: '---\ntitle: Neem Oil for Whiteflies\nprimary_keyword: neem oil\n---\nTarget.\n' },
+    ];
+    const target = { url: '/neem-oil-for-whiteflies/', keyword: 'neem oil', title: 'Neem Oil for Whiteflies' };
+    const excludeSource = jest.fn((u) => u === '/pest-control-sarasota-fl/');
+    const filtered = planner.planForTarget(target, { corpus, cap: 1, excludeSource });
+    // Screened during the corpus scan (before the cap), never planned.
+    expect(excludeSource).toHaveBeenCalledWith('/pest-control-sarasota-fl/');
+    expect(filtered.map((t) => t.source_file)).not.toContain('src/content/services/pest-control-sarasota-fl.md');
+  });
+});
+
 describe('anchorCandidates', () => {
+  test('drops phrases that do not name a narrower target subject before the planner cap', () => {
+    const out = anchorCandidates({
+      url: '/lawn-weed-control-bradenton-fl/',
+      keyword: 'lawn care in bradenton',
+      title: 'Lawn Weed Control in Bradenton, FL',
+    });
+    const phrases = out.map((c) => c.phrase.toLowerCase());
+    expect(phrases).not.toContain('lawn care in bradenton');
+    expect(phrases).toContain('lawn weed control in bradenton, fl');
+  });
   test('priority order: keyword > "service in city" > "city service" > title', () => {
     const out = anchorCandidates({
       url: '/pest-control-bradenton-fl/',

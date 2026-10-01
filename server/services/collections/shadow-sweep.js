@@ -68,7 +68,7 @@ function predictedOpeningScript({ firstName, amountDollars, invoiceTitle, invoic
   const balance = invoiceCount > 1
     ? `an open balance of $${amountDollars} across ${invoiceCount} invoices, the oldest for your ${title} service`
     : `an open balance of $${amountDollars} for your ${title} service`;
-  return `Hi ${name}, this is Waves Pest Control with a quick billing follow-up. `
+  return `Hi ${name}, it's Waves with a quick billing follow-up. `
     + `Our records show ${balance}. `
     + `Do you have a moment to take care of that today, or would a payment link by text be easier?`;
 }
@@ -250,11 +250,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (heal.skip) continue;
       const liveShadow = heal.liveShadow;
       if (heal.extraKeys && heal.extraKeys.length) {
-        await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereNull('read_at')
+        await require('../notification-service')._private.openToCloser(db('notifications')
+          .where({ recipient_type: 'admin' }), 'collections')
           .whereIn(db.raw("metadata->>'dedupeKey'"), heal.extraKeys)
-          .update({ read_at: db.fn.now() })
+          .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'A duplicate case card was retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
       }
 
@@ -392,11 +391,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // points at mutated data — an admin must never see it beside the
         // replacement. Same read_at mechanism, best-effort.
         if (existing.idempotency_key && existing.idempotency_key !== idempotencyKey) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
+          await require('../notification-service')._private.openToCloser(db('notifications')
+            .where({ recipient_type: 'admin' }), 'collections')
             .whereRaw("metadata->>'dedupeKey' = ?", [existing.idempotency_key])
-            .update({ read_at: db.fn.now() })
+            .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case card was replaced by a newer version', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] superseded-card retirement failed: ${err.message}`));
         }
         caseRow = updated;
@@ -442,11 +440,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
           .first('id')
           .catch(() => null);
         if (recheck) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
+          await require('../notification-service')._private.openToCloser(db('notifications')
+            .where({ recipient_type: 'admin' }), 'collections')
             .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
-            .update({ read_at: db.fn.now() })
+            .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The call was placed, so the proposal no longer stands', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] post-file card recheck retirement failed: ${err.message}`));
         }
       }
@@ -491,11 +488,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // stamp only leaves a stale card, never sends anything.
       const keys = lapsedRows.map((c) => c.idempotency_key).filter(Boolean);
       if (keys.length) {
-        await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereNull('read_at')
+        await require('../notification-service')._private.openToCloser(db('notifications')
+          .where({ recipient_type: 'admin' }), 'collections')
           .whereIn(db.raw("metadata->>'dedupeKey'"), keys)
-          .update({ read_at: db.fn.now() })
+          .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case lapsed, so its proposal card retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] card retirement failed: ${err.message}`));
       }
     }

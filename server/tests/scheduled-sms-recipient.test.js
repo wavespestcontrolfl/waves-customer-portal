@@ -24,6 +24,9 @@ const {
   classifyDepositReplayFallback,
 } = require('../services/scheduler');
 
+// Every entry point except invoice_send_deferred registers no invoice handoff.
+const noInvoiceHandoffs = { deferredProviderHandoff: () => undefined, deferredBillingEmailPreSendCheck: () => undefined };
+
 test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
   // Exercise the actual dispatch block without starting cron jobs or importing
   // live integrations. A forged descriptor must not override its claimed row.
@@ -43,7 +46,7 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
     sendCustomerMessage,
     dispatchScheduledSms,
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
-    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay }),
   });
   expect(dispatchScheduledSms).toHaveBeenCalledWith(expect.objectContaining({ id: 'queue-row' }),
     expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3);
@@ -61,6 +64,34 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
   }
 });
 
+test('a replay carries its entry\'s provider-boundary predicate into the send (the voicemail quote link\'s holds)', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const boundaryCheck = jest.fn();
+  const deferredProviderPreSendCheck = jest.fn(() => boundaryCheck);
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: null, to_phone: '+19415550101', message_body: 'Quote link', message_type: 'voicemail_quote_link' },
+    claimMeta: { entry_point: 'voicemail_lead_sms_deferred', lead_id: 'lead-1', voicemail_phone: '+19415550101' },
+    toPhone: '+19415550101', purpose: 'missed_call_followup', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  expect(deferredProviderPreSendCheck).toHaveBeenCalledWith('voicemail_lead_sms_deferred', expect.objectContaining({
+    lead_id: 'lead-1', voicemail_phone: '+19415550101', to_phone: '+19415550101',
+  }));
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ providerPreSendCheck: boundaryCheck, entryPoint: 'scheduled_sms_cron' }));
+  // Owner ruling 2026-09-28: an already-queued deferred voicemail text goes
+  // out on the very next replay instead of waiting for the 8am-8pm window —
+  // this entry point is used for nothing else, so the replay marks it
+  // customer-initiated (checkSendWindow's CUSTOMER_ACTION_ENTRY_POINTS
+  // escape hatch) unconditionally.
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
+});
+
 test('a deferred billing notice replays with its delivery category and Email-sidecar marker', async () => {
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');
@@ -75,13 +106,71 @@ test('a deferred billing notice replays with its delivery category and Email-sid
     dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
     Array,
-    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
   });
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
     hasEmailLeg: true, invoiceId: 'inv-1',
     metadata: expect.objectContaining({
       billingDeliveryCategory: 'payment_issue', notificationEventKey: 'payment-problem:attempt:pay-2:payment_failed',
     }),
+  }));
+});
+
+test('a composer-queued text replays with its linked visits so the street-level hold is re-checked at DELIVERY (a clear visit that became a hold after the enqueue)', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const run = async (claimMeta, customerId = 'cust-1') => {
+    const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+      msg: { id: 'queue-row', customer_id: customerId, message_body: 'Your reschedule link', message_type: 'manual', admin_user_id: 'admin-1' },
+      claimMeta,
+      toPhone: '+19415550101', purpose: 'conversational', replayConsentBasis: undefined,
+      sendCustomerMessage,
+      dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+      SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+      Array,
+      require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+    });
+    return sendCustomerMessage.mock.calls[0][0];
+  };
+  const withLinks = await run({ human_authored: true, linked_scheduled_service_ids: ['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c'] });
+  expect(withLinks.metadata.linked_scheduled_service_ids).toEqual(['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c']);
+  // A row with no resolved customer (a shared phone that matched several accounts) replays as a lead-shaped
+  // send and still carries the ids; the send step checks them whatever the audience.
+  expect((await run({ human_authored: true, linked_scheduled_service_ids: ['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c'] }, null)).metadata.linked_scheduled_service_ids)
+    .toEqual(['3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c']);
+  // Every other queued row replays exactly as before: no key at all.
+  expect((await run({ human_authored: true })).metadata).not.toHaveProperty('linked_scheduled_service_ids');
+});
+
+test('a queued invoice notice replays with the registry\'s invoice handoffs, bound to its own row', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const providerHandoff = jest.fn();
+  const emailCheck = jest.fn();
+  const deferredProviderHandoff = jest.fn(() => providerHandoff);
+  const deferredBillingEmailPreSendCheck = jest.fn(() => emailCheck);
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'cust-1', to_phone: '+19415550101', message_body: 'Your invoice', message_type: 'invoice' },
+    claimMeta: { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', customer_id: 'forged-customer',
+      billingDeliveryCategory: 'invoice', notificationEventKey: 'invoice:inv-1:sent' },
+    toPhone: '+19415550101', purpose: 'payment_link', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    require: () => ({ deferredSmsHandoff: () => undefined, deferredProviderHandoff, deferredBillingEmailPreSendCheck,
+      deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  const rowMeta = expect.objectContaining({ invoice_id: 'inv-1', customer_id: 'cust-1', to_phone: '+19415550101' });
+  expect(deferredProviderHandoff).toHaveBeenCalledWith('invoice_send_deferred', rowMeta);
+  expect(deferredBillingEmailPreSendCheck).toHaveBeenCalledWith('invoice_send_deferred', rowMeta);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    entryPoint: 'scheduled_sms_cron', purpose: 'payment_link', invoiceId: 'inv-1',
+    withProviderHandoff: providerHandoff, billingEmailPreSendCheck: emailCheck,
+    metadata: expect.objectContaining({ original_entry_point: 'invoice_send_deferred' }),
   }));
 });
 
@@ -106,7 +195,7 @@ test('scheduled completion sends the body after the review guard strips its bund
     claimMeta: { entry_point: 'dispatch_completion_deferred', bundled_review_request_id: 'review-1' },
     toPhone: 'fixture-phone', purpose: 'service_complete', replayConsentBasis: undefined,
     sendCustomerMessage, dispatchScheduledSms, SCHEDULED_SMS_MAX_ATTEMPTS: 3,
-    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay }),
   });
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
     body: completion,
@@ -291,7 +380,7 @@ describe('classifyDepositReplayFallback — channel-flip email handoff outcomes'
   test('a deterministically undeliverable email lets the queued TEXT proceed — it is the only receipt left', () => {
     // Mirrors the immediate path\'s undeliverable-email SMS fallback
     // (codex P2 on 6b73a479).
-    for (const reason of ['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
+    for (const reason of ['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
       expect(classifyDepositReplayFallback({ sent: false, reason })).toBe('sms_fallback');
     }
   });

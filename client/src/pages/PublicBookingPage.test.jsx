@@ -8,13 +8,21 @@ import PublicBookingPage from './PublicBookingPage';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 
 vi.mock('../components/AddressAutocomplete', () => ({
-  default: ({ value, onChange, placeholder }) => (
-    <input aria-label="Service address" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+  default: ({ value, onChange, onSelect, placeholder }) => (
+    <>
+      <input aria-label="Service address" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <button type="button" onClick={() => onSelect?.({
+        line1: '123 Main St', line2: 'Apt A', formatted: '123 Main St Apt A, Sarasota, FL 34236',
+        city: 'Sarasota', state: 'FL', zip: '34236', lat: 27.34, lng: -82.53,
+      })}>Choose address with Apt A</button>
+    </>
   ),
 }));
 vi.mock('../components/brand', async (importOriginal) => ({ ...(await importOriginal()), WavesShell: ({ children }) => <div>{children}</div> }));
 vi.mock('../components/BrandFooter', () => ({ default: () => null }));
-vi.mock('../components/booking/WavesAIScheduleSearch', () => ({ default: () => null }));
+vi.mock('../components/booking/WavesAIScheduleSearch', () => ({
+  default: ({ onSearch }) => <button type="button" onClick={() => onSearch('Tuesday afternoon')}>Test AI search</button>,
+}));
 vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn(), useGlassSurface: () => {} }));
 vi.mock('../lib/analytics/events', () => ({
   track: vi.fn(),
@@ -121,6 +129,73 @@ describe('PublicBookingPage custom-date browse', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show all open times' }));
     expect(await screen.findByRole('button', { name: /^Choose 9:00 AM/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Choose 1:00 PM/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('PublicBookingPage offer identity', () => {
+  it('sends estimate identity and unit on initial, AI-search, and date-browse offers', async () => {
+    const browsed = futureDay(40);
+    const fetchMock = stubFetch({ browseDay: { date: browsed, fullDate: 'Saturday, September 5', nearby: false, slots: [] } });
+    render(
+      <MemoryRouter initialEntries={['/book?estimate_id=est-fixture']}>
+        <PublicBookingPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByLabelText('Service address');
+    fireEvent.click(screen.getByRole('button', { name: 'Choose address with Apt A' }));
+    fireEvent.change(screen.getByLabelText('Apartment or unit (optional)'), { target: { value: 'Apt B' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Test AI search' }));
+    fireEvent.change(await screen.findByLabelText(/Need a date further out/), { target: { value: browsed } });
+
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.map(([url, options]) => ({
+        url: new URL(String(url), 'https://portal.test'),
+        body: options?.body ? JSON.parse(options.body) : null,
+      }));
+      const availability = calls.find(call => call.url.pathname.endsWith('/booking/availability') && !call.url.searchParams.has('date_from'));
+      const search = calls.find(call => call.url.pathname.endsWith('/booking/find-slots'));
+      const browse = calls.find(call => call.url.pathname.endsWith('/booking/availability') && call.url.searchParams.has('date_from'));
+      for (const call of [availability, browse]) {
+        expect(call.url.searchParams.get('estimate_id')).toBe('est-fixture');
+        expect(call.url.searchParams.get('address')).toBe('123 Main St');
+        expect(call.url.searchParams.get('city')).toBe('Sarasota');
+        expect(call.url.searchParams.get('state')).toBe('FL');
+        expect(call.url.searchParams.get('zip')).toBe('34236');
+        expect(call.url.searchParams.get('unit')).toBe('Apt B');
+      }
+      expect(search.body).toMatchObject({
+        estimate_id: 'est-fixture', address: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34236', unit: 'Apt B',
+      });
+    });
+  });
+
+  it('uses the authenticated fetch path for all three bare-entry offers', async () => {
+    const browsed = futureDay(40);
+    authState.customer = { id: 'customer-a', first_name: 'Pat', phone: '9415550101', email: 'pat@example.com' };
+    authState.isAuthenticated = true;
+    stubFetch({ browseDay: { date: browsed, fullDate: 'Saturday, September 5', nearby: false, slots: [] } });
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Choose address with Apt A' }));
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Test AI search' }));
+    fireEvent.change(await screen.findByLabelText(/Need a date further out/), { target: { value: browsed } });
+
+    await waitFor(() => {
+      const offerCalls = apiMock.fetchRaw.mock.calls.filter(([url]) => (
+        String(url).includes('/booking/availability') || String(url).includes('/booking/find-slots')
+      ));
+      expect(offerCalls).toHaveLength(3);
+      expect(offerCalls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
+        expect.stringContaining('/booking/find-slots'),
+        expect.stringContaining('/booking/availability?'),
+        expect.stringContaining(`date_from=${browsed}`),
+      ]));
+    });
   });
 });
 

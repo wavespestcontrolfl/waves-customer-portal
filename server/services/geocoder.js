@@ -49,7 +49,13 @@ function rejectGeocodeResult(result, { requireInServiceArea = true } = {}) {
   if (!streetLevel) return `coarse_result:${types.join('|') || 'unknown'}`;
   if (requireInServiceArea) {
     const { lat, lng } = result.geometry.location;
-    if (!isInServiceAreaBox(lat, lng)) return 'outside_service_area';
+    // The DeSoto rectangle clips a sliver of the served neighbours, so the
+    // result's own county / ZIP decides inside it (county name wins).
+    const comps = Array.isArray(result.address_components) ? result.address_components : [];
+    const comp = (type) => comps.find((c) => Array.isArray(c.types) && c.types.includes(type)) || null;
+    const county = comp('administrative_area_level_2')?.long_name || null;
+    const zip = comp('postal_code')?.long_name || null;
+    if (!isInServiceAreaBox(lat, lng, { county, zip })) return 'outside_service_area';
   }
   return null;
 }
@@ -319,7 +325,10 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
     .whereRaw("btrim(address_line1) <> ''")
     .modify((q) => {
       if (excluded.length) q.whereNotIn('id', excluded);
-      if (reviewOn) review.excludeReviewedAddresses(q);
+      if (reviewOn) {
+        review.excludeReviewedAddresses(q);
+        review.excludeMatchingPrimaryPins(q);
+      }
     })
     .orderBy('created_at', 'desc')
     .limit(limit)

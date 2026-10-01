@@ -128,6 +128,84 @@ describe('resolveLeadSource', () => {
 });
 
 // ---------------------------------------------------------------------------
+// AI-assistant referral (owner-approved 2026-09-27) — the quote-wizard's own
+// path (public-property-lookup.js / public-quote.js both call
+// resolveLeadSource directly with the client's raw `attribution` object, the
+// same shape /api/leads receives). Shares its detection table with
+// lead-source-classify.js via ./ai-referral-sources.js (codex pre-push P1-a)
+// — these inputs mirror lead-webhook-meta-attribution.test.js's
+// "AI-assistant referral" cases so the two paths can't silently drift.
+// ---------------------------------------------------------------------------
+describe('resolveLeadSource — AI-assistant referral', () => {
+  const AI_SOURCE_TYPE = 'ai_assistant';
+
+  function mockAiLeadSources({ aiRow = null, byName = {} } = {}) {
+    db.mockImplementation(() => ({
+      whereRaw: () => ({ first: async () => null }),
+      where: (clause) => ({
+        first: async () => {
+          if (clause && clause.source_type === AI_SOURCE_TYPE) return aiRow;
+          if (clause && clause.name) return byName[clause.name] || null;
+          return null;
+        },
+      }),
+    }));
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isGbpUtmCampaign.mockReturnValue(false);
+    findGbpLocationByUtmContent.mockReturnValue(null);
+  });
+
+  test('utm_source=chatgpt.com resolves the seeded AI Assistant Referrals row by source_type', async () => {
+    mockAiLeadSources({ aiRow: { id: 'ls-ai', name: 'AI Assistant Referrals', source_type: 'ai_assistant' } });
+    const res = await resolveLeadSource({ utm: { source: 'chatgpt.com' }, landing_url: 'https://wavespestcontrol.com/quote' });
+    expect(res.leadSourceId).toBe('ls-ai');
+    expect(res.sourceType).toBe('ai_assistant');
+    expect(res.leadSourceDetail).toMatch(/AI assistant referral \(ChatGPT\)/);
+    expect(res.isPaidClick).toBe(false);
+  });
+
+  test('a bare perplexity.ai referrer (no UTMs) also resolves ai_assistant', async () => {
+    mockAiLeadSources({ aiRow: { id: 'ls-ai', source_type: 'ai_assistant' } });
+    const res = await resolveLeadSource({ referrer: 'https://www.perplexity.ai/search/pest-control-near-me' });
+    expect(res.leadSourceId).toBe('ls-ai');
+    expect(res.leadSourceDetail).toMatch(/AI assistant referral \(Perplexity\)/);
+  });
+
+  test('sourceType stays ai_assistant even when the seed row is missing (fail-closed shape, mirrors google/meta paid)', async () => {
+    mockAiLeadSources({ aiRow: null });
+    const res = await resolveLeadSource({ utm: { source: 'openai' } });
+    expect(res.leadSourceId).toBeNull();
+    expect(res.sourceType).toBe('ai_assistant');
+  });
+
+  test('precedence: a gclid still wins over an AI-assistant referrer', async () => {
+    mockLeadSources({ google: { id: 'ls-google', source_type: 'google_ads' } });
+    const res = await resolveLeadSource({ gclid: 'g1', referrer: 'https://chatgpt.com/c/abc' });
+    expect(res.leadSourceId).toBe('ls-google');
+    expect(res.sourceType).toBe('google_ads');
+  });
+
+  test('precedence: an explicit GBP utm still wins over an AI-assistant utm_source', async () => {
+    isGbpUtmCampaign.mockReturnValue(true);
+    findGbpLocationByUtmContent.mockReturnValue({ name: 'Parrish', gbpUtmContent: 'parrish-profile' });
+    mockLeadSources({ byName: { 'GBP — Parrish': { id: 'ls-gbp-parrish', name: 'GBP — Parrish', source_type: 'gbp' } } });
+    const res = await resolveLeadSource({ utm: { source: 'gbp', content: 'parrish-profile' }, referrer: 'https://chatgpt.com/c/abc' });
+    expect(res.leadSourceId).toBe('ls-gbp-parrish');
+    expect(res.sourceType).toBe('gbp');
+  });
+
+  test('no AI signal falls through to Main Site unchanged', async () => {
+    mockLeadSources({ byName: { [MAIN_SITE_NAME]: { id: 'ls-main', name: MAIN_SITE_NAME, source_type: 'main_site' } } });
+    const res = await resolveLeadSource({ referrer: 'https://www.google.com/search?q=pest+control' });
+    expect(res.leadSourceId).toBe('ls-main');
+    expect(res.sourceType).toBe('main_site');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sourceType — the lead_sources.source_type key the ad-funnel channel map
 // (ads/call-attribution attributionForSourceType) is keyed on. public-quote
 // stamps its ad_service_attribution row from this, so a wrong/missing value

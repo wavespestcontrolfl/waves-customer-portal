@@ -41,6 +41,7 @@ const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
@@ -710,6 +711,9 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
 
+  // FLEX-TIER: the flexible tier's own candidate admission (a no-op in
+  // every other mode) — see flexTier.flexCandidateRules.
+  const flexRules = flexCandidateRules(service, ctx);
   const findTimeArgs = {
     lat: geo.lat,
     lng: geo.lng,
@@ -728,6 +732,10 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     ...(prefs.preferred_time_window
       ? { earliestStartMin: prefs.preferred_time_window.startMin }
       : {}),
+    // FLEX-TIER: the same generation-time floor on the one date the 73h
+    // freeze ends (find-time keeps the larger of it and the preferred-time
+    // floor); the admission filter below still drops anything inside it.
+    ...flexRules.findTimeArgs,
     // NOTE: occupancy keeps find-time's default ['cancelled'] so it stays
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.
@@ -753,9 +761,13 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0 };
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0, flex_floor: 0 };
+  // FLEX-TIER (Codex #4995): HARD — a destination inside the 73h freeze, or
+  // on a date the window does not admit, never becomes a candidate (apply.js
+  // re-checks both authoritatively, grouped members' derived starts included).
+  const admitted = flexRules.admit(slots, drops);
   const candidates = [];
-  for (const slot of slots) {
+  for (const slot of admitted) {
     // HARD: find-time (findAvailableSlots) shares ONE admission bound across
     // every caller once GATE_SCHEDULING_CAPACITY is on — scheduling/policy.js
     // SHIFT.endMinutes is the CUSTOMER day close (18:00 since picker-windows

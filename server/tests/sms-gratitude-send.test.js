@@ -11,6 +11,7 @@ const mockState = {
   openRequest: false,
   openCallCommitment: false,
   openSmsCommitment: false,
+  openEmailCommitment: false,
   openTriage: false,
   openOperatorItem: false,
   intentMode: 'auto_send',
@@ -86,6 +87,7 @@ jest.mock('../models/db', () => {
       if (table === 'service_requests') return mockState.openRequest ? { id: 'request-1' } : null;
       if (table === 'call_commitments as cc') return mockState.openCallCommitment ? { id: 'call-commitment-1' } : null;
       if (table === 'call_commitments as cc_sms') return mockState.openSmsCommitment ? { id: 'sms-commitment-1' } : null;
+      if (table === 'call_commitments as cc_email') return mockState.openEmailCommitment ? { id: 'email-commitment-1' } : null;
       if (table === 'triage_items as ti') return mockState.openTriage ? { id: 'triage-1' } : null;
       if (table === 'operator_inbox_items as oi') return mockState.openOperatorItem ? { id: 'operator-item-1' } : null;
       if (table === 'agent_decisions as ad') {
@@ -136,7 +138,7 @@ jest.mock('../models/db', () => {
   // one statement, answered from the same fixture flags.
   db.first = jest.fn(async () => ({
     pending_work: [
-      mockState.openRequest, mockState.openCallCommitment, mockState.openSmsCommitment,
+      mockState.openRequest, mockState.openCallCommitment, mockState.openSmsCommitment, mockState.openEmailCommitment,
       mockState.openTriage, mockState.openOperatorItem, mockState.pendingDecision,
     ].some(Boolean),
     thread_advanced: mockState.threadAdvanced,
@@ -163,8 +165,20 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 0),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
   PROMPT_VERSION: 'house_voice_v11',
+  REAL_ANSWERS_VERSION_FAMILY: 'house_voice_v12_real_answers',
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
+  // call, gratitude sends included — see sms-auto-send-open-times.test.js's
+  // identical mock comment. Fixed gratitude copy never claims an ETA.
+  findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  // Structural default-deny (Codex round-7 P2) — see identical mock comment
+  // in sms-auto-send-open-times.test.js.
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({
   evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true, blockers: [] })),
@@ -215,6 +229,7 @@ function resetFixture() {
   mockState.openRequest = false;
   mockState.openCallCommitment = false;
   mockState.openSmsCommitment = false;
+  mockState.openEmailCommitment = false;
   mockState.openTriage = false;
   mockState.openOperatorItem = false;
   mockState.intentMode = 'auto_send';
@@ -408,6 +423,10 @@ test('new inbound/human answer, duplicate claim, and every operational work queu
   expect((await attempt()).sent).toBe(false);
   mockState.aliasFirsts = 0;
   mockState.openSmsCommitment = false;
+  mockState.openEmailCommitment = true;
+  expect((await attempt()).sent).toBe(false);
+  mockState.aliasFirsts = 0;
+  mockState.openEmailCommitment = false;
   mockState.openTriage = true;
   expect((await attempt()).sent).toBe(false);
   mockState.aliasFirsts = 0;
@@ -429,6 +448,30 @@ test('qualified live gratitude preserves mode/graduation checks and reaches only
     to: '+19415550100', body: buildGratitudeReply('Dana'),
     metadata: expect.objectContaining({ original_message_type: 'ai_gratitude', gratitude_policy_version: GRATITUDE_POLICY_VERSION }),
   }));
+});
+
+// Pre-push audit P1 (GATE_SMS_REAL_ANSWERS): reloadGratitudeCaller and
+// claimGratitudeSend used to hard-code expectedPromptVersion to the static
+// PROMPT_VERSION constant, which stays 'house_voice_v11' forever once the
+// real-answers gate goes live — a gratitude draft stamped
+// 'house_voice_v12_real_answers' would fail 'prompt_version_mismatch'
+// forever, even with the gate on. Both sites now judge the STORED row's own
+// version (threaded through from the caller, who set it once at draft
+// insert time and never mutates it), so either recognized version succeeds
+// when it genuinely matches the row — and a genuine mismatch still fails
+// closed.
+test('a gratitude draft stamped under the real-answers prompt (v12) sends — the version check judges the ROW, not a hardcoded v11', async () => {
+  mockState.draft.prompt_version = 'house_voice_v12_real_answers';
+  await expect(attempt({ promptVersion: 'house_voice_v12_real_answers' })).resolves.toMatchObject({
+    sent: true, providerMessageId: expect.stringMatching(/^SM/),
+  });
+});
+
+test('a caller whose promptVersion disagrees with the stored row still fails closed (prompt_version_mismatch), never sends', async () => {
+  mockState.draft.prompt_version = 'house_voice_v12_real_answers';
+  // The caller believes this draft was drafted under v11 — genuinely wrong
+  // versus the stored row — so it must still be refused, not waved through.
+  await expect(attempt({ promptVersion: 'house_voice_v11' })).resolves.toMatchObject({ sent: false });
 });
 
 test('candidate sweep drains the oldest inbound before more than 25 newer rejected drafts', async () => {
@@ -756,6 +799,7 @@ test.each([
   ['service request', () => { mockState.openRequest = true; }, 'service_requests'],
   ['call commitment', () => { mockState.openCallCommitment = true; }, 'call_commitments as cc'],
   ['SMS commitment', () => { mockState.openSmsCommitment = true; }, 'call_commitments as cc_sms'],
+  ['email commitment', () => { mockState.openEmailCommitment = true; }, 'call_commitments as cc_email'],
   ['triage item', () => { mockState.openTriage = true; }, 'triage_items as ti'],
   ['operator inbox item', () => { mockState.openOperatorItem = true; }, 'operator_inbox_items as oi'],
   ['review decision', () => { mockState.pendingDecision = true; }, 'agent_decisions as ad'],

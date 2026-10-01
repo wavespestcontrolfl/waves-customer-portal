@@ -1,0 +1,513 @@
+[
+  {
+    "slug": "purple-nutsedge",
+    "kind": "weed",
+    "common_name": "Purple Nutsedge",
+    "aka": [
+      "nutgrass"
+    ],
+    "aliases": [
+      "purple nutsedge",
+      "nutgrass",
+      "nut grass",
+      "cyperus rotundus"
+    ],
+    "scientific_name": "Cyperus rotundus",
+    "rank": "species",
+    "group": "sedges",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Roll the stem between your fingers \u2014 triangular, not round",
+      "Leaves grow in sets of three from the base, shiny and stiff",
+      "Grows noticeably faster and taller than the surrounding lawn within days of mowing",
+      "Purple-to-reddish, brownish seed head atop a bare triangular stalk"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellow-nutsedge",
+        "difference": "Purple nutsedge has a purplish-brown seed head and tubers linked in chains; yellow nutsedge has a golden-yellow seed head and tubers usually growing singly.",
+        "next_photo": "A close-up of the seed head color and a dug-up section showing how the tubers are connected.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "green-kyllinga",
+        "difference": "Purple nutsedge produces underground tubers and a purplish seed head; green kyllinga has no tubers at all and a small round green seedhead that fades to brown.",
+        "next_photo": "Dig at the base \u2014 tubers present (nutsedge) or absent (kyllinga) \u2014 plus a close-up of the seedhead shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "One of the most persistent lawn weeds there is, spreading through chains of underground tubers that resprout even after top growth is removed. A technician evaluates the weed, turf type, season, and coverage to explain why this needs a more patient approach than an ordinary lawn weed.",
+      "fact": "A single tuber can produce a whole new chain of plants underground, which is why pulling the visible top growth rarely gets rid of it for good.",
+      "blurb": "A persistent, tuber-spreading sedge that's genuinely hard to control \u2014 often needs a different approach than an ordinary weed."
+    },
+    "tech_notes": "Underground tuber bank makes single-application control unreliable; set expectations for repeat treatment over a season or more. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/EP569",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "57f62df1d4261a5f77ae3daaba6254ee7dd49ace3ccd07042aeaae09a12173c5"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "sedge",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "tubers",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Roll the stem \u2014 triangular, not round",
+        "Leaves in sets of three, shiny and stiff",
+        "Grows taller than the lawn within days of mowing",
+        "Dig at the base \u2014 chains of small tubers linked by wiry rhizomes"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "yellow-nutsedge",
+    "kind": "weed",
+    "common_name": "Yellow Nutsedge",
+    "aka": [
+      "nutgrass"
+    ],
+    "aliases": [
+      "yellow nutsedge",
+      "nutgrass",
+      "nut grass",
+      "cyperus esculentus"
+    ],
+    "scientific_name": "Cyperus esculentus",
+    "rank": "species",
+    "group": "sedges",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Roll the stem between your fingers \u2014 triangular, not round",
+      "Leaves grow in sets of three from the base, a lighter yellow-green than surrounding turf",
+      "Grows noticeably faster and taller than the lawn within days of mowing",
+      "Golden-yellow to tan seed head atop a bare triangular stalk"
+    ],
+    "look_alikes": [
+      {
+        "slug": "purple-nutsedge",
+        "difference": "Yellow nutsedge has a golden-yellow seed head and tubers usually growing singly; purple nutsedge has a purplish-brown seed head and tubers linked in chains.",
+        "next_photo": "A close-up of the seed head color and a dug-up section showing how the tubers are connected.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "globe-sedge",
+        "difference": "Yellow nutsedge produces underground tubers and a golden-yellow seed head; globe sedge has no tubers and a spiky, round, ball-like green seedhead cluster.",
+        "next_photo": "Dig at the base \u2014 tubers present (nutsedge) or absent (globe sedge) \u2014 plus a close-up of the seedhead shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-growing sedge that thrives in wet or overwatered turf and spreads through underground tubers, making it more persistent than an ordinary broadleaf or grassy weed. A technician looks at the weed, irrigation and drainage, turf type, and coverage before recommending an approach.",
+      "fact": "Its tubers are edible and were once cultivated as a food crop (the source of \"tiger nuts\"), even though in a lawn they're simply a stubborn weed.",
+      "blurb": "A fast-growing, tuber-spreading sedge that favors wet or overwatered turf."
+    },
+    "tech_notes": "Confirm irrigation/drainage contribution; underground tuber bank means repeat monitoring is likely needed. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/",
+      "https://blogs.ifas.ufl.edu/entnemdept/2023/06/01/weed-of-the-month-nutsedge/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bf93a18d9ad0c026074c63b8fdaae1457fc4808255b4f8379d2a809ee155990f"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "sedge",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "tubers",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Roll the stem \u2014 triangular, not round",
+        "Leaves in sets of three, lighter yellow-green than surrounding turf",
+        "Grows taller than the lawn within days of mowing",
+        "Dig at the base \u2014 small tubers, usually growing singly rather than in a chain"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "globe-sedge",
+    "kind": "weed",
+    "common_name": "Globe Sedge",
+    "aka": [],
+    "aliases": [
+      "globe sedge",
+      "cyperus croceus"
+    ],
+    "scientific_name": "Cyperus croceus",
+    "rank": "species",
+    "group": "sedges",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Roll the stem between your fingers \u2014 triangular, not round",
+      "Leaves grow in sets of three from the base",
+      "Small, spiky, round green seed clusters that look like tiny burred balls at the top of the stalk",
+      "No underground tubers, unlike the nutsedges"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellow-nutsedge",
+        "difference": "Globe sedge has no tubers and a spiky, round, ball-like seed cluster; yellow nutsedge has small tubers and a golden-yellow, more open seed head.",
+        "next_photo": "Dig at the base for tubers (present in nutsedge, absent in globe sedge) and a close-up of the seed cluster shape.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "green-kyllinga",
+        "difference": "Globe sedge has spiky, distinctly round, burred seed balls; green kyllinga has a smoother, smaller, rounded-to-oval seedhead and forms dense mats via rhizomes.",
+        "next_photo": "A close-up of the seedhead shape \u2014 spiky and burred vs. smooth and oval.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A sedge that, unlike its nutsedge relatives, doesn't spread by underground tubers, which generally makes it somewhat less stubborn to manage. A technician looks at the weed, turf type, season, and coverage before recommending an approach.",
+      "fact": "Its seed clusters look like tiny spiky green balls, which is exactly where the name \"globe sedge\" comes from.",
+      "blurb": "A sedge with spiky, ball-like seed clusters \u2014 without the underground tubers that make nutsedge so stubborn."
+    },
+    "tech_notes": "No tuber bank, unlike Cyperus rotundus/esculentus \u2014 generally more responsive to a single well-timed approach. Per label if herbicide is used.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/",
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cd1a5370079d537258cd0e56e9ebc0c4f46a20de730cb0b8dbbcfe6b28f4da29"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "plant": {
+      "type": "sedge",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "seed",
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Roll the stem \u2014 triangular, not round",
+        "Leaves in sets of three from the base",
+        "Small, spiky, round green seed clusters at the top of the stalk",
+        "Dig at the base \u2014 no underground tubers present"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  },
+  {
+    "slug": "green-kyllinga",
+    "kind": "weed",
+    "common_name": "Green Kyllinga",
+    "aka": [],
+    "aliases": [
+      "green kyllinga",
+      "kyllinga",
+      "kyllinga brevifolia"
+    ],
+    "scientific_name": "Kyllinga brevifolia",
+    "rank": "species",
+    "group": "sedges",
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Roll the stem between your fingers \u2014 triangular, not round",
+      "Shiny, dark green leaves with a distinct ridge down the midvein",
+      "Small, round-to-oval, pea-sized green seed head, three leaf-like bracts beneath it, that turns brown as it matures",
+      "Spreads by rhizomes into a dense mat \u2014 no underground tubers"
+    ],
+    "look_alikes": [
+      {
+        "slug": "purple-nutsedge",
+        "difference": "Green kyllinga has no tubers and a small, smooth, pea-sized green seedhead; purple nutsedge produces chains of tubers and a larger, purplish-brown seed head.",
+        "next_photo": "Dig at the base \u2014 tubers present (nutsedge) or absent (kyllinga) \u2014 plus a close-up of the seedhead.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "globe-sedge",
+        "difference": "Green kyllinga has a smooth, small, rounded-to-oval seedhead and forms a dense mat via rhizomes; globe sedge has a spikier, more burred, ball-like seed cluster.",
+        "next_photo": "A close-up of the seedhead texture \u2014 smooth and rounded vs. spiky and burred.",
+        "photo_can_confirm": true
+      }
+    ],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A rhizome-spreading sedge that forms a dense, shiny-green mat in wet or overwatered turf, distinct from the true nutsedges since it never forms tubers. A technician looks at the weed, irrigation and drainage, turf type, and coverage before recommending an approach.",
+      "fact": "Young green kyllinga is often mistaken for one of the true nutsedges, but a dig at the base tells the story fast \u2014 kyllinga never makes tubers.",
+      "blurb": "A shiny, mat-forming sedge that favors wet turf \u2014 no tubers, unlike its nutsedge look-alikes."
+    },
+    "tech_notes": "Rhizome-only spread (no tuber bank) distinguishes it from Cyperus rotundus/esculentus for control planning. Per label if herbicide is used; confirm irrigation/drainage contribution.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/sedges/",
+      "https://erec.ifas.ufl.edu/weed-id/green-kyllinga"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "642468ad77adde41c4b0c3e97f06ba4a8f32fc32c57aa7b431f68c03d6670b48"
+    },
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "plant": {
+      "type": "sedge",
+      "life_cycle": "perennial",
+      "spreads_by": [
+        "rhizomes"
+      ],
+      "id_cues": [
+        "Roll the stem \u2014 triangular, not round",
+        "Shiny dark green leaves with a ridge down the midvein",
+        "Small, round-to-oval, pea-sized green seed head",
+        "Dig at the base \u2014 rhizomes present, no tubers"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
+  }
+]

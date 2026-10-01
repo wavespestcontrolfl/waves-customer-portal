@@ -426,6 +426,37 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
+  it('a blank-city customer retry takes the ZIP line under GATE_SMS_LINE_ADDRESS_FALLBACK and replays by customer', async () => {
+    const prevGate = process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+    process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = 'true';
+    try {
+      forceRecordableViaFailOpen();
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      renderSmsTemplate.mockResolvedValue('Deposit received.');
+      sendCustomerMessage.mockResolvedValue({ sent: false, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-07-07T12:00:00.000Z' });
+      mockIsEstimateAcceptActive.mockReturnValue(true);
+      const { handler, state } = statefulWebhookDb({
+        estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer' },
+        customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', city: '', zip: '34285' },
+      });
+      mockDbHandler = handler;
+
+      await handleDepositIntentSucceeded(succeededPi);
+
+      expect(state.smsLogInserts).toHaveLength(1);
+      expect(state.smsLogInserts[0].from_phone).toBe('+19412973337'); // Venice line, not Bradenton
+      expect(JSON.parse(state.smsLogInserts[0].metadata).resolve_from_by_customer).toBe(true);
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_SMS_LINE_ADDRESS_FALLBACK;
+      else process.env.GATE_SMS_LINE_ADDRESS_FALLBACK = prevGate;
+      const { renderSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      renderSmsTemplate.mockResolvedValue(null);
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+    }
+  });
+
   it('email-only receipt channel: no SMS, sends the deposit.receipt email instead', async () => {
     forceRecordableViaFailOpen();
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
@@ -478,7 +509,7 @@ describe('webhook + invoice credit', () => {
     expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('withheldLinkPolicy');
   });
 
-  it('portal-wide email opt-out (email_enabled=false) suppresses the receipt email', async () => {
+  it('portal-wide email opt-out (email_enabled=false) does not suppress the receipt email', async () => {
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     sendCustomerMessage.mockClear();
     mockSendTemplate.mockClear();
@@ -486,15 +517,17 @@ describe('webhook + invoice credit', () => {
     const { handler } = statefulWebhookDb({
       estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
       customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
-      // transactional_required bypasses suppression groups, so the sender
-      // itself must honor the portal-wide opt-out.
+      // transactional_required bypasses suppression groups, and the sender
+      // itself no longer reads the portal-wide switch either (owner ruling
+      // 2026-09-26: payment emails cannot be turned off).
       prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
     });
     mockDbHandler = handler;
 
     await handleDepositIntentSucceeded(succeededPi);
 
-    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('receipt channel "both" sends the SMS and the email', async () => {
@@ -587,11 +620,10 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });
 
-  it('email-only channel whose email leg is undeliverable falls back to the TEXT', async () => {
-    forceRecordableViaFailOpen();
-    // Stale email-only rows (email removed / email messages opted out after
-    // choosing Email) must not leave a paid deposit with no receipt on any
-    // channel (codex P1 on d040aa76) — mirrors the consent gate fallback.
+  it('email-only channel with the portal-wide email switch off still sends the email, not the TEXT', async () => {
+    // Owner ruling 2026-09-26: payment emails cannot be turned off, so an
+    // address on file stays deliverable even with the switch off — no
+    // fallback to text.
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     renderSmsTemplate.mockClear();
@@ -601,20 +633,33 @@ describe('webhook + invoice credit', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true });
     mockIsEstimateAcceptActive.mockReturnValue(true);
 
-    // Portal-wide email opt-out
-    let ctx = statefulWebhookDb({
+    const ctx = statefulWebhookDb({
       estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
       customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: 'sam@customer.example' },
       prefsRow: { payment_receipt_channel: 'email', email_enabled: false },
     });
     mockDbHandler = ctx.handler;
     await handleDepositIntentSucceeded(succeededPi);
-    expect(mockSendTemplate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    renderSmsTemplate.mockResolvedValue(null);
+  });
 
-    // No recipient email on file at all
+  it('email-only channel with NO recipient email falls back to the TEXT', async () => {
+    forceRecordableViaFailOpen();
+    // A genuinely missing address (email removed after choosing Email) must
+    // not leave a paid deposit with no receipt on any channel (codex P1 on
+    // d040aa76) — mirrors the consent gate fallback.
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockClear();
     sendCustomerMessage.mockClear();
-    ctx = statefulWebhookDb({
+    mockSendTemplate.mockClear();
+    renderSmsTemplate.mockResolvedValue('Deposit received.');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    mockIsEstimateAcceptActive.mockReturnValue(true);
+
+    const ctx = statefulWebhookDb({
       estimateRow: { id: 'est-1', status: 'sent', onetime_total: 280, customer_id: 'cust-1', customer_phone: '(941) 555-0199', customer_name: 'Sam Customer', token: 'tok-1' },
       customerRow: { id: 'cust-1', phone: '(941) 555-0100', first_name: 'Sam', email: '' },
       prefsRow: { payment_receipt_channel: 'email' },
@@ -1736,11 +1781,11 @@ describe('sendDepositReceiptEmailFallback — scheduled-replay handoff to the em
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
-  it('portal-wide email opt-out is honored', async () => {
+  it('the portal-wide email switch never stops the replayed receipt (owner ruling 2026-09-26)', async () => {
     mockDbHandler = fallbackDb({ estimate: baseEstimate, customer: baseCustomer, prefs: { email_enabled: false }, ledger: baseLedger });
     const r = await sendDepositReceiptEmailFallback('est-1');
-    expect(r).toEqual({ sent: false, reason: 'email_opted_out' });
-    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(r).toEqual({ sent: true });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
   });
 
   it('no received/credited ledger row → nothing to receipt', async () => {

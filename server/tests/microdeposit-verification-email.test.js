@@ -10,39 +10,67 @@ jest.mock('../services/customer-contact', () => ({
 }));
 jest.mock('../services/email-template', () => ({ currency: (v) => `$${Number(v).toFixed(2)}` }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.wavespestcontrol.com' }));
-const mockWithCustomerCommsLock = jest.fn();
-jest.mock('../utils/customer-comms-lock', () => ({
-  withCustomerCommsLock: (...args) => mockWithCustomerCommsLock(...args),
+// The preference-enforced send rides the shared billing email authority
+// (owner ruling 2026-09-27). Its own locks, rechecks and suppression reads are
+// pinned in billing-channel-email-authority.test.js and the Postgres suite;
+// here it authorizes the billing recipient, and a test overrides it to refuse
+// at the first read or at the provider handoff.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(),
+  dispatchUnderBillingEmailAuthority: jest.fn(),
 }));
 
 const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const BillingEmailAuthority = require('../services/billing-channel-email-authority');
 const invoiceHelpers = require('../services/invoice-helpers');
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 
-function prefsChain(value, error = null) {
+function prefsChain(value) {
   const q = {};
   q.where = jest.fn(() => q);
-  q.first = jest.fn(async () => {
-    if (error) throw error;
-    return value;
-  });
-  q.catch = (cb) => Promise.resolve({}).catch(cb);
+  q.first = jest.fn(() => Promise.resolve(value));
   return q;
 }
 
 const invoice = { id: 'inv-1', title: 'Quarterly Pest Control', total: '129.00', credit_applied: null };
 const customer = { id: 'cust-1', first_name: 'Taylor' };
+const authorityInput = {
+  customerId: 'cust-1', invoiceId: 'inv-1', channel: 'email',
+  metadata: { billingDeliveryCategory: 'payment_issue' },
+};
+
+function refuseAtHandoff(boundaryBlock) {
+  BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+    state.boundaryBlock = boundaryBlock;
+    return { ok: false };
+  });
+  EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+    await withProviderHandoff(jest.fn());
+    return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+  });
+}
 
 describe('sendMicrodepositVerificationEmail', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockWithCustomerCommsLock.mockImplementation(async (_database, _customerId, fn) => fn(db));
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsChain({});
       throw new Error(`Unexpected db table ${table}`);
     });
+    BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
+      category: 'payment_issue',
+      recipient: { email: 'billing@example.com', name: 'Taylor Smith' },
+      recipientEmail: 'billing@example.com',
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockReset()
+      .mockImplementation(async ({ dispatch, state }) => {
+        state.handoffStarted = true;
+        await dispatch('authority-trx');
+        state.providerAccepted = true;
+        return { ok: true };
+      });
   });
   afterEach(() => jest.restoreAllMocks());
 
@@ -72,42 +100,17 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'missing_email' });
   });
 
-  test('preference-enforced send skips when Email Messages is disabled', async () => {
+  test('an operator send skips the customer\'s choices and rechecks invoice ownership at the handoff', async () => {
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsChain({ email_enabled: false });
       throw new Error(`Unexpected db table ${table}`);
     });
-
-    const result = await sendMicrodepositVerificationEmail({
-      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
-    });
-
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-  });
-
-  test.each([
-    ['enabled preference', { email_enabled: true }, null],
-    ['missing preference row', undefined, null],
-    ['failed initial preference read', undefined, new Error('preferences unavailable')],
-  ])('preference-enforced send proceeds with %s', async (_label, prefs, error) => {
-    db.mockImplementation((table) => {
-      if (table === 'notification_prefs') return prefsChain(prefs, error);
-      throw new Error(`Unexpected db table ${table}`);
-    });
-
-    const result = await sendMicrodepositVerificationEmail({
-      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
-  });
-
-  test('unenforced send proceeds when Email Messages is disabled', async () => {
-    db.mockImplementation((table) => {
-      if (table === 'notification_prefs') return prefsChain({ email_enabled: false });
-      throw new Error(`Unexpected db table ${table}`);
+    const ownership = jest.fn(async () => ({ ok: true }));
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(ownership);
+    const dispatch = jest.fn();
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const handoff = await withProviderHandoff(dispatch);
+      return { sent: handoff.ok };
     });
 
     const result = await sendMicrodepositVerificationEmail({
@@ -115,104 +118,106 @@ describe('sendMicrodepositVerificationEmail', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
-    expect(mockWithCustomerCommsLock).not.toHaveBeenCalled();
+    expect(invoiceHelpers.selfPayAtDispatch).toHaveBeenCalledWith('inv-1', db);
+    expect(ownership).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(BillingEmailAuthority.loadBillingEmailContext).not.toHaveBeenCalled();
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
   });
 
-  test('fresh Email Messages opt-out refuses provider dispatch', async () => {
-    db.mockImplementation((table) => {
-      if (table === 'notification_prefs') return prefsChain({ email_enabled: true });
-      throw new Error(`Unexpected db table ${table}`);
-    });
-    const lockedPrefsQuery = prefsChain({ email_enabled: false });
-    const lockedTrx = jest.fn((table) => {
-      if (table === 'notification_prefs') return lockedPrefsQuery;
-      throw new Error(`Unexpected locked table ${table}`);
-    });
-    mockWithCustomerCommsLock.mockImplementationOnce(async (_database, _customerId, fn) => fn(lockedTrx));
-    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+  test('an operator send never dispatches once the invoice moved to a third-party payer', async () => {
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch')
+      .mockReturnValue(async () => ({ ok: false, code: 'INVOICE_PAYER_BILLED' }));
     const dispatch = jest.fn();
-    let handoffResult;
     EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
-      handoffResult = await withProviderHandoff(dispatch);
-      return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+      await withProviderHandoff(dispatch);
+      return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
     });
 
-    const result = await sendMicrodepositVerificationEmail({
-      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
-    });
+    const result = await sendMicrodepositVerificationEmail({ invoice, customer, touchKey: '14d' });
 
-    expect(handoffResult).toEqual({ ok: false });
-    expect(mockWithCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
-    expect(invoiceHelpers.selfPayAtDispatch).toHaveBeenCalledWith('inv-1', lockedTrx);
-    expect(lockedTrx).toHaveBeenCalledWith('notification_prefs');
-    expect(lockedPrefsQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
     expect(dispatch).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(result).toEqual({ ok: false, blocked: false, reason: 'aborted_by_caller_before_dispatch' });
   });
 
-  test('preference-enforced provider handoff rechecks and dispatches under the customer lock', async () => {
-    let lockActive = false;
-    const lockedPrefsQuery = prefsChain({ email_enabled: true });
-    lockedPrefsQuery.where.mockImplementation((criteria) => {
-      expect(lockActive).toBe(true);
-      expect(criteria).toEqual({ customer_id: 'cust-1' });
-      return lockedPrefsQuery;
-    });
-    const lockedTrx = jest.fn((table) => {
-      if (table === 'notification_prefs') return lockedPrefsQuery;
-      throw new Error(`Unexpected locked table ${table}`);
-    });
-    mockWithCustomerCommsLock.mockImplementationOnce(async (_database, _customerId, fn) => {
-      lockActive = true;
-      try {
-        return await fn(lockedTrx);
-      } finally {
-        lockActive = false;
-      }
-    });
-    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
-    const dispatch = jest.fn(async (database) => {
-      expect(database).toBe(lockedTrx);
-      expect(lockActive).toBe(true);
-      await Promise.resolve();
-      expect(lockActive).toBe(true);
-    });
+  test('preference-enforced send goes through the shared billing email authority for payment_issue', async () => {
+    const dispatch = jest.fn();
     EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
-      const handoffResult = await withProviderHandoff(dispatch);
-      return { sent: handoffResult.ok };
+      const handoff = await withProviderHandoff(dispatch);
+      return { sent: handoff.ok };
     });
 
     const result = await sendMicrodepositVerificationEmail({
       invoice, customer, touchKey: '14d', enforceBillingPreference: true,
     });
 
-    expect(result.ok).toBe(true);
-    expect(mockWithCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
-    expect(invoiceHelpers.selfPayAtDispatch).toHaveBeenCalledWith('inv-1', lockedTrx);
-    expect(lockedTrx).toHaveBeenCalledWith('notification_prefs');
-    expect(lockedPrefsQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
-    expect(lockedPrefsQuery.first).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith(lockedTrx);
-    expect(lockActive).toBe(false);
+    expect(result).toEqual({ ok: true });
+    expect(BillingEmailAuthority.loadBillingEmailContext).toHaveBeenCalledWith(authorityInput);
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+      input: authorityInput,
+      recipientEmail: 'billing@example.com',
+      templateKey: 'payment.microdeposit_verification',
+    }));
+    expect(dispatch).toHaveBeenCalledWith('authority-trx');
+    expect(db).not.toHaveBeenCalled();
   });
 
-  test('returns ok:false (never throws) when the email send errors', async () => {
-    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('sendgrid down'));
-    const result = await sendMicrodepositVerificationEmail({ invoice, customer, touchKey: '7d' });
+  test.each([
+    ['NO_EMAIL_RECIPIENT', { ok: false, skipped: true, reason: 'missing_email' }],
+    ['INVOICE_PAYER_BILLED', { ok: false, skipped: true, reason: 'invoice_payer_billed' }],
+    ['BILLING_PREFERENCES_CHANGED',
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'BILLING_PREFERENCES_CHANGED' }],
+    ['INVOICE_CUSTOMER_MISMATCH',
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'INVOICE_CUSTOMER_MISMATCH' }],
+  ])('a %s refusal at the first read sends nothing', async (code, expected) => {
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: { code, reason: code } });
 
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/sendgrid down/);
-    expect(result.deliveryOutcome).toBe('uncertain');
-  });
-
-  test('early template read failure is definitely not sent when preference-enforced handoff has not begun', async () => {
-    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template read unavailable'));
     const result = await sendMicrodepositVerificationEmail({
       invoice, customer, touchKey: '14d', enforceBillingPreference: true,
     });
-    expect(result).toEqual({ ok: false, error: 'template read unavailable', deliveryOutcome: 'not_sent' });
+
+    expect(result).toEqual(expected);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
+
+  test('an unreadable billing email context holds the send instead of sending blind', async () => {
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('preferences unavailable'));
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(result).toEqual({
+      ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable',
+    });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a staff do-not-contact', { code: 'SUPPRESSED_MANUAL_DNC', reason: 'manual_dnc' },
+      { ok: false, blocked: true, reason: 'Suppressed: manual_dnc' }],
+    ['a changed recipient', { code: 'EMAIL_RECIPIENT_CHANGED' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'EMAIL_RECIPIENT_CHANGED' }],
+  ])('%s at the provider handoff refuses the dispatch', async (_label, boundaryBlock, expected) => {
+    refuseAtHandoff(boundaryBlock);
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(result).toEqual(expected);
+  });
+
+  test.each([false, true])(
+    'a failure before the provider handoff is definitely not sent (enforced: %s)',
+    async (enforceBillingPreference) => {
+      EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template read unavailable'));
+      const result = await sendMicrodepositVerificationEmail({
+        invoice, customer, touchKey: '14d', enforceBillingPreference,
+      });
+      expect(result).toEqual({ ok: false, error: 'template read unavailable', deliveryOutcome: 'not_sent' });
+    },
+  );
 
   test('in-progress collision stays uncertain even before this caller starts a handoff', async () => {
     EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('in progress'), {
@@ -235,12 +240,12 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(result.deliveryOutcome).toBe('uncertain');
   });
 
-  test('unknown error after provider handoff remains uncertain', async () => {
+  test.each([false, true])('unknown error after provider handoff remains uncertain (enforced: %s)', async (enforceBillingPreference) => {
     jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
     EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
       withProviderHandoff(async () => { throw new Error('provider response lost'); }));
     const result = await sendMicrodepositVerificationEmail({
-      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+      invoice, customer, touchKey: '14d', enforceBillingPreference,
     });
     expect(result.deliveryOutcome).toBe('uncertain');
   });
@@ -249,7 +254,6 @@ describe('sendMicrodepositVerificationEmail', () => {
     ['rate limit', 429, 'not_sent'], ['timeout', 408, 'uncertain'],
     ['server error', 503, 'uncertain'], ['network error', null, 'uncertain'],
   ])('post-handoff %s has truthful Email delivery outcome', async (_label, status, expected) => {
-    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
     EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
       withProviderHandoff(async () => { throw Object.assign(new Error('SendGrid error'), status ? { status } : {}); }));
     const result = await sendMicrodepositVerificationEmail({
@@ -265,7 +269,7 @@ describe('sendMicrodepositVerificationEmail', () => {
     const result = await sendMicrodepositVerificationEmail({
       invoice, customer, touchKey: '14d', enforceBillingPreference: true,
     });
-    expect(result).toEqual({ ok: true, providerAccepted: true });
+    expect(result).toEqual({ ok: true });
   });
 
   test.each(['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'])(

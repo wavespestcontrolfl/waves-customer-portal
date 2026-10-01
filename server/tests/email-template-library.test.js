@@ -5,6 +5,9 @@ jest.mock('../services/sendgrid-mail', () => ({
   newsletterGroupId: jest.fn(() => 101),
   serviceGroupId: jest.fn(() => 202),
   sendOne: jest.fn(),
+  // The shared annual-offer guard (sendOne's own pre-provider decision) —
+  // preflightTemplateSend calls it directly; default = not withheld.
+  applyAnnualOfferGuard: jest.fn(async ({ html, text, estimateIds }) => ({ sendHtml: html, sendText: text, sendEstimateIds: estimateIds })),
   isDefiniteRejection: jest.fn((err) => [400, 401, 403, 404, 405, 413, 415, 422, 429]
     .includes(Number(err?.status))),
 }));
@@ -16,6 +19,7 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const NotificationService = require('../services/notification-service');
 const EmailTemplates = require('../services/email-template-library');
+const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
 
 // Codex round 3 on #4608 (structural move): the annual-offer guard's
 // AUTHORITATIVE check now runs inside sendgrid.sendOne, which this file
@@ -52,6 +56,7 @@ function chain({ result = [], first, returning } = {}) {
     'select',
     'orderBy',
     'limit',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -321,6 +326,84 @@ describe('email template library rendering', () => {
     }));
   });
 
+  describe('lead / estimate linkage on the queued row', () => {
+    const EST = '11111111-1111-4111-8111-111111111111';
+    const LEAD = '22222222-2222-4222-8222-222222222222';
+    const CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+    // The estimate-owner lookup: `.limit(2).pluck('id')`.
+    const ownerChain = (ids) => { const q = chain(); q.limit = jest.fn(() => q); q.pluck = jest.fn(async () => ids); return q; };
+
+    test('two live leads on the estimate records no lead (ambiguous) but keeps the estimate', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: null, estimateId: EST },
+        [ownerChain([LEAD, '55555555-5555-4555-8555-555555555555'])],
+      );
+      expect(row).toEqual(expect.objectContaining({ estimate_id: EST, lead_id: null }));
+    });
+
+    async function sendLeadMail(args, leadsQueue) {
+      const queuedMessage = { id: 'msg-1', status: 'queued', subject_snapshot: 'Your estimate expires June 12' };
+      const queueInsert = chain({ returning: [queuedMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version() })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
+        leads: leadsQueue,
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+      await EmailTemplates.sendTemplate({
+        templateKey: 'estimate.expiring_notice',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam', expires_at: 'June 12', estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample' },
+        ...args,
+      });
+      return queueInsert.insert.mock.calls[0][0];
+    }
+
+    test('a lead-typed send with no recipient_id records the estimate and the lead that owns it', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: null, estimateId: EST },
+        [ownerChain([LEAD])],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_type: 'lead', recipient_id: null, estimate_id: EST, lead_id: LEAD }));
+    });
+
+    test('a lead-typed send whose recipient_id is a real lead records that lead', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: LEAD },
+        [chain({ first: { id: LEAD } })],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_id: LEAD, lead_id: LEAD, estimate_id: null }));
+    });
+
+    test('a lead-typed row that names a CUSTOMER id is not a lead id (falls back to the estimate owner)', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: CUSTOMER_ID, estimateId: EST },
+        [chain({ first: undefined }), ownerChain([LEAD])],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_id: CUSTOMER_ID, lead_id: LEAD, estimate_id: EST }));
+    });
+
+    test('a customer-typed send records the estimate without any lead lookup', async () => {
+      // setDbQueues throws on a table with no queue, so a stray leads query would fail this test.
+      const row = await sendLeadMail(
+        { recipientType: 'customer', recipientId: CUSTOMER_ID, linkEstimateId: EST },
+        [],
+      ).catch((e) => { throw e; });
+      expect(row).toEqual(expect.objectContaining({ recipient_type: 'customer', lead_id: null, estimate_id: EST }));
+    });
+
+    test('a failed lead lookup never blocks the send; the estimate link is still recorded', async () => {
+      const boom = chain();
+      boom.first = jest.fn(async () => { throw Object.assign(new Error('db down'), { code: '57P01' }); });
+      const row = await sendLeadMail({ recipientType: 'lead', estimateId: EST }, [boom]);
+      expect(row).toEqual(expect.objectContaining({ lead_id: null, estimate_id: EST }));
+      expect(sendgrid.sendOne).toHaveBeenCalled();
+    });
+  });
+
   test('deduplicates SendGrid categories before queueing and sending', async () => {
     const queuedMessage = {
       id: 'msg-1',
@@ -481,6 +564,15 @@ describe('email template library rendering', () => {
 
   test.each(['lost claim', 'write failed', 'acknowledgement lost'])(
     'a marker %s makes no provider request and restores an unsent failure', async (scenario) => {
+    const throughBillingAuthority = scenario === 'acknowledgement lost';
+    const customer = {
+      id: 'cust-marker-lost', email: 'sam@example.com', first_name: 'Sam', phone: null,
+    };
+    const prefs = {
+      customer_id: customer.id, email_enabled: true, billing_channels: ['email'],
+    };
+    const authorityState = {};
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
     const current = {};
     const queueInsert = chain();
     queueInsert.returning.mockImplementation(async () => {
@@ -488,6 +580,10 @@ describe('email template library rendering', () => {
       return [current];
     });
     const failure = chain({ returning: [{ id: 'msg-marker-lost' }] });
+    failure.update.mockImplementation((values) => {
+      Object.assign(current, values);
+      return failure;
+    });
     const marker = chain();
     marker.update = jest.fn(async () => {
       if (scenario === 'lost claim') return 0;
@@ -496,21 +592,52 @@ describe('email template library rendering', () => {
     });
     mockMarkerDb.mockReturnValue(marker);
     setDbQueues({
-      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
-      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
-      email_suppressions: [chain({ result: [] })],
+      email_templates: [
+        chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) }),
+        ...(throughBillingAuthority ? [chain({ first: serviceTemplate({
+          id: 'tmpl-billing', template_key: 'billing.notice', active_version_id: 'ver-billing',
+        }) })] : []),
+      ],
+      email_template_versions: [
+        chain({ first: version({ id: 'ver-1' }) }),
+        ...(throughBillingAuthority ? [chain({ first: version({ id: 'ver-billing' }) })] : []),
+      ],
+      email_suppressions: [chain({ result: [] }),
+        ...(throughBillingAuthority ? [chain({ result: [] })] : [])],
       email_messages: [queueInsert, chain({ first: current }), failure],
       email_message_events: [chain({ first: undefined })],
       audit_log: [chain()],
+      ...(throughBillingAuthority ? {
+        customers: [chain({ first: customer }), chain({ first: customer })],
+        notification_prefs: [chain({ first: prefs })],
+      } : {}),
     });
 
     await expect(EmailTemplates.sendTemplate({
       templateKey: 'estimate.expiring_notice',
       to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      ...(throughBillingAuthority ? {
+        withProviderHandoff: dispatch => dispatchUnderBillingEmailAuthority({
+          input: {
+            customerId: customer.id,
+            metadata: { billingDeliveryCategory: 'billing' },
+          },
+          recipientEmail: customer.email,
+          preSendCheck,
+          dispatch,
+          state: authorityState,
+        }),
+      } : {}),
     })).rejects.toMatchObject({ code: scenario === 'lost claim' ? 'EMAIL_SEND_IN_PROGRESS' : 'ECONNRESET' });
 
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    if (throughBillingAuthority) {
+      expect(preSendCheck).toHaveBeenCalledTimes(1);
+      expect(preSendCheck).toHaveBeenCalledWith(expect.objectContaining({ providerBoundary: false }));
+      expect(authorityState).toMatchObject({ providerPreparationStarted: true });
+      expect(authorityState.handoffStarted).not.toBe(true);
+    }
     expect(failure.where).toHaveBeenCalledWith(expect.objectContaining({
       send_attempt_token: current.send_attempt_token,
       provider_handoff_attempt_token: current.send_attempt_token,
@@ -521,6 +648,7 @@ describe('email template library rendering', () => {
       status: 'failed',
       provider_handoff_phase: 'pending',
     }));
+    expect(current).toMatchObject({ status: 'failed', provider_handoff_phase: 'pending' });
   });
 
   test.each([['delivered', 'delivered'], ['bounced', 'bounce'], ['failed', 'bounce'], ['failed', 'blocked']])('a matching %s/%s webhook proves acceptance after a lost SDK response', async (status, eventType) => {
@@ -773,6 +901,166 @@ describe('email template library rendering', () => {
     expect(snapshotWrite.where).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id, status: 'queued' }));
     expect(snapshotWrite.update).toHaveBeenCalledWith(expect.objectContaining({
       html_snapshot: '<p>Portal home</p>', text_snapshot: 'Portal home',
+    }));
+  });
+
+  test('settles a final caller-authority veto as definitely unsent after marker preparation', async () => {
+    const queued = { id: 'msg-boundary-veto', status: 'queued', subject_snapshot: 'S' };
+    const rejected = { ...queued, status: 'failed', error_message: 'provider_boundary_blocked' };
+    const boundaryUpdate = chain({ returning: [rejected] });
+    const database = jest.fn();
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), boundaryUpdate],
+    });
+    const providerBoundaryCheck = jest.fn(async ({ database: checkedDatabase }) => {
+      expect(checkedDatabase).toBe(database);
+      return { ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: true };
+    });
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      const marker = mockMarkerDb.mock.results[0].value;
+      expect(marker.update).toHaveBeenCalledWith(expect.objectContaining({ provider_handoff_phase: 'started' }));
+      const verdict = await args.providerBoundaryCheck({ database: args.database });
+      throw Object.assign(new Error(verdict.reason), {
+        code: verdict.code,
+        retryable: verdict.retryable,
+        providerBoundaryBlocked: true,
+      });
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => {
+        await dispatch(database, providerBoundaryCheck);
+        return { ok: false };
+      },
+    });
+
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ database, providerBoundaryCheck }));
+    expect(result).toEqual(expect.objectContaining({
+      sent: false, aborted: true, boundaryBlocked: true,
+      reason: 'provider_boundary_blocked', providerAttempted: false,
+    }));
+    expect(boundaryUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: queued.id, status: 'queued', provider_handoff_phase: 'started',
+    }));
+    expect(boundaryUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error_message: 'provider_boundary_blocked', provider_handoff_phase: 'rejected',
+    }));
+  });
+
+  test('settles a boundary check that could not RUN (infrastructure) as definitely unsent and retryable, never left started', async () => {
+    const queued = { id: 'msg-boundary-unavailable', status: 'queued', subject_snapshot: 'S' };
+    const rejected = { ...queued, status: 'failed', error_message: 'provider_boundary_check_failed' };
+    const boundaryUpdate = chain({ returning: [rejected] });
+    const database = jest.fn();
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queued] }), boundaryUpdate],
+    });
+    const providerBoundaryCheck = jest.fn(async () => {
+      throw Object.assign(new Error('eligibility read unavailable'), { providerBoundaryCheckFailed: true });
+    });
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      await args.providerBoundaryCheck({ database: args.database });
+      throw new Error('the provider request must never be reached');
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      withProviderHandoff: async (dispatch) => {
+        await dispatch(database, providerBoundaryCheck);
+        return { ok: true };
+      },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sent: false, aborted: true, boundaryCheckFailed: true,
+      reason: 'provider_boundary_check_failed', providerAttempted: false,
+    }));
+    expect(result.boundaryBlocked).toBeUndefined();
+    expect(boundaryUpdate.where).toHaveBeenCalledWith(expect.objectContaining({
+      id: queued.id, status: 'queued', provider_handoff_phase: 'started',
+    }));
+    expect(boundaryUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error_message: 'provider_boundary_check_failed', provider_handoff_phase: 'rejected',
+    }));
+  });
+
+  test('propagates a failed boundary-refusal settlement through normal provider recovery', async () => {
+    const queued = { id: 'msg-boundary-settlement-failed', status: 'queued', subject_snapshot: 'S' };
+    const current = { ...queued, provider_handoff_phase: 'started' };
+    const boundaryUpdate = chain();
+    const settlementError = new Error('boundary settlement unavailable');
+    boundaryUpdate.returning.mockRejectedValueOnce(settlementError);
+    const recovered = chain({ returning: [{ ...queued, status: 'failed' }] });
+    const database = jest.fn();
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ first: null }), chain({ returning: [queued] }), boundaryUpdate,
+        chain({ first: current }), recovered],
+      email_message_events: [chain()],
+    });
+    const providerBoundaryCheck = jest.fn(async () => ({
+      ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: true,
+    }));
+    sendgrid.sendOne.mockImplementationOnce(async (args) => {
+      current.send_attempt_token = args.customArgs.send_attempt_token;
+      current.provider_handoff_attempt_token = args.customArgs.send_attempt_token;
+      const verdict = await args.providerBoundaryCheck({ database: args.database });
+      throw Object.assign(new Error(verdict.reason), {
+        code: verdict.code, retryable: verdict.retryable, providerBoundaryBlocked: true,
+      });
+    });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      idempotencyKey: 'boundary-settlement-retry',
+      withProviderHandoff: async (dispatch) => {
+        await dispatch(database, providerBoundaryCheck);
+        return { ok: false };
+      },
+    })).rejects.toBe(settlementError);
+
+    expect(recovered.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['pending', 'started']);
+    expect(recovered.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error_message: settlementError.message, provider_handoff_phase: 'pending',
+    }));
+
+    const failed = {
+      ...current,
+      status: 'failed',
+      error_message: settlementError.message,
+      provider_handoff_phase: 'pending',
+      idempotency_key: 'boundary-settlement-retry',
+    };
+    const requeued = { ...failed, status: 'queued', provider_handoff_phase: 'pending' };
+    const sent = { ...requeued, status: 'sent', provider_message_id: 'sg-boundary-retry' };
+    const retryClaim = chain({ returning: [requeued] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ first: failed }), retryClaim, chain({ returning: [sent] })],
+    });
+    sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-boundary-retry' });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      idempotencyKey: 'boundary-settlement-retry',
+    })).resolves.toMatchObject({ sent: true, providerAccepted: true });
+    expect(retryClaim.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued', provider_handoff_phase: 'pending', error_message: null,
     }));
   });
 
@@ -1062,6 +1350,19 @@ describe('email template library rendering', () => {
       idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
     });
     expect(snapshot).toEqual({});
+  });
+
+  test('keeps a fail-closed marker when a declared producer context is invalid', () => {
+    const facts = {
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1', triggerEventId: 'event-1',
+      idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
+    };
+    const snapshot = EmailTemplates.payloadSnapshotForSend(
+      { first_name: 'Taylor' }, null, facts, { replayDeclared: true },
+    );
+    expect(snapshot).toEqual({ first_name: 'Taylor', __billing_replay_context: null });
+    expect(EmailTemplates.payloadSnapshotForSend({ first_name: 'Taylor' }, null, facts))
+      .toEqual({ first_name: 'Taylor' });
   });
 
   test('a reclaimed send persists fresh rendered content and replay context from the same attempt', async () => {
@@ -2322,5 +2623,233 @@ describe('email template library rendering', () => {
       expect(result).toEqual(expect.objectContaining({ sent: true }));
       expect(result.withheldLinksRewritten).toBeUndefined();
     });
+  });
+});
+
+describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch checks for shadow mode)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockMarkerDb.mockImplementation(() => {
+      const marker = chain();
+      marker.update = jest.fn(async () => 1);
+      return marker;
+    });
+  });
+
+  test('passes (ok:true) for a healthy, active, fully-supplied, unsuppressed send — never touches email_messages or the provider', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.rendered.subject).toBe('Your estimate expires June 12');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('blocks (ok:false) a disabled/paused template with the same reason sendTemplate would throw', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ status: 'paused', active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      reason: 'email template estimate.expiring_notice is paused',
+      code: 'EMAIL_TEMPLATE_DISABLED',
+    }));
+  });
+
+  test('blocks (ok:false) on a missing required variable', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' }, // missing estimate_url, expires_at
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Missing required variables/);
+  });
+
+  test('blocks (ok:false) a suppressed recipient — the exact reason sendTemplate would block on', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [{ suppression_type: 'unsubscribe', group_key: null }] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'suppressed@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'Suppressed: unsubscribe' }));
+  });
+
+  // codex P2 round 5 on #5154: the annual-offer guard is the SAME function
+  // sendOne runs at the live provider boundary, not a narrower mirror.
+  test('runs the shared annual-offer guard with the send\'s estimate id and template key; a withheld offer blocks', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.applyAnnualOfferGuard.mockRejectedValueOnce(annualOfferWithheldError('est-1'));
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      estimateId: 'est-1',
+    });
+
+    expect(sendgrid.applyAnnualOfferGuard).toHaveBeenCalledWith(expect.objectContaining({
+      estimateIds: ['est-1'],
+      templateKey: 'estimate.expiring_notice',
+      html: expect.stringContaining('https://example.com/estimate/est-1'),
+    }));
+    expect(result).toEqual({ ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a guard LOOKUP failure is not a verdict — it is rethrown for the caller, never read as ok or blocked', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.applyAnnualOfferGuard.mockRejectedValueOnce(annualOfferGuardFailedError());
+
+    await expect(EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      estimateId: 'est-1',
+    })).rejects.toMatchObject({ annualOfferGuardFailed: true });
+  });
+
+  // codex P2 round 6 on #5154: preflight runs the SAME guard chain as
+  // sendTemplate (resolveTemplateForSend + prepareTemplateSend), so a
+  // marketing send with no unsubscribe URL and no ASM group is refused by
+  // both, with the same reason — never a parallel check that can drift.
+  test('a marketing template with no unsubscribe URL and no ASM group is refused by live sendTemplate AND blocked by preflight, identically', async () => {
+    const marketingVersion = () => version({
+      id: 'ver-marketing',
+      subject: 'Monthly update',
+      blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, here is the monthly update.' }],
+    });
+    sendgrid.newsletterGroupId.mockReturnValue(null);
+    try {
+      setDbQueues({
+        email_templates: [
+          chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) }),
+          chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) }),
+        ],
+        email_template_versions: [chain({ first: marketingVersion() }), chain({ first: marketingVersion() })],
+      });
+
+      await expect(EmailTemplates.sendTemplate({
+        templateKey: 'newsletter.monthly', to: 'sam@example.com', payload: { first_name: 'Sam' },
+      })).rejects.toThrow('marketing template sends require an unsubscribe URL or SendGrid ASM group');
+
+      const result = await EmailTemplates.preflightTemplateSend({
+        templateKey: 'newsletter.monthly', to: 'sam@example.com', payload: { first_name: 'Sam' },
+      });
+      expect(result).toEqual({
+        ok: false,
+        reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
+        code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
+      });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(sendgrid.applyAnnualOfferGuard).not.toHaveBeenCalled();
+    } finally {
+      sendgrid.newsletterGroupId.mockReturnValue(101);
+    }
+  });
+
+  test('an infrastructure error in the shared chain (a template read failing) is rethrown, not read as a block', async () => {
+    const failing = chain();
+    failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+    setDbQueues({ email_templates: [failing] });
+
+    await expect(EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com', payload: {},
+    })).rejects.toThrow('connection terminated');
+  });
+
+  // codex P1 round 7 on #5154: the email-division ledger fence lives in the
+  // shared chain (prepareTemplateSend), classified by the library's own
+  // isMarketingSend — so live sendTemplate refuses BEFORE any email_messages
+  // row, preflight blocks identically, and a service template is untouched.
+  test('marketingRequiresLedger: a marketing-stream template is refused by sendTemplate before any email_messages row, and blocked by preflight', async () => {
+    const nurtureTemplate = () => serviceTemplate({
+      template_key: 'nurture.expired_1', send_stream: 'marketing_nurture', suppression_group_key: 'marketing_nurture',
+      layout_wrapper_id: 'service_pinned_v1', active_version_id: 'ver-1',
+    });
+    setDbQueues({
+      email_templates: [chain({ first: nurtureTemplate() }), chain({ first: nurtureTemplate() })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) }), chain({ first: version({ id: 'ver-1' }) })],
+      // No email_messages / email_suppressions queue: touching either throws.
+    });
+    const args = {
+      templateKey: 'nurture.expired_1',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      marketingRequiresLedger: true,
+    };
+
+    await expect(EmailTemplates.sendTemplate(args)).rejects.toMatchObject({ code: EmailTemplates.LEDGER_REQUIRED_CODE });
+    const result = await EmailTemplates.preflightTemplateSend(args);
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, code: 'EMAIL_DIVISION_LEDGER_REQUIRED' }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('marketingRequiresLedger leaves a service_operational template alone (preflight passes)', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      marketingRequiresLedger: true,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test('blocks (ok:false) a missing template', async () => {
+    setDbQueues({ email_templates: [chain({ first: null })] });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'no.such.template',
+      to: 'sam@example.com',
+      payload: {},
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
   });
 });

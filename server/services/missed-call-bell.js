@@ -60,14 +60,25 @@ function unknownCallerAllowed(row, opts) {
   return true;
 }
 
-/** Pure eligibility — exported for tests. */
-function missedCallEligible(row, now = Date.now(), opts = {}) {
+/**
+ * Pure: is this an inbound call nobody answered that no other lane owns?
+ * The call's own shape only — never the bell's delivery state, so
+ * missed-call-text-back.js (its own lease/settle keys) can share the rule
+ * without the bell's settled alert hiding the call from it.
+ */
+function missedCallShapeEligible(row, opts = {}) {
   if (!row || row.direction !== 'inbound') return false;
   if (!row.customer_id && !unknownCallerAllowed(row, opts)) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
   if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
   if (row.call_outcome === 'ai_handled' || row.call_outcome === 'ai_transferred') return false; // Sandy handled it / handed it to a person
   if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
+  return true;
+}
+
+/** Pure eligibility — exported for tests. */
+function missedCallEligible(row, now = Date.now(), opts = {}) {
+  if (!missedCallShapeEligible(row, opts)) return false;
   const meta = parseMeta(row.metadata);
   if (meta.missed_call_settled_at) return false;                      // delivered / superseded
   if (meta.missed_call_notified_at && !leaseStale(meta.missed_call_notified_at, now)) return false; // live lease
@@ -242,4 +253,17 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
-module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls, outcomeUnanswered, UNKNOWN_CALLER_MIN_SECONDS };
+module.exports = {
+  missedCallEligible,
+  missedCallShapeEligible,
+  ringMissedCallIfUnanswered,
+  sweepMissedCalls,
+  outcomeUnanswered,
+  UNKNOWN_CALLER_MIN_SECONDS,
+  // Exported so missed-call-text-back.js shares the exact same "what counts
+  // as a missed call" shape in its SQL pre-filter instead of re-deriving it.
+  UNANSWERED,
+  UNANSWERED_STATUSES,
+  TERMINAL_STATUSES,
+  VOICEMAIL_GRACE_MS,
+};

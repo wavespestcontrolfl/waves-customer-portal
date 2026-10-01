@@ -3,21 +3,26 @@
 // is mocked; the classifier is covered in call-commitments-queue.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // A system retire closes the row done (read is not done).
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution, at }) => ({ done_at: at, done_by: by, resolution, read_at: at })) },
+}));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
-  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
+  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), listSlotKeptCallIds: jest.fn(async () => []), listLapsedEvidenceClosedCallIds: jest.fn(async () => []), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
 });
 
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, listSlotKeptCallIds, listLapsedEvidenceClosedCallIds, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('../services/call-commitments');
 const { runCallCommitmentsWatchdog, AGGREGATE_THRESHOLD } = require('../services/call-commitments-watchdog');
 
 const NOW = new Date('2026-09-05T15:00:00Z');
+const notificationUpdates = [];
 const daysAgo = (n) => new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000).toISOString();
 const row = (id, extra = {}) => ({
   id, call_log_id: `call-${id}`, status: 'open', party: 'waves', kind: 'callback', description: `Call back ${id}`,
@@ -26,6 +31,7 @@ const row = (id, extra = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  notificationUpdates.length = 0;
   const db = require('../models/db');
   db.raw = (sql) => sql;
   db.transaction = async (run) => run(db);
@@ -35,7 +41,7 @@ beforeEach(() => {
     for (const name of ['where', 'whereNull', 'whereRaw', 'whereNot', 'whereNotExists', 'orderBy', 'forUpdate', 'join']) q[name] = () => q;
     q.whereIn = (_column, values) => { ids = values; return q; };
     q.modify = (fn) => { fn(q); return q; };
-    q.update = async () => 1;
+    q.update = async (patch) => { if (String(table).startsWith('notifications')) notificationUpdates.push(patch); return 1; };
     q.first = async () => null;
     q.select = async () => table === 'call_commitments as cc'
       ? [...new Map((await Promise.all(listOpenCommitments.mock.results.map((r) => r.value))).flat().map((r) => [r.id, r])).values()].filter((r) => ids.includes(r.id)) : [];
@@ -120,6 +126,31 @@ test('fulfillment is refreshed for every candidate call before paging; a promise
   expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
 });
 
+test('a call holding a promise the evidence close shut on a since-cancelled visit is refreshed too, so the promise can reopen and ring', async () => {
+  listOpenCommitments
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([row('e', { call_log_id: 'call-evidence' })]);
+  listLapsedEvidenceClosedCallIds.mockResolvedValueOnce(['call-evidence']);
+  refreshFulfillment.mockResolvedValueOnce({ fulfilled: 0, reopened: 1 });
+  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(listLapsedEvidenceClosedCallIds).toHaveBeenCalledWith(expect.anything());
+  expect(refreshFulfillment).toHaveBeenCalledWith(expect.anything(), 'call-evidence');
+  expect(out).toMatchObject({ overdue: 1 });
+});
+
+test('a call holding a promise kept by a booking for its promised slot is refreshed too, and a promise that lapsed is re-listed and can ring (codex #5081 r5)', async () => {
+  listOpenCommitments
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([row('k', { call_log_id: 'call-kept' })]);
+  listSlotKeptCallIds.mockResolvedValueOnce(['call-kept']);
+  refreshFulfillment.mockResolvedValueOnce({ fulfilled: 0, reopened: 1 });
+  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(listSlotKeptCallIds).toHaveBeenCalledWith(expect.anything());
+  expect(refreshFulfillment).toHaveBeenCalledWith(expect.anything(), 'call-kept');
+  expect(listOpenCommitments).toHaveBeenCalledTimes(2);
+  expect(out).toMatchObject({ overdue: 1 });
+});
+
 test('a call whose fulfillment refresh FAILED is left out of the bell — its promise may already be kept — and reported as unverified', async () => {
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   refreshFulfillment.mockRejectedValueOnce(new Error('connection reset'));
@@ -174,6 +205,17 @@ test('nothing overdue → quiet', async () => {
   listOpenCommitments.mockResolvedValue([row('c', { due_at: new Date(NOW.getTime() + 3600000).toISOString() })]);
   expect(await runCallCommitmentsWatchdog({ now: NOW })).toEqual({ skipped: false, scanned: 1, overdue: 0, alerted: 0, unverified: 0 });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+});
+
+test('a system retire closes the reminder done, never with read_at alone (read is not done)', async () => {
+  listOpenCommitments.mockResolvedValue([row('c', { due_at: new Date(NOW.getTime() + 3600000).toISOString() })]);
+  await runCallCommitmentsWatchdog({ now: NOW });
+  // The no-longer-overdue sweep and the emptied-aggregate retire both ran.
+  expect(notificationUpdates.length).toBeGreaterThanOrEqual(2);
+  for (const patch of notificationUpdates) {
+    expect(patch).toMatchObject({ done_by: 'call-commitments-watchdog', done_at: NOW });
+    expect(typeof patch.resolution).toBe('string');
+  }
 });
 
 test('while the follow-up pager is live, a callback still on its 24-hour list is left to it — no overdue bell', async () => {

@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -45,6 +45,7 @@ const { verifyAssessmentPin } = require('../services/service-report/assessment-p
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -76,6 +77,121 @@ async function fetchSeasonalForecastSafe(zip) {
   } catch {
     return null;
   }
+}
+
+// Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS,
+// dark). Best-effort, fail-soft — a weather hiccup must never block the
+// report. weekWeather is the trailing 7-day rainfall at the property.
+//
+// codex P1 2026-09-29 round 3 (pre-push audit): this used to fetch its own
+// week-weather here, independently of report-data.js's own lawn-style
+// freeze machinery — a SEPARATE preflight fetch from what the browser's
+// own, independent live /data request would resolve. That is exactly the
+// gap the lawn water balance's freeze avoids: the pre-render pass (this
+// route, and pdf-queue.js) and the browser's live fetch are two SEPARATE
+// process invocations, and a preflight racing its own deadline can settle
+// to a different answer than the browser's own fetch does moments later —
+// a successful preflight followed by a browser-side timeout would cache a
+// PDF that disagrees with what the browser actually rendered.
+//
+// Fixed by moving the fetch (and the freeze) into
+// report-data.js's resolvePestWeekWeather /
+// resolvePestWeekWeatherForBuild, called from INSIDE buildReportV1Data —
+// the ONE canonical resolution every caller of buildReportV1Data shares
+// (this route, pdf-queue.js, and the browser's own live /data fetch all
+// call buildReportV1Data). The first successful render freezes the
+// settled week onto service_records.structured_notes.pestWeekWeather
+// (first-writer-wins); every later reader — preflight or live view —
+// replays the SAME persisted value, so there is no separate fetch left to
+// disagree with the render. weekWeather below is read from
+// expectationFactsOut.weekWeather, the server-internal channel
+// buildReportV1Data already populated in the `data = await
+// buildReportV1Data(...)` call above; pestWeekWeatherUncacheable is
+// already on `data` itself (report-data.js attaches it directly, same
+// convention as lawnAssessment.weekWeatherUncacheable) — nothing to
+// recompute here.
+
+// LIVE VIEW ONLY — never called for a PDF/static render (see the call site).
+// True when the NWS forecast (weather-forecast.js — the same source the tech
+// rain-out badges use) shows a STORM/HEAVY-RAIN forecast in roughly the next
+// few forecast periods. Fail-open (false) on any miss; bounded to a short
+// deadline so a slow NWS response never holds up the live report.
+//
+// codex P2 2026-09-29 (round 2): `rainChance` is the probability of ANY
+// measurable precipitation (NWS's probabilityOfPrecipitation), not its
+// intensity — a 70% chance of "Light Rain" is not "heavy rain right after a
+// treatment can reduce it" and must not trigger that caveat on probability
+// alone. getDailyRainOutlookBounded exposes no quantitative precipitation
+// amount to fall back on (only `rainChance` / `shortForecast` — see its own
+// return-shape doc comment), so intensity is read ONLY from the forecast
+// TEXT (storm/thunderstorm/heavy rain), never the bare percentage.
+// codex P1 2026-09-29 round 4: a report reopened weeks after the visit is
+// still a LIVE view (mode === 'live' never expires), so without this floor
+// it would run TODAY's NWS forecast and, on a storm forecast, print "heavy
+// rain right after a treatment can wash it out" against a treatment applied
+// long ago — a caveat about the wrong moment in time. "Recent" = the
+// service date falls within the last 2 ET calendar days (today, yesterday,
+// or the day before) — an ET-calendar-day comparison via the shared
+// etDateString/addETDays helpers, never raw epoch-ms/24h arithmetic (which
+// drifts across a DST transition and is blind to calendar days entirely).
+// `service_date` is a plain calendar day (a Postgres DATE column arrives as
+// a UTC-midnight Date, or an equivalent date-only string) — its UTC
+// calendar fields ARE the intended day (same convention monthFromDate
+// above uses), so it is read directly rather than reinterpreted through
+// etDateString, which would roll a UTC-midnight instant back to the PRIOR
+// ET calendar day.
+function isRecentServiceDate(serviceDateRaw, now = new Date()) {
+  if (!serviceDateRaw) return false;
+  const d = serviceDateRaw instanceof Date ? serviceDateRaw : new Date(serviceDateRaw);
+  if (Number.isNaN(d.getTime())) return false;
+  const svcYmd = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  const cutoffYmd = etDateString(addETDays(now, -2));
+  return svcYmd >= cutoffYmd;
+}
+
+async function fetchPestRainForecastHeavySafe(service) {
+  try {
+    const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+    const lat = service.customer_latitude ?? service.latitude ?? service.lat;
+    const lng = service.customer_longitude ?? service.longitude ?? service.lng;
+    const outlook = await getDailyRainOutlookBounded(lat, lng, { deadlineMs: 1200 });
+    if (!outlook) return false;
+    return Object.values(outlook).slice(0, 3).some((day) => (
+      /storm|thunderstorm|heavy rain/i.test(String(day?.shortForecast || ''))
+    ));
+  } catch {
+    return false;
+  }
+}
+
+// A PDF/static render must never bake an UNSETTLED trailing 7-day window
+// into a permanently cached document (owner ruling 2026-09-28): the window
+// ending on the service date is still accumulating (application-conditions.js's
+// own `windowClosed` — the same open/closed distinction its 30-min vs 6h
+// cache TTL already encodes, and the one the lawn report's weekly water
+// balance keys its own freeze/uncacheable state off). The live page may
+// still show an unsettled reading; a non-live render gets NO weekWeather at
+// all in that case, so the rain block (and its ants-after-rain line) is
+// simply absent rather than freezing a number that later changes — nothing
+// rain-derived reaches the cached bytes, so there is nothing stale to carry
+// forward once the window closes.
+function settledWeekWeatherForRender(weekWeather, mode) {
+  // codex P2 2026-09-28 round 5: the LIVE page no longer shows an open
+  // window either. fetchServiceWeekWeather serves an open window from the
+  // FORECAST endpoint, whose current-day value includes hours that have not
+  // happened yet, so "It's rained about X" (and the ants-after-heavy-rain
+  // line it can trigger) would describe predicted rain as observed. Every
+  // render — live, PDF, static — shows the rain block only once the window
+  // has closed and the reading is a measurement; `mode` is kept for the
+  // call sites' readability and for a future live-only source of measured
+  // so-far precipitation.
+  void mode;
+  return weekWeather?.windowClosed === true ? weekWeather : null;
+}
+
+function monthFromDate(dateStr) {
+  const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? null : d.getUTCMonth() + 1;
 }
 
 async function staffCanViewSuppressed(req) {
@@ -146,10 +262,8 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
-const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
+const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
-// The approved idiom that replaces a stripped fixed-timing clause.
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -158,8 +272,11 @@ const {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
+  applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -178,11 +295,12 @@ const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue'
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
-  answerServiceReportQuestion,
+  routeServiceReportQuestion,
 } = require('../services/service-report/report-assistant');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 
 const PDF_NAVY = '#1B2C5B';
@@ -310,6 +428,11 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'referral_cta_clicked',
 ]);
 const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
+// Events only the server writes. The /ask route records report_question_asked
+// with the topic its own routing produced, and get_report_engagement counts
+// those rows as real questions, so the public events POST must not mint them
+// (codex P2 on #5167). recordServiceReportEvent still accepts them.
+const SERVER_ONLY_REPORT_EVENTS = new Set(['report_question_asked']);
 
 async function trackServiceReportView(service) {
   if (!service?.id || service.report_viewed_at) return;
@@ -371,6 +494,33 @@ async function buildServiceReportV1ResponseData(service, token, {
   // under the general report limiter, repeatedly. Defaulting to off means a
   // future caller cannot inherit that cost by accident either.
   composeOffers = false,
+  // OPT-IN on the same terms: only the /data render shows the "Your plan"
+  // card, so only it pays for the membership + year-history reads
+  // (GATE_REPORT_PLAN_SUMMARY). The Q&A endpoint never reads the field.
+  planSummary = false,
+  // OPT-IN on the same terms (codex round-5 P2): only the /data render
+  // shows "Your upcoming visits", so only it pays for the paged
+  // scheduled_services scan (property/estimate/single-premises reads
+  // included) GATE_REPORT_UPCOMING_VISITS guards. report-assistant.js
+  // (the Q&A endpoint) never reads the field.
+  upcomingVisitsCard = false,
+  // OPT-IN likewise for the lawn "Near you" line (GATE_REPORT_NEAR_YOU):
+  // only the /data render shows it, so only it pays for the city-wide
+  // lawn-findings read.
+  nearYou = false,
+  // OPT-IN on the same terms (codex P2 #5137 deferred finding a): only a
+  // caller that actually RENDERS the pest expectations block — the /data
+  // live render and the direct PDF route — pays for either of the two
+  // external weather lookups that feed it: the pest week-weather resolution
+  // (threaded to buildReportV1Data's own `pestWeekWeather` opt-in below) AND
+  // the live heavy-rain NWS forecast fetched further down in this function.
+  // The Q&A endpoint (/ask) calls this builder purely for report CONTEXT —
+  // answerServiceReportQuestion never reads data.pestReportV2.expectations —
+  // so every customer question was paying up to ~1.2s for the week-weather
+  // lookup plus another ~1.2s for the forecast, for a field it never uses.
+  // Defaulting to off means a future caller cannot inherit that cost by
+  // accident either.
+  pestExpectationsWeather = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -380,9 +530,20 @@ async function buildServiceReportV1ResponseData(service, token, {
   // mode rides into the builder so mode-sensitive copy (the pest Visit
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
+  // expectationFactsOut is the ONE channel for moa_group/rainfast_minutes
+  // (codex P0 2026-09-28): report-data.js populates it as a side effect but
+  // never attaches those facts to `data` itself, so they can only reach the
+  // pest V2 expectations builder below, never the public JSON/PDF payload.
+  const expectationFactsOut = {};
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
+    nearYou,
+    // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
+    // #5137 deferred finding a): only a caller that opts into
+    // pestExpectationsWeather above — the /data live render and the direct
+    // PDF route — pays for the lookup. /ask never sets it, so it never pays.
+    pestWeekWeather: pestExpectationsWeather,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -419,6 +580,14 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
       if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
     });
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF/static/sms_preview cache keys don't vary on this
+    // gate, so a rolling deploy could otherwise cache copy under the
+    // worker's OWN gate state rather than what the browser actually
+    // rendered. Stripped here at the SAME payload boundary every other
+    // live-only field uses (stripLiveOnlyReportProductCopy — report-data.js,
+    // same shape as stripLiveOnlyScheduleFields).
+    stripLiveOnlyReportProductCopy(data);
     if (data.reportV2?.aftercare?.reentry) {
       data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
     }
@@ -480,7 +649,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary (narrative slot), the What-we-found tiles, and the activity
   // gauge, all of which the dashboard would otherwise suppress. The same
   // classifier drives the PDF cache suffix (pest-report-v2.js).
-  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
+  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType, pestReportExpectationsGateOn } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
@@ -489,6 +658,39 @@ async function buildServiceReportV1ResponseData(service, token, {
   ) {
     try {
       const forecast = await fetchSeasonalForecastSafe(service.zip);
+      // Rain/spiders/what-to-expect facts — computed only when the
+      // expectations gate is on, so a dark gate costs nothing extra.
+      // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
+      // mutable-content rule): a non-live render always passes false. Also
+      // bounded to a RECENT service (codex P1 2026-09-29 round 4): a report
+      // reopened weeks later is still a live view, and today's forecast has
+      // nothing to do with a treatment from long ago — see
+      // isRecentServiceDate's own comment.
+      const expectationsGateOn = pestReportExpectationsGateOn();
+      // pestExpectationsWeather gates this fetch too (codex P2 #5137
+      // deferred finding a) — the same opt-in that gates the week-weather
+      // resolution above, so /ask never pays for this ~1.2s NWS lookup
+      // either, on top of the mode/recency guards that were already here.
+      const forecastHeavyRain = pestExpectationsWeather && expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
+        ? await fetchPestRainForecastHeavySafe(service)
+        : false;
+      // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
+      // it comes from expectationFactsOut.weekWeather, the SAME
+      // pinned/frozen value report-data.js's buildReportV1Data already
+      // resolved for THIS invocation (via resolvePestWeekWeather /
+      // resolvePestWeekWeatherForBuild, called above in the
+      // `data = await buildReportV1Data(...)` at the top of this function).
+      // See this block's header comment for why a separate preflight fetch
+      // here was the bug.
+      // PDF/static: an unsettled (still-accumulating) week never reaches the
+      // rain block — see settledWeekWeatherForRender. Live keeps whatever
+      // was resolved, settled or not.
+      const weekWeather = settledWeekWeatherForRender(expectationFactsOut.weekWeather ?? null, mode);
+      // pestWeekWeatherUncacheable is already on `data` — report-data.js
+      // attaches it directly (same convention as
+      // lawnAssessment.weekWeatherUncacheable), from the SAME
+      // resolvePestWeekWeather* call that produced weekWeather above, so it
+      // can never disagree with what this render actually used.
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -517,6 +719,39 @@ async function buildServiceReportV1ResponseData(service, token, {
         // isCallback rides the payload ungated (report-data), so the gate
         // term here is what makes the suppression killable.
         suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
+        // Merges the ALREADY-PUBLIC per-application fields (name, targets,
+        // applicationArea, method, methodInferred — all already on
+        // data.applications) with the moa_group/rainfast_minutes facts ONLY
+        // expectationFactsOut carries (codex P0 2026-09-28: those two facts
+        // must never reach the public /api/reports/:token/data response,
+        // gate on or off, every service line — see expectationFactsOut
+        // above). Aligned by index: both arrays map 1:1 over the same
+        // `products` report-data.js fetched.
+        applications: (data.applications || []).map((app, index) => ({
+          id: app.id,
+          product: {
+            name: app.product?.name || null,
+            moa_group: expectationFactsOut.applications?.[index]?.product?.moa_group ?? null,
+            rainfast_minutes: expectationFactsOut.applications?.[index]?.product?.rainfast_minutes ?? null,
+          },
+          targets: app.targets,
+          applicationArea: app.applicationArea || null,
+          method: app.method || null,
+          methodInferred: app.methodInferred === true,
+        })),
+        // Server-internal only (codex P0 2026-09-28) — computed directly
+        // from `service`, never read off `data`/the returned report
+        // payload: a raw completed-action label must never reach the
+        // public /api/reports/:token/data response, gate on or off.
+        actionLabels: completedProtocolActionLabels(service),
+        // Server-internal only, same contract (codex P1 2026-09-28) — the
+        // same completed actions WITH treatmentApplied preserved, so the
+        // spider section's residual-evidence check can tell a genuine eave
+        // TREATMENT from a sweep.
+        actionEntries: completedProtocolActionEntries(service),
+        weekWeather,
+        forecastHeavyRain,
+        serviceMonth: monthFromDate(service.service_date),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
@@ -677,6 +912,11 @@ async function findProjectByReportSegment(segment) {
       // Feed the canonical review resolver for the payload's reviewLocation.
       'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
       'c.nearest_location_id',
+      // technicianName stays sourced from the project's CREATOR (unchanged
+      // response field) — the resolved applicator identity for
+      // applicatorFdacsId/applicatorName is looked up separately by
+      // resolveProjectApplicatorTechnician (report-data.js), which does not
+      // assume the creator performed the visit.
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -866,6 +1106,23 @@ router.get('/project/:token/data', async (req, res, next) => {
         && !filingBinaryMayDiscloseFee(lastFiling);
     }
 
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // judged against viewerProjectDate (the WDO last-filing date when one
+    // exists), same rules as the service report's applicatorFdacsId.
+    // Resolved from the technician who actually PERFORMED the linked
+    // service (service_records → scheduled_services → the project's
+    // created_by_tech_id only when genuinely unlinked) — never simply the
+    // staffer who typed up the project record, which the plain `t.name as
+    // technician_name` join above still reflects (codex P1: an admin
+    // creating a project for a tech-performed visit was publishing the
+    // ADMIN's own id/name). `technicianName` below is left as-is; the new
+    // `applicatorName` carries the corrected identity. Poison Control line
+    // eligibility (owner ruling 2026-09-26) rides the same shared resolver,
+    // computed from the project's RAW findings/followup_findings, before
+    // the internal-key/fee strip below (structured treatment fields, never
+    // free text, so nothing here needs scrubbing).
+    const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
+
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
     // raw payload, so the strip is enforced at the egress point too (audit
@@ -919,6 +1176,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
       ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
+      applicatorFdacsId,
+      applicatorName,
+      poisonControl,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
@@ -1101,7 +1361,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
 
     const eventName = normalizedEventName(req);
     const channel = String(req.body?.channel || 'public_report').trim();
-    if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
+    if (!ALLOWED_REPORT_EVENTS.has(eventName) || SERVER_ONLY_REPORT_EVENTS.has(eventName)) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     // Cross-sell events exist only while the feature does (codex #3367 r4:
@@ -1736,7 +1996,11 @@ router.post('/:token/ask', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first();
 
     if (!service || service.report_template_version !== 'service_report_v1') {
@@ -1760,14 +2024,23 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const answer = answerServiceReportQuestion({
+    const { answer, topic } = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
-    await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
-      question_length: question.length,
-    });
+    // The question's text is never stored — only its length and the topic
+    // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
+    // the engagement stats can say what customers ask about per report type.
+    // A staff QA question (the report page sends the portal JWT, as on the
+    // /data read) is answered but never recorded as customer engagement
+    // (codex P2 on #5167).
+    if (!(await staffCanViewSuppressed(req))) {
+      await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
+        question_length: question.length,
+        topic,
+      });
+    }
     return res.json({ answer });
   } catch (err) { next(err); }
 });
@@ -1874,7 +2147,11 @@ router.get('/:token', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       // Frozen identity (report-identity-snapshot.js) overlays the live join
       // HERE, before the filename, the canonical lawn pin, and the cache
@@ -1920,17 +2197,29 @@ router.get('/:token', async (req, res, next) => {
       // must re-render the cached document.
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
+      // Hoisted here (rather than redeclared further down, where it used to
+      // live right before resolveCanonicalLawnRender) so the photo-set
+      // signature's lawn-photo resolution and the canonical lawn render
+      // below read the exact SAME propertyHistoryEnabled value, instead of
+      // each independently re-deriving its own default from the gate
+      // (Sonnet fallback-audit P1, 2026-09-28). A bare env-flag read, so
+      // hoisting it earlier changes nothing about when the gate is checked.
+      const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
       // Photo-set key component + render fence: closeout photo recovery can
       // attach rows while this untracked render runs (Codex #4091 P1). The
       // parked-summary marker is derived from THIS loaded snapshot; the
       // post-render re-read below sees live state (photo-set-signature.js).
-      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
+      // lawnFields: `service` is already service_records.* (loaded above) —
+      // reuse it so the lawn-photo identity lookup skips a second
+      // service_records read (Sonnet fallback-audit P1, 2026-09-28).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
       const smSignature = await stationMapPdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
+      const apSignature = await applicatorIdentityPdfSignature(service.id, db);
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
@@ -1942,7 +2231,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1960,6 +2249,8 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      // The applicator pair the render printed (store key), same contract.
+      let apRenderedSignature = apSignature;
       let cockroachRenderedSignature = cockroachV2Signature;
       let reserviceRenderedSignature = reserviceV2Signature;
       // The canonical snapshot the render is pinned to. Declared out here so
@@ -1976,7 +2267,9 @@ router.get('/:token', async (req, res, next) => {
         // ONE canonical lookup feeds BOTH the pin and the storage-key component
         // (#3172 r1) — two lookups can straddle a selection change and cache a
         // B-pinned PDF under A's key, which is the race this closes.
-        const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+        // propertyHistoryEnabled is hoisted above (before photoSetSignature),
+        // not re-read here, so every lawn-identity resolution in this handler
+        // shares the exact same value.
         const canonical = await resolveCanonicalLawnRender(service, db, { propertyHistoryEnabled });
         const canonicalPin = canonical.pin;
         laRenderSignature = canonical.signature;
@@ -1985,8 +2278,13 @@ router.get('/:token', async (req, res, next) => {
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
+            // This direct PDF route renders the pest expectations block, so
+            // it pays for the weather lookups (codex P2 #5137 deferred
+            // finding a) — see pestExpectationsWeather's own doc above.
+            pestExpectationsWeather: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          apRenderedSignature = applicatorRenderedPdfSignature(data);
           cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
           reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
           renderedData = data;
@@ -2062,13 +2360,20 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
         } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (renderedData?.pestWeekWeatherUncacheable) {
+          // Same rule as the lawn branch above, mirrored for the pest-line
+          // rain block (codex P0 2026-09-28): a still-OPEN 7-day window
+          // must never be baked into the stable '-pex2' PDF key, or later
+          // downloads keep serving the "no rain block" bytes forever even
+          // after the window settles.
+          logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
           logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
-        } else if (await reportPhotoSetPdfSignature(service.id, db) !== photoSetSignature) {
+        } else if (await reportPhotoSetPdfSignature(service.id, db, { propertyHistoryEnabled }) !== photoSetSignature) {
           // Recovered closeout photos landed mid-render: this output describes
           // the OLD photo set and must not become the cached document.
           logger.warn(`[reports-public] photo set changed during PDF render for ${service.id} — not caching this render`);
@@ -2076,7 +2381,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -2094,7 +2399,7 @@ router.get('/:token', async (req, res, next) => {
     // served anymore: they were written with raw technician_notes (gate
     // codes, billing notes) before the 2026-07-16 owner ruling and a stored
     // file can't be sanitized in place — regenerate on the fly instead, which
-    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
+    // routes notes through customerSafeVisitNotes (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -2144,7 +2449,11 @@ router.get('/:token/map.svg', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
@@ -2216,7 +2525,11 @@ router.get('/:token/data', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
@@ -2283,7 +2596,12 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
+        // This route renders the pest expectations block on every mode it
+        // serves (live/pdf/static/sms_preview), so it pays for the weather
+        // lookups (codex P2 #5137 deferred finding a) — see
+        // pestExpectationsWeather's own doc above.
+        pestExpectationsWeather: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2328,8 +2646,9 @@ router.get('/:token/data', async (req, res, next) => {
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
       // technician_notes is internal (owner ruling 2026-07-16): only the
-      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
-      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
+      // reviewed parse may reach the customer, through the one rule every
+      // customer render uses (context-aggregator customerSafeVisitNotes).
+      notes: customerSafeVisitNotes(service) || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -2412,8 +2731,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   }
 
   // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
-  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
-  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  // print only the reviewed parse, through the one rule every customer
+  // render uses (context-aggregator customerSafeVisitNotes), or nothing.
+  const reviewedNotes = customerSafeVisitNotes(service);
   if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
@@ -2475,6 +2795,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
   doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
+  // Owner ask 2026-09-28: every report, legacy ones included, links to the
+  // public Products & Safety page. The URL prints in full for paper copies.
+  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();
@@ -2485,12 +2808,16 @@ async function ensureReportToken(serviceRecordId) {
   const service = await db('service_records').where({ id: serviceRecordId }).first();
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write (same rule as pdf-queue.js ensureReportToken): a
+  // concurrent mint never overwrites a token another writer already queued.
   const token = crypto.randomBytes(16).toString('hex');
-  await db('service_records').where({ id: serviceRecordId }).update({
+  const updated = await db('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: db.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await db('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 module.exports = router;
@@ -2499,3 +2826,7 @@ module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
+module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
+module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
+module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
+module.exports.isRecentServiceDate = isRecentServiceDate;

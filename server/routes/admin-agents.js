@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { scopeToProspects } = require('../services/lead-statuses');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
 const modelSwitchboard = require('../services/model-switchboard');
@@ -69,7 +70,7 @@ const AGENTS = [
 
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
-const CLOSED_LEAD_STATUSES = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
+const CLOSED_LEAD_STATUSES = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate', 'handled'];
 const TASK_LIFECYCLE_STATUSES = new Set(['done', 'dismissed']);
 const { DRAFT_REPLY_PREFIX } = require('../services/review-reply/draft-prefix');
 
@@ -165,7 +166,7 @@ function followUpDateFromPreset(preset, explicitDate) {
 
 function leadDraftMessage(lead, taskType) {
   const name = firstName(lead);
-  const greeting = `Hi${name ? ` ${name}` : ''}, this is Waves Pest Control.`;
+  const greeting = `Hi${name ? ` ${name}` : ''}, it's Waves.`;
   const service = compact(lead.service_interest || '', 42);
   const servicePhrase = service ? ` with ${service}` : '';
 
@@ -580,6 +581,7 @@ async function loadLeadConversionDetails() {
   const recentRows = await db('leads')
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', since30)
+    .modify(scopeToProspects)
     .select('status', 'response_time_minutes', 'first_contact_at');
 
   const responded = recentRows.filter((row) => row.response_time_minutes != null);
@@ -1036,9 +1038,14 @@ function uuidOrNull(value) {
 
 // Activity feed (GATE_AGENT_ACTIVITY). ?hours=24|168 window; gate off →
 // { available: false }. Read-only; see server/services/agent-activity.js.
+// ?focus=<notification id> (the bell's deep link, admin-alerts-brevity
+// scope): loads that ONE ops_digest row regardless of its read state or
+// age, so an older read ACT/REVIEW row (already dropped from the pinned
+// set, its full report now living only in `detail`) is still reachable —
+// an invalid/non-UUID value is silently ignored rather than erroring.
 router.get('/activity', async (req, res, next) => {
   try {
-    const feed = await agentActivity.getActivity({ windowHours: req.query.hours });
+    const feed = await agentActivity.getActivity({ windowHours: req.query.hours, focus: uuidOrNull(req.query.focus) });
     res.json(feed);
   } catch (err) {
     next(err);
@@ -1092,7 +1099,11 @@ function opsQueueGateOn() {
 // ops-queue gate. Cheap by design: no ledger read, no DB.
 router.get('/control/hub', (_req, res) => {
   res.json({
-    features: { queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false },
+    features: {
+      queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false,
+      // GATE_TYPED_DECISIONS: the Typed review tab exists only while the lane is live.
+      typed: require('../config/feature-gates').typedDecisionsLive(),
+    },
     areas: modelSwitchboard.AREAS,
   });
 });
@@ -1317,11 +1328,16 @@ router.post('/leads/:id/mark-contacted', async (req, res, next) => {
       return res.status(409).json({ error: 'Closed leads cannot be marked contacted from Agent Ops' });
     }
 
-    const [updated] = await db('leads').where('id', req.params.id).update({
-      status: lead.status === 'new' ? 'contacted' : lead.status,
-      next_follow_up_at: null,
-      updated_at: new Date(),
-    }).returning('*');
+    // Conditional on the lead STILL being open (codex #5477 r9-r12): a booking may
+    // have closed it as 'handled' (or staff closed it) since the read above.
+    const [updated] = await db('leads').where('id', req.params.id)
+      .whereNotIn('status', CLOSED_LEAD_STATUSES)
+      .update({
+        status: lead.status === 'new' ? 'contacted' : lead.status,
+        next_follow_up_at: null,
+        updated_at: new Date(),
+      }).returning('*');
+    if (!updated) return res.status(409).json({ error: 'Closed leads cannot be marked contacted from Agent Ops' });
 
     if (lead.response_time_minutes == null) await leadAttribution.logFirstResponse(req.params.id);
 
@@ -1355,12 +1371,15 @@ router.post('/leads/:id/schedule-follow-up', async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid follow-up date' });
     }
 
-    const [updated] = await db('leads').where('id', req.params.id).update({
-      next_follow_up_at: followUpAt,
-      follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
-      last_follow_up_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
+    const [updated] = await db('leads').where('id', req.params.id)
+      .whereNotIn('status', CLOSED_LEAD_STATUSES) // still open at the write (see mark-contacted)
+      .update({
+        next_follow_up_at: followUpAt,
+        follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
+        last_follow_up_at: new Date(),
+        updated_at: new Date(),
+      }).returning('*');
+    if (!updated) return res.status(409).json({ error: 'Closed leads cannot be scheduled from Agent Ops' });
 
     await db('lead_activities').insert({
       lead_id: req.params.id,
@@ -1448,8 +1467,13 @@ router.post('/leads/:id/draft-response', async (req, res, next) => {
       status: 'pending',
     };
 
-    const { draft, refreshed } = await db.transaction(async (trx) => {
+    const result = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`agent_ops_lead_draft:${lead.id}:${taskType}`]).catch(() => {});
+      // Still open under a share lock (see mark-contacted): a close that committed
+      // since the read above means no draft; one that comes later waits for this.
+      const stillOpen = await trx('leads').where({ id: lead.id })
+        .whereNotIn('status', CLOSED_LEAD_STATUSES).forShare().first('id');
+      if (!stillOpen) return { closed: true };
       const matches = await trx('message_drafts')
         .where({ status: 'pending', intent: 'agent_ops_lead_followup' })
         .whereRaw("flags ->> 'source' = ?", ['agent_ops'])
@@ -1479,6 +1503,8 @@ router.post('/leads/:id/draft-response', async (req, res, next) => {
         .returning('*');
       return { draft: inserted, refreshed: false };
     });
+    if (result.closed) return res.status(409).json({ error: 'Closed leads cannot have Agent Ops drafts created' });
+    const { draft, refreshed } = result;
 
     await db('lead_activities').insert({
       lead_id: lead.id,

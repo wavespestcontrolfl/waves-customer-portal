@@ -2,11 +2,15 @@
 // cross-sell.js — the live service report's "add your next service" offer.
 //
 // Owner-approved 2026-08-11: a completed-visit report may offer the ONE next
-// service family the customer doesn't have (pest ↔ lawn, then tree & shrub,
-// then termite bait), priced by the estimator engine when the property data
-// supports a real number, or as an unpriced "request a quote" CTA when it
-// doesn't. LIVE web views only — the PDF is a permanent service record and
-// carries no pricing by documented rule (ServiceReportDocument header).
+// service family the customer doesn't have (pest ↔ lawn, then tree & shrub),
+// priced by the estimator engine when the property data supports a real
+// number, or as an unpriced "request a quote" CTA when it doesn't. LIVE web
+// views only — the PDF is a permanent service record and carries no pricing
+// by documented rule (ServiceReportDocument header). Owner ruling 2026-09-28
+// ("three pillars is fine for now, yes applies there too"): the ladder push
+// stops at the three pillars everywhere — termite is no longer offered as
+// the fourth rung on the report card, the portal offer card, or the
+// photo-triage lane's ladder pick (see OFFER_LADDER below).
 //
 // This module COMPOSES the two existing authorities instead of re-deciding
 // anything itself:
@@ -27,13 +31,39 @@ const logger = require('../logger');
 // ladder): one offer per report, never stacked. Mosquito is deliberately
 // absent — it affects the price tier but never the target — and palm is
 // assessment-first by catalog design (booking_enabled false), never offered.
-// The full 16-row ownership matrix + identity-start rules live in
+// The full ownership matrix + identity-start rules live in
 // pickOfferTarget/startFamilyForIdentity below; the test file pins every row.
-const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub', 'termite'];
+// Owner ruling 2026-09-28 (applies to EVERY offer surface — the report card,
+// the portal offer card, and the photo-triage lane alike, confirmed
+// explicitly: "three pillars is fine for now, yes applies there too"):
+// offers push the three pillars only — pest, lawn, tree & shrub. Termite
+// left the ladder everywhere (it was the fourth rung, offered once a
+// customer owned all three); `termite`/`termite_bait` ownership still counts
+// as "has a plan, not the anchor" via offerVocabulary below, it is simply
+// never the OFFER on any surface. One shared picker, ladder, and ownership
+// matrix for buildReportCrossSell, buildPortalOffer / buildPortalPurchaseBasis
+// / resolvePortalOfferTarget, and buildOfferForFamily (photo-triage) — they
+// can never disagree about what a customer may be offered.
+const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
+
+// Guarded-ownership families for the report's recent-report ambiguity guard
+// ONLY (see guardedFamilies below) — separate from OFFER_LADDER because
+// termite is no longer an offer rung on ANY surface but a recent,
+// uncorroborated termite report identity is exactly as ambiguous as a
+// recent pest/lawn/tree one (P0, pre-push finding on this change): the
+// unseeded-next-visit gap and a just-cancelled termite plan are
+// indistinguishable, so a recent uncorroborated termite report must still
+// fail the whole report card closed rather than fall through to
+// startFamilyForIdentity and pitch a 'start pest' card to a customer who
+// may still own a termite plan.
+const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
-// words — one vocabulary, no parallel matcher to drift.
+// words — one vocabulary, no parallel matcher to drift. SHARED with the
+// portal/photo-triage offer surfaces below (buildPortalOffer,
+// buildOfferForFamily) — never add a family here that those surfaces should
+// not also start reaching by requestedTargetKey.
 const OFFER_PROMPTS = {
   pest_control: 'pest control',
   lawn_care: 'lawn care',
@@ -68,25 +98,30 @@ function offerVocabulary(ownedKeys = []) {
   return new Set(ownedKeys.map((key) => OWNED_KEY_TO_OFFER_KEY[key] || key));
 }
 
-// Ownership matrix (owner ruling 2026-08-13, every cell approved):
-//   everything (pest+lawn+T&S+termite)     → NO card (referral fills the slot)
+// Ownership matrix (owner ruling 2026-08-13, every cell approved; termite
+// rung removed 2026-09-28 on every surface — see OFFER_LADDER above) — the
+// ONE picker shared by buildReportCrossSell, buildPortalOffer /
+// buildPortalPurchaseBasis / resolvePortalOfferTarget, and buildOfferForFamily
+// (photo-triage): they can never disagree about what a customer may be
+// offered.
+//   all three pillars (pest+lawn+T&S)      → NO card (referral fills the slot)
 //   T&S without lawn (incl. T&S+termite)   → lawn
-//   pest+lawn+T&S                          → termite   (08-11 ruling, kept)
 //   pest+lawn                              → tree & shrub
 //   has pest                               → lawn
 //   has lawn                               → pest
 //   termite-only / rodent- / mosquito-only → pest
 // Rule order IS the precedence: the T&S-without-lawn row deliberately beats
-// both the pest→lawn and termite→pest rows (T&S+termite → lawn, not pest).
+// the pest→lawn row (T&S+termite → lawn, not pest).
 function pickOfferTarget(ownedKeys) {
   const owned = offerVocabulary(ownedKeys);
   const pest = owned.has('pest_control');
   const lawn = owned.has('lawn_care');
   const tree = owned.has('tree_shrub');
-  const termite = owned.has('termite');
-  if (pest && lawn && tree && termite) return null;
+  // Owns all three pillars → nothing to offer (owner 2026-09-28: termite is
+  // no longer a rung on any surface; `termite` ownership still counts as
+  // "has a plan" via the final pest_control default below).
+  if (pest && lawn && tree) return null;
   if (tree && !lawn) return 'lawn_care';
-  if (pest && lawn && tree) return 'termite';
   if (pest && lawn) return 'tree_shrub';
   if (pest) return 'lawn_care';
   if (lawn) return 'pest_control';
@@ -178,108 +213,17 @@ function pickOption(options = [], targetKey) {
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 const { hasPresenceValue } = require('../pricing-engine/property-calculator');
 const { hasGlobalVerifyFlag } = require('../lookup-confidence');
-
-// True only when NOTHING on file contradicts "this customer has a single
-// premises, the primary one" (codex #3367 PR r11 P1). Used by the unlinked-
-// report branch, where the report's address is the customer mirror and so
-// carries no evidence of its own. Deliberately a PROOF of single-premises,
-// not a search for a second one: an unreadable witness throws and the outer
-// catch suppresses the card, which is the same fail-closed posture the
-// linked branches take.
-async function customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet) {
-  // The eligibility flag the discount engine already trusts for multi-home
-  // status — admins hand-set it for customers whose second property never
-  // made it into customer_properties.
-  if (customer?.has_multi_home === true) return false;
-  const linkage = require('../estimate-property-linkage');
-  const provablyPrimary = (key) => {
-    if (!key) return false;
-    if (!linkage.sameScopeKey(key, primaryStreet)) return false;
-    // Same street, but disjoint locality evidence (city-only vs zip-only)
-    // matches across cities under sameScopeKey's per-field wildcard — the
-    // r6/r7 rule. A key with NO locality at all is the legacy partial stamp,
-    // and it is UNPROVEN, not benign (codex #3367 PR r12): a secondary
-    // property with the same street and unit in another city produces
-    // exactly that key, so accepting it would declare the wrong premises
-    // primary and publish an exact price from the wrong profile — the hole
-    // the linked-report and estimate-seed guards already close by rejecting
-    // scopeKeyLacksLocality outright. Same rejection here.
-    if (linkage.scopeKeyLacksLocality(key)) return false;
-    return scopeKeysShareLocality(key, primaryStreet);
-  };
-  // EVERY property row, active or not (pre-push P0): report tokens are
-  // permanent, so the report being priced is frequently older than the
-  // account's current shape. A secondary property that has since been
-  // deactivated is exactly the premises a legacy unlinked record is likely
-  // to belong to, and filtering it out makes the COALESCEd primary address
-  // look proven. This proof asks "has this account EVER had a second
-  // premises", not "does it have one today" — the live-count question that
-  // refreshHasMultiHome answers is a different one.
-  const properties = await database('customer_properties')
-    .where({ customer_id: customerId })
-    .select('address_line1', 'address_line2', 'city', 'zip');
-  if (properties.length >= 2) return false;
-  for (const row of properties) {
-    if (!provablyPrimary(linkage.normalizedStampedStreet(row.address_line1, row.address_line2, row.city, row.zip))) {
-      return false;
-    }
-  }
-  // customer_properties is gated (GATE_CUSTOMER_PROPERTIES) and empty for
-  // accounts that predate it, so the STAMPED visit addresses are the second
-  // witness: dispatch stamps the premises it routed to, and a stamp that
-  // cannot be proven to be the primary is a second premises on this account.
-  const cols = await database('scheduled_services').columnInfo();
-  if (!cols.service_address_line1) return true;
-  const stampCols = ['service_address_line1'];
-  for (const col of ['service_address_line2', 'service_address_city', 'service_address_zip']) {
-    if (cols[col]) stampCols.push(col);
-  }
-  // property_id / source_estimate_id ride along so an UNSTAMPED row can be
-  // resolved rather than waved through (codex #3367 PR r13): dispatch's own
-  // order is stamp → property row → creating estimate → primary, and only
-  // the property_id leg is covered by the customer_properties witness above.
-  // A row that links to a secondary address through its creating ESTIMATE
-  // would otherwise certify a multi-property account as single-premises.
-  if (cols.property_id) stampCols.push('property_id');
-  if (cols.source_estimate_id) stampCols.push('source_estimate_id');
-  const rows = await database('scheduled_services')
-    .where({ customer_id: customerId })
-    .distinct(stampCols);
-  for (const row of rows) {
-    if (String(row.service_address_line1 || '').trim()) {
-      if (!provablyPrimary(linkage.normalizedStampedStreet(
-        row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip
-      ))) return false;
-      continue;
-    }
-    // Unstamped: resolve the same way the linked-report branch does.
-    if (row.property_id) {
-      const prop = await database('customer_properties')
-        .where({ id: row.property_id })
-        .first('address_line1', 'address_line2', 'city', 'zip');
-      // An unresolvable property link names no premises — the row is not
-      // evidence of a second one (the linked-report branch suppresses on
-      // it because THAT report is the one being priced; here the row is
-      // just another visit on the account).
-      if (!prop) continue;
-      if (!provablyPrimary(linkage.normalizedStampedStreet(
-        prop.address_line1, prop.address_line2, prop.city, prop.zip
-      ))) return false;
-      continue;
-    }
-    if (row.source_estimate_id) {
-      const src = await database('estimates')
-        .where({ id: row.source_estimate_id })
-        .first('address');
-      if (!src?.address) continue;
-      if (!provablyPrimary(linkage.normalizedEstimateStreet(src.address))) return false;
-      continue;
-    }
-    // Neither stamped nor linked → the absence of evidence, not evidence of
-    // a second premises.
-  }
-  return true;
-}
+// Moved to visit-property-scope.js (codex round-5 P1) so the upcoming-visits
+// card can share this exact single-premises proof instead of re-deriving
+// its own (a legacy no-evidence row on a multi-property account must not
+// pass sameResolvedProperty against a primary-property report just because
+// the customer mirror happens to be all either side has). Same semantics as
+// before the move: deliberately a PROOF of single-premises, not a search for
+// a second one; an unreadable witness throws and the outer catch here
+// suppresses the card, the same fail-closed posture the linked branches
+// take — the card treats a throw/false differently (excludes the one
+// unscoped row, not the whole card).
+const { customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
 
 // Stable digest of every field the card RENDERS. Key order is fixed by
 // construction, so the same visible offer always hashes identically.
@@ -312,6 +256,31 @@ function optionIsPriceable(option) {
   // exactly that line-declared fee and refuses any OTHER one-time charge
   // (GitHub #3391 P1).
   return Number(option.perVisit) > 0;
+}
+
+// Bait-station setup fee (service-pricing.js priceBaitSetup, owner ruling
+// 2026-08-29): $99 one-time, unwaived unless the customer already has
+// ANOTHER WaveGuard-qualifying recurring service (on the estimate or
+// already active). The estimator prices it as an INTRINSIC, SEPARATE
+// oneTimeItems line keyed rodent_bait_setup — not folded into the
+// rodent_bait line's own price — so quoteAmountFromLine/findLineItem (which
+// match only the target service's own line) never surface it on `option`,
+// and optionIsPriceable's dueAtStart/oneTime check above never sees it
+// either. A card this module marks 'priced' for a not-yet-a-WaveGuard-
+// member customer then carries an undisclosed one-time charge the click
+// mint's belt check (GitHub #3391) rejects with a 409 (codex round-1 P1).
+// Mirrors the estimator's OWN otherQualifiers/isWaveGuardMember predicate
+// (estimate-engine.js) via the SAME determineWaveGuardTier the estimator
+// calls — no parallel qualifying-count logic — over `currentServiceKeys`,
+// the identical modeled baseline qualifyingBaselineMismatch already reads,
+// so this can never disagree with the ownership frame the rest of the card
+// prices against.
+function rodentSetupFeeUnwaived(targetKey, currentServiceKeys) {
+  if (targetKey !== 'rodent_bait') return false;
+  const { determineWaveGuardTier } = require('../pricing-engine/discount-engine');
+  const otherQualifiers = (Array.isArray(currentServiceKeys) ? currentServiceKeys : [])
+    .filter((key) => key !== 'rodent_bait');
+  return determineWaveGuardTier(otherQualifiers).qualifyingCount === 0;
 }
 
 function parseJsonColumn(value) {
@@ -569,41 +538,24 @@ async function buildReportCrossSell(service, database, {
         .where({ id: service.scheduled_service_id })
         .first('service_address_line1', 'service_address_line2', 'service_address_city',
           'service_address_zip', 'source', 'is_recurring', 'source_estimate_id', 'property_id');
-      if (linkedVisit && linkedVisit.service_address_line1) {
-        const rawKey = linkage.normalizedStampedStreet(
-          linkedVisit.service_address_line1, linkedVisit.service_address_line2,
-          linkedVisit.service_address_city, linkedVisit.service_address_zip
-        );
-        if (!rawKey || linkage.scopeKeyLacksLocality(rawKey)) return null;
-        if (!linkage.sameScopeKey(rawKey, primaryStreet)) return null;
+      // Shared stamp → property_id → source_estimate_id resolver (codex
+      // round-4 P1: server/services/service-report/visit-property-scope.js
+      // — one implementation, no re-derived per-caller chain to miss a
+      // leg on again). hasEvidence false (linkedVisit missing entirely, OR
+      // found with no stamp/property_id/source_estimate_id at all) proves
+      // nothing and falls through to the single-premises proof below,
+      // exactly as before; hasEvidence true with a null key is an
+      // unresolvable/unprovable link — fail closed, no card, same as the
+      // per-leg checks this replaces.
+      const { resolveVisitPropertyScope } = require('./visit-property-scope');
+      const scope = await resolveVisitPropertyScope(linkedVisit || {}, database);
+      if (scope.hasEvidence) {
+        if (!scope.key) return null;
+        if (!linkage.sameScopeKey(scope.key, primaryStreet)) return null;
         // Both keys carry locality, but possibly in DISJOINT fields
         // (city-only vs zip-only) — sameScopeKey's per-field wildcard
         // accepts that across cities; require one shared proof (PR r6).
-        if (!scopeKeysShareLocality(rawKey, primaryStreet)) return null;
-        premisesProven = true;
-      } else if (linkedVisit && (linkedVisit.property_id || linkedVisit.source_estimate_id)) {
-        // Unstamped but LINKED (codex #3367 PR r7): dispatch's own rule
-        // resolves an unstamped row through its property row / creating
-        // estimate before falling back to primary — assuming primary here
-        // would publish a primary-profile price for a secondary-property
-        // visit. Same proofs as a raw stamp; unresolvable = no card.
-        let resolvedKey = null;
-        if (linkedVisit.property_id) {
-          const prop = await database('customer_properties')
-            .where({ id: linkedVisit.property_id })
-            .first('address_line1', 'address_line2', 'city', 'zip');
-          resolvedKey = prop
-            ? linkage.normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
-            : null;
-        } else {
-          const src = await database('estimates')
-            .where({ id: linkedVisit.source_estimate_id })
-            .first('address');
-          resolvedKey = linkage.normalizedEstimateStreet(src?.address);
-        }
-        if (!resolvedKey || linkage.scopeKeyLacksLocality(resolvedKey)) return null;
-        if (!linkage.sameScopeKey(resolvedKey, primaryStreet)) return null;
-        if (!scopeKeysShareLocality(resolvedKey, primaryStreet)) return null;
+        if (!scopeKeysShareLocality(scope.key, primaryStreet)) return null;
         premisesProven = true;
       }
       // A linked row that is MISSING, or carries no stamp and no
@@ -740,12 +692,20 @@ async function buildReportCrossSell(service, database, {
         const ladderVocab = ladderKeysFor(fam);
         return familyUncorroborated(fam, ladderVocab.length ? ladderVocab : [...offerVocabulary([fam])]);
       });
-      // Only a LADDER family carries the both-answers-wrong ambiguity that
-      // suppresses the whole card on a recent report: it would either be
-      // offered to someone who owns it or advanced past for someone who
-      // doesn't. A non-ladder family moves no rung, so it simply drops.
-      const uncorroboratedLadder = uncorroborated.filter((fam) => ladderKeysFor(fam).length > 0);
-      if (uncorroboratedLadder.length) {
+      // GUARDED_OWNERSHIP_FAMILIES (not OFFER_LADDER — P0, pre-push finding):
+      // termite is no longer an offer rung, but a recent uncorroborated
+      // termite report identity carries the exact same both-answers-wrong
+      // ambiguity as a recent pest/lawn/tree one and must still fail the
+      // card closed.
+      const guardedFamilies = new Set(GUARDED_OWNERSHIP_FAMILIES);
+      const guardedKeysFor = (fam) => [...offerVocabulary([fam])].filter((key) => guardedFamilies.has(key));
+      // Only a GUARDED family (every GUARDED_OWNERSHIP_FAMILIES member)
+      // carries the both-answers-wrong ambiguity that suppresses the whole
+      // card on a recent report: it would either be offered to someone who
+      // owns it or advanced past for someone who doesn't. A family outside
+      // that set moves no rung, so it simply drops.
+      const uncorroboratedGuarded = uncorroborated.filter((fam) => guardedKeysFor(fam).length > 0);
+      if (uncorroboratedGuarded.length) {
         // ET calendar discipline (pre-push P1): service_date is a DATE —
         // compare ET calendar days, never UTC-midnight milliseconds, or
         // the suppress/offer boundary moves hours early around DST.
@@ -798,6 +758,14 @@ async function buildReportCrossSell(service, database, {
     // policy) is bounded here because the ownership reads on this same
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
+
+    // Owner ruling 2026-09-28: a customer who owns all three pillars gets NO
+    // card at all — the referral card fills that slot instead.
+    {
+      const pillars = offerVocabulary(ladderEvidence);
+      if (pillars.has('pest_control') && pillars.has('lawn_care') && pillars.has('tree_shrub')) return null;
+    }
+
     // No recurring evidence at all → the identity-start branch: offer starts
     // the family today's report belongs to (owner matrix 2026-08-13). With
     // evidence, the ownership matrix decides. relationship below stays
@@ -921,7 +889,8 @@ async function buildReportCrossSell(service, database, {
     // would need provenance the stored blob does not carry.
     const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+      && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
     const payload = {
       serviceKey: targetKey,
@@ -1250,7 +1219,8 @@ function composePricedOfferBasis({ result, propertySeed, correctionsUnapplied, t
   const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
   const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
   const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-    && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+    && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+    && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
   const payload = {
     serviceKey: targetKey,
@@ -1380,6 +1350,8 @@ module.exports = {
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
+    GUARDED_OWNERSHIP_FAMILIES,
+    rodentSetupFeeUnwaived,
     // Test hook: what the seed actually carries out of an accepted estimate
     // is the money-bearing contract here — every modifier it drops prices
     // as if the property did not have it.

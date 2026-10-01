@@ -1,0 +1,662 @@
+[
+  {
+    "slug": "two-striped-walkingstick",
+    "kind": "organism",
+    "common_name": "Two-striped Walkingstick",
+    "aka": [
+      "Devil Rider"
+    ],
+    "aliases": [
+      "two-striped walkingstick",
+      "two-striped walking stick",
+      "devil rider",
+      "anisomorpha buprestoides"
+    ],
+    "scientific_name": "Anisomorpha buprestoides",
+    "rank": "species",
+    "group": "other-insects",
+    "subgroup": "irritant-walkingsticks",
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large (2 to 3 inches), stout, brown, twig-shaped body with two dark stripes running down the back",
+      "No wings; looks exactly like a stick even up close",
+      "Often found as a pair, a smaller male riding on top of a larger female",
+      "Sprays a defensive chemical from the front of its body if grabbed or threatened"
+    ],
+    "look_alikes": [
+      {
+        "slug": "katydid",
+        "difference": "Walkingstick is plain brown/striped and shaped like a stick with no wings; katydid is green with leaf-shaped wings",
+        "next_photo": "From a safe distance, zoom in checking for wings and green leaf-shaped wing covers versus a plain stick shape.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Its defensive spray can cause intense burning and temporary eye pain if it gets in your eyes; don't pick it up, and rinse eyes with water right away if sprayed.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A slow, harmless-looking insect with one real hazard: the chemical spray it uses in self-defense, which can be genuinely painful if it reaches your eyes. Leaving it alone (and keeping kids and pets from picking it up) is the whole story.",
+      "fact": "It's commonly seen in mated pairs in the fall, with a noticeably smaller male riding on the back of a larger female for days at a time."
+    },
+    "tech_notes": "No treatment indicated; if asked, advise not to handle it and to rinse eyes with water immediately if sprayed, seeking medical care for persistent eye pain.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Anisomorpha_buprestoides"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months (fall mating season) are from general knowledge, not directly cited. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "9f6547a330f700c70b5472ec0c5dddda0a64892fd1e0df9564de3ea49eb9e3bb"
+    },
+    "role": "harmless_visitor",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "carolina-mantis",
+    "kind": "organism",
+    "common_name": "Carolina Mantis",
+    "aka": [],
+    "aliases": [
+      "carolina mantis",
+      "stagmomantis carolina"
+    ],
+    "scientific_name": "Stagmomantis carolina",
+    "rank": "species",
+    "group": "other-insects",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender body 2 to 2.4 inches long, dusty brown, gray or green to match its surroundings",
+      "Enlarged, spiny front legs held folded up in front, as if praying, ready to snap out and grab prey",
+      "Triangular head with large eyes that swivel to track movement",
+      "Sits still for long periods, ambushing insects rather than chasing them"
+    ],
+    "look_alikes": [
+      {
+        "slug": "two-striped-walkingstick",
+        "difference": "Mantis has enlarged, spiny front legs held up for grabbing prey; walkingstick's legs are all thin and equal, made only for walking",
+        "next_photo": "From a safe distance, zoom in on the front legs, checking for an enlarged, spiny grabbing pair.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can pinch or nip if picked up, but this isn't dangerous and it won't come after a person; it's not a stinger.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A garden ally that ambushes and eats other insects, including some real pests. It's not aggressive and doesn't sting, though it can nip if handled, so this one is worth leaving in place.",
+      "fact": "Its papery egg case, glued to a twig or fence, can hold well over a hundred eggs that all hatch out together in spring."
+    },
+    "tech_notes": "No treatment indicated; if an egg case is found on a structure people want removed, relocate rather than destroy where practical since it's a beneficial predator. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (its grabbing front legs can pinch/nip if handled, though this isn't dangerous).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Stagmomantis_carolina"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names mantises explicitly). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "473e3608b4f6588da59c27f89c1ef635f0ac1b22de0b405047bd9a8b3aa07e6b"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "dragonfly",
+    "kind": "organism",
+    "common_name": "Dragonflies",
+    "aka": [],
+    "aliases": [
+      "dragonfly",
+      "dragonflies",
+      "odonata"
+    ],
+    "scientific_name": "Odonata (Anisoptera)",
+    "rank": "order",
+    "group": "other-insects",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph (aquatic)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large (1.5 to 3+ inches), narrow-bodied insect with two pairs of long, clear or colored wings held flat out to the sides at rest",
+      "Huge eyes that often meet or nearly meet on top of the head",
+      "Fast, darting flight low over lawns, ponds, and pool decks, hunting mosquitoes and other small flying insects",
+      "Rests on plant stems, fences or the ground near water with its wings spread flat"
+    ],
+    "look_alikes": [
+      {
+        "slug": "gallinipper",
+        "difference": "Dragonfly holds its wings flat out at rest and isn't a biting pest; gallinipper is a large mosquito that folds its wings over its back and bites painfully.",
+        "next_photo": "From a safe distance, zoom in on the wing position at rest (flat out vs. folded over the back).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "pool-water",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It has no stinger, but a large one can give a harmless nip if handled; it won't come after a person.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the best natural mosquito controls around a yard or pool; despite old nicknames like 'devil's darning needle,' it has no stinger and isn't aggressive toward people. Seeing them patrol the pool deck is a good sign, not a concern.",
+      "fact": "Its eyes are made up of nearly 24,000 individual lenses, giving it some of the sharpest vision of any insect."
+    },
+    "tech_notes": "No treatment indicated; reassure customers this is a beneficial predator, not an aggressive pest, despite folklore to the contrary. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (a large dragonfly can nip if handled, though this is harmless).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Dragonfly"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names large dragonflies explicitly). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "07349f126a0c2fe6ad981ead7800872cacf671543b78eca2749e95bb29f9e45a"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "green-lacewing",
+    "kind": "organism",
+    "common_name": "Green Lacewing",
+    "aka": [
+      "Aphid Lion"
+    ],
+    "aliases": [
+      "green lacewing",
+      "green lacewings",
+      "aphid lion",
+      "chrysopidae"
+    ],
+    "scientific_name": "Chrysopidae",
+    "rank": "family",
+    "group": "other-insects",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Delicate, pale green body with two pairs of large, clear, lacy-veined wings held roof-like over the back at rest",
+      "Golden or coppery eyes and long, thread-like antennae",
+      "Larvae are spindle-shaped, mottled tan, with visible pincer-like jaws ('aphid lions')",
+      "Adults flutter weakly around porch lights at night; larvae are found on leaves near aphid colonies"
+    ],
+    "look_alikes": [
+      {
+        "slug": "termite-swarmers",
+        "difference": "Lacewing has clear, lacy-veined wings held roof-like over the back and long antennae; termite swarmer has plain, equal-sized wings held flat and short antennae",
+        "next_photo": "A close-up of the wing veining and antenna length, and whether wings shed easily",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "azalea-lace-bug",
+        "difference": "Green lacewing is larger, flies to lights at night, and is a beneficial predator; azalea lace bug is tiny and stays under azalea leaves as a plant pest.",
+        "next_photo": "A photo of where it was found (flying near a porch light vs. underside of an azalea leaf) plus a close-up of the wings",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A garden ally whose larvae are aggressive aphid hunters, which is why growers call them 'aphid lions.' Finding either the adult or larva on a plant is a good sign for aphid control, not a pest to treat.",
+      "fact": "A single lacewing larva can eat around a hundred aphids in a week."
+    },
+    "tech_notes": "No treatment indicated; commonly confused with termite swarmers at lights, so check wing venation and antenna length when a swarmer report comes in near dusk. Also confused by name with azalea-lace-bug (a plant pest); confirm which one a customer actually has before recommending anything.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Chrysopidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 54: added a reciprocal look-alike to azalea-lace-bug (B/true-bugs, also this session's own work) — a name-based mix-up ('lace bug' vs 'lacewing') between a plant pest and a beneficial predator, worth distinguishing before any treatment recommendation.",
+      "approval_hash": "244974d94ff17bfd05fe6e6b7676780471277e551bfe886f7af1d99594fd9d22"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "cicada",
+    "kind": "organism",
+    "common_name": "Cicada",
+    "aka": [],
+    "aliases": [
+      "cicada",
+      "cicadas",
+      "cicadidae"
+    ],
+    "scientific_name": "Cicadidae",
+    "rank": "family",
+    "group": "other-insects",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "nymph (underground)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large (1 to 2 inches), thick-bodied insect with big, wide-set eyes and clear, veined wings held roof-like over the back",
+      "Produces a loud, continuous buzzing drone from tree canopies, especially in the heat of the day",
+      "Leaves behind a hollow, tan, exact-body-shaped shell clinging to tree bark after it molts",
+      "Found on tree trunks and branches; rarely seen on the ground unless freshly emerged or dead"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cicada-killer",
+        "difference": "Cicada is thick-bodied with clear wings, no stinger, and stays on tree trunks; cicada killer is a large wasp with a stinger that digs burrows in bare soil",
+        "next_photo": "From a safe distance, zoom in checking for a wasp-like waist and stinger, or a burrow with loose soil, versus a round-bodied insect on bark.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The soundtrack of a Florida summer; it doesn't bite, sting, or seriously damage established trees. Egg-laying can cause minor dieback on thin twigs, but that's rarely worth treating.",
+      "fact": "Its buzzing call, made by rapidly buckling a set of ribbed structures on its body, can reach around 120 decibels, among the loudest sounds any insect makes."
+    },
+    "tech_notes": "No treatment indicated; if minor twig dieback from egg-laying is a concern on young trees, that's a pruning/monitoring conversation, not a pesticide one.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Cicada"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5eebf8deb759197f65b601cf4542dbf4cc799f6976769e4ab72610a8ed600355"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "antlion",
+    "kind": "organism",
+    "common_name": "Antlion (doodlebug)",
+    "aka": [
+      "Doodlebug"
+    ],
+    "aliases": [
+      "antlion",
+      "antlions",
+      "doodlebug",
+      "myrmeleontidae"
+    ],
+    "scientific_name": "Myrmeleontidae",
+    "rank": "family",
+    "group": "other-insects",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Larva ('doodlebug') is a plump, mottled tan grub with large sickle-shaped jaws, hidden at the bottom of a small funnel-shaped pit",
+      "The pit is 1 to 3 inches wide in loose, dry sand, often along foundations, under eaves, or in sandy garden beds",
+      "Adult looks like a slow, weak-flying damselfly with long, clubbed antennae, active mainly at night",
+      "The larva rarely bites unless directly dug up and handled; adults don't bite or sting at all"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cicada-killer",
+        "difference": "Antlion pit is a smooth sand funnel with no tunnel or insect visible; cicada killer burrow is a mounded tunnel with a wasp coming and going",
+        "next_photo": "From a safe distance, zoom in on the hole's shape (smooth funnel vs. mounded tunnel) and whether a wasp is seen using it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler",
+      "sign"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can pinch if dug up and handled, but this is rare and not dangerous; easiest to just leave the little sand pit alone.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Those small funnel-shaped pits in sandy, dry soil are ambush traps for ants and other small crawling insects, not a pest problem. It's a genuine garden ally and best left in place.",
+      "fact": "Its common name 'doodlebug' comes from the meandering, doodle-like trails it leaves in the sand while searching for a good spot to dig its trap."
+    },
+    "tech_notes": "No treatment indicated; if pits are unwanted in a play area, relocating loose sand/mulch is a better fix than pesticide.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Antlion"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Bite risk to people is extremely rare per the source (one documented case); flagged bites:true for honesty but framed as low-concern in copy/safety_line. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "12c5eca5275029c30f1d05aca9affd93883e32ceb5b52d324201317a951aff7d"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

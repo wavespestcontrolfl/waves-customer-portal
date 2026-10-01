@@ -15,6 +15,7 @@ const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadli
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
+const { parseETDateTime } = require('../utils/datetime-et');
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
 const PROPERTY_ID = '00000000-0000-4000-8000-000000000102';
 const properties = [{ id: PROPERTY_ID }];
@@ -24,7 +25,7 @@ const source = (message_body, direction = 'inbound') => ({
 });
 const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
-  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, ...extra,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
@@ -71,7 +72,7 @@ describe('SMS operational evidence and ownership', () => {
   test('outbound staff promise is tracked; outgoing profile guesses are not facts', () => {
     const message = source("I'll send the estimate. The controller is on the side of the house", 'outbound');
     const result = groundExtraction(extracted([
-      obligation("I'll send the estimate", { basis: 'promise' }),
+      obligation("I'll send the estimate", { basis: 'promise', promise_firm: true }),
     ], [fact()]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.facts).toEqual([]);
@@ -80,17 +81,19 @@ describe('SMS operational evidence and ownership', () => {
   test('a subjectless "Will …" staff declaration is a promise, not a question', () => {
     const message = source('Will call you tomorrow at 9am', 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: true, kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.obligations[0]).toMatchObject({ due_at: '2040-03-11T13:00:00.000Z', timing_unverified: false });
   });
 
   test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am', 'Want me to call you tomorrow at 9am',
-    'Need us to call you tomorrow at 9am', 'Will we call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
+    'Need us to call you tomorrow at 9am', 'Will we call you tomorrow at 9am'])('an outbound question the extraction marks as no firm promise is not recorded: %s', (body) => {
+    // Staff-promise plan (2026-09-28): the extraction judges a staff text's
+    // firmness (promise_firm); a question or offer is never a firm promise.
     const message = source(body, 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: false, kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result).toMatchObject({ obligations: [], dropped: 1 });
   });
@@ -151,7 +154,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = "I'll send the reschedule link shortly";
     const message = source(quote, 'outbound');
     const result = groundExtraction(extracted([obligation(quote, {
-      kind: 'send_reschedule_link', basis: 'promise', description: quote,
+      kind: 'send_reschedule_link', basis: 'promise', promise_firm: true, description: quote,
     })]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.obligations[0]).toMatchObject({ kind: 'send_reschedule_link', basis: 'promise' });
@@ -185,7 +188,7 @@ describe('SMS operational evidence and ownership', () => {
   test('tomorrow without a clock time does not acquire a model-invented time', () => {
     const message = source("I'll call tomorrow", 'outbound');
     const result = groundExtraction(extracted([obligation(message.message_body, {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: true, kind: 'callback', due_text: 'tomorrow', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result.obligations[0]).toMatchObject({ due_text: 'tomorrow', due_at: null });
   });
@@ -698,6 +701,158 @@ describe('private profile writes', () => {
   });
 });
 
+describe('Owner-approved staff-promise plan (2026-09-28): a promise staff texted is read by the extraction, kept whatever its wording, and due at the end of the day it names', () => {
+  // 2040-03-10 is a Saturday (EST); DST starts Sunday 2040-03-11.
+  const staff = (body) => source(body, 'outbound');
+  const promise = (quote, extra = {}) => obligation(quote, { basis: 'promise', promise_firm: true, kind: 'other', ...extra });
+
+  test('a firm promise in a conversational staff text is kept: the customer-instruction word and question checks do not apply', () => {
+    const message = staff("Not a problem, we'll adjust. How have the mosquitoes been?");
+    expect(groundExtraction(extracted([promise("we'll adjust")]), { message, properties }).obligations).toHaveLength(1);
+    // An offer or a question is not a promise: the extraction says so, and it is dropped.
+    expect(groundExtraction(extracted([promise("we'll adjust", { promise_firm: false })]), { message, properties }).obligations).toEqual([]);
+    const offer = staff('Are you around today? You want me to swing by?');
+    expect(groundExtraction(extracted([promise('You want me to swing by', { promise_firm: false })]), { message: offer, properties }).obligations).toEqual([]);
+    // A customer's text keeps every existing check: negated wording still drops its ask.
+    const customer = source('Not today, but please send the estimate');
+    expect(groundExtraction(extracted([obligation('please send the estimate')]), { message: customer, properties }).obligations).toEqual([]);
+  });
+
+  test('a staff promise whose words do not name its type is kept as a general promise; a customer ask is still dropped', () => {
+    const message = staff("Hey, I'll stop by today");
+    const kept = groundExtraction(extracted([promise("I'll stop by today", { kind: 'technician_follow_up' })]), { message, properties }).obligations;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ kind: 'other', basis: 'promise' });
+    // A named type stays: "the estimate" is an estimate.
+    const named = staff("I'll send the estimate today");
+    expect(groundExtraction(extracted([promise("I'll send the estimate today", { kind: 'send_estimate' })]), { message: named, properties })
+      .obligations[0]).toMatchObject({ kind: 'send_estimate' });
+    const ask = source('Can you stop by today');
+    expect(groundExtraction(extracted([obligation('Can you stop by today', { kind: 'technician_follow_up' })]), { message: ask, properties })
+      .obligations).toEqual([]);
+  });
+
+  test.each([
+    ['the day it names, quoted', 'gonna knock out your spray tomorrow', 'tomorrow', '2040-03-11', '2040-03-11'],
+    ["the text's own day", "I'll stop by today", 'today', '2040-03-10', '2040-03-10'],
+    ['a span it names', 'gonna peel back this weekend', 'this weekend', '2040-03-11', '2040-03-11'],
+    ['fourteen days out', "we'll be back March 24", 'March 24', '2040-03-24', '2040-03-24'],
+    ['a day before the text', "I'll stop by tomorrow", 'tomorrow', '2040-03-09', null],
+    ['a day its quoted words do not name (Codex #5248 r1 P1)', "I'll stop by tomorrow", 'tomorrow', '2040-03-12', null],
+    ['wording the code cannot place on one day', "we'll be back in two weeks", 'in two weeks', '2040-03-24', null],
+    ['more than fourteen days out', "we'll be back March 25", 'March 25', '2040-03-25', null],
+    ['a date that does not exist', "I'll stop by tomorrow", 'tomorrow', '2040-02-30', null],
+    ['timing that is not quoted', "I'll stop by soon", 'Wednesday', '2040-03-14', null],
+    ['no timing words at all', "I'll stop by", null, '2040-03-11', null],
+  ])('due_date: %s', (_label, body, dueText, dueDate, expected) => {
+    const message = staff(body);
+    const [kept] = groundExtraction(extracted([promise(body, { due_text: dueText, due_date: dueDate })]), { message, properties }).obligations;
+    expect(kept.due_date).toBe(expected);
+  });
+
+  test('Codex #5248 r2: a customer-side kind on a staff promise makes it general, never dropped', () => {
+    const message = staff("I'll send you photos tomorrow");
+    const [kept] = groundExtraction(extracted([promise("I'll send you photos tomorrow", { kind: 'send_photos' })]), { message, properties }).obligations;
+    expect(kept).toMatchObject({ kind: 'other', basis: 'promise' });
+  });
+
+  test.each([
+    ['"before" a day is the day before it', "I'll send it before Wednesday", 'before Wednesday', '2040-03-13', '2040-03-13'],
+    ['"before" read as the day itself is refused', "I'll send it before Wednesday", 'before Wednesday', '2040-03-14', null],
+    ['a weekday abbreviation', "I'll call you Wed", 'Wed', '2040-03-14', '2040-03-14'],
+    ['a second day in the promise', "I'll stop by Wednesday or Thursday", 'Wednesday', '2040-03-14', null],
+    ['a hedge in the text', "I'll probably stop by Wednesday", 'Wednesday', '2040-03-14', null],
+    ['one day named twice', 'Wednesday works, see you Wednesday', 'Wednesday', '2040-03-14', '2040-03-14'],
+    // Codex #5248 r3: a subject date is no alternative; a range or a second day is.
+    ['a dated subject beside its deadline', "I'll send the September 10 report tomorrow", 'tomorrow', '2040-03-11', '2040-03-11'],
+    ['a range of days', "I'll be there Wed-Fri", 'Wed', '2040-03-14', null],
+    ['two days joined by and', "I'll come tomorrow and Friday", 'tomorrow', '2040-03-11', null],
+  ])('Codex #5248 r2 due_date: %s', (_label, body, dueText, dueDate, expected) => {
+    const [kept] = groundExtraction(extracted([promise(body, { due_text: dueText, due_date: dueDate })]), { message: staff(body), properties }).obligations;
+    expect(kept.due_date).toBe(expected);
+  });
+
+  test('Codex #5248 r3: "Wed at 3pm" resolves its clock; a yearless date near year-end is next year\'s', () => {
+    const clocked = staff("I'll call Wed at 3pm");
+    expect(groundExtraction(extracted([promise("I'll call Wed at 3pm", { due_text: 'Wed at 3pm', due_at: '2040-03-14T15:00:00-04:00' })]),
+      { message: clocked, properties }).obligations[0]).toMatchObject({ due_at: '2040-03-14T19:00:00.000Z', timing_unverified: false });
+    const yearEnd = { ...staff("I'll send it Jan 2"), created_at: '2040-12-28T15:00:00Z' };
+    expect(groundExtraction(extracted([promise("I'll send it Jan 2", { due_text: 'Jan 2', due_date: '2041-01-02' })]),
+      { message: yearEnd, properties }).obligations[0].due_date).toBe('2041-01-02');
+  });
+
+  test('Codex #5248 r3: a text stamped for another property never witnesses a scoped staff promise, whatever its type', () => {
+    const scoped = { kind: 'other', sms_context: { source_at: '2040-03-10T15:00:00Z', basis: 'promise', property_id: 'home' } };
+    const manual = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    expect(admissibleWitness({ ...manual, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...manual, operator_sent: false, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...manual, linked_property_id: 'home' }, scoped)).toBe(true);
+    expect(admissibleWitness(manual, scoped)).toBe(true);
+    // A customer's ask keeps the human-type exemption unchanged.
+    expect(admissibleWitness({ ...manual, linked_property_id: 'rental' }, { ...scoped, sms_context: { ...scoped.sms_context, basis: 'request' } })).toBe(true);
+  });
+
+  test('Codex #5248 r2: a general staff promise admits any delivered text written after it and an email to the customer; an ask does not', () => {
+    const sms_context = { source_at: '2040-03-10T15:00:00Z', customer_id: CUSTOMER_ID };
+    const staffPromise = { kind: 'other', sms_context: { ...sms_context, basis: 'promise' } };
+    const ask = { kind: 'other', sms_context: { ...sms_context, basis: 'request' } };
+    const guide = { type: 'sms', status: 'delivered', message_type: 'prep_guide', operator_sent: false };
+    expect(admissibleWitness(guide, staffPromise)).toBe(true);
+    expect(admissibleWitness(guide, ask)).toBe(false);
+    // Queued before the promise: not written after it.
+    expect(admissibleWitness({ ...guide, scheduled_at: '2040-03-10T14:00:00Z' }, staffPromise)).toBe(false);
+    // Property-scoped: an unstamped text may carry the item; one stamped with another property never does.
+    const scoped = { kind: 'other', sms_context: { ...sms_context, basis: 'promise', property_id: 'home' } };
+    expect(admissibleWitness(guide, scoped)).toBe(true);
+    expect(admissibleWitness({ ...guide, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...guide, linked_property_id: 'home' }, scoped)).toBe(true);
+    // A scoped promise of a typed kind keeps the stamp rule (Codex #4816 r39).
+    expect(admissibleWitness({ ...guide, message_type: 'confirmation' },
+      { kind: 'send_appointment_confirmation', sms_context: { ...sms_context, basis: 'promise', property_id: 'home' } })).toBe(false);
+    const email = { type: 'email_delivery', status: 'delivered', sent_at: '2040-03-10T16:00:00Z', recipient_type: 'customer', recipient_id: CUSTOMER_ID };
+    expect(admissibleWitness(email, staffPromise)).toBe(true);
+    expect(admissibleWitness({ ...email, recipient_id: '00000000-0000-4000-8000-000000000999' }, staffPromise)).toBe(false);
+    expect(admissibleWitness({ ...email, recipient_type: 'lead' }, staffPromise)).toBe(false);
+    expect(admissibleWitness({ ...email, bounced_at: '2040-03-10T16:01:00Z' }, staffPromise)).toBe(false);
+    expect(admissibleWitness(email, ask)).toBe(false);
+  });
+
+  test('due_date is never taken with a clock in the text, nor for a customer ask', () => {
+    const clocked = staff("I'll be there tomorrow at 3pm");
+    expect(groundExtraction(extracted([promise("I'll be there tomorrow at 3pm", { due_text: 'tomorrow at 3pm', due_date: '2040-03-11' })]),
+      { message: clocked, properties }).obligations[0].due_date).toBeNull();
+    const ask = source('Please send the estimate tomorrow');
+    expect(groundExtraction(extracted([obligation('Please send the estimate tomorrow', { due_text: 'tomorrow', due_date: '2040-03-11' })]),
+      { message: ask, properties }).obligations[0].due_date).toBeNull();
+  });
+
+  test('a promise naming a day is due 8 PM ET that day (DST-correct); within an hour of the text, 9 AM ET the next day', () => {
+    const item = (extra) => ({ party: 'waves', basis: 'promise', kind: 'other', quote: "I'll stop by tomorrow", due_text: 'tomorrow', ...extra });
+    // Sent Saturday 10 AM EST, due Sunday 8 PM EDT (00:00Z Monday).
+    expect(resolveDueDeadline(item({ due_date: '2040-03-11' }), '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: '2040-03-12T00:00:00.000Z', due_basis: 'default_kind' });
+    // "Tonight", sent 7:30 PM EST: under an hour to 8 PM, so 9 AM EDT Sunday.
+    expect(resolveDueDeadline(item({ quote: "I'll stop by tonight", due_text: 'tonight', due_date: '2040-03-10' }), '2040-03-11T00:30:00Z'))
+      .toEqual({ due_at: '2040-03-11T13:00:00.000Z', due_basis: 'default_kind' });
+    // A stated clock still wins.
+    expect(resolveDueDeadline(item({ due_date: '2040-03-11', due_at: '2040-03-11T19:00:00.000Z' }), '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: '2040-03-11T19:00:00.000Z', due_basis: 'stated' });
+    // A customer ask never takes due_date: its stated timing keeps the existing rules (undated here).
+    expect(resolveDueDeadline({ ...item({ due_date: '2040-03-11' }), basis: 'request', quote: 'Can you stop by tomorrow' }, '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test("the extraction is told the text's ET day and the staff-promise rules", () => {
+    const prompt = buildPrompt({ message: staff("I'll stop by tomorrow") });
+    expect(prompt).toContain('The CURRENT message was sent on Saturday, 2040-03-10 (America/New_York).');
+    for (const phrase of ['promise_firm is true only for a promise (basis promise) its sender committed to outright',
+      'Never extract a status update or arrival estimate', 'due_date, for a promise only, is the calendar day',
+      '"This weekend" is that weekend\'s Sunday; "next week" is next week\'s Friday']) {
+      expect(prompt).toContain(phrase);
+    }
+  });
+});
+
 describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   const at = new Date('2040-03-10T15:00:00Z');
   test.each(Object.entries(DEFAULT_DEADLINE_HOURS))('a %s request with no stated due_at defaults to +%ih (due_basis default_kind)', (kind, hours) => {
@@ -722,7 +877,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'request', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
   });
 
-  test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
+  test.each(['Can you call me tomorrow?', 'Can someone come out Friday?', 'Schedule me mid Oct',
     'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week',
     'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed',
     'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call',
@@ -739,7 +894,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Please call me from Friday onward', 'Call me from tomorrow on', 'Available from Monday through Wednesday, call me',
     'Please call me about the report from last week tomorrow', 'Send the photos from Monday through Wednesday by Friday',
     'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
-    'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
+    'Call me regarding the estimate next week'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
@@ -810,6 +965,131 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
 
   test('send_reschedule_link shares the 24h scheduling window', () => {
     expect(DEFAULT_DEADLINE_HOURS.send_reschedule_link).toBe(24);
+  });
+});
+
+describe('Owner ruling 2026-09-28: a same-day-only ask about TODAY gets an end-of-day deadline instead of staying undated', () => {
+  const wavesItem = (quote, overrides = {}) => ({ party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null, quote, ...overrides });
+
+  test.each(["Can you call about tonight's visit?", "Confirm this afternoon's appointment please"])(
+    // Codex #5170 r3 P2: a possessive same-day form names the topic, never the deadline.
+    '"%s" names the visit, not the timing, so it never takes the same-day path', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      const item = { ...wavesItem(quote), due_text: quote.match(/(tonight|this afternoon)'s/)[0] };
+      expect(resolveDueDeadline(item, at).due_at).not.toBe(parseETDateTime('2040-03-12T20:00').toISOString());
+    });
+
+  test.each(['Did you come today or not?', 'Can you call or text me today?', 'Can you come this afternoon or tonight?',
+    // Codex #5170 r3 P2: a qualifier bound to the same-day form stays same-day.
+    'Can you call later tonight?', 'Can you come any time today?', 'Stop by sometime this afternoon', 'Can you come later today?'])(
+    // Codex #5170 r2 P2: a bare "or" with only same-day timing is still same-day.
+    '"%s" offers no later option, so it gets the 8 PM ET same-day deadline', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    });
+
+  test('"Did you come to my house today?" at 10:00 ET gets an 8 PM ET same-day deadline', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    expect(resolveDueDeadline(wavesItem('Did you come to my house today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('"Should we skip today?" at 19:30 ET is less than an hour from 8 PM, so it rolls to 9 AM ET the next day', () => {
+    const at = parseETDateTime('2040-03-12T19:30');
+    expect(resolveDueDeadline(wavesItem('Should we skip today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-13T09:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('exactly 1 hour before 8 PM ET still keeps the 8 PM deadline (the rollover is strictly "less than" an hour)', () => {
+    const at = parseETDateTime('2040-03-12T19:00');
+    expect(resolveDueDeadline(wavesItem('Did you come today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test.each(['tonight', 'this morning', 'this afternoon', 'this evening', 'later today', 'EOD', 'end of the day', 'end of day'])(
+    'same-day token "%s" alone still gets the 8 PM ET deadline', (token) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(`Can you take care of that ${token}?`), at))
+        .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    });
+
+  test.each(['Can you come today or tomorrow?', 'Come today, else Friday', 'Can you stop by today and Friday?',
+    // Codex #5170 r1 P2: a bare later alternative STATED_TIMING alone would miss.
+    'Can you come today or next visit?', 'Come today, otherwise whenever works', 'Skip today or next time is fine'])(
+    '"%s" states more than same-day timing, so it keeps the legacy undated behavior', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: null, due_basis: null });
+    });
+
+  test('"Please send it this afternoon" and "Call about the termite quote this afternoon" now bell at end of day — this ruling supersedes their prior Codex #4816 r20 undated case', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    for (const quote of ['Please send it this afternoon', 'Call about the termite quote this afternoon']) {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
+        .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    }
+  });
+
+  test('"today at 3" still resolves through the existing stated path — an explicit due_at is never overridden by the same-day rule', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const stated = parseETDateTime('2040-03-12T15:00').toISOString();
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: stated, quote: 'Come by today at 3' }, at))
+      .toEqual({ due_at: stated, due_basis: 'stated' });
+  });
+
+  test('a customer-owned promise mentioning "today" stays undated — the same-day rule only applies to Waves obligations', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'promise', due_at: null, quote: "I'll be home today" }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('an unresolved clock ("by 3pm today") always keeps the row undated, even though "today" alone would otherwise qualify', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null,
+      quote: 'Can you come by 3pm today?', timing_unverified: true };
+    expect(statesClock(item.quote)).toBe(true);
+    expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('a due_text naming only a same-day token still qualifies even if the surrounding quote has extra words', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: 'today',
+      quote: 'Any chance you can swing by today, the yard looks rough?' };
+    expect(resolveDueDeadline(item, at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('a due_text naming more than the same day keeps the row undated', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: 'today or tomorrow',
+      quote: 'Come by today or tomorrow' };
+    expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('"today\'s appointment" (possessive) is a topic reference, not same-day timing — falls through to the ordinary per-kind default like today', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const result = resolveDueDeadline(wavesItem("Can we reschedule today's appointment?", { kind: 'schedule_visit' }), at);
+    // STATED_TIMING's own NOT_POSSESSIVE already keeps "today's" out of stated
+    // timing entirely (unrelated to this ruling), so the row gets the
+    // ordinary R5 per-kind default rather than the same-day 8 PM deadline —
+    // still a real deadline either way, never left undated.
+    expect(result.due_basis).toBe('default_kind');
+    expect(result.due_at).toBe(new Date(at.getTime() + DEFAULT_DEADLINE_HOURS.schedule_visit * 3600000).toISOString());
+  });
+
+  test('DST boundary: a same-day deadline that rolls to the next ET day across the fall-back transition lands on the correct wall-clock instant', () => {
+    // 2040-11-04 is the fall-back Sunday (America/New_York: 2 AM EDT -> 1 AM
+    // EST). A message late Saturday the 3rd (still EDT, UTC-4) whose
+    // rollover lands on the 4th (already EST, UTC-5) must read as 9 AM EST
+    // — parseETDateTime resolves this from the calendar day + wall clock,
+    // never a hand-rolled +23h/+24h offset.
+    const at = parseETDateTime('2040-11-03T19:45'); // Saturday, EDT, 15 min to 8 PM
+    const result = resolveDueDeadline(wavesItem('Should we skip today?'), at);
+    const expected = parseETDateTime('2040-11-04T09:00'); // Sunday, after fall-back, EST
+    expect(result).toEqual({ due_at: expected.toISOString(), due_basis: 'default_kind' });
+    // Sanity: the instant actually crossed the DST seam — EDT is UTC-4 and
+    // EST is UTC-5, so a naive same-offset +13h15m from 19:45 EDT would have
+    // landed one hour off of the real 9 AM EST instant.
+    expect(expected.getTime() - at.getTime()).toBe((13 * 60 + 15) * 60000 + 3600000);
   });
 });
 
@@ -912,15 +1192,50 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
   });
 
-  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (the split-billing ask "separate the charges")', () => {
+  test('owner ruling 2026-09-28 (reverses R3): an "other" ask admits any text a person sent and a call back a person placed, never an automated text or call', () => {
     const other = { kind: 'other' };
-    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, other)).toBe(false);
-    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, other)).toBe(false);
-    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
+    const personSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    const staffCall = { type: 'call', status: 'completed', duration_seconds: 90, source: 'admin-click',
+      v2_extraction_status: 'valid', is_voicemail: 'false' };
+    // The R3 "separate the charges" case: a person's "Done" now answers it.
+    expect(admissibleWitness(personSms, other)).toBe(true);
+    // Staff draft-approval sends carry their own provenance type.
+    expect(admissibleWitness({ ...personSms, operator_sent: false, message_type: 'ai_approved' }, other)).toBe(true);
+    // Codex #5169 r1 P1: automated senders reuse the bare 'manual' type.
+    expect(admissibleWitness({ ...personSms, operator_sent: false }, other)).toBe(false);
+    expect(admissibleWitness({ ...personSms, message_type: 'confirmation' }, other)).toBe(false);
+    expect(admissibleWitness({ ...personSms, status: 'queued' }, other)).toBe(false);
+    // A text a person queued before the ask and that went out after it was not written in reply to it.
+    const asked = { kind: 'other', sms_context: { source_at: '2040-03-10T15:00:00Z' } };
+    expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T14:00:00Z' }, asked)).toBe(false);
+    expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T15:30:00Z' }, asked)).toBe(true);
+    // A call back counts only through the staff bridge, never a robocall or an unsourced row,
+    // and only once it reached the customer (Codex #5220 r1 P1): the recording's reviewed
+    // extraction heard a live conversation, and a card call's own customer leg completed.
+    for (const source of ['admin-click', 'admin-callback', 'tech-click']) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(true);
+    for (const source of ['collections_voice', 'status_callback', null]) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, duration_seconds: 30 }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: 'true' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: null }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, v2_extraction_status: 'schema_failed' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'no-answer', customer_leg_seconds: '0' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '45' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '75' }, other)).toBe(true);
+    // An ask naming an address still takes a person's reply (Codex #5169 r1
+    // P2); an email delivery is still no `other` witness.
+    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }], sms_context: { basis: 'request' } };
+    expect(admissibleWitness(personSms, emailOther)).toBe(true);
+    expect(admissibleWitness(staffCall, emailOther)).toBe(true);
+    // A promise staff made to email an address is proved by that delivery, never a text or call.
+    expect(admissibleWitness(personSms, { ...emailOther, sms_context: { basis: 'promise' } })).toBe(false);
     expect(admissibleWitness({ type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
       recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
-    // `callback` keeps its existing call/visit mix — unaffected by R3.
+    // `callback` keeps its existing call/visit mix, whoever placed the call.
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
+    // Payment admissibility is untouched: gated by money_answerable alone.
+    const paid = { type: 'payment', payment_source: 'ledger' };
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { money_answerable: false } })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { money_answerable: true } })).toBe(true);
   });
 
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
@@ -1180,17 +1495,20 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
-  test('only admissible records are offered to the model as witness_refs; payment evidence is split out of #4816', async () => {
+  test('only admissible records are offered to the model as witness_refs (R2: a payment can be; a text with no person\'s mark never is)', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
       text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
     const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'On our way' };
-    const paid = { ref: 'payment:i-1', type: 'payment', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid' };
-    const ask = { kind: 'other', description: 'You still coming this morning?', sms_context: ctx };
-    expect(admissibleWitness(paid, ask)).toBe(false);
-    await verifySmsFulfillment(ask, { records: [visit, staffSms], failures: [] });
-    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"witness_refs":["visit:v-1"]');
+    const paid = { ref: 'payment:i-1', type: 'payment', payment_source: 'invoice', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid 2040-03-11' };
+    // An ask the extraction marked answerable by a payment (answered_by_payment, stamped at intake).
+    const ask = { kind: 'other', description: 'Did my payment go through?', sms_context: { ...ctx, money_answerable: true } };
+    expect(admissibleWitness(staffSms, ask)).toBe(false);
+    expect(admissibleWitness(paid, ask)).toBe(true);
+    await verifySmsFulfillment(ask, { records: [visit, staffSms, paid], failures: [] });
+    const witnessRefs = JSON.parse(dispatchWithFallback.mock.calls[0][1].text.match(/"witness_refs":(\[[^\]]*\])/)[1]);
+    expect(witnessRefs.sort()).toEqual(['payment:i-1', 'visit:v-1']);
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
@@ -1242,6 +1560,140 @@ describe('fulfillment proof', () => {
     expect(groundFulfillment({ ...verdict, quote: 'I answered the invoice dispute' }, { records: [record], failures: [] }, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'ungrounded_witness' });
     await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toMatchObject({ verdict: 'open' });
+  });
+});
+
+describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid invoice/payments row, a deposit) closes a settlement question', () => {
+  // A payment question the extraction marked answerable by a payment (stamped at intake).
+  const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z', money_answerable: true };
+  const invoicePaid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
+    paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
+  const ledgerPaid = { id: 'pay-1', ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger',
+    created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11' };
+
+  test('rule 2: whether a payment can answer an ask is the extraction\'s judgement, stamped at intake — never the ask\'s wording', () => {
+    // Marked answerable: admissible whatever the wording, a refund mentioned beside the question included.
+    for (const description of ['Did my payment go through?', "Don't refund it, did my payment go through?", 'What is the Zelle number?']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, sms_context: ctx })).toBe(true);
+      expect(admissibleWitness(ledgerPaid, { kind: 'other', description, sms_context: ctx })).toBe(true);
+    }
+    // Not marked — money going back however it is worded, a card change, or no judgement recorded at all
+    // (a row from before the stamp): never answered by a payment, even when it reads like a payment question.
+    for (const [description, sms_context] of [['Can you reverse that charge?', { ...ctx, money_answerable: false }],
+      ['Please update my card', { ...ctx, money_answerable: false }], ['Did my payment go through?', { ...ctx, money_answerable: false }],
+      ['Did my payment go through?', { property_id: null, source_at: ctx.source_at }]]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, sms_context })).toBe(false);
+    }
+    // Payment evidence is `other`-only — a payment ask of another kind never admits it.
+    expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment', sms_context: ctx })).toBe(false);
+    expect(admissibleWitness(invoicePaid, { kind: 'schedule_visit', description: 'Did my payment go through?', sms_context: ctx })).toBe(false);
+  });
+
+  test('rule 2: the extraction is asked to judge money going back, however worded, as never answered by a payment', () => {
+    const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
+    const obligationSchema = SCHEMA.properties.obligations.items;
+    expect(obligationSchema.required).toContain('answered_by_payment');
+    expect(obligationSchema.properties.answered_by_payment).toEqual({ type: 'boolean' });
+    const prompt = buildPrompt({ message: source('Did my payment go through?') });
+    expect(prompt).toContain('answered_by_payment is true only when the customer\'s own payment arriving');
+    for (const phrase of ['a refund, reversal, void, reimbursement, chargeback', 'a change of how the customer pays', 'a receipt or other document']) {
+      expect(prompt).toContain(phrase);
+    }
+  });
+
+  test('rule 2: the completion check repeats the rule — a payment never answers money going back, however worded', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment({ kind: 'other', description: 'Did my payment go through?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
+      .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
+  });
+
+  test('owner ruling 2026-09-28: the extraction no longer judges whether a reply could answer an ask', () => {
+    const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
+    const obligationSchema = SCHEMA.properties.obligations.items;
+    expect(obligationSchema.required).not.toContain('answered_by_reply');
+    expect(obligationSchema.properties).not.toHaveProperty('answered_by_reply');
+    expect(buildPrompt({ message: source("What's the Zelle number?") })).not.toContain('answered_by_reply');
+  });
+
+  test('owner ruling 2026-09-28: a person\'s reply or call back closes a general ask without the model, whatever it says', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const ask = { kind: 'other', description: 'I thought it was 125 a quarter', sms_context: { ...ctx, basis: 'request', money_answerable: false } };
+    const reply = (id, created_at, text, extra = {}) => ({ id, ref: `sms:${id}`, type: 'sms', status: 'delivered',
+      message_type: 'manual', operator_sent: true, created_at, text, ...extra });
+    const first = reply('first', '2040-03-11T15:00:00Z', 'You got it');
+    const later = reply('later', '2040-03-11T16:00:00Z', 'Following up');
+    // The earliest response is the witness, with no quote to find in it.
+    expect(await verifySmsFulfillment(ask, { records: [later, first], failures: [] })).toMatchObject({ verdict: 'fulfilled',
+      record_type: 'sms', record_id: 'first', matched_at: '2040-03-11T15:00:00Z', quote: null, basis: 'person_reply' });
+    expect(await verifySmsFulfillment(ask, { records: [reply('ok', '2040-03-11T15:00:00Z', 'Ok')], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'ok' });
+    // A call back through the staff bridge, earlier than any text.
+    const call = { id: 'call-1', ref: 'call:call-1', type: 'call', status: 'completed', duration_seconds: 300, source: 'tech-click',
+      v2_extraction_status: 'valid', is_voicemail: 'false', created_at: '2040-03-11T14:00:00Z', text: '' };
+    expect(await verifySmsFulfillment(ask, { records: [first, call], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'call', record_id: 'call-1' });
+    // A failed or truncated channel cannot hide a response that was loaded.
+    expect(await verifySmsFulfillment(ask, { records: [first], failures: ['visit', 'sms_truncated'] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'first' });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    // Inside an open window a message waits for the deadline (R1).
+    expect(await verifySmsFulfillment(ask, { records: [first], failures: [] }, { eventOnly: true })).toMatchObject({ verdict: 'open' });
+    // A text with no person's mark is never the shortcut; the model sees it as context.
+    await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
+    // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
+    await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
+    // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
+    expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
+      { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
+    // The check is told a promise is kept only by doing it, on the day it named.
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
+    // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
+    const { basis: _basis, ...noBasis } = ask.sms_context;
+    await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(5);
+  });
+
+  test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
+    const scopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: { ...ctx, property_id: 'home' } };
+    const unscopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: ctx };
+    const invoiceAtHome = { ...invoicePaid, property_id: 'home' };
+    const invoiceElsewhere = { ...invoicePaid, property_id: 'rental' };
+    const invoiceUnlinked = { ...invoicePaid, property_id: null };
+    expect(admissibleWitness(invoiceAtHome, scopedAsk)).toBe(true);
+    expect(admissibleWitness(invoiceElsewhere, scopedAsk)).toBe(false);
+    // A payment nothing ties to any property still counts for a scoped ask
+    // (owner ruling 2026-09-27): only another property's payment is refused.
+    expect(admissibleWitness(invoiceUnlinked, scopedAsk)).toBe(true);
+    expect(admissibleWitness(ledgerPaid, scopedAsk)).toBe(true);
+    // Unscoped: every leg, linked or not, is admitted.
+    expect(admissibleWitness(invoiceUnlinked, unscopedAsk)).toBe(true);
+    expect(admissibleWitness(ledgerPaid, unscopedAsk)).toBe(true);
+  });
+
+  test('rule 9 / Codex round 1 P1-B: a ledger record carries only amount, date and the structured method — never a free-text key', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    // The real query (loadSmsFulfillmentEvidence) never selects
+    // payments.description at all any more; this is the shape it actually
+    // produces — a controlled `method` enum, no free-text field whatsoever.
+    const ledger = { ...ledgerPaid, method: 'zelle', text: 'Payment of $200.00 recorded 2040-03-11 (zelle)' };
+    const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    await verifySmsFulfillment(ask, { records: [ledger], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).toContain('(zelle)');
+    const record = JSON.parse(prompt.slice(prompt.indexOf('{"obligation"'))).records[0];
+    expect(record).not.toHaveProperty('description');
+    expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
+  });
+
+  test('rule 1: admissibility alone never closes the row — grounding still requires the model to cite and quote the payment witness', () => {
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    const evidence = { records: [invoicePaid], failures: [] };
+    // The model said open: no auto-fulfill even though a payment witness exists.
+    expect(groundFulfillment({ verdict: 'open', record_ref: null, quote: null }, evidence, paymentOther)).toEqual({ verdict: 'open' });
+    // The model cited it with a grounded quote: fulfilled, carrying which table to lock (rule 8).
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'payment:invoice-1', quote: 'Invoice Quarterly paid' }, evidence, paymentOther))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'payment', record_id: 'invoice-1', payment_source: 'invoice' });
   });
 });
 

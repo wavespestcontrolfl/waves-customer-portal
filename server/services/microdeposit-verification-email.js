@@ -8,60 +8,56 @@
  * tier / follow-up step) so the email re-nudges on the SAME cadence as the SMS,
  * once per touch — not once forever, and not on every cron pass.
  */
-const db = require('../models/db');
-const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { isDefiniteRejection } = require('./sendgrid-mail');
-const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { currency } = require('./email-template');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
+const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const {
+  billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
+} = require('./billing-email-sender');
+
+const TEMPLATE_KEY = 'payment.microdeposit_verification';
 
 function firstToken(value) {
   return String(value || '').trim().split(/\s+/)[0] || '';
 }
 
-function isEmailLike(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
-}
+// This email keeps no attempt log of its own; its email_messages row is the
+// record.
+async function noAttemptLog() {}
 
 /**
  * @returns {{ ok: boolean, skipped?: boolean, blocked?: boolean, deduped?: boolean,
- *             reason?: string, error?: string }}
+ *             retryable?: boolean, deliveryOutcome?: string, reason?: string, error?: string }}
  */
 async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, enforceBillingPreference = false }) {
   if (!invoice?.id || !customer?.id) return { ok: false, skipped: true, reason: 'missing_context' };
 
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customer.id })
-    .first()
-    .catch((err) => {
-      logger.warn(`[microdeposit-email] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
-      return null;
-    });
-  if (enforceBillingPreference && prefs?.email_enabled === false) {
-    return { ok: false, skipped: true, reason: 'email_disabled' };
-  }
-  if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === false) {
-    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
-  }
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {}).filter((e) => isEmailLike(e.email));
-  if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
+  // Who this email may go to. The customer's billing choices, recipient and
+  // invoice ownership come from the shared billing email authority (owner
+  // ruling 2026-09-27), read here and again under its locks at the provider
+  // handoff. An operator's explicit send skips the customer's choices, as
+  // before, and rechecks ownership only.
+  const authorityInput = {
+    customerId: customer.id, invoiceId: invoice.id, channel: 'email',
+    metadata: { billingDeliveryCategory: 'payment_issue' },
+  };
+  const { recipient, to, refusal } = enforceBillingPreference
+    ? await billingEmailRecipient(authorityInput, 'microdeposit-email')
+    : await operatorEmailRecipient(customer, 'microdeposit-email');
+  if (refusal) return refusal;
 
-  const amountDue = invoiceAmountDue(invoice);
   const touch = String(touchKey || 'default');
-  let providerHandoffStarted = false;
-  let emailDisabledAtHandoff = false;
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'payment.microdeposit_verification',
-      to: recipient.email,
+      templateKey: TEMPLATE_KEY,
+      to,
       payload: {
         first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
         invoice_title: invoice.title || 'your service',
-        amount_due: currency(amountDue),
+        amount_due: currency(invoiceAmountDue(invoice)),
         billing_url: `${publicPortalUrl()}/?tab=billing`,
       },
       recipientType: 'customer',
@@ -69,47 +65,19 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
       triggerEventId: `microdeposit_verification_email:${invoice.id}:${touch}`,
       idempotencyKey: `microdeposit_verification_email:${invoice.id}:${touch}`,
       suppressionGroupKey: 'transactional_required',
-      categories: ['bank_verification', 'payment_setup'],
-      ...(enforceBillingPreference ? {
-        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
-          const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
-          if (ownership.ok !== true) return ownership;
-          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
-          if (freshPrefs?.email_enabled === false) {
-            emailDisabledAtHandoff = true;
-            return { ok: false };
-          }
-          if (billingChannelAllowed(freshPrefs || {}, 'payment_issue', 'email') === false) return { ok: false };
-          providerHandoffStarted = true;
-          await dispatch(trx);
-          return { ok: true };
-        }),
-      } : {}),
+      categories: ['bank_verification', 'payment_setup',
+        ...(enforceBillingPreference ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY])],
+      withProviderHandoff: enforceBillingPreference
+        ? (dispatch) => dispatchUnderBillingEmailAuthority({
+          input: authorityInput, recipientEmail: to, templateKey: TEMPLATE_KEY, dispatch, state,
+        })
+        : selfPayOnlyHandoff(invoice.id, state),
     });
-    if (emailDisabledAtHandoff && !result.sent) {
-      return { ok: false, skipped: true, reason: 'email_disabled' };
-    }
-
-    return {
-      ok: !!result.sent,
-      blocked: !!result.blocked,
-      deduped: !!result.deduped,
-      reason: result.reason || null,
-      ...(result.deliveryOutcome ? { deliveryOutcome: result.deliveryOutcome } : {}),
-      ...(result.retryable ? { retryable: true } : {}),
-      ...(result.deferred ? { deferred: true } : {}),
-    };
-  } catch (e) {
-    logger.warn(`[microdeposit-email] send failed for invoice ${invoice.id}: ${e.message}`);
-    if (e.providerOutcome?.deliveryOutcome === 'accepted') return { ok: true, providerAccepted: true };
-    if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(e.code)) {
-      return { ok: false, skipped: true, reason: 'template_unavailable' };
-    }
-    const definitelyNotSent = e.code !== 'EMAIL_SEND_IN_PROGRESS'
-      && (e.providerOutcome?.deliveryOutcome === 'not_sent'
-        || (e.providerOutcome?.deliveryOutcome !== 'uncertain'
-          && ((enforceBillingPreference && !providerHandoffStarted) || isDefiniteRejection(e))));
-    return { ok: false, error: e.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
+    return await billingEmailSendOutcome(result, state, noAttemptLog);
+  } catch (err) {
+    return billingEmailSendFailure(err, state.handoffStarted, noAttemptLog, {
+      logTag: 'microdeposit-email', label: `verification for invoice ${invoice.id}`,
+    });
   }
 }
 

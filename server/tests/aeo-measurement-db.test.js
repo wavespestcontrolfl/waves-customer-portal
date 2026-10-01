@@ -32,10 +32,10 @@ run('AEO PostgreSQL evidence, cohort, and feedback', () => {
     await database.schema.createTable('seo_llm_mentions', t => {
       t.increments('id'); t.integer('query_id'); t.text('query'); t.date('check_date');
       t.text('llm_platform'); t.text('model_version'); t.boolean('waves_mentioned');
-      t.jsonb('waves_cited_urls'); t.jsonb('competitors_mentioned');
+      t.jsonb('waves_cited_urls'); t.jsonb('competitors_mentioned'); t.jsonb('companies_named');
     });
     await database.schema.createTable('content_optimization_impact', t => {
-      t.increments('id'); t.text('bucket'); t.text('page_url'); t.jsonb('aeo_query_ids');
+      t.increments('id'); t.text('bucket'); t.text('run_id'); t.text('page_url'); t.jsonb('aeo_query_ids');
       t.timestamp('deployed_at', { useTz: true }); t.timestamp('aeo_checked_at', { useTz: true });
       t.timestamp('updated_at', { useTz: true }); t.text('aeo_verdict'); t.boolean('aeo_now_cited');
     });

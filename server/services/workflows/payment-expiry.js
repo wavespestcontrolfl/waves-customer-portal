@@ -5,6 +5,7 @@ const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 const PaymentLifecycleEmail = require('../payment-lifecycle-email');
 const { billingChannelAllowed } = require('../billing-delivery-channels');
+const { previouslySettledBillingLegs } = require('../messaging/billing-channel-routing');
 
 class PaymentExpiry {
   /**
@@ -331,9 +332,22 @@ class PaymentExpiry {
           },
           hasEmailLeg: reminderStage !== '60_day',
         });
+        if (require('../collections/collection-hold').isHoldSuppression(sendResult)) {
+          // Dispute hold: the notice waits (no alert row, no interaction stamped; the next sweep
+          // re-tries); the email leg is gated at its own lifecycle boundary.
+          await emailPromise;
+          continue;
+        }
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
         }
+
+        const emailResult = await emailPromise;
+        // The App bell (including one with no native push acceptance) may
+        // have been visible before this sweep. Repairing that old event is
+        // not a new alert, interaction, or notification count; an external
+        // lifecycle Email accepted now remains a fresh independent reach.
+        if (previouslySettledBillingLegs([sendResult, emailResult])) continue;
 
         // Create inventory_alerts entry for dashboard visibility
         await db('inventory_alerts').insert({
@@ -346,7 +360,7 @@ class PaymentExpiry {
           status: 'active',
         });
 
-        const deliveredChannel = ['sms', 'email', 'push'].includes(sendResult.channel)
+        const deliveredChannel = sendResult.deduped ? 'email' : ['sms', 'email', 'push'].includes(sendResult.channel)
           ? sendResult.channel : 'sms';
         await db('customer_interactions').insert({
           customer_id: card.customer_id,
@@ -356,7 +370,6 @@ class PaymentExpiry {
           body: `Card ****${card.last_four} expires ${expLabel}`,
         });
 
-        await emailPromise;
         notified++;
       } catch (err) {
         logger.error(`Payment expiry check failed for card ${card.id}: ${err.message}`);

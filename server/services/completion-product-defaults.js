@@ -61,6 +61,19 @@
  * mechanism (lawn-completion-defaults.js / GATE_LAWN_COMPLETION_DEFAULTS)
  * and must not get a second, conflicting one here.
  *
+ * Follow-up visits (Codex r3 P1, PR #5049): POST /:serviceId/schedule-
+ * followup books a follow-up child by copying its source visit's
+ * service_type verbatim and marking it ONLY with scheduled_services.
+ * followup_source_service_id — the usual text/service-key matching alone
+ * would resolve it back to the SOURCE visit (a cockroach follow-up matches
+ * "cockroach"/"roach" just like the initial cleanout). When a scheduled
+ * service carries that column, resolveCompletionDefaultProductNames is
+ * called with isFollowup: true, which overrides the resolved visit to the
+ * matched program's own follow-up visit (found from protocol-matcher's
+ * rule table, never a hard-coded visit number) — today that is only
+ * cockroach visit 3, which carries no completionDefaultProducts and so
+ * resolves to source 'none', never the visit-1 cleanout mix.
+ *
  * A product NAME resolves to an active products_catalog row by: exact
  * name, exact product_aliases alias, then a token-subset match (a legacy
  * shorthand like "Advion Gel" is a token subset of the catalog's current
@@ -77,7 +90,7 @@
  * with no products prefilled.
  */
 
-const { matchServiceProtocol } = require('./protocol-matcher');
+const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
 const { gateEnvValue } = require('../config/feature-gates');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 
@@ -154,7 +167,7 @@ function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = fals
 // visit's own record of how it's actually applied there (scope +
 // completionApplicationMethod) — a name can appear in more than one
 // line's hints (rare), so the FIRST line naming it wins, matching
-// dedupeNames' own first-seen rule.
+// dedupeEntries' own first-seen rule.
 function completionApplicationMethodForName(visit, name) {
   const lineMeta = visit?.lineMeta;
   if (!lineMeta || typeof lineMeta !== 'object') return null;
@@ -172,13 +185,57 @@ function completionApplicationMethodForName(visit, name) {
 
 // -- visit resolution + precedence (pure) ------------------------------
 
+// The program's own follow-up rule, resolved from protocol-matcher's rule
+// table rather than a hard-coded visit number (Codex r3 P1, PR #5049):
+// MATCH_RULES carries exactly one `_followup`-reasoned rule for a program
+// that has a follow-up stage today (bed_bug_followup, cockroach_followup,
+// rodent_followup, palm_followup) — a program with none (pest, mosquito,
+// termite, tree & shrub) returns null and the caller's normal text-matched
+// visit stands. Tracks protocols.json/protocol-matcher.js as programs and
+// visit numbers change, instead of hard-coding "cockroach visit 3".
+function followupRuleForProgram(programKey) {
+  if (!programKey) return null;
+  return MATCH_RULES.find((rule) => rule.programKey === programKey && /_followup$/.test(rule.reason || '')) || null;
+}
+
+function findVisitByNumber(program, visitNumber) {
+  return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
+}
+
+// Applies the isFollowup override (see resolveCompletionDefaultProductNames'
+// own doc above) to a raw matchServiceProtocol result, isolated from the
+// precedence logic below so each stays independently readable.
+function resolveEffectiveVisit(match, programKey, isFollowup) {
+  const visit = match?.matchedVisit || null;
+  const matchReason = match?.reason || null;
+  const matched = !!match?.matched;
+  if (!isFollowup || !programKey || !match?.program) return { visit, matchReason, matched };
+  const rule = followupRuleForProgram(programKey);
+  const followupVisit = rule ? findVisitByNumber(match.program, rule.visit) : null;
+  if (!followupVisit) return { visit, matchReason, matched };
+  return { visit: followupVisit, matchReason: rule.reason, matched: true };
+}
+
 // Resolves which protocol visit a service maps to and, from it, the
 // ordered product NAMES to prefill (before any catalog lookup), plus each
 // name's protocol-specified application method (methodsByName, keyed
 // lower-case). Pure: given the same protocols.json + inputs, always the
 // same output.
+//
+// isFollowup (Codex r3 P1, PR #5049): a follow-up visit booked through
+// POST /:serviceId/schedule-followup copies its source visit's
+// service_type verbatim and is marked ONLY by scheduled_services.
+// followup_source_service_id — text matching alone resolves it back to the
+// SOURCE visit (a booked follow-up to "Cockroach Control Service" matches
+// visit 1's own terms, never visit 3's "roach follow"/"roach recheck"
+// wording, since its service_type carries neither). When true, and the
+// matched program has its own follow-up visit (followupRuleForProgram),
+// this overrides the resolved visit to THAT visit instead — today that is
+// cockroach visit 3, which carries no completionDefaultProducts, so it
+// resolves to source 'none' (a deliberate "nothing curated for a
+// follow-up yet", never the cleanout mix a fresh initial visit gets).
 function resolveCompletionDefaultProductNames({
-  protocols, serviceType, serviceKey = null, month = null,
+  protocols, serviceType, serviceKey = null, month = null, isFollowup = false,
 } = {}) {
   let match = null;
   try {
@@ -187,8 +244,8 @@ function resolveCompletionDefaultProductNames({
     match = null;
   }
   const programKey = match?.programKey || null;
-  const visit = match?.matchedVisit || null;
-  const matchedVisit = { visit: visit?.visit ?? null, reason: match?.reason || null, matched: !!match?.matched };
+  const { visit, matchReason, matched } = resolveEffectiveVisit(match, programKey, isFollowup);
+  const matchedVisit = { visit: visit?.visit ?? null, reason: matchReason, matched };
 
   // Lawn already has its own governed completion-defaults mechanism
   // (lawn-completion-defaults.js) — this resolver must never seed a
@@ -314,7 +371,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
   try {
     const scheduled = await db('scheduled_services')
       .where({ id: serviceId })
-      .first('id', 'customer_id', 'property_id', 'service_id', 'service_type', 'service_key_snapshot', 'scheduled_date');
+      .first(
+        'id', 'customer_id', 'property_id', 'service_id', 'service_type', 'service_key_snapshot',
+        'scheduled_date', 'followup_source_service_id',
+      );
     if (!scheduled) return empty;
 
     // Month selects the visit in month-keyed programs such as T&S.
@@ -328,6 +388,9 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       serviceType: scheduled.service_type,
       serviceKey: scheduled.service_key_snapshot || null,
       month,
+      // A row this IS a follow-up child of (Codex r3 P1, PR #5049) — see
+      // resolveCompletionDefaultProductNames' own isFollowup doc above.
+      isFollowup: !!scheduled.followup_source_service_id,
     });
 
     let holds = [];

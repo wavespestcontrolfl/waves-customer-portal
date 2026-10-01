@@ -1,4 +1,4 @@
-const { buildLeadFunnel } = require('../services/lead-funnel');
+const { buildLeadFunnel, buildFunnelBreakdown } = require('../services/lead-funnel');
 
 const row = (lead_source, funnel_stage, n, is_paid = false) => ({ lead_source, funnel_stage, n, is_paid });
 
@@ -60,7 +60,7 @@ describe('buildLeadFunnel', () => {
   test('empty input yields empty sources and zeroed totals, never NaN rates', () => {
     const out = buildLeadFunnel([]);
     expect(out.sources).toEqual([]);
-    expect(out.totals).toEqual({ leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, bookRate: 0, completeRate: 0 });
+    expect(out.totals).toEqual({ leads: 0, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, revenue: 0, bookRate: 0, completeRate: 0 });
     expect(out.stagesPresent).toEqual({ contacted: false, estimate: false, booked: false });
   });
 
@@ -98,5 +98,42 @@ describe('facebook organic split', () => {
     expect(out.sources.find((s) => s.sourceKey === 'facebook_organic').source).toBe('Facebook (organic)');
     expect(out.paid.leads).toBe(2);
     expect(out.organic.leads).toBe(3);
+  });
+});
+
+describe('revenue and the other funnel views', () => {
+  test('sources and totals carry the completed revenue credited to their rows', () => {
+    const out = buildLeadFunnel([
+      { lead_source: 'organic', funnel_stage: 'completed', n: 2, revenue: '450.50' },
+      { lead_source: 'organic', funnel_stage: 'lead', n: 3, revenue: '0' },
+      { lead_source: 'google_ads', funnel_stage: 'completed', n: 1, revenue: 199.99, is_paid: true },
+    ]);
+    expect(out.sources.find((s) => s.sourceKey === 'organic').revenue).toBe(450.5);
+    expect(out.totals.revenue).toBe(650.49);
+    expect(out.paid.revenue).toBe(199.99);
+  });
+
+  test('a landing-page view funnels exactly like the source view, and an unknown page stays unknown', () => {
+    const ants = 'wavespestcontrol.com/pest-control/ants';
+    const page = buildFunnelBreakdown([
+      { group_key: ants, funnel_stage: 'lead', n: '3', revenue: '0' },
+      { group_key: ants, funnel_stage: 'booked', n: 1, revenue: 0 },
+      { group_key: ants, funnel_stage: 'completed', n: 1, revenue: '300' },
+      { group_key: ants, funnel_stage: 'lost', n: 1, revenue: 0 },
+      { group_key: '(unknown)', funnel_stage: 'lead', n: 2, revenue: 0 },
+    ], 'page');
+    expect(page[0]).toMatchObject({ key: ants, label: ants, leads: 6, booked: 2, completed: 1, lost: 1, revenue: 300 });
+    expect(page[0].rates.bookRate).toBe(33);
+    expect(page[1]).toMatchObject({ key: '(unknown)', label: '(unknown)', leads: 2 });
+    expect(page[0].isPaid).toBeUndefined(); // paid vs organic belongs to the source view only
+  });
+
+  test('service and heard-about views read as plain labels; a missing answer is shown as no answer', () => {
+    expect(buildFunnelBreakdown([{ group_key: 'tree_shrub', funnel_stage: 'lead', n: 1 }], 'service')[0].label).toBe('Tree & shrub');
+    const heard = buildFunnelBreakdown([
+      { group_key: 'chatgpt', funnel_stage: 'lead', n: 1 },
+      { group_key: '(unknown)', funnel_stage: 'lead', n: 4 },
+    ], 'heard');
+    expect(heard.map((g) => g.label)).toEqual(['No answer (not asked or skipped)', 'ChatGPT']);
   });
 });

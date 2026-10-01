@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
     const val = typeof spec === 'function' ? spec(mockCounters[table]) : spec;
     const chain = {};
     const self = () => chain;
-    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
+    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
       chain[m] = jest.fn((...args) => {
         if (table === 'invoices' && m === 'where' && args[0] === 'notes') mockInvoiceNotePredicates.push(args);
         if (typeof args[0] === 'function') args[0].call(chain, chain);
@@ -116,7 +116,30 @@ test('terminal alert scan recognizes an uppercase note stamp', async () => {
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
   expect(mockInvoiceNotePredicates).toEqual([['notes', 'ilike', `%accepted estimate #${EST}%`]]);
   expect(mockUpdates).toHaveLength(1);
-  expect(mockUpdates[0].payload.body).toContain('COVERED');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).toContain('COVERED');
+});
+
+test('a terminal alert cut by the brevity guard is rewritten from its full `detail`, and the rewrite stays cut with detail kept', async () => {
+  const lead = 'A visit was completed but its invoice is void, so NO new invoice was cut and the customer completion text carried no pay link.';
+  const terminal = {
+    id: 'terminal-alert',
+    body: `${lead.slice(0, 100)}…`,
+    detail: `${lead} ALSO: the one-time WaveGuard setup fee is owed.`,
+    metadata: { setupFeeDedupeKey: `unminted_setup_fee_manual_billing:${EST}`,
+      customerId: CUST, setupFeeResolved: false, expectedSetupFeeCents: 9900 },
+  };
+  mockTables = {
+    notifications: (n) => (n === 1 || n === 2 || n === 4 ? [terminal] : []),
+    invoices: [{ id: 'inv-fee', status: 'paid', line_items: FEE_LINE,
+      notes: `ACCEPTED ESTIMATE #${EST.toUpperCase()}.` }],
+  };
+  await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
+  expect(mockUpdates).toHaveLength(1);
+  const { body, detail } = mockUpdates[0].payload;
+  expect(body.length).toBeLessThanOrEqual(110);
+  expect(detail).toContain(lead);
+  expect(detail).toContain('COVERED');
+  expect(detail).not.toContain('ALSO:');
 });
 
 test('a RESOLVED alert whose fee invoice becomes REFUNDED stays settled — never rewritten to demand the fee again', async () => {
@@ -148,8 +171,8 @@ test('a VOID (not refunded) fee invoice beside a live application DOES rewrite t
   };
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
   expect(mockUpdates).toHaveLength(1);
-  expect(mockUpdates[0].payload.body).toContain('do NOT bill an application again');
-  expect(mockUpdates[0].payload.body).toContain('one-time setup fee');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).toContain('do NOT bill an application again');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).toContain('one-time setup fee');
   expect(mockUpdates[0].payload.read_at).toBe(null); // newly actionable — rings
 });
 
@@ -167,8 +190,8 @@ test('a PARTIAL fee amount ($9.90 vs expected $99) never resolves the fee — ce
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
   // Application covered, fee NOT (partial) → fee-only instruction, never resolved.
   expect(mockUpdates).toHaveLength(1);
-  expect(mockUpdates[0].payload.body).toContain('one-time setup fee');
-  expect(mockUpdates[0].payload.body).not.toContain('RESOLVED');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).toContain('one-time setup fee');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).not.toContain('RESOLVED');
 });
 
 test('a covered annual-prepay term WAIVES the estate fee — a fee-owed alert resolves instead of instructing $99', async () => {
@@ -182,8 +205,8 @@ test('a covered annual-prepay term WAIVES the estate fee — a fee-owed alert re
   };
   await reconcileSetupFeeAlert({ customerId: CUST, sourceEstimateId: EST });
   expect(mockUpdates).toHaveLength(1);
-  expect(mockUpdates[0].payload.body).toContain('RESOLVED');
-  expect(mockUpdates[0].payload.body).not.toContain('Still owed');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).toContain('RESOLVED');
+  expect(mockUpdates[0].payload.detail || mockUpdates[0].payload.body).not.toContain('Still owed');
 });
 
 test('a foreign re-linked visit never reconciles another customer\'s alert', async () => {

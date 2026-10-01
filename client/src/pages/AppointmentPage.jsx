@@ -14,6 +14,12 @@
  * the glass scene, and the same warm-surface inline palette. The owner
  * explicitly removed the app-download block from this family of pages —
  * do not re-add it.
+ *
+ * GATE_VISIT_PREP_PHOTOS (customer-visit-photos-scope-20260928.md): when
+ * the payload's `prepPhotos.eligible` is true, a quiet "Anything you want
+ * your technician to look at?" block renders between Add to calendar and
+ * "Need a different time?" (VisitPrepPhotoForm, owns its own submit/ack/
+ * error states). Gate off / field absent: no block, page unchanged.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
@@ -22,6 +28,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import VanScene from '../components/VanScene';
+import VisitPrepPhotoForm from '../components/visit-prep/VisitPrepPhotoForm';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -300,6 +307,25 @@ export default function AppointmentPage() {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Posts VisitPrepPhotoForm's FormData to this token's own upload route.
+  // No Content-Type header — the browser sets the multipart boundary for a
+  // FormData body, and the server's own pre-parser guard (visitPrepPreParser
+  // Guard) 404s anything that isn't multipart/form-data. Throws an Error
+  // carrying `.status`/`.code` (from the server's `{ error, code }` shape;
+  // a plain 404 carries no code) so the form can map it to a customer line.
+  const submitVisitPrepPhotos = useCallback(async (formData) => {
+    const res = await fetch(`${API_BASE}/public/appointment/${token}/photos`, {
+      method: 'POST',
+      body: formData,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body?.ok) return body;
+    const err = new Error(body?.error || "We couldn't send that just now.");
+    err.status = res.status;
+    err.code = body?.code || null;
+    throw err;
+  }, [token]);
+
   const confirm = async () => {
     if (confirming) return;
     setConfirming(true);
@@ -391,6 +417,12 @@ export default function AppointmentPage() {
   // Server-computed in Eastern time — the visit date is an ET calendar day,
   // and the device clock can already disagree with it.
   const isTomorrow = !!data.isTomorrow;
+  // Dead-link guard (C3/C6): a token alone isn't enough — canMoveOnline is
+  // false for a visit that already starts inside the self-serve move-notice
+  // window, where /reschedule/:token would just refuse the move. Defaults
+  // true so an older cached payload (no canMoveOnline field yet) keeps
+  // today's behavior rather than hiding the card.
+  const canPickOnline = !!data.rescheduleToken && data.canMoveOnline !== false;
 
   return (
     <Page>
@@ -476,7 +508,7 @@ export default function AppointmentPage() {
               {confirming ? 'Confirming…' : 'Confirm this appointment'}
             </button>
             <div style={{ fontSize: 14, color: S.muted, marginTop: 10, textAlign: 'center', lineHeight: 1.5 }}>
-              {data.rescheduleToken
+              {canPickOnline
                 ? "Time doesn't work? Pick a different one below — no call needed."
                 : "Time doesn't work? Text or call us and we'll sort it out."}
             </div>
@@ -517,7 +549,18 @@ export default function AppointmentPage() {
         />
       ) : null}
 
-      {data.rescheduleToken ? (
+      {/* GATE_VISIT_PREP_PHOTOS: key absent (gate off) or eligible:false
+          renders nothing — the page is byte-identical to before this lane. */}
+      {data.prepPhotos?.eligible ? (
+        <Card data-testid="visit-prep-card">
+          <VisitPrepPhotoForm
+            photosRemaining={data.prepPhotos.photosRemaining}
+            onSubmit={submitVisitPrepPhotos}
+          />
+        </Card>
+      ) : null}
+
+      {canPickOnline ? (
         <Card>
           <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
             Need a different time?

@@ -62,11 +62,34 @@ function trimTrailingUrlNoise(url) {
   return out;
 }
 
-function sourceUrls(document, brief = {}) {
+// `evidenceUrls`: sources that support the text but are not published with it —
+// the competitor pages a post may name but never link (owner ruling
+// 2026-09-28; evidenceUrlsFor below). The review still reads them, so a claim
+// sourced from a competitor's own page keeps its evidence without the post
+// linking it (Codex r2, r6 on #5191).
+// A destination in any form competitor-links.js detects (http://,
+// protocol-relative, www., entity- or backslash-escaped, backslash
+// separators) as the https URL the review's filter below accepts (Codex r3,
+// r5 on #5191); null when it isn't a web URL at all. Same WHATWG rules as
+// competitor-links' hostOf: an http(s) scheme is parsed as written, where a
+// backslash is a slash ("https:\\orkin.com\\plans").
+function evidenceUrl(raw) {
+  const url = require('./competitor-links').readableUrl(raw);
+  const absolute = /^https?:/i.test(url) ? url : /^[\\/]{2}/.test(url) ? `https:${url}` : /^www\./i.test(url) ? `https://${url}` : null;
+  if (!absolute) return null;
+  try {
+    const parsed = new URL(absolute);
+    parsed.protocol = 'https:';
+    return parsed.href;
+  } catch { return null; }
+}
+
+function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Public citation URLs only; the transport independently checks DNS/IP/redirects.
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
-  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}`;
+  const evidence = (Array.isArray(evidenceUrls) ? evidenceUrls : []).map(evidenceUrl).filter(Boolean);
+  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
   return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
     .map(trimTrailingUrlNoise)
     .filter((url) => {
@@ -93,7 +116,7 @@ function reviewError(result) {
   return error;
 }
 
-async function evaluate(document, brief = {}) {
+async function evaluate(document, brief = {}, { evidenceUrls = [] } = {}) {
   const parsed = fm.parse(document);
   const domain = resolveDomainContext(parsed.data.domains);
   if (!domain) {
@@ -101,7 +124,7 @@ async function evaluate(document, brief = {}) {
       findings: [{ action: 'Editorial evidence domain could not be resolved from this document\'s frontmatter domains; retry once it is unambiguous.' }] }] });
   }
   return require('./editorial-review').review({ document, title: parsed.data.title || parsed.data.metaTitle || '',
-    domain, sourceUrls: sourceUrls(document, brief), factsPack: brief.facts_pack || null });
+    domain, sourceUrls: sourceUrls(document, brief, evidenceUrls), factsPack: brief.facts_pack || null });
 }
 
 // Refresh document assembly: starts from the live page's frontmatter
@@ -154,12 +177,49 @@ async function refreshReviewFrontmatter(draft, brief) {
 // Review/repair loop: evaluates the assembled document, attempts one repair
 // pass on a clean (non-error) failure, then re-evaluates. Frontmatter is
 // frozen for the whole loop — repair may only change the body bytes.
+// A competitor page the writer relied on is named in the post but never
+// linked (owner ruling 2026-09-28), so its URL goes in notes_for_reviewer,
+// which never publishes. Two kinds of notes URL are taken: competitor hosts,
+// and public-record pages (BBB, ConsumerAffairs, any .gov), which the price
+// guard accepts as the source of a competitor price (content-guardrails
+// competitorPriceEvidenced) — dropping them here reviewed a sourced price
+// without its source (Codex r10 on #5191). Every other source is linked in
+// the body, where the link allowlist applies. Each URL is read whole from
+// one of the detector's URL starts to the next space (never joined across
+// lines), a balanced "(2026)" kept and only unmatched wrapping punctuation
+// trimmed, as sourceUrls does (Codex r7 on #5191), then normalized to the
+// https URL a browser requests (evidenceUrl), so every consumer (the review,
+// the publish-day snapshots) gets the same clean list.
+function evidenceUrlsFor(draft) {
+  const { isCompetitorHost } = require('./competitor-links');
+  const { isPublicRecordHost } = require('./content-guardrails');
+  return notesEvidenceUrls(draft).filter((url) => {
+    const host = new URL(url).hostname;
+    return isCompetitorHost(host) || isPublicRecordHost(host);
+  });
+}
+
+// Every URL in the draft's notes_for_reviewer, read and normalized as above.
+// The price guard reads the whole list: a competitor price needs a source
+// there even when it is a public-record page (content-guardrails
+// competitorPriceEvidenced; Codex r9 on #5191).
+function notesEvidenceUrls(draft) {
+  const notes = typeof draft?.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : '';
+  const { URL_START_RE, readableUrl } = require('./competitor-links');
+  const urlRe = new RegExp(`(?:${URL_START_RE.source})[^\\s<>"'\`\\]}]+`, 'gi');
+  // Read as the detector reads it: entities decoded, Markdown escapes removed.
+  const urls = (readableUrl(notes).match(urlRe) || [])
+    .map((raw) => evidenceUrl(trimTrailingUrlNoise(raw)))
+    .filter(Boolean);
+  return [...new Set(urls)];
+}
+
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
   let result;
   for (let attempt = 0; attempt < 2; attempt++) {
-    result = await evaluate(document, brief);
+    result = await evaluate(document, brief, { evidenceUrls: evidenceUrlsFor(draft) });
     if (result?.pass === true) {
       const body = fm.parse(document).content;
       return { ...draft, body, editorial_review: result };
@@ -194,13 +254,13 @@ async function prepareDraft(draft, brief = {}) {
   return reviewAndRepairDraft(draft, reviewFrontmatter, brief);
 }
 
-async function filesForDocument({ document, path, brief = {} }) {
+async function filesForDocument({ document, path, brief = {}, evidenceUrls = [] }) {
   if (!enabled() || !applicable(path)) return [];
   const contract = require('../../../packages/editorial-evidence/index.cjs');
   if (!process.env.EDITORIAL_REVIEW_PRIVATE_KEY || !process.env.EDITORIAL_REVIEW_PUBLIC_KEY) {
     throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Editorial signing keys are unavailable; retry after configuration recovers.' }] }] });
   }
-  const result = await evaluate(document, brief);
+  const result = await evaluate(document, brief, { evidenceUrls });
   if (result?.pass !== true) throw reviewError(result);
   // evaluate() above already resolved this document's domain successfully,
   // so this is never null here.
@@ -388,4 +448,4 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
 const evidenceDomain = (document) => domainContextFromDocument(document)?.hostname || null;
 
 module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
-  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain };
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, evidenceUrlsFor, notesEvidenceUrls };

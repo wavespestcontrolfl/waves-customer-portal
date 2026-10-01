@@ -76,7 +76,9 @@ async function persistAudit(record) {
     sent_at: providerOutcome && providerOutcome.sentAt ? new Date(providerOutcome.sentAt) : null,
     provider_error: providerOutcome ? providerOutcome.error : null,
 
-    metadata: Number.isFinite(input.renderedSlotMs) && input.appointmentId
+    // promisedWindowUnknown: renderedSlotMs only guarded the send; the body
+    // quoted no window, so none is recorded as the promise.
+    metadata: Number.isFinite(input.renderedSlotMs) && input.appointmentId && input.promisedWindowUnknown !== true
       ? { ...input.metadata, rendered_slot_ms: input.renderedSlotMs } : (input.metadata || null),
   };
 

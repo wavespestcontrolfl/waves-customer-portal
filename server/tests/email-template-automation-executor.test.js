@@ -1,6 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  // Default: every shadow-mode test exercises the ok:true path unless it
+  // overrides this — matches today's "would send" behavior before the
+  // preflight existed.
+  preflightTemplateSend: jest.fn(async () => ({ ok: true })),
+  LEDGER_REQUIRED_CODE: 'EMAIL_DIVISION_LEDGER_REQUIRED',
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -1538,6 +1543,757 @@ describe('email template automation executor', () => {
       await AutomationExecutor.processDueRuns();
 
       expect(dueQuery.whereIn).not.toHaveBeenCalledWith('id', expect.anything());
+    });
+  });
+
+  describe('shadow mode (GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow)', () => {
+    const savedGate = process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = savedGate;
+    });
+
+    test('never calls the email library; finalizes shadow with a domain+hash would_send event', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      // entity_type '' short-circuits livePayloadForRun with no extra query.
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      // The same pre-provider checks a live send would hit ran first (codex
+      // P2) — disabled/missing template, required variables, suppression —
+      // and passed, which is WHY this finalized would_send.
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'estimate.extension_notice',
+        to: 'sam@example.com',
+      }));
+      expect(wouldSendLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        run_id: 'run-1',
+        event_type: 'would_send',
+      }));
+      const metadata = JSON.parse(wouldSendLogQuery.insert.mock.calls[0][0].metadata);
+      expect(metadata).toEqual(expect.objectContaining({
+        automation_key: 'estimate.extension_notice',
+        template_key: 'estimate.extension_notice',
+        trigger_event_key: 'estimate.auto_renewed',
+        recipient_domain: 'example.com',
+      }));
+      expect(metadata.recipient_hash).toEqual(expect.stringMatching(/^[0-9a-f]{12}$/));
+      // Never the full address in the event.
+      expect(JSON.stringify(metadata)).not.toContain('sam@example.com');
+    });
+
+    test('records would_block (not would_send) when the live send would have blocked pre-provider — e.g. a suppressed recipient (codex P2)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({ ok: false, reason: 'Suppressed: unsubscribe' });
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const blockedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'Suppressed: unsubscribe' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, blockedRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldBlockLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        run_id: 'run-1',
+        event_type: 'would_block',
+        message: 'Suppressed: unsubscribe',
+      }));
+      expect(blockedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped',
+        exit_reason: 'Suppressed: unsubscribe',
+      }));
+    });
+
+    // codex P2 round 5 on #5154: shadow preflight hands the annual-offer
+    // guard the SAME estimate id the live dispatchRun does (one shared
+    // helper), so a withheld offer is a would_block, not a false would_send.
+    test('an estimate run passes its estimate id to the preflight; a withheld annual offer records would_block', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({ ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' });
+      const queuedRun = run({ attempts: 0 });
+      const blockedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'annual_offer_withheld' }] });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          blockedRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), wouldBlockLogQuery],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(),
+        now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-1' }));
+      const metadata = JSON.parse(wouldBlockLogQuery.insert.mock.calls[0][0].metadata);
+      expect(metadata.guard).toBe('ANNUAL_OFFER_WITHHELD');
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_block' }));
+    });
+
+    test('a preflight infrastructure failure fails OPEN to would_send (never breaks shadow itself)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockRejectedValueOnce(new Error('db unavailable'));
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(wouldSendLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_send' }));
+    });
+
+    test('a shadow-ORIGIN delayed run finalizes as shadow even after the gate flips to true (codex P1)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      // The run was CREATED while shadow was promised (contextFor stamped
+      // origin_mode:'shadow' at creation time) — this is what a delayed or
+      // retried shadow-origin run looks like once it comes due; the current
+      // gate reading 'true' above must not override that promise.
+      const queuedRun = run({
+        entity_type: '', entity_id: '',
+        context: JSON.stringify({ origin_mode: 'shadow' }),
+      });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('idempotency: a shadow run does not block a later live attempt', () => {
+    test('promotes the existing shadow row in place instead of deduping or inserting a second row', async () => {
+      const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      // delay_minutes:60 -> status 'scheduled', so processTrigger never
+      // reaches executeRun/dispatch — isolates the promotion mechanism.
+      const promotedRunQuery = chain({ returning: [{ ...existingShadowRun, status: 'scheduled' }] });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      const result = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1',
+          customer_id: 'cust-1',
+          customer_email: 'Sam@Example.com',
+          first_name: 'Sam',
+          estimate_url: 'https://example.com/estimate/est-1',
+          new_expires_at: '2026-06-01',
+          renewal_count: 1,
+          status: 'sent',
+        },
+        now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.results[0].deduped).toBe(false);
+      expect(promotedRunQuery.insert).not.toHaveBeenCalled();
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+      expect(promotedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        event_type: 'promoted_from_shadow',
+      }));
+    });
+
+    test('shadow -> email correction -> live replay: promotion refreshes the stored recipient email, never dispatching to the stale shadow-era address', async () => {
+      // The shadow row was created under an OLD address; the customer's
+      // email has since been corrected, and this live replay's payload
+      // (and the under-lock customers re-read) carry the NEW one.
+      const existingShadowRun = run({ status: 'shadow', recipient_email: 'old@example.com', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      const promotedRunQuery = chain({ returning: [{ ...existingShadowRun, status: 'scheduled', recipient_email: 'sam@example.com' }] });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        recipient_email: 'sam@example.com',
+      }));
+    });
+
+    test('promotion refreshes template identity/version/automation_id from THIS live attempt, not the shadow-era values, and stamps origin_mode:live (codex P1)', async () => {
+      // The shadow row was created under an OLDER automation/template
+      // (shadow-era: automation-1 / estimate.extension_notice / version-1).
+      // The automation has since republished a corrected template under a
+      // NEW automation row — the live replay must send THAT content, not
+      // resend the shadow-era template identity dispatchRun would read off
+      // the stale row.
+      const existingShadowRun = run({
+        status: 'shadow',
+        automation_id: 'automation-1',
+        template_key: 'estimate.extension_notice',
+        template_version_id: 'version-1',
+        context: JSON.stringify({ origin_mode: 'shadow' }),
+      });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      const currentAutomation = automation({
+        id: 'automation-2',
+        delay_minutes: 60,
+        template_key: 'estimate.extension_notice_v2',
+        active_version_id: 'version-2',
+      });
+      const promotedRunQuery = chain({
+        returning: [{
+          ...existingShadowRun, status: 'scheduled',
+          automation_id: 'automation-2', template_key: 'estimate.extension_notice_v2', template_version_id: 'version-2',
+        }],
+      });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [currentAutomation] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        automation_id: 'automation-2',
+        template_key: 'estimate.extension_notice_v2',
+        template_version_id: 'version-2',
+      }));
+      const updateArg = promotedRunQuery.update.mock.calls[0][0];
+      expect(JSON.parse(updateArg.context).origin_mode).toBe('live');
+    });
+
+    test('a shadow replay of an existing shadow row still dedupes (no promotion while mode stays shadow)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      try {
+        const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
+        const existingRunQuery = chain({ first: existingShadowRun });
+        const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        setDbQueues({
+          'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+          customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+          email_template_automation_runs: [existingRunQuery],
+          email_template_automation_run_events: [dedupeLogQuery],
+        });
+
+        const result = await AutomationExecutor.processTrigger({
+          triggerEventKey: 'estimate.auto_renewed',
+          triggerEventId: 'estimate_auto_renew:est-1',
+          payload: {
+            estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+            first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+          },
+        });
+
+        expect(result.results[0].deduped).toBe(true);
+        expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
+
+    test('a concurrent promotion race: losing the conditional update dedupes against the row as it now stands, never a fabricated runnable row', async () => {
+      const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      // The conditional UPDATE (WHERE status='shadow') returns ZERO rows —
+      // another replay already won and advanced the row past 'shadow'.
+      const lostRaceUpdateQuery = chain({ returning: [] });
+      const currentRunQuery = chain({ first: { ...existingShadowRun, status: 'sent' } });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, lostRaceUpdateQuery, currentRunQuery],
+        email_template_automation_run_events: [dedupeLogQuery],
+      });
+
+      const result = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(result.results[0].run.status).toBe('sent');
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+  });
+
+  describe('idempotency: a corrected shadow would_block run goes live (pre-live fix)', () => {
+    const payload = {
+      estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+      first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+    };
+    const replay = () => AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload,
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    test('a skipped row whose latest ledger event is would_block is promoted in place, guarded by the status AND the would_block fact', async () => {
+      const blockedRun = run({ status: 'skipped', exit_reason: 'template disabled', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: blockedRun });
+      const promotedRunQuery = chain({ returning: [{ ...blockedRun, status: 'scheduled' }] });
+      const latestEventQuery = chain({ first: { event_type: 'would_block' } });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [latestEventQuery, promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(false);
+      expect(promotedRunQuery.insert).not.toHaveBeenCalled();
+      expect(promotedRunQuery.where).toHaveBeenCalledWith({ id: 'run-1', status: 'skipped', automation_key: 'estimate.extension_notice' });
+      expect(promotedRunQuery.whereRaw).toHaveBeenCalledWith(expect.stringContaining("= 'would_block'"));
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'scheduled', attempts: 0, last_error: null, exit_reason: null, completed_at: null,
+      }));
+      expect(promotedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        event_type: 'promoted_from_shadow',
+        metadata: expect.stringContaining('"from_status":"skipped"'),
+      }));
+    });
+
+    test.each([
+      ['a genuine condition/exit skip (latest event is skipped)', { event_type: 'skipped' }],
+      ['a skipped row with no ledger events at all', undefined],
+      ['a LIVE block after an earlier would_block (latest event is a later skip)', { event_type: 'skipped' }],
+    ])('%s is NOT promoted: it dedupes as before', async (_label, latestEvent) => {
+      const skippedRun = run({ status: 'skipped', exit_reason: 'estimate accepted', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: skippedRun });
+      const latestEventQuery = chain({ first: latestEvent });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery],
+        email_template_automation_run_events: [latestEventQuery, dedupeLogQuery],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(result.results[0].run.status).toBe('skipped');
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+
+    test.each([
+      ['a LIVE-origin run rolled back to shadow and finalized would_block', JSON.stringify({ origin_mode: 'live' })],
+      ['a would_block row with no origin_mode stamp', JSON.stringify({})],
+      ['a LIVE-origin run finalized shadow by a rollback', JSON.stringify({ origin_mode: 'live' }), 'shadow'],
+      ['a shadow row owned by ANOTHER automation (shared idempotency key)', JSON.stringify({ origin_mode: 'shadow' }), 'shadow', 'other.automation'],
+      ['a would_block row owned by ANOTHER automation', JSON.stringify({ origin_mode: 'shadow' }), 'skipped', 'other.automation'],
+    ])('%s is NOT promoted: it dedupes without even reading the ledger', async (_label, context, status = 'skipped', ownerKey = undefined) => {
+      const skippedRun = run({ status, exit_reason: 'template disabled', context, ...(ownerKey ? { automation_key: ownerKey } : {}) });
+      const existingRunQuery = chain({ first: skippedRun });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery],
+        email_template_automation_run_events: [dedupeLogQuery],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(existingRunQuery.update).not.toHaveBeenCalled();
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+
+    test('a shadow replay (mode still shadow) never promotes a would_block row', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      try {
+        const blockedRun = run({ status: 'skipped', exit_reason: 'template disabled' });
+        const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        setDbQueues({
+          'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+          customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+          email_template_automation_runs: [chain({ first: blockedRun })],
+          // No latest-event lookup queued: shadow mode must not even ask.
+          email_template_automation_run_events: [dedupeLogQuery],
+        });
+
+        const result = await replay();
+
+        expect(result.results[0].deduped).toBe(true);
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
+  });
+
+  describe('per-automation isolation (pre-live fix)', () => {
+    test('one misconfigured automation does not stop the later automations on the same trigger; the first failure is rethrown with per-automation detail', async () => {
+      const queuedRun = run({ automation_key: 'estimate.second', idempotency_key: 'estimate.second:est-1' });
+      const existingRunQuery = chain({ first: null });
+      const insertRunQuery = chain({ returning: [queuedRun] });
+      const queuedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [
+          automation({ automation_key: 'estimate.broken', idempotency_key_template: '' }),
+          automation({ automation_key: 'estimate.second', idempotency_key_template: 'estimate.second:{estimate_id}', delay_minutes: 60 }),
+        ] })],
+        customers: [chain({ first: { id: 'cust-1', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, insertRunQuery],
+        email_template_automation_run_events: [queuedLogQuery],
+      });
+
+      let thrown;
+      try {
+        await AutomationExecutor.processTrigger({
+          triggerEventKey: 'estimate.auto_renewed',
+          triggerEventId: 'estimate_auto_renew:est-1',
+          payload: { estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com', renewal_count: 1, status: 'sent' },
+          now: new Date('2026-05-18T12:00:00.000Z'),
+        });
+      } catch (err) { thrown = err; }
+
+      expect(thrown).toBeDefined();
+      expect(thrown.status).toBe(400);
+      expect(thrown.message).toMatch(/estimate\.broken does not define an idempotency key template/);
+      expect(thrown.automationFailures).toEqual([
+        expect.objectContaining({ automation_key: 'estimate.broken', status: 400 }),
+      ]);
+      // The healthy automation AFTER the broken one still got its run.
+      expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        automation_key: 'estimate.second',
+        idempotency_key: 'estimate.second:est-1',
+      }));
+      expect(thrown.partialResults).toHaveLength(1);
+      expect(thrown.partialResults[0].automation_key).toBe('estimate.second');
+    });
+  });
+
+  describe('off mode (GATE_EMAIL_TEMPLATE_AUTOMATIONS unset/false — fail closed)', () => {
+    test('processTrigger is a pure no-op: no automations query, no run created', async () => {
+      const savedNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      db.mockClear();
+      try {
+        const result = await AutomationExecutor.processTrigger({ triggerEventKey: 'estimate.auto_renewed', payload: { estimate_id: 'est-1' } });
+        expect(result).toEqual({ trigger_event_key: 'estimate.auto_renewed', automation_count: 0, results: [], disabled: true });
+        expect(db).not.toHaveBeenCalled();
+        expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      } finally {
+        if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = savedNodeEnv;
+      }
+    });
+
+    test('executeRun never dispatches a run that is due while the gate reads off — marks it skipped instead', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      try {
+        const queuedRun = run({ entity_type: '', entity_id: '' });
+        const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+        const skippedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped' }] });
+        const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+        setDbQueues({
+          email_template_automation_runs: [runningRunQuery, skippedRunQuery],
+          email_template_automation_run_events: [attemptLogQuery, skippedLogQuery],
+        });
+
+        const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+        expect(result.status).toBe('skipped');
+        expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+        expect(skippedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+          message: 'email template automations gate is off',
+        }));
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
+  });
+
+  // codex P1 round 7 on #5154 (owner ruling 2026-09-28: fence, wire later):
+  // a marketing-stream template belongs to the email division's ledger, so
+  // the executor asks the library to refuse it (marketingRequiresLedger) on
+  // BOTH the live send and the shadow preflight. The classification itself
+  // (isMarketingSend) is the library's and is proven in
+  // email-template-library.test.js.
+  describe('email-division ledger fence', () => {
+    afterEach(() => { delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS; });
+
+    function ledgerRefusal() {
+      return Object.assign(new Error('marketing-stream sends must go through the email division ledger (email-division/ledger.js sendWithLedger), not the automation executor'), {
+        status: 409, code: 'EMAIL_DIVISION_LEDGER_REQUIRED',
+      });
+    }
+
+    test('live: a marketing-template run is settled skipped (ledger_required) — never retried, nothing sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const queuedRun = run({ attempts: 0 });
+      const skippedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped' }] });
+      const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          skippedRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), skippedLogQuery],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+      EmailTemplates.sendTemplate.mockRejectedValueOnce(ledgerRefusal());
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(), now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+      expect(skippedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped', exit_reason: expect.stringContaining('email division ledger'),
+      }));
+      expect(skippedRunQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled' }));
+      expect(JSON.parse(skippedLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'ledger_required' }));
+    });
+
+    test('live: a service/operational template run still dispatches (the fence flag rides along, the library lets it through)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const queuedRun = run({ attempts: 0 });
+      const sentRunQuery = chain({ returning: [{ ...queuedRun, status: 'sent', email_message_id: 'message-1' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          sentRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), chain({ returning: [{ id: 'event-2' }] })],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+      EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, message: { id: 'message-1', provider_message_id: 'sg-1' } });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(), now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('sent');
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+    });
+
+    test('shadow: the preflight carries the same fence and records would_block ledger_required — what live would do', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({
+        ok: false, reason: ledgerRefusal().message, code: 'EMAIL_DIVISION_LEDGER_REQUIRED',
+      });
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          chain({ returning: [{ ...queuedRun, status: 'skipped' }] }),
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), wouldBlockLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({ marketingRequiresLedger: true }));
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_block' }));
+      expect(JSON.parse(wouldBlockLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'ledger_required' }));
+    });
+  });
+
+  // codex P1 round 6 on #5154: the scheduler now drains due runs in off
+  // mode too. With the gate off a due delayed/retry run is settled skipped
+  // (gate_off) straight after its claim — no entity read, no shadow
+  // preflight, no send — so it cannot go out stale when the gate returns.
+  describe('off mode drains due runs as skipped (drop-on-rollback)', () => {
+    afterEach(() => { delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS; });
+
+    test('processDueRuns with the gate off skips a due run without reading its estimate, previewing or sending; back live, the terminal run never sends', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      const dueRun = run({ status: 'retry_scheduled', attempts: 1 });
+      const skippedRow = { ...dueRun, status: 'skipped', exit_reason: 'email template automations gate is off' };
+      const skippedRunQuery = chain({ returning: [skippedRow] });
+      const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ result: [dueRun] }), // the due batch
+          chain({ returning: [{ ...dueRun, status: 'running', attempts: 2 }] }), // the claim
+          skippedRunQuery,
+        ],
+        'email_template_automations as a': [chain({ first: automation() })],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), skippedLogQuery],
+        // NO estimates / customers queue: an entity read would throw "Unexpected db table".
+      });
+
+      const result = await AutomationExecutor.processDueRuns();
+
+      expect(result.processed).toBe(1);
+      expect(result.results[0].status).toBe('skipped');
+      expect(skippedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped', exit_reason: 'email template automations gate is off',
+      }));
+      expect(JSON.parse(skippedLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'gate_off' }));
+      expect(EmailTemplates.preflightTemplateSend).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+
+      // The gate comes back live: the run is terminal, so nothing sends.
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const again = await AutomationExecutor.executeRun(skippedRow, { automation: automation() });
+      expect(again.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a shadow-origin run that comes due while off is skipped too — no shadow preflight', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      const queuedRun = run({ context: JSON.stringify({ origin_mode: 'shadow' }) });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          chain({ returning: [{ ...queuedRun, status: 'skipped' }] }),
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.preflightTemplateSend).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unknown trigger keys', () => {
+    test('processTrigger is a harmless no-op: empty results, zero writes', async () => {
+      db.mockClear();
+      setDbQueues({ 'email_template_automations as a': [chain({ result: [] })] });
+
+      const result = await AutomationExecutor.processTrigger({ triggerEventKey: 'no.such.trigger', payload: {} });
+
+      expect(result).toEqual({ trigger_event_key: 'no.such.trigger', automation_count: 0, results: [] });
+      // loadAutomations is the only db access; no run/customer/event write.
+      expect(globalDbAccesses).toEqual(['email_template_automations as a']);
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
+
+  // pre-push audit P1 — resolveEmailForTrigger resolves a customer-only
+  // recipient's address from LIVE customers only (whereNull deleted_at, the
+  // predicate every customer-addressed sender uses). A soft-deleted
+  // customer resolves no address, so the trigger fails with the coded
+  // recipient-email-required error (the emitters settle that marker
+  // unrecoverable) and nothing is written or sent.
+  describe('recipient email lookup (resolveEmailForTrigger)', () => {
+    test('filters soft-deleted customers; a retired customer resolves no address and nothing is written', async () => {
+      const lookup = chain({ first: undefined }); // what whereNull('deleted_at') yields for a soft-deleted row
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({
+          automation_key: 'review.thank_you', trigger_event_key: 'review.linked_5star', template_key: 'review.thank_you',
+        })] })],
+        customers: [lookup],
+      });
+
+      await expect(AutomationExecutor.processTrigger({
+        triggerEventKey: 'review.linked_5star',
+        triggerEventId: 'review_linked_5star:rev-1',
+        entityType: 'review',
+        entityId: 'rev-1',
+        recipient: { type: 'customer', id: 'cust-1' },
+        payload: { review_id: 'rev-1', customer_id: 'cust-1', location_id: 'venice' },
+      })).rejects.toMatchObject({ code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED', status: 400 });
+
+      expect(lookup.where).toHaveBeenCalledWith({ id: 'cust-1' });
+      expect(lookup.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(globalDbAccesses).not.toContain('email_template_automation_runs');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    // codex P2 round 5 on #5154: a lookup that FAILED is not a customer
+    // with no email — it must surface as a transient (non-400) error so the
+    // lifecycle emitter retries the marker instead of settling it
+    // unrecoverable on one DB hiccup.
+    test('a failed lookup rejects with a transient, retryable error — never the deterministic recipient-required error', async () => {
+      const lookup = chain();
+      lookup.first = jest.fn(async () => { throw new Error('connection terminated unexpectedly for sam@example.com'); });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({
+          automation_key: 'review.thank_you', trigger_event_key: 'review.linked_5star', template_key: 'review.thank_you',
+        })] })],
+        customers: [lookup],
+      });
+
+      const err = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'review.linked_5star',
+        triggerEventId: 'review_linked_5star:rev-1',
+        entityType: 'review',
+        entityId: 'rev-1',
+        recipient: { type: 'customer', id: 'cust-1' },
+        payload: { review_id: 'rev-1', customer_id: 'cust-1', location_id: 'venice' },
+      }).then(() => null, (e) => e);
+
+      expect(err).toMatchObject({ code: 'AUTOMATION_RECIPIENT_LOOKUP_FAILED', status: 503, retryable: true });
+      expect(err.message).not.toContain('sam@example.com');
+      expect(globalDbAccesses).not.toContain('email_template_automation_runs');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     });
   });
 });

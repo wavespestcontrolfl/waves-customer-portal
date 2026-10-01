@@ -167,6 +167,15 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : ([...legs].reverse().find((seg) => seg.lead_id)?.lead_id || null),
         promises,
         callerTurns, // the earlier legs' caller lines — the resumed capture floor's summary starts from these
+        // An earlier leg's mid-call OpenAI → Claude switch: the row stamp the
+        // switching socket writes at once (present before its segment lands),
+        // else a segment's versions stamp. The resumed leg stays on Claude —
+        // one switch per CALL, not per socket.
+        modelSwitch: [meta.relay_model_switch, ...legs.map((seg) => seg.versions && seg.versions.model_switch)]
+          .find((sw) => sw && typeof sw === 'object' && sw.from && sw.to) || null,
+        // The model the latest earlier leg ran on — a leg that never switched
+        // is resumed on it while this session still allows it (codex r7).
+        priorModel: (latest && ((latest.versions && latest.versions.model) || latest.model)) || null,
       };
     });
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });

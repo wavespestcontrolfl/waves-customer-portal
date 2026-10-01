@@ -85,6 +85,16 @@ export function stopPropertyAlerts(stop) {
   return out;
 }
 
+// Customer-visit-photos scope doc §5.4 item 2 (PR 3b) — GET
+// /api/admin/schedule sets `customerSentPhotos: true` on every member row
+// of a stop that has one (server-side, ONE batched query, CURRENT
+// scheduled_services membership; see admin-schedule.js). A grouped stop
+// therefore shows the chip once here even though the server may have
+// stamped it on more than one member.
+export function stopHasCustomerSentPhotos(stop) {
+  return !!stop && stop.services.some((s) => s.customerSentPhotos === true);
+}
+
 /** "2 services · ~55 min" for a grouped stop; null for a single row. */
 export function stopSummaryLabel(stop) {
   if (!stop || !stop.isVisit) return null;

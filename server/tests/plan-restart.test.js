@@ -24,6 +24,7 @@ jest.mock('../services/cancellation-processor', () => ({
 }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn().mockResolvedValue(false) }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 jest.mock('../services/cancellation-resolution', () => ({
   cancelFlowV2Enabled: () => process.env.GATE_CANCEL_FLOW_V2 === 'true',
   previewCancellationResolution: jest.fn(),
@@ -161,6 +162,18 @@ function builder(table) {
       orWhereNotNull: (col) => { push(true, (r) => r[norm(col)] != null); return sub; },
       whereIn: (col, vals) => { push(false, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
       orWhereIn: (col, vals) => { push(true, (r) => vals.map(String).includes(String(r[norm(col)]))); return sub; },
+      // coveredTermsAsOf's P2-4 termite grace-deadline check (a raw SQL
+      // GREATEST/INTERVAL expression) — vacuously true, same rationale as
+      // the top-level b.whereRaw below: no fixture here carries both
+      // renewed_from_term_id AND annual_plan_version on a payment_pending
+      // row, so the preceding whereNotNull gates already decide this
+      // branch before whereRaw's own value would matter.
+      whereRaw: () => { push(false, () => true); return sub; },
+      // coveredTermsAsOf's grace branch also requires a parent that still
+      // authorizes the renewal (Codex #4971 r28, an EXISTS subquery) —
+      // vacuously true here for the same reason as whereRaw above: the
+      // preceding whereNotNull gates already exclude every fixture row.
+      whereExists: () => { push(false, () => true); return sub; },
     };
     fn.call(sub);
     return (r) => parts.reduce((acc, p, i) => (i === 0 ? p.cond(r) : (p.or ? (acc || p.cond(r)) : (acc && p.cond(r)))), false);
@@ -232,7 +245,7 @@ function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
     db: fakeDb,
-    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date('2026-10-01T00:00:00Z') },
+    persistence: { serverRecomputeFromEstimateData: recompute, estimateExpiresAt: () => new Date(Date.now() + 30 * 24 * 3600 * 1000) },
     pricingAi: {
       variantsForService: pricingAi.variantsForService,
       optionServices: pricingAi.optionServices,

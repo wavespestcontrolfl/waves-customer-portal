@@ -25,6 +25,16 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
+const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
+const { GUARANTEE_COPY, copyAllowedInScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+
+// The copy scope an option set asks for: an explicit guaranteeScope, else the
+// older noGuaranteeClaims boolean (true means 'none').
+function copyScope({ noGuaranteeClaims = false, guaranteeScope = null } = {}) {
+  if (guaranteeScope === 'none' || guaranteeScope === 'satisfaction' || guaranteeScope === 'all') return guaranteeScope;
+  return noGuaranteeClaims ? 'none' : 'all';
+}
+const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
 function searchText(item = {}) {
   return [item.service, item.offerKey, item.label, item.name, item.displayName, item.detail, item.det]
@@ -216,7 +226,8 @@ function fillTrapChecks(text, checks) {
     .replace('{checks}', `${word} trap check${n === 1 ? '' : 's'}`);
 }
 
-function resolveOneTimeServiceCopy(item = {}) {
+function resolveOneTimeServiceCopy(item = {}, options = {}) {
+  const scope = copyScope(options);
   const key = oneTimeCopyKeyFor(item);
   if (!key) return null;
   const entry = PACK[key];
@@ -286,8 +297,9 @@ function resolveOneTimeServiceCopy(item = {}) {
   }
   // Trenching: the warranty-period inspection bullet rides a sold warranty
   // tier only (repellent products default to 'none') — codex #3823 r3 P1.
-  if (key === 'termite_trenching' && (!item.warrantyTier || String(item.warrantyTier) === 'none')) {
-    lines = lines.filter((line) => line !== entry.warrantyBullet);
+  const purchasedTrenchingWarranty = key === 'termite_trenching' && hasPurchasedTrenchingWarranty(item);
+  if (key === 'termite_trenching' && !purchasedTrenchingWarranty) {
+    lines = lines.filter((line) => line !== PURCHASED_TRENCHING_WARRANTY_BULLET);
   }
   // Dethatching: debris hauling is priced separately (cleanupLevel) — the
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
@@ -339,6 +351,19 @@ function resolveOneTimeServiceCopy(item = {}) {
     const days = Number(item.creditableWithinDays) || 0;
     if (days > 0 && entry.creditBullet) lines.push(entry.creditBullet.replace('{creditDays}', String(days)));
   }
+  // A row's normal assurance cannot override the estimate's guarantee scope
+  // (for example, stale pest pricing beside authored termite work, or a
+  // commercial job). Keep the sold visit scope and payment terms while
+  // removing the promises the scope does not allow ('satisfaction' keeps
+  // "satisfaction guaranteed", 'none' keeps no guarantee claim).
+  if (scope !== 'all') {
+    if (scope === 'none' || !copyAllowedInScope(assurance, scope)) assurance = null;
+    if (!copyAllowedInScope(outcome, scope)) outcome = entry.outcomeNoGuarantee || outcome;
+    if (!copyAllowedInScope(outcome, scope)) outcome = 'Your service follows the written scope and terms in this estimate.';
+    lines = lines.filter((line) => (purchasedTrenchingWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET)
+      || copyAllowedInScope(line, scope));
+    if (!copyAllowedInScope(terms, scope)) terms = withoutClaimsOutsideScope(terms, scope) || 'Your written service scope and terms apply.';
+  }
   return {
     key,
     outcome: fillVisits(outcome, visits),
@@ -355,7 +380,8 @@ function resolveOneTimeServiceCopy(item = {}) {
 //   { key, hero: { eyebrow, h1, sub }, aiTitle?, aiBody?, askChips } or null.
 // Hero strings keep {first}/{city} for the renderer; {Visits} is filled
 // here from the row's visit count.
-function oneTimeOnlyIntelligenceCopy(items = []) {
+function oneTimeOnlyIntelligenceCopy(items = [], options = {}) {
+  const scope = copyScope(options);
   // Raw (un-normalized) rows carry no `kind` — a member-discount row is a
   // negative price, and an adjustment row is never a service. Included
   // (service-credit) and quote-required rows ARE services: they resolve to
@@ -412,10 +438,13 @@ function oneTimeOnlyIntelligenceCopy(items = []) {
     hero: {
       eyebrow: entry.hero.eyebrow,
       h1: fillVisits(entry.hero.h1, visits),
-      sub: fillVisits(heroSub, visits),
+      sub: copyAllowedInScope(heroSub, scope) ? fillVisits(heroSub, visits) : NO_GUARANTEE_HERO,
     },
-    ...(entry.aiTitle ? { aiTitle: entry.aiTitle, aiBody } : {}),
-    askChips: Array.isArray(entry.askChips) ? [...entry.askChips] : [],
+    ...(entry.aiTitle ? {
+      aiTitle: entry.aiTitle,
+      aiBody: copyAllowedInScope(aiBody, scope) ? aiBody : 'The priced lines below show the written scope and terms for this service.',
+    } : {}),
+    askChips: (Array.isArray(entry.askChips) ? entry.askChips : []).filter((chip) => copyAllowedInScope(chip, scope)),
   };
 }
 
@@ -429,12 +458,14 @@ const COMPONENT_EXPANSION_KEYS = new Set(['rodent_exclusion']);
 
 // Row copies for a breakdown, aligned by index; included (service-credit)
 // rows never carry copy. Both render paths use this so they cannot diverge
-// (codex #3823 r3 P2s).
-function resolveOneTimeRowCopies(rows = []) {
+// (codex #3823 r3 P2s). Each row states its own terms: the row's termsScope
+// stamp within the estimate's scope (serviceGuaranteeScope).
+function resolveOneTimeRowCopies(rows = [], options = {}) {
   const seen = new Set();
+  const scope = copyScope(options);
   return (Array.isArray(rows) ? rows : []).map((row) => {
     if (!row || row.serviceSpecificDiscountApplied === true || row.kind === 'included') return null;
-    const copy = resolveOneTimeServiceCopy(row);
+    const copy = resolveOneTimeServiceCopy(row, { guaranteeScope: serviceGuaranteeScope(scope, row.termsScope) });
     if (!copy) return null;
     if (COMPONENT_EXPANSION_KEYS.has(copy.key)) {
       if (seen.has(copy.key)) return null;
@@ -446,6 +477,7 @@ function resolveOneTimeRowCopies(rows = []) {
 
 module.exports = {
   ONE_TIME_SERVICE_COPY: PACK,
+  GUARANTEE_COPY,
   resolveOneTimeRowCopies,
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,

@@ -53,3 +53,27 @@ export function isProductApplication(app) {
   const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
   return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);
 }
+
+// Rodenticide on the property. Loading or checking a rodent bait station is
+// not an application (above), but the stations hold rodenticide — the
+// classic accidental-ingestion call — so those reports still carry the
+// Poison Control line (owner 2026-09-26). Signals, any one: the visit's
+// typed flow (primary or companion) is the rodent bait-station flow, the
+// station map is the rodent bait program, or a recorded row is rodenticide
+// or rodent bait. Trapping programs ('trapping') are not bait programs.
+const RODENT_BAIT_TYPED_FLOW = 'rodent_bait_station';
+
+export function isRodenticideRow(app) {
+  if (!app) return false;
+  const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
+  if (/rodentic/i.test(identity)) return true;
+  return /\b(rodent|rats?|mouse|mice)\b/i.test(identity) && /bait/i.test(identity);
+}
+
+export function reportHasRodenticide(data) {
+  if (!data) return false;
+  if (data.typedReport?.type === RODENT_BAIT_TYPED_FLOW) return true;
+  if ((Array.isArray(data.companionReports) ? data.companionReports : []).some((c) => c?.type === RODENT_BAIT_TYPED_FLOW)) return true;
+  if (data.stationMap?.program === 'rodent') return true;
+  return (Array.isArray(data.applications) ? data.applications : []).some(isRodenticideRow);
+}

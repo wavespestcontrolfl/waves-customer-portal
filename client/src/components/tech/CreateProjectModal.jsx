@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { adminFetch } from '../../lib/adminFetch';
+import { readCollectionHold } from '../../hooks/useCollectionHold';
+import { HOLD_UNKNOWN_MESSAGE } from '../admin/CollectionHoldNotice';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import WdoSignaturePad from './WdoSignaturePad';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
@@ -1769,8 +1771,16 @@ export default function CreateProjectModal({
           : quote.coveredByCredit
             ? `Account credit covers the invoice. Card charge: ${total}`
             : `Total charge: ${total}`;
+        // B10: this charge goes past a collections dispute hold, so the
+        // confirm names the hold (or says the check failed) before charging.
+        const hold = await readCollectionHold(customerId);
+        const holdNotice = hold.dispute
+          ? 'BILLING HOLD: this customer disputed a bill on a collections call. This charge goes past the hold.\n\n'
+          : hold.status === 'error'
+            ? `${HOLD_UNKNOWN_MESSAGE}. This charge goes past a billing hold if there is one.\n\n`
+            : '';
         if (!confirm(
-          `Charge ${savedCardLabel} and finish this service?\n\n${pricingDetail}\n\n` +
+          `${holdNotice}Charge ${savedCardLabel} and finish this service?\n\n${pricingDetail}\n\n` +
           `After payment succeeds, the customer receives the ${documentLabel} immediately.`,
         )) return;
 
@@ -2689,9 +2699,15 @@ export default function CreateProjectModal({
                     style={{ ...inputStyle, resize: 'vertical', minHeight: 132, paddingRight: 44 }}
                   />
                   <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+                    {/* AI draft replaces this field with its response, so the
+                        mic stops while a draft or save is in flight and a late
+                        chunk is dropped rather than appended and then
+                        overwritten (same rule as the Schedule report draft). */}
                     <DictationButton
                       palette={P}
+                      disabled={aiWriting || saving}
                       onAppend={(text) => {
+                        if (aiWriting) return;
                         userDirtyRef.current = true;
                         setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text);
                       }}

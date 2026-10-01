@@ -62,6 +62,31 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/visit-completion-packets.js',
+    snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
+    reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
+  },
+  {
+    file: 'services/visit-completion-summary.js',
+    snippet: "return Boolean(await database('sms_log')",
+    reason: 'summaryReceiptTextHandled: asks whether this invoice\'s receipt text went or is in flight (scoped by its invoice:<id>:receipt event key). An in-flight billing text-leg claim placeholder IS that text going out, so hiding reservations would defeat the check and let the summary duplicate it; review-ask and reply reservations never carry an invoice event key.',
+  },
+  {
+    file: 'services/visit-completion-summary.js',
+    snippet: "if (link.kind === 'pay_link' && await database('sms_log')",
+    reason: 'summaryLinkStillValid: asks whether this invoice\'s own pay-link text went or is in flight (scoped by its invoice:<id>:sent event key). An in-flight billing text-leg claim placeholder counts as the text going out, so the summary goes plain instead of texting the link twice; hiding reservations would defeat that. Review-ask and reply reservations never carry an invoice event key.',
+  },
+  {
+    file: 'services/twilio.js',
+    snippet: "const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');",
+    reason: 'accepted-send recovery idempotency check keyed by the provider SID Twilio just returned; a pre-provider reservation carries no SID, so it structurally cannot match.',
+  },
+  {
+    file: 'services/messaging/billing-text-leg-dedupe.js',
+    snippet: "return conn('sms_log')",
+    reason: 'findLiveClaim: deliberately reads this module\'s own in-flight claim placeholder (status sending + billing_text_leg_claim marker) for one customer+notice; hiding reservations here would defeat the claim.',
+  },
+  {
     file: 'services/messaging/push-channel-routing.js',
     snippet: "? await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' }).where(function sameNotice() {",
     reason: 'persistPushProof: existence check for this accepted push notice before writing its proof; a send reservation is never a push proof.',
@@ -147,6 +172,18 @@ const ALLOWLIST = [
     reason: 'whereIn(status, [blocked, failed, cancelled]) excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 1,
+    reason: 'billingTextDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to notificationEventKey with a real twilio_sid — a send reservation is never a billing-leg provider row.',
+  },
+  {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 2,
+    reason: 'billingAppDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to from_phone \'push\' + notificationEventKey — a send reservation is always an ordinary outbound row, never the push-proof row.',
+  },
+  {
     file: 'services/messaging/sync-optout.js',
     snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'from_phone = the opting-out customer\'s own number — every send reservation is Waves\' own outbound row and can never match a customer\'s from_phone.',
@@ -167,9 +204,14 @@ const ALLOWLIST = [
     reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
-    file: 'routes/admin-communications.js',
+    file: 'services/scheduled-sms-cancel.js',
     snippet: 'const sentSibling = await trx(\'sms_log\')',
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+  },
+  {
+    file: 'services/scheduled-sms-cancel.js',
+    snippet: 'const current = await trx(\'sms_log\').where({ id, status: \'scheduled\' }).first(\'metadata\');',
+    reason: 'by-id, status \'scheduled\' read of the one row being cancelled (workflow-ownership recheck after the CAS matched nothing) — not a message-history reader, and \'scheduled\' excludes \'sending\' reservations.',
   },
   {
     file: 'routes/admin-communications.js',
@@ -198,7 +240,7 @@ const ALLOWLIST = [
   },
   {
     file: 'routes/estimate-public.js',
-    snippet: 'const recentPacketSend = async () => db(\'sms_log\')',
+    snippet: 'let q = db(\'sms_log\')',
     reason: 'message_type restricted to \'estimate_service_details\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
@@ -270,8 +312,13 @@ const ALLOWLIST = [
   },
   {
     file: 'services/call-commitments.js',
-    snippet: 'const text = await conn("sms_log as os")',
-    reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+    snippet: 'const row = await firstContactMatch((cursor, size) => conn("sms_log as os")',
+    reason: 'humanTextTo: status filtered to sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+  },
+  {
+    file: 'services/call-commitments.js',
+    snippet: 'const row = await conn("sms_log")',
+    reason: 'reportTextTo: status filtered to sent/delivered (provider-accepted) and message_type to service_report*, so an unresolved \'sending\' reservation cannot match.',
   },
   {
     file: 'services/call-recording-processor.js',
@@ -325,6 +372,11 @@ const ALLOWLIST = [
   },
   {
     file: 'services/intelligence-bar/comms-tools.js',
+    snippet: 'const rows = await db(\'sms_log\')',
+    reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (list_queued_messages lists future sends only).',
+  },
+  {
+    file: 'services/intelligence-bar/comms-tools.js',
     snippet: 'const inbound = await db(\'sms_log\')',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
   },
@@ -340,8 +392,19 @@ const ALLOWLIST = [
   },
   {
     file: 'services/invoice.js',
+    // queuePendingChannelReplay takes its `database` handle as a param
+    // (Codex round-3 P1/P2 #4963: runs under finalizeInvoiceAfterSms's own
+    // transaction so a queue-insert failure is retried with the delivery
+    // stamp) — its own dedup read reads through that param, not the bare
+    // `db` the wrapper's held-SMS-leg queue below still uses, so the two
+    // no longer share one snippet.
+    snippet: 'const existingQueued = await database("sms_log")',
+    reason: 'queuePendingChannelReplay (Codex round-3 P1 #4963): metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+  },
+  {
+    file: 'services/invoice.js',
     snippet: 'const existingQueued = await db("sms_log")',
-    reason: 'metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+    reason: 'sendViaSMSAndEmail\'s held-SMS-leg queue: same metadata key (entry_point = \'invoice_send_deferred\') exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',
@@ -394,6 +457,11 @@ const ALLOWLIST = [
     reason: 'deliberately includes in-flight review-ask/reply reservations as ask-spacing evidence (the REBUTTED FINDING note at the top of review-ask-reservation.js) — excluding them here would break the spacing guarantee this function exists to provide.',
   },
   {
+    file: 'services/review-ask-topic.js',
+    snippet: 'let rows = await db("sms_log")',
+    reason: 'inbound-only (direction: "inbound") — the customer\'s own texts as Day-0 topic evidence; a send reservation is always an outbound row.',
+  },
+  {
     file: 'services/review-request.js',
     snippet: 'const stamped = await db("sms_log")',
     reason: 'status explicitly excludes \'sending\' in its own whereNotIn list (evidence of DELIVERY, not an in-flight attempt) — an unresolved reservation cannot match.',
@@ -420,11 +488,6 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-auto-send.js',
-    snippet: "const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })",
-    reason: 'single-row inbound lookup for the gratitude thread lock; an outbound send reservation cannot match the id plus inbound direction predicate.',
-  },
-  {
-    file: 'services/sms-auto-send.js',
     snippet: 'reservationsCleared = await db(\'sms_log\')',
     reason: 'this IS the reply-reservation reconciliation sweep itself (settles manual_send_reservation / auto_send_reservation rows; review-ask reservations are explicitly excluded from it) — applying the exclusion helper here would hide the very rows this sweep exists to find and release.',
   },
@@ -437,11 +500,6 @@ const ALLOWLIST = [
     file: 'services/sms-operational-actions.js',
     snippet: 'const candidates = await conn(\'sms_log as s\').modify(withoutScheduledDeliveryTwins, \'s\').where(\'s.created_at\', \'>=\', since).where(\'s.created_at\', \'<=\', now)',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await trx(\'sms_log\').where({ id: initial.sms_log_id }).forUpdate().first();',
-    reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',
@@ -579,6 +637,16 @@ const ALLOWLIST = [
     file: 'services/reschedule-link-promises.js',
     snippet: 'const sms = await conn(\'sms_log\').where({ twilio_sid: row.provider_message_id }).first(\'id\', \'status\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const staffSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction outbound, admin_user_id NOT NULL): deliberately includes an in-flight reservation — a staff-initiated send attempt IS evidence a human just reached out, whether or not the provider has confirmed delivery yet; over-suppression (holding the marketing email) is the safe direction here, unlike the message-history readers this guard protects.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const inboundSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction inbound): an inbound row is the customer\'s own message and is never a send reservation (those are always outbound placeholders), so the exclusion cannot apply regardless.',
   },
 ];
 

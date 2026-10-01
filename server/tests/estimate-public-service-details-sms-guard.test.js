@@ -1,14 +1,18 @@
 /**
  * estimate-public.js's service-details SMS send (~POST /:token/service-details
- * /send, channel 'sms') deliberately bypasses sendCustomerMessage and calls
- * TwilioService.sendSMS directly — so it composes the annual-offer guard
- * into its own preSendCheck (Codex round 1 on #4608, P1) instead of getting
- * it for free at the send-customer-message.js chokepoint. This pins that
- * composition: checkSendWindow runs first (unchanged priority/shape), then
- * annualHandoffGuard on the estimate itself; a blocked verdict returns the
- * same not-ok shape checkSendWindow does, so TwilioService.sendSMS withholds
- * the send exactly like a window hold (no Twilio call), and the route reports
- * the generic "could not send" failure. estimate-annual-guard.js and
+ * /send, channel 'sms') used to bypass sendCustomerMessage and call
+ * TwilioService.sendSMS directly, composing the annual-offer guard into its
+ * own preSendCheck (Codex round 1 on #4608, P1). It now goes through
+ * sendCustomerMessage (B01: the direct call never read messaging_suppression
+ * or sms_enabled — see estimate-public-service-details-sms-suppression.test.js
+ * for the real-chain proof). THIS file pins the route's claim/dedupe/withhold
+ * response machinery, so sendCustomerMessage is replaced below by a thin
+ * adapter that reproduces what the real chokepoint hands the provider
+ * (annualHandoffGuard as preSendCheck) and maps the provider result back into
+ * the chokepoint's result shape; the chokepoint's own behavior (window, link
+ * wrap, suppression, consent) is pinned in its own suites. A blocked
+ * annual verdict makes the provider withhold the send (no Twilio call), and
+ * the route reports the generic "could not send" failure. estimate-annual-guard.js and
  * services/messaging/validators/send-window run FOR REAL here — only db and
  * services/twilio (the actual SDK boundary) are mocked, so the guard's own
  * DB lookup exercises the real loadAnnualOfferRow/annualPlanPublicReplayBlocked
@@ -23,7 +27,32 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // tests exercise.
 jest.mock('express-rate-limit', () => () => (req, res, next) => next());
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+// Adapter double for the chokepoint (see header). Records the exact input the
+// route hands sendCustomerMessage in `sendCustomerMessage.mock.calls`.
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async (input) => {
+    const TwilioService = require('../services/twilio');
+    const { annualHandoffGuard } = require('../services/estimate-annual-guard');
+    const mockedDb = require('../models/db');
+    const result = await TwilioService.sendSMS(input.to, input.body, {
+      preSendCheck: async () => {
+        const verdict = await annualHandoffGuard({ db: mockedDb, estimateIds: [input.estimateId] })();
+        return verdict.blocked
+          ? { ok: false, code: 'ANNUAL_OFFER_WITHHELD', reason: 'annual_offer_withheld', retryable: false }
+          : { ok: true };
+      },
+    });
+    if (result && result.success) {
+      return { sent: true, blocked: false, deliveryOutcome: result.deliveryOutcome, providerMessageId: result.sid, ...(result.deduped ? { deduped: true } : {}) };
+    }
+    return { sent: false, blocked: !!result?.preSendBlocked, code: result?.code, retryable: result?.retryable === true, deliveryOutcome: 'not_sent' };
+  }),
+}));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/short-url', () => ({
+  ...jest.requireActual('../services/short-url'),
+  createShortCode: jest.fn(),
+}));
 
 const ESTIMATE_ID = 'est-service-details-1';
 const TOKEN = 'sd-guard-token-abc123';
@@ -87,6 +116,13 @@ function makeDb(getRow) {
       builder.first = jest.fn(async () => (db.__recentPacketFound ? { id: 'log-1' } : null));
       return builder;
     }
+    if (table === 'short_codes') {
+      const builder = {};
+      builder.whereIn = jest.fn((col, vals) => { db.__shortCodeLog.push({ whereIn: [col, vals] }); return builder; });
+      builder.whereNull = jest.fn(() => builder);
+      builder.update = jest.fn(async (payload) => { db.__shortCodeLog.push({ update: payload }); return 1; });
+      return builder;
+    }
     if (table === 'sms_send_claims') {
       const builder = {};
       builder.where = jest.fn(() => builder);
@@ -106,6 +142,7 @@ function makeDb(getRow) {
   db.__claimOutcome = null;
   db.__recentPacketFound = false;
   db.__annualLookupThrows = false;
+  db.__shortCodeLog = [];
   return db;
 }
 
@@ -139,7 +176,7 @@ afterAll((done) => {
   server.close(done);
 });
 
-const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
+const GATE_KEYS = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2', 'GATE_SMS_LINK_WRAP'];
 let priorGates;
 beforeEach(() => {
   jest.clearAllMocks();
@@ -153,11 +190,14 @@ beforeEach(() => {
   // both are bare jest.fn() with no default implementation to lose) clears
   // that queue too.
   require('../services/twilio').sendSMS.mockReset();
+  require('../services/messaging/send-customer-message').sendCustomerMessage.mockClear();
   require('../services/email-template-library').sendTemplate.mockReset();
   mockDb.__claimAcquired = true;
   mockDb.__claimOutcome = null;
   mockDb.__recentPacketFound = false;
   mockDb.__annualLookupThrows = false;
+  mockDb.__shortCodeLog = [];
+  require('../services/short-url').createShortCode.mockReset();
   priorGates = GATE_KEYS.map((key) => process.env[key]);
   GATE_KEYS.forEach((key) => delete process.env[key]);
 });
@@ -281,6 +321,57 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     expect(capturedVerdict).toEqual({ ok: true });
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, channel: 'sms' });
+  });
+
+  describe('GATE_SMS_LINK_WRAP dedupe (the wrap itself now runs inside sendCustomerMessage)', () => {
+    const PDF_URL = `https://portal.wavespestcontrol.com/api/estimates/${TOKEN}/service-details/pest_control/pdf`;
+    // sendCustomerMessage strips the https:// from SMS links, so the logged body has the bare form.
+    const PDF_URL_BARE = PDF_URL.replace(/^https:\/\//, '');
+    function deliveredRow(phone) {
+      const draft = baseEstimateRow({ customer_phone: phone });
+      draft.status = 'sent';
+      draft.estimate_data.deliveryState = { firstDeliveredAt: '2026-01-01T12:00:00Z', annualPlanOfferFingerprint: annualPlanOfferFingerprint(draft) };
+      return draft;
+    }
+    const post = () => fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service: 'pest_control', channel: 'sms' }),
+    });
+    const flushTimers = () => new Promise((resolve) => setImmediate(resolve));
+
+    test('the cross-restart dedupe query also matches a wrapped body by the code minted for the exact pdf target', async () => {
+      process.env.GATE_SMS_LINK_WRAP = 'true';
+      const TwilioService = require('../services/twilio');
+      currentRow = deliveredRow('+19415550314');
+      mockDb.__recentPacketFound = true;
+      const smsLogCalls = [];
+      const realDb = mockDb.getMockImplementation();
+      mockDb.mockImplementation((table) => {
+        const b = realDb(table);
+        if (table === 'sms_log') {
+          const origWhere = b.where;
+          b.where = jest.fn((...args) => {
+            if (typeof args[0] === 'function') {
+              const inner = { whereRaw: jest.fn((sql, binds) => { smsLogCalls.push({ sql, binds }); return inner; }), orWhereRaw: jest.fn((sql, binds) => { smsLogCalls.push({ sql, binds }); return inner; }) };
+              args[0].call(inner);
+              return b;
+            }
+            return origWhere(...args);
+          });
+        }
+        return b;
+      });
+      try {
+        const res = await post();
+        expect(res.status).toBe(200);
+        expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+        expect(smsLogCalls).toContainEqual({ sql: expect.stringContaining('strpos(COALESCE(message_body'), binds: [PDF_URL_BARE] });
+        expect(smsLogCalls).toContainEqual({ sql: expect.stringMatching(/short_codes sc WHERE sc\.target_url = \?.*'\/l\/' \|\| sc\.code/), binds: [PDF_URL] });
+      } finally {
+        mockDb.mockImplementation(realDb);
+      }
+    });
   });
 
   test('P0 (Codex round 2 on #4608): two OVERLAPPING SMS requests for a withheld annual estimate both get the generic 404 — blocked at the early verdict gate for EACH, no provider call for either', async () => {
@@ -468,7 +559,7 @@ describe('service-details SMS: annual-offer guard composed into preSendCheck (Co
     // shorter window — otherwise it would only ever be reclaimable after
     // the full 10 minutes, and a legitimate retap moments later (once a
     // fresh delivery makes the offer eligible again) could never send.
-    expect(sql).toMatch(/outcome = 'withheld'/);
+    expect(sql).toMatch(/outcome IN \('withheld', 'policy_blocked'\)/);
     expect(sql).toMatch(/created_at < NOW\(\) - interval '\d+ seconds'/);
   });
 

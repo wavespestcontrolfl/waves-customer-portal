@@ -173,6 +173,59 @@ describe('customer notification native push dispatch', () => {
     expect(result.push).not.toHaveProperty('accepted');
   });
 
+  test.each([false, true])('a failed push preserves whether the current bell was reused: %s', async (deduped) => {
+    const existing = deduped ? {
+      id: 'old-bell', category: 'billing', title: 'Balance', body: 'Current quoted balance', link: null,
+    } : null;
+    const { notifQ } = setupDb({ existing, inserted: { id: 'new-bell', body: 'Current quoted balance' } });
+    PushService.sendToCustomer.mockRejectedValue(new Error('offline'));
+
+    const result = await NotificationService.notifyCustomer('customer-1', 'billing', 'Balance', 'Current quoted balance', {
+      dedupeKey: 'previsit:visit-1', awaitPush: true,
+    });
+
+    expect(result).toMatchObject({ deduped, push: { error: 'dispatch_failed' } });
+    expect(result.body).toBe('Current quoted balance');
+    expect(notifQ.insert).toHaveBeenCalledTimes(deduped ? 0 : 1);
+  });
+
+  test.each([
+    ['category', 'service'], ['title', 'Earlier title'], ['body', 'Earlier balance'], ['link', '/old'],
+  ])('a reused bell with a different %s cannot dispatch or reuse native acceptance', async (field, value) => {
+    const existing = { id: 'old-bell', category: 'billing', title: 'Balance', body: '$100 due', link: '/billing', [field]: value };
+    const { notifQ } = setupDb({ existing });
+    PushService.sendToCustomer.mockResolvedValue({ sent: 1, deduped: true, acceptedAt: new Date() });
+
+    const result = await NotificationService.notifyCustomer('customer-1', 'billing', 'Balance', '$100 due', {
+      dedupeKey: 'previsit:visit-1', link: '/billing', awaitPush: true,
+    });
+
+    expect(result).toMatchObject({ ...existing, deduped: true, push: {
+      queued: false, accepted: 0, reason: 'dedupe_payload_changed',
+    } });
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    expect(notifQ.insert).not.toHaveBeenCalled();
+  });
+
+  test('a changed quote after lost bell commit acknowledgement cannot reuse the old event for native delivery', async () => {
+    const persisted = { id: 'bell-committed', category: 'billing', title: 'Balance', body: '$100 due', link: null };
+    const { notifQ, trx } = setupDb({ inserted: persisted });
+    const shouldContinue = jest.fn(async () => true);
+    const opts = { dedupeKey: 'previsit:visit-1', awaitPush: true, pushOptions: { shouldContinue } };
+    db.transaction.mockImplementationOnce(async (fn) => {
+      await fn(trx);
+      throw new Error('commit acknowledgement lost');
+    });
+    await expect(NotificationService.notifyCustomer('customer-1', 'billing', 'Balance', '$100 due', opts)).resolves.toBeNull();
+    expect(shouldContinue).toHaveBeenCalledWith({ database: trx });
+
+    notifQ.first.mockResolvedValue(persisted);
+    const retried = await NotificationService.notifyCustomer('customer-1', 'billing', 'Balance', '$50 due', opts);
+    expect(retried).toMatchObject({ body: '$100 due', deduped: true, push: { accepted: 0, reason: 'dedupe_payload_changed' } });
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    expect(notifQ.insert).toHaveBeenCalledTimes(1);
+  });
+
   test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
     const { notifQ, trx } = setupDb();
     let releaseLock;
@@ -197,6 +250,47 @@ describe('customer notification native push dispatch', () => {
     if (mode === 'throws') expect(result).toBeNull();
     else expect(result).toMatchObject({ suppressed: true, reason: 'pre_send_check_blocked' });
     expect(shouldContinue).toHaveBeenCalledTimes(1);
+    expect(notifQ.insert).not.toHaveBeenCalled();
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a previsit quote changed after the initial check is rechecked before its bell insert', async () => {
+    const { notifQ, trx } = setupDb();
+    let releaseLock;
+    let lockEntered;
+    const entered = new Promise((resolve) => { lockEntered = resolve; });
+    trx.raw.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseLock = resolve;
+      lockEntered();
+    }));
+
+    const rendered = { visitDate: '2026-10-02', dueCents: 9660 };
+    const current = { ...rendered };
+    const preSendCheck = jest.fn(async () => (
+      current.visitDate === rendered.visitDate && current.dueCents === rendered.dueCents
+        ? { ok: true }
+        : { ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true }
+    ));
+    const shouldContinue = require('../services/messaging/push-channel-routing')._test.windowGuardFrom(preSendCheck);
+
+    // The canonical pipeline already checked this copy before entering the
+    // App provider. Change it while notifyCustomer is waiting on the event
+    // lock; create() must run the same callback again before persistence.
+    await expect(preSendCheck()).resolves.toEqual({ ok: true });
+    const pending = NotificationService.notifyCustomer(
+      'customer-1', 'billing', 'Balance due', 'Your balance is $96.60.',
+      { dedupeKey: 'previsit-balance:visit-1', awaitPush: true, pushOptions: { shouldContinue } },
+    );
+    await entered;
+    current.visitDate = '2026-10-03';
+    current.dueCents = 0;
+    releaseLock();
+
+    await expect(pending).resolves.toMatchObject({
+      id: null, suppressed: true, reason: 'pre_send_check_blocked',
+    });
+    expect(preSendCheck).toHaveBeenCalledTimes(2);
+    expect(preSendCheck).toHaveBeenLastCalledWith({ database: trx });
     expect(notifQ.insert).not.toHaveBeenCalled();
     expect(PushService.sendToCustomer).not.toHaveBeenCalled();
   });
@@ -250,7 +344,7 @@ describe('customer notification native push dispatch', () => {
 describe('admin feed role scoping (adminRoleOnly triggers)', () => {
   function adminFeedQuery({ rows = [], count = '2', updated = 1 } = {}) {
     const q = {};
-    for (const m of ['whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'limit']) {
+    for (const m of ['whereNull', 'orWhereRaw', 'whereRaw', 'select', 'orderBy', 'orderByRaw', 'limit']) {
       q[m] = jest.fn(() => q);
     }
     q.where = jest.fn((arg) => {
@@ -265,6 +359,7 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
 
   function setupAdminDb(opts) {
     const q = adminFeedQuery(opts);
+    db.raw = jest.fn((sql) => sql);
     db.mockImplementation((table) => {
       if (table === 'notifications') return q;
       throw new Error(`Unexpected table ${table}`);
@@ -316,14 +411,19 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     expect(q.whereRaw).toHaveBeenCalled();
   });
 
-  test('markAllReadAdmin scopes by role; admin stays global', async () => {
+  test('markAllReadAdmin scopes by role; admin stays global (aside from the activity-only exclusion every role gets)', async () => {
     const techQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'technician' });
-    expect(techQ.whereRaw).toHaveBeenCalled();
+    // Both the role's triggerKey allowlist AND the activity-only exclusion
+    // are whereRaw predicates — a technician gets both.
+    expect(techQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'triggerKey'"))).toBe(true);
 
     const adminQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'admin' });
-    expect(adminQ.whereRaw).not.toHaveBeenCalled();
+    // Admin gets NO role predicate — only the activity-only exclusion
+    // (metadata.feed = 'activity' rows never reach the bell for any role).
+    expect(adminQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'triggerKey'"))).toBe(false);
+    expect(adminQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'feed'"))).toBe(true);
     expect(adminQ.update).toHaveBeenCalled();
   });
 });

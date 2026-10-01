@@ -437,6 +437,30 @@ function renderWeekPlanAfterTreatment(plan, { restriction = null } = {}) {
   };
 }
 
+// The literal token renderWeekPlanNotBefore leaves for the caller to fill
+// with the hold's end time (the plan step runs before the visit's products
+// are known; the caller owns the clock). It must never reach a customer.
+const HOLD_UNTIL_TOKEN = '{holdUntil}';
+const NOT_BEFORE_SENTENCE = `Not before ${HOLD_UNTIL_TOKEN}: if your permitted watering day comes first, use your next permitted day after it; if there isn't one this week, skip that run.`;
+
+/**
+ * The report card's plan while a product watering HOLD is in force: the same
+ * plan, with one sentence saying the run may not start before the hold ends.
+ * It only ever moves a run later inside the customer's own permitted days or
+ * drops it, so it can never create an illegal watering. A report-time overlay,
+ * like the credit path: the stored Monday snapshot and its decisionHash are
+ * never touched. Null for hold / unavailable plans (no run to shift).
+ *
+ * The detail carries a literal {holdUntil} token — the caller replaces it
+ * with the hold's end time.
+ */
+function renderWeekPlanNotBefore(plan, { restriction = null, runMinutes = null } = {}) {
+  if (!plan || plan.action !== 'run') return null;
+  const card = renderWeekPlanReport(plan, { runMinutes, restriction });
+  if (!card) return null;
+  return { title: card.title, detail: `${card.detail} ${NOT_BEFORE_SENTENCE}` };
+}
+
 /**
  * One customer-week decision for app, email and reports. The Monday sweep
  * publishes under the existing property-preferences lock after validating
@@ -916,6 +940,8 @@ module.exports = {
   renderWeekPlanEmail,
   renderWeekPlanReport,
   renderWeekPlanAfterTreatment,
+  renderWeekPlanNotBefore,
+  HOLD_UNTIL_TOKEN,
   visitInPlanWeek,
   renewWeekPlanClaim,
   renewWeekPlanClaimWithRetry,

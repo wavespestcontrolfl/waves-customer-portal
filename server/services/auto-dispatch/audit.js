@@ -170,9 +170,14 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
         .whereIn('s.status', ['pending', 'confirmed']);
     })
     .update({
-      read_at: nowDate,
+      ...require('../notification-service')._private.doneColumns({
+        by: 'auto-dispatch', resolution: 'The visit is no longer awaiting placement', at: nowDate, keepExisting: true, conn: db,
+      }),
       title: resolvedTitle,
       body: 'This visit is no longer awaiting placement for the recorded due date.',
+      // The alert's original instruction was stored as the full text; a
+      // resolved row must not keep it behind "Show full text".
+      detail: null,
     });
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')

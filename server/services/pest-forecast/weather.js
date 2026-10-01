@@ -6,25 +6,46 @@
  * forecast periods and reduce them to two signals the pest model cares about:
  * a representative daytime high (°F) and an average precipitation chance (%).
  *
- * SWFL points are additionally enriched with the Florida Automated Weather
- * Network (FAWN) recent-rainfall reading, which gives a better "is the ground
- * already wet" signal for mosquito/ant pressure than a forward precip chance.
+ * SWFL points are additionally enriched with yesterday's measured rainfall at
+ * the city's own coordinate: NOAA MRMS gauge-corrected radar (~1 km grid, via
+ * mrms-qpe.js), the same observed-rain source the irrigation emails quote.
+ * It gives a better "is the ground already wet" signal for mosquito/ant
+ * pressure than a forward precip chance.
  *
  * Everything here is best-effort and fails soft: if the network is slow or the
  * upstreams are down, getWeatherSignals resolves to { hasWeather: false } and
  * the forecast degrades to its pure seasonal baseline. Results are cached per
- * rounded coordinate for 3 hours so a popular embed can't hammer NWS/FAWN.
+ * rounded coordinate until their freshUntil (3 hours; 15 minutes while a
+ * SWFL city's rain reading is missing; never past ET midnight, when
+ * "yesterday" moves) so a popular embed can't hammer NWS/MRMS.
  */
 
 const logger = require('../logger');
-let fawn = null;
-try { fawn = require('../fawn-weather'); } catch (_e) { fawn = null; }
+const { fetchMrmsDailyRain } = require('../mrms-qpe');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const NWS_UA = 'WavesPestControl-PestForecast/1.0 (+https://www.wavespestcontrol.com)';
 const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
+// A SWFL fill still missing yesterday's rain (IEM backfills late; an outage)
+// is retried this soon, not published rain-less for the full CACHE_TTL — a
+// missing reading can read as "dry".
+const MISSING_RAIN_RETRY = 15 * 60 * 1000; // 15 minutes
 const TIMEOUT_MS = 4000;
 
-const _cache = new Map(); // key -> { at, value }
+const _cache = new Map(); // key -> signals (each carries its own freshUntil)
+// The fill in progress per coordinate — concurrent requests share it.
+const _inflight = new Map(); // key -> Promise<signals>
+// Last measured MRMS reading per coordinate, for the ET day it measured.
+const _rainMemo = new Map(); // key -> { day, inches }
+
+// Epoch ms at which signals filled at `at` stop being fresh: CACHE_TTL, or
+// MISSING_RAIN_RETRY for a rain-less SWFL fill, and never past the next ET
+// midnight, when "yesterday" moves. The forecast cache and the public
+// route's HTTP lifetimes honor this same instant.
+function freshUntil(at, { missingRain = false } = {}) {
+  const midnight = parseETDateTime(`${etDateString(addETDays(at, 1))}T00:00`).getTime();
+  return Math.min(at.getTime() + (missingRain ? MISSING_RAIN_RETRY : CACHE_TTL), midnight);
+}
 
 function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
@@ -71,18 +92,71 @@ async function fetchNwsForecast(lat, lng) {
 }
 
 /**
+ * Measured rainfall (inches) for `day` — yesterday, the most recent CLOSED ET
+ * day; MRMS's current day is only a partial "so far" accumulation — at a
+ * coordinate, or null. A closed day's total doesn't change, so a reading
+ * already measured for `day` is reused when a later lookup the same day fails
+ * or comes back empty, rather than dropping a known total (a missing reading
+ * can read as "dry"); it is never reused for any other day. Never throws: the
+ * NWS signal stands on its own. Logged once per cache fill (not per request).
+ */
+async function fetchRecentRainIn(lat, lng, key, day) {
+  const known = _rainMemo.get(key);
+  const lastGood = known && known.day === day ? known.inches : null;
+  try {
+    const rain = await fetchMrmsDailyRain({ latitude: lat, longitude: lng, start: day, end: day });
+    if (!rain) {
+      logger.warn?.(`[pest-forecast/weather] MRMS rainfall unavailable for ${key} (${day})`);
+      return lastGood;
+    }
+    const inches = rain.days.find((d) => d.date === day)?.inches;
+    // A null day is a GAP (IEM backfills late), not a measured dry day —
+    // Number(null) === 0 would inject a phantom 0" and falsely flag "dry".
+    if (inches == null || !Number.isFinite(Number(inches))) {
+      logger.info?.(`[pest-forecast/weather] MRMS has no rainfall yet for ${key} (${day})`);
+      return lastGood;
+    }
+    _rainMemo.set(key, { day, inches: Number(inches) });
+    return Number(inches);
+  } catch (err) {
+    logger.warn?.(`[pest-forecast/weather] MRMS lookup failed for ${key}: ${err.message}`);
+    return lastGood;
+  }
+}
+
+/**
  * Resolve weekly weather signals for a coordinate. Never throws.
  * Returns: { hasWeather, tempHighF, precipChance, recentRainIn, source,
- *            warm, hot, dry, wet, coolSnap }
+ *            warm, hot, dry, wet, coolSnap, freshUntil }
  */
 async function getWeatherSignals({ lat, lng, region } = {}) {
+  const now = new Date();
   if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) {
-    return flags({ hasWeather: false });
+    return { ...flags({ hasWeather: false }), freshUntil: freshUntil(now) };
   }
 
   const key = cacheKey(lat, lng);
   const hit = _cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.value;
+  if (hit && now.getTime() < hit.freshUntil) return hit;
+
+  // One fill per coordinate at a time: concurrent requests share it, so a
+  // slower failed lookup can never overwrite a faster good one, and a burst
+  // of requests costs one set of upstream calls.
+  if (!_inflight.has(key)) {
+    const fill = fillSignals({ lat, lng, region, key, now })
+      .finally(() => { if (_inflight.get(key) === fill) _inflight.delete(key); });
+    _inflight.set(key, fill);
+  }
+  return _inflight.get(key);
+}
+
+async function fillSignals({ lat, lng, region, key, now }) {
+  // SWFL points also get yesterday's measured rainfall. Started before the
+  // NWS lookup so a cache fill waits for the slower of the two, not both.
+  const wantsRain = region === 'sw';
+  const rainLookup = wantsRain
+    ? fetchRecentRainIn(lat, lng, key, etDateString(addETDays(now, -1)))
+    : Promise.resolve(null);
 
   let base = { hasWeather: false, tempHighF: null, precipChance: null, recentRainIn: null, source: null };
   try {
@@ -92,38 +166,15 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
     logger.warn?.(`[pest-forecast/weather] NWS lookup failed for ${key}: ${err.message}`);
   }
 
-  // Enrich SWFL points with FAWN recent rainfall (best-effort, never blocks).
-  if (fawn && region === 'sw') {
-    try {
-      // getRecentRainfall() (not getCurrent()) — it reads FAWN's most recent
-      // COMPLETE day total, not the near-real-time hourly reading, which is
-      // what "has it been wet lately" needs and keeps this enrichment from
-      // pulling a stale day-total into any "current conditions" consumer.
-      const cur = await fawn.getRecentRainfall({ latitude: lat, longitude: lng });
-      // Guard explicitly against null/undefined — Number(null) === 0 would
-      // otherwise inject a phantom 0" reading and falsely flag the week "dry".
-      if (cur && cur.rainfall_in != null && Number.isFinite(Number(cur.rainfall_in))) {
-        base.recentRainIn = Number(cur.rainfall_in);
-        base.hasWeather = true;
-        if (!base.source) base.source = 'fawn';
-        else base.source = 'nws+fawn';
-      } else if (cur && cur.error) {
-        // FawnWeather.getRecentRainfall() already caught its own fetch/parse
-        // error and returned a placeholder — log once per cache fill (not
-        // per request) so an upstream FAWN outage is visible without spamming.
-        logger.warn?.(`[pest-forecast/weather] FAWN enrichment unavailable for ${key}: ${cur.error}`);
-      }
-    } catch (err) {
-      // Best-effort enrichment only — the NWS signal already stands, so we
-      // degrade to NWS-only rather than fail the whole forecast. Still log
-      // so a persistent problem (bad URL, station lookup failure, timeout)
-      // doesn't go unnoticed.
-      logger.warn?.(`[pest-forecast/weather] FAWN lookup failed for ${key}: ${err.message}`);
-    }
+  const recentRainIn = await rainLookup;
+  if (recentRainIn != null) {
+    base.recentRainIn = recentRainIn;
+    base.hasWeather = true;
+    base.source = base.source ? `${base.source}+mrms` : 'mrms';
   }
 
-  const value = flags(base);
-  _cache.set(key, { at: Date.now(), value });
+  const value = { ...flags(base), freshUntil: freshUntil(now, { missingRain: wantsRain && recentRainIn == null }) };
+  _cache.set(key, value);
   return value;
 }
 
@@ -146,6 +197,6 @@ function flags(b) {
   };
 }
 
-function _clearCache() { _cache.clear(); } // test hook
+function _clearCache() { _cache.clear(); _rainMemo.clear(); _inflight.clear(); } // test hook
 
 module.exports = { getWeatherSignals, flags, _clearCache };

@@ -11,6 +11,8 @@ const expression = `(?:${weekday}(?:\\s+(?:${absolute}|(?:the\\s+)?${day}))?|${a
 const DATE = new RegExp(`\\b${expression}\\b`, 'g');
 const normalize = (text) => String(text || '').toLowerCase().replace(/[’']/g, '').replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
 const indexOfName = (values, text) => values.findIndex(value => value.startsWith(text.slice(0, 3)));
+// "Dec." / "Thurs." lose their abbreviation dot before sentences are split.
+const ABBREVIATION_DOT = /\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)\./gi;
 
 // This is an evidence grammar, not a general prose interpreter. The existing
 // quoted-deadline parser requires a clock; confirmed-slot evidence requires a
@@ -80,7 +82,7 @@ function transcriptDates(transcript, reference) {
   let complete = true;
   // Every sentence retains its turn's speaker. A caller's own delivery
   // statement must never supply timing for a Waves promise elsewhere.
-  const clauses = String(transcript || '').replace(/\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)\./gi, '$1')
+  const clauses = String(transcript || '').replace(ABBREVIATION_DOT, '$1')
     .split('\n').flatMap(line => {
       const turn = /^\s*(agent|caller|customer):\s*(.*)$/i.exec(line);
       return (turn ? turn[2] : line).replace(/\?/g, ' question.').split(/[.!;]+/)
@@ -189,4 +191,14 @@ function deliveryTimingMatches(date, timing, reference) {
     && actual.hour >= 8 && actual.hour < 12;
 }
 
-module.exports = { verifyRescheduleDateClaims, verifiedAppointmentIdentityClaims };
+// One date said on its own ("Thurs., Dec. 17", "the 9th", "tomorrow"), read
+// to the components it states: { year?, month?, day?, weekday? }. Null when
+// the text is not exactly one date this grammar proves. For callers that
+// already hold the words naming a date (the call reschedule applier's
+// agreed_slot_words.day / moved_appointment_words).
+function statedDateComponents(text, reference) {
+  const said = normalize(String(text || '').replace(ABBREVIATION_DOT, '$1'));
+  return new RegExp(`^${expression}$`).test(said) ? components(said, reference) : null;
+}
+
+module.exports = { verifyRescheduleDateClaims, verifiedAppointmentIdentityClaims, statedDateComponents };

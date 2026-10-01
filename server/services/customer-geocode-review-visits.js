@@ -1,0 +1,385 @@
+const { inheritReferenceUnit, premiseStampConflicts } = require('./stamped-address');
+const { lockTechDays } = require('./scheduling/tech-day-lock');
+const { etDateString } = require('../utils/datetime-et');
+const { toDateStr } = require('./auto-dispatch/dates');
+const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+const {
+  planAppointmentAddress,
+  lockAppointmentAddress,
+  applyAppointmentAddress,
+} = require('./appointment-address');
+const { roundDecimal } = require('../../shared/proposal-bid.cjs');
+
+const VISIT_FIELDS = [
+  'id', 'property_id', 'technician_id', 'scheduled_date', 'status', 'lat', 'lng', 'visit_id',
+  'auto_dispatch_locked', 'auto_dispatch_excluded',
+  'is_recurring', 'recurring_parent_id',
+  'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip',
+];
+
+const pinAtScale = (value, places) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? roundDecimal(numeric, places) : NaN;
+};
+const isProtected = row => Boolean(row.auto_dispatch_locked || row.auto_dispatch_excluded);
+
+function retry(message = 'Appointments changed while saving. Reload and review them.') {
+  return Object.assign(new Error(message), {
+    statusCode: 409, status: 409, code: 'visit_changed', isOperational: true,
+  });
+}
+
+// 55P03 lock_not_available: a NOWAIT row lock found the row already held.
+async function withoutWaiting(read) {
+  try {
+    return await read();
+  } catch (error) {
+    if (error?.code === '55P03') throw retry('Appointments are being updated right now. Try again in a moment.');
+    throw error;
+  }
+}
+
+function visitStamp(row) {
+  return {
+    service_address_line1: row.service_address_line1,
+    service_address_line2: row.service_address_line2,
+    service_address_city: row.service_address_city,
+    service_address_state: row.service_address_state,
+    service_address_zip: row.service_address_zip,
+  };
+}
+
+function visitMatchesPrimary(row, customer, primary) {
+  if (row.property_id != null) return String(row.property_id) === String(primary.id);
+  const reference = {
+    service_address_line1: customer.address_line1,
+    service_address_line2: customer.address_line2,
+    service_address_city: customer.city,
+    service_address_state: customer.state,
+    service_address_zip: customer.zip,
+  };
+  const original = visitStamp(row);
+  const stamped = inheritReferenceUnit({
+    ...original,
+    service_address_line1: original.service_address_line1 || reference.service_address_line1,
+  }, reference);
+  if (premiseStampConflicts(stamped, reference)) return false;
+  const stampedState = String(original.service_address_state || '').trim().toLowerCase();
+  return !stampedState || stampedState === String(customer.state || '').trim().toLowerCase();
+}
+
+function visitPinIsSafeToReplace(row, customer, primary) {
+  if (row.property_id != null && String(row.property_id) === String(primary.id)) return true;
+  if (row.lat == null || row.lng == null) return true;
+  const rowLat = Number(row.lat);
+  const rowLng = Number(row.lng);
+  const rowHasPair = Number.isFinite(rowLat) && Number.isFinite(rowLng) && rowLat !== 0 && rowLng !== 0;
+  if (!rowHasPair) return true;
+  return [customer, primary].some(reference => {
+    if (reference?.latitude == null || reference?.longitude == null) return false;
+    const priorLat = Number(reference.latitude);
+    const priorLng = Number(reference.longitude);
+    return Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0
+      && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
+      && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6);
+  });
+}
+
+function candidateVisits(conn, customerId, { lock = false } = {}) {
+  let query = conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['pending', 'confirmed'])
+    .where('scheduled_date', '>=', etDateString())
+    .orderBy('id')
+    .select(VISIT_FIELDS);
+  if (lock) query = query.forUpdate().noWait();
+  return query;
+}
+
+function recurringRoots(conn, customerId, { lock = false } = {}) {
+  let query = conn('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
+    .whereNull('recurring_parent_id')
+    .orderBy('id')
+    .select('*');
+  if (lock) query = query.forUpdate().noWait();
+  return query;
+}
+
+function seriesParentId(row) {
+  return row.recurring_parent_id || (row.is_recurring ? row.id : null);
+}
+
+async function prelockVisitContext(trx, customerId) {
+  const visits = await candidateVisits(trx, customerId);
+  const roots = await recurringRoots(trx, customerId);
+  const techDaysLocked = await lockTechDays(trx, visits.map(row => ({
+    techId: row.technician_id,
+    date: toDateStr(row.scheduled_date),
+  })), { wait: false });
+  if (techDaysLocked === false) throw retry();
+  const seriesIds = [...new Set([
+    ...visits.map(seriesParentId), ...roots.map(row => row.id),
+  ].filter(Boolean))].map(String).sort();
+  for (const parentId of seriesIds) {
+    const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['recurring-series-maintenance', parentId]);
+    if (result.rows[0]?.locked !== true) {
+      throw retry('This recurring plan changed while saving. Reload and review it.');
+    }
+  }
+  return { visits, rootIds: roots.map(row => String(row.id)), seriesIds };
+}
+
+function sameVisitFence(before, after) {
+  return String(before.id) === String(after.id)
+    && String(before.technician_id || '') === String(after.technician_id || '')
+    && toDateStr(before.scheduled_date) === toDateStr(after.scheduled_date)
+    && String(before.visit_id || '') === String(after.visit_id || '')
+    && String(seriesParentId(before) || '') === String(seriesParentId(after) || '');
+}
+
+function rowIsEligible(row, customer, primary, verifyPin) {
+  return visitMatchesPrimary(row, customer, primary)
+    && (!verifyPin || visitPinIsSafeToReplace(row, customer, primary));
+}
+
+async function groupedPlans(trx, prelocked, { customer, primary, verifyPin }) {
+  if (!verifyPin) return [];
+  const candidates = new Map(prelocked.visits.map(row => [String(row.id), row]));
+  const anchors = new Map();
+  for (const row of prelocked.visits) {
+    if (row.visit_id && rowIsEligible(row, customer, primary, true)
+      && !anchors.has(String(row.visit_id))) anchors.set(String(row.visit_id), row);
+  }
+  const groups = [];
+  for (const [visitId, anchor] of [...anchors].sort(([a], [b]) => a.localeCompare(b))) {
+    const plan = await planAppointmentAddress(trx, anchor.id, primary.id, 'visit');
+    const memberIds = plan.rows.map(row => String(row.id));
+    if (memberIds.some(id => !candidates.has(id))
+      || plan.rows.some(row => isProtected(row) || !rowIsEligible(row, customer, primary, true))) {
+      throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
+    }
+    groups.push({ visitId, memberIds, plan });
+  }
+  return groups;
+}
+
+async function lockVisitContext(trx, customerId, prelocked, {
+  includeProtected = false, customer, primary, verifyPin = false,
+} = {}) {
+  const groups = await groupedPlans(trx, prelocked, { customer, primary, verifyPin });
+  for (const group of groups) {
+    try {
+      await lockAppointmentAddress(trx, group.plan, {}, { noWait: true });
+    } catch (error) {
+      if (error?.code === 'visit_busy') throw retry();
+      throw error;
+    }
+  }
+
+  // Never wait on a visit row: this runs under the customer row lock, and a
+  // writer that holds a visit and then wants the customer (the annual-prepay
+  // switch) would deadlock with a waiting staff decision. A busy row is the
+  // same outcome as a changed one: reload and try again, draft kept.
+  const [visits, roots] = await withoutWaiting(async () => [
+    await candidateVisits(trx, customerId, { lock: true }),
+    await recurringRoots(trx, customerId, { lock: true }),
+  ]);
+  const changed = visits.length !== prelocked.visits.length
+    || visits.some((row, index) => !sameVisitFence(prelocked.visits[index], row))
+    || roots.length !== prelocked.rootIds.length
+    || roots.some((row, index) => String(row.id) !== prelocked.rootIds[index]);
+  if (changed) throw retry();
+
+  const lockedById = new Map(visits.map(row => [String(row.id), row]));
+  if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
+    || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
+    throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
+  }
+  if (verifyPin) {
+    const plannedIds = new Set(groups.flatMap(group => group.memberIds));
+    const newlyEligibleGroup = visits.some(row => row.visit_id
+      && !plannedIds.has(String(row.id)) && rowIsEligible(row, customer, primary, true));
+    if (newlyEligibleGroup) throw retry();
+  }
+
+  const rootsById = new Map(roots.map(row => [String(row.id), row]));
+  const missingIds = prelocked.seriesIds.filter(id => !rootsById.has(id));
+  if (missingIds.length) {
+    const parents = await withoutWaiting(() => trx('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereIn('id', missingIds)
+      .orderBy('id')
+      .forUpdate()
+      .noWait()
+      .select('*'));
+    if (parents.length !== missingIds.length
+      || parents.some((row, index) => String(row.id) !== missingIds[index])) {
+      throw retry('Recurring plans changed while saving. Reload and review them.');
+    }
+    for (const row of parents) rootsById.set(String(row.id), row);
+  }
+  return {
+    visits: includeProtected ? visits : visits.filter(row => !isProtected(row)),
+    parents: prelocked.seriesIds.map(id => rootsById.get(id)), groups,
+  };
+}
+
+async function updatePrimaryVisits(trx, customer, primary, after, latitude, longitude, visitContext, actorId) {
+  const ids = visitContext.visits
+    .filter(row => !row.visit_id)
+    .filter(row => rowIsEligible(row, customer, primary, true))
+    .map(row => row.id);
+  if (ids.length) {
+    await trx('scheduled_services')
+      .whereIn('id', ids)
+      .whereIn('status', ['pending', 'confirmed'])
+      .where('scheduled_date', '>=', etDateString())
+      .update({
+        property_id: primary.id,
+        service_address_line1: after.address_line1,
+        service_address_line2: after.address_line2 || null,
+        service_address_city: after.city,
+        service_address_state: after.state,
+        service_address_zip: after.zip,
+        lat: latitude,
+        lng: longitude,
+        zone: null,
+        route_order: null,
+        pre_service_brief: null,
+        pre_service_brief_type: null,
+        pre_service_brief_generated_at: null,
+        updated_at: new Date(),
+      });
+  }
+  const groupedUpdated = [];
+  for (const group of visitContext.groups) {
+    groupedUpdated.push(...await applyAppointmentAddress(trx, group.plan, actorId));
+  }
+  if (visitContext.parents.length) {
+    const appointmentAddress = {
+      property_id: primary.id,
+      service_address_line1: after.address_line1,
+      service_address_line2: after.address_line2 || null,
+      service_address_city: after.city,
+      service_address_state: after.state,
+      service_address_zip: after.zip,
+      lat: latitude,
+      lng: longitude,
+      zone: null,
+    };
+    const matchingParentIds = visitContext.parents.filter(parent => {
+      const effective = { ...parent, ...recurringServiceAddress(parent) };
+      return rowIsEligible(effective, customer, primary, true);
+    }).map(parent => parent.id);
+    if (matchingParentIds.length) {
+      await trx('scheduled_services')
+        .where({ customer_id: customer.id })
+        .whereIn('id', matchingParentIds)
+        .update({
+          recurring_template_overrides: trx.raw(
+            "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ appointment_address: appointmentAddress })],
+          ),
+        });
+    }
+  }
+  return [...ids, ...groupedUpdated];
+}
+
+const primaryLinked = (row, primary) => row.property_id != null
+  && String(row.property_id) === String(primary.id);
+
+function primaryAddressPatch(primary) {
+  return {
+    property_id: primary.id,
+    service_address_line1: primary.address_line1,
+    service_address_line2: primary.address_line2 || null,
+    service_address_city: primary.city,
+    service_address_state: primary.state,
+    service_address_zip: primary.zip,
+  };
+}
+
+async function clearLocationMirrors(trx, customer, primary, latitude, longitude, clearMirrors) {
+  const hasRejectedPin = Number.isFinite(latitude) && Number.isFinite(longitude);
+  if (!hasRejectedPin && !clearMirrors) return { customer: 0, property: 0 };
+  const customerQuery = trx('customers').where({ id: customer.id });
+  if (!clearMirrors) customerQuery.where({ latitude, longitude });
+  const customerCount = await customerQuery.update({ latitude: null, longitude: null, updated_at: new Date() });
+  const propertyQuery = trx('customer_properties')
+    .where({ id: primary.id, customer_id: customer.id, active: true, is_primary: true });
+  if (!clearMirrors) propertyQuery.where({ latitude, longitude });
+  const propertyCount = await propertyQuery.update({ latitude: null, longitude: null, updated_at: new Date() });
+  return { customer: customerCount, property: propertyCount };
+}
+
+async function clearVisitLocations(trx, customer, primary, matchingVisits) {
+  const ids = matchingVisits.map(row => row.id);
+  const scope = query => query.where({ customer_id: customer.id })
+    .whereIn('status', ['pending', 'confirmed'])
+    .where('scheduled_date', '>=', etDateString());
+  return ids.length ? scope(trx('scheduled_services').whereIn('id', ids)).update({
+    lat: null,
+    lng: null,
+    zone: null,
+    route_order: null,
+    updated_at: new Date(),
+  }) : 0;
+}
+
+async function clearRecurringLocations(trx, customer, primary, parents, rejectedPins) {
+  let count = 0;
+  for (const parent of parents) {
+    const effective = { ...parent, ...recurringServiceAddress(parent) };
+    if (!visitMatchesPrimary(effective, customer, primary)
+      || (!primaryLinked(effective, primary)
+        && !rejectedPins.some(pin => pinAtScale(effective.lat, 6) === pin.latitude
+          && pinAtScale(effective.lng, 6) === pin.longitude))) continue;
+    count += await trx('scheduled_services')
+      .where({ id: parent.id, customer_id: customer.id })
+      .update({
+        recurring_template_overrides: trx.raw(
+          "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ appointment_address: {
+            ...recurringServiceAddress(parent),
+            ...(primaryLinked(effective, primary) ? primaryAddressPatch(primary) : {}),
+            lat: null, lng: null, zone: null,
+          } })],
+        ),
+      });
+  }
+  return count;
+}
+
+async function clearMatchingPins(trx, customer, primary, storedReview, visitContext, {
+  clearMirrors = false, additionalPins = [],
+} = {}) {
+  const latitude = Number(storedReview?.latitude);
+  const longitude = Number(storedReview?.longitude);
+  const rejectedPins = [storedReview, ...additionalPins].flatMap(pin => {
+    if (pin?.latitude == null || pin?.longitude == null) return [];
+    const pinLatitude = pinAtScale(pin.latitude, 6);
+    const pinLongitude = pinAtScale(pin.longitude, 6);
+    return Number.isFinite(pinLatitude) && Number.isFinite(pinLongitude)
+      ? [{ latitude: pinLatitude, longitude: pinLongitude }] : [];
+  }).filter((pin, index, pins) => pins.findIndex(candidate => candidate.latitude === pin.latitude
+    && candidate.longitude === pin.longitude) === index);
+  const matchingVisits = visitContext.visits.filter(row => visitMatchesPrimary(row, customer, primary))
+    .filter(row => primaryLinked(row, primary) || rejectedPins.some(pin =>
+      pinAtScale(row.lat, 6) === pin.latitude && pinAtScale(row.lng, 6) === pin.longitude));
+  const mirrors = await clearLocationMirrors(trx, customer, primary, latitude, longitude, clearMirrors);
+  const visits = await clearVisitLocations(trx, customer, primary, matchingVisits);
+  const templates = await clearRecurringLocations(trx, customer, primary, visitContext.parents, rejectedPins);
+  return { ...mirrors, visits, templates, visitIds: matchingVisits.map(row => row.id) };
+}
+
+module.exports = {
+  prelockVisitContext,
+  lockVisitContext,
+  updatePrimaryVisits,
+  clearMatchingPins,
+  pinAtScale,
+};

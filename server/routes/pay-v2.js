@@ -9,6 +9,7 @@ const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 // financial/personal data — never cacheable, never indexable.
 router.use(noStore);
 const InvoiceService = require('../services/invoice');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
@@ -19,6 +20,8 @@ const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoice
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
+// Lives in services/pay-combined.js (shared with the customer-dunning set); import it from there.
+const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
 
 /**
  * Public pay routes — no auth required.
@@ -254,12 +257,6 @@ async function invoiceCaptureNeeded(invoice) {
   }
 }
 
-// Would auto-applied account credit fully cover this invoice? PROBE only —
-// never applies anything. Mirrors createInvoicePaymentIntent's
-// availableCredit gate (feature-gated, payer-billed excluded). Under the
-// held-coverage flow (Codex #2507 round-7 P1) a required-save invoice
-// stays collectible until capture completes, so GET/capture-setup can no
-// longer key the capture state off status === 'prepaid' alone.
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
@@ -271,20 +268,6 @@ async function invoiceProjectedCreditApplied(invoice) {
   const credit = Number(row?.account_credits) || 0;
   if (!(credit > 0)) return 0;
   return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
-}
-
-async function invoiceCreditWouldFullyCover(invoice) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
-  if (!invoice?.customer_id || invoice?.payer_id) return false;
-  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
-  // including the customer's opt-in (customers.auto_apply_account_credit,
-  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
-  // it must read as zero here too — otherwise the capture step / combined
-  // preview would show a coverage the setup path will never apply.
-  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -455,6 +438,20 @@ router.get('/:token', async (req, res, next) => {
         || (isInvoiceCollectibleStatus(data.status) && (await invoiceCreditWouldFullyCover(data))))
       && (await invoiceCaptureNeeded(data));
 
+    // The visit note, screened like every other customer render
+    // (context-aggregator.js customerSafeVisitNotes): the reviewed report
+    // text only. The invoice
+    // keeps the note as it stood when billed (the raw note, on older
+    // invoices), so it is screened here with the visit record's own flags; a
+    // combined-visit invoice keeps none and shows none.
+    const techNotes = data.tech_notes && data.service_record_id
+      ? await db('service_records')
+        .where({ id: data.service_record_id, customer_id: data.customer_id })
+        .first('structured_notes', 'service_data', 'completion_source')
+        .then((record) => (record ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true }) : null))
+        .catch(() => null)
+      : null;
+
     res.json({
       invoice: {
         id: data.id,
@@ -499,7 +496,7 @@ router.get('/:token', async (req, res, next) => {
         type: data.service_type,
         date: data.service_date,
         techName: data.tech_name,
-        techNotes: data.tech_notes,
+        techNotes,
         productsApplied,
         photos,
       },
@@ -587,6 +584,17 @@ router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
 // =========================================================================
 // POST /api/pay/:token/setup — Create Stripe PaymentIntent for invoice
 // =========================================================================
+// Codex #4971 r26 P1: a delivered termite-renewal pay link whose parent plan
+// has since been cancelled, refunded or moved must not start a payment. Keyed
+// on the invoice's own term link, so an ordinary invoice costs no query.
+async function rejectIfRenewalNotPayable(invoice, res) {
+  if (!invoice?.annual_prepay_term_id) return false;
+  const refusal = await require('../services/termite-annual-renewal-charge').renewalPaymentRefusal(invoice);
+  if (!refusal) return false;
+  res.status(409).json({ error: refusal.message, renewalNotPayable: true });
+  return true;
+}
+
 router.post('/:token/setup', async (req, res, next) => {
   let invoice = null;
   try {
@@ -622,6 +630,7 @@ router.post('/:token/setup', async (req, res, next) => {
     // for repeated saved-card clicks. Do not mint a public PaymentIntent
     // while an off-session charge is active or awaiting reconciliation.
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -780,6 +789,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // route that can mutate that PI while a saved-card collection owns the
     // invoice, not only the route that creates new PIs.
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -842,6 +852,7 @@ router.post('/:token/quote', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -880,6 +891,7 @@ router.post('/:token/finalize', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res)) return;
+    if (await rejectIfRenewalNotPayable(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
@@ -887,7 +899,20 @@ router.post('/:token/finalize', async (req, res, next) => {
     }
 
     // Required-save invoices force the flag server-side (see /setup).
-    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) });
+    // Codex #4971 r26 P1: a termite renewal's payment is finalized UNDER the
+    // renewal gate, re-checked there (an ordinary invoice runs straight
+    // through).
+    const finalizeOptions = { saveCard: !!saveCard || (await invoiceRequiresSavedMethod(invoice)) };
+    let result;
+    try {
+      result = await require('../services/termite-annual-renewal-charge')
+        .withRenewalPaymentClearance(invoice, () => StripeService.finalizeInvoicePayment(invoice.id, quoteToken, finalizeOptions));
+    } catch (clearanceErr) {
+      if (clearanceErr && clearanceErr.code === 'RENEWAL_NOT_PAYABLE') {
+        return res.status(409).json({ error: clearanceErr.message, renewalNotPayable: true });
+      }
+      throw clearanceErr;
+    }
     res.json(result);
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -1663,4 +1688,3 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
-module.exports.invoiceCreditWouldFullyCover = invoiceCreditWouldFullyCover;

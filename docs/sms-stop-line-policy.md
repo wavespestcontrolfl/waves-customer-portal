@@ -70,6 +70,12 @@ existing WaveGuard member, which test 1 would keep. The owner ruled on
 and had the line removed. Recorded here so it is not "fixed" back by
 accident.
 
+`missed_call_text_back` (services/missed-call-text-back.js) would pass test 2
+— an unknown caller with no customer record is a cold first touch — but the
+owner ruled on 2026-09-26 that a caller who dialed US first is different from
+a lead form or a referrer's name: "they called us." No disclosure line.
+Recorded here so it is not "fixed" onto the keep-list by accident.
+
 ## Adding a template
 
 Seed it without the line unless one of the two tests above says otherwise.

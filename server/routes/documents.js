@@ -11,19 +11,20 @@ const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const {
   getProjectType,
-  customerSafeServiceNotes,
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
   projectTypeHasInternalFindingKeys,
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
+const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf } = require('../services/service-report/report-identity-snapshot');
 const {
   WAVES_ADDRESS_LINE,
   WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const PhotoService = require('../services/photos');
 
@@ -386,10 +387,12 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE DID
   // ══════════════════════════════════════════════════════
-  // Same legacy inspection-fee scrub as the service-history JSON — this PDF
-  // (and its auto_report share links) is a customer render of the same notes
-  // (codex #2817).
-  const notes = (customerSafeServiceNotes(service.technician_notes, structuredNotes) || '').trim();
+  // The same rule as the service-history JSON — this PDF (and its
+  // auto_report share links) is a customer render of the same notes: the
+  // reviewed report text only, never the tech's raw note, with the legacy
+  // inspection-fee scrub on top (context-aggregator.js customerSafeVisitNotes;
+  // codex #2817).
+  const notes = (customerSafeVisitNotes(service, { projectLine: true }) || '').trim();
   if (notes) {
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Did', L, y);
@@ -530,6 +533,13 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.fillColor(MUTED).text(
     'View this report in your Waves portal · National Poison Control: (800) 222-1222',
     0, 770, { width: 612, align: 'center' }
+  );
+  // Owner ask 2026-09-28: every report links to the public Products & Safety
+  // page, this Documents-API PDF (visits with no report token) included. The
+  // URL prints in full for paper copies; it fits the band above the page edge.
+  doc.fillColor(MUTED_ON_DARK).text(
+    `Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`,
+    0, 780, { width: 612, align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` }
   );
   doc.page.margins.bottom = previousBottomMargin;
   doc.restore();

@@ -176,13 +176,20 @@ function resolveAnchor(service, anchorMap) {
 /**
  * Bulk reminder-freeze lookup for a set of scheduled_service ids.
  *
+ * `freezeHours` is the claimable-band width the caller wants enforced —
+ * defaults to REMINDER_SENDABLE_HOURS (route-tiers' own 72.25h band).
+ * GATE_AUTO_DISPATCH_FLEX_TIER passes its own, tighter 73h
+ * (flex-tier.js's FLEX_TIER_FREEZE_HOURS), which fully covers 72.25h, so a
+ * visit still claimable by the reminder sender is always caught either way.
+ *
  * Returns { failed, frozen:Set<id> }:
  *   failed=true  → the status could not be read; callers MUST treat EVERY
  *                  visit as frozen (fail closed).
- *   frozen       → ids whose 72h reminder is recorded as sent (directly, or
- *                  via the owning sibling row for the same appointment slot).
+ *   frozen       → ids whose reminder is recorded as sent (directly, or via
+ *                  the owning sibling row for the same appointment slot), or
+ *                  whose appointment sits inside `freezeHours` of `now`.
  */
-async function loadReminderFreeze(db, serviceIds, now = new Date()) {
+async function loadReminderFreeze(db, serviceIds, now = new Date(), freezeHours = REMINDER_SENDABLE_HOURS) {
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
   try {
     const rows = await db('appointment_reminders')
@@ -206,7 +213,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date()) {
       // Inclusive <=, matching the sender's own `hoursUntil <= 72.25` — at
       // the exact boundary the sender may still claim the row, so the visit
       // must already be frozen.
-      return t - now.getTime() <= REMINDER_SENDABLE_HOURS * 3600000;
+      return t - now.getTime() <= freezeHours * 3600000;
     };
 
     const frozen = new Set();

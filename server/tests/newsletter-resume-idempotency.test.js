@@ -40,7 +40,7 @@ db.raw = jest.fn(async () => ({ rowCount: 0 }));
 db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
-const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
+const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliveries } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
@@ -48,7 +48,10 @@ const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../serv
 function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
-   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate']
+   'whereNotExists', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'forUpdate',
+   // excludeMarketingOptedOut's pre-filtering CTE (codex #5165) — a no-op
+   // chain link here, same as every other query-shape method above.
+   'withMaterialized']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.whereIn = jest.fn((...args) => {
     if (onWhereIn) onWhereIn(...args);
@@ -102,6 +105,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       })) }),
     ],
     newsletter_send_deliveries: [
+      chain({ first: null }),                               // ledger guard: no rows yet → seed
       chain({}),                                            // insert onConflict
       chain({ result: deliveries }),                        // SELECT after insert
       // Terminal 'skipped' update for recipients that failed the dispatch
@@ -224,6 +228,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         recheckQuery,
       ],
       newsletter_send_deliveries: [
+        chain({ first: null }),                                      // ledger guard: no rows yet → seed
         chain({}),                                                    // insert onConflict
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
         chain({ updated: 1 }),                                        // post-send bulk update
@@ -482,6 +487,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         chain({ result: [{ id: 1, customer_id: null }, { id: 2, customer_id: null }] }),
       ],
       newsletter_send_deliveries: [
+        chain({ first: null }),                                      // ledger guard: no rows yet → seed
         chain({}),
         chain({ result: [
           { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
@@ -561,6 +567,79 @@ describe('resumeCampaign — preconditions', () => {
       preclaimed: true,
       claimToken: expect.any(String),
     });
+  });
+
+  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, not explicitly opted out, retryable (codex round 17 P2; #5165)', async () => {
+    const q = chain({ first: { id: 'd-1' } });
+    db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return q; });
+    await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
+    expect(q.join).toHaveBeenCalledWith('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id');
+    expect(q.where).toHaveBeenCalledWith({ 'newsletter_subscribers.status': 'active' });
+    expect(q.whereIn).toHaveBeenCalledWith('newsletter_send_deliveries.status', ['queued', 'failed', 'sending']);
+    // global suppression + archived customer + explicit marketing opt-out
+    // + non-mailable same-mailbox sibling + duplicate-ACTIVE-mailbox
+    // canonical-row check (owner ruling 2026-09-29, #5165; codex P2 :224)
+    expect(q.whereNotExists).toHaveBeenCalledTimes(5);
+  });
+
+  test('the correction-eligibility read and the resume precheck relink archived links BEFORE judging outstanding rows (codex round 18 P2)', async () => {
+    const order = [];
+    db.transaction.mockImplementation(async (cb) => { order.push('relink'); return cb({ raw: db.raw }); });
+    const eligibility = chain({ first: { id: 'd-1' } });
+    eligibility.first = jest.fn(async () => { order.push('eligibility'); return { id: 'd-1' }; });
+    db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return eligibility; });
+    await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
+    expect(order).toEqual(['relink', 'eligibility']);
+
+    // The resume precheck: the ledger count, then the relink, then the
+    // outstanding-eligible count — a row relinked to a live twin counts.
+    order.length = 0;
+    const failedSend = {
+      id: 's', status: 'failed', newsletter_type: null, updated_at: new Date('2026-09-28T12:00:00Z'),
+      subject: 'Hello', html_body: '<p>Body</p>', text_body: 'Body', event_ids: [],
+    };
+    const outstanding = chain();
+    outstanding.count = jest.fn(() => ({ first: jest.fn(async () => { order.push('outstanding'); return { c: 0 }; }) }));
+    const queues = {
+      newsletter_sends: [chain({ first: failedSend }), chain({ first: null })],
+      newsletter_send_deliveries: [chain({ count: 3 }), outstanding, chain({ updated: 0 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      return queue && queue.length ? queue.shift() : chain();
+    });
+    await prepareResumeCampaign('s').catch(() => {});
+    expect(order.slice(0, 2)).toEqual(['relink', 'outstanding']);
+    db.transaction.mockImplementation(async (cb) => cb({ raw: db.raw }));
+  });
+
+  test('a correction saved between validation and the claim makes the claim miss: VERSION_CHANGED, nothing is sent (codex round 13 P1)', async () => {
+    const failedSend = {
+      id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', updated_at: new Date('2026-09-28T12:00:00Z'),
+      subject: 'Pest Insider — September', html_body: '<p>Fine copy about mowing height.</p>', text_body: 'Fine copy about mowing height.', event_ids: [],
+    };
+    const wheres = [];
+    const claimChain = chain({ returning: [] }); // the version-bound claim finds no row: it was edited after validation
+    const where = claimChain.where;
+    claimChain.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+    const queues = {
+      newsletter_sends: [
+        chain({ first: failedSend }),          // fetch + validate
+        claimChain,                            // claim
+        chain({ first: { status: 'failed' } }), // re-read: still failed → edited, not claimed elsewhere
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 1 }),                   // ledger exists
+        chain({ count: 1 }),                   // outstanding eligible rows
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VERSION_CHANGED' });
+    expect(wheres).toContainEqual(['updated_at', '<', expect.any(Date)]);
   });
 
   test("a STALE 'sending' parent with zero eligible recipients is reclaimed and finalized — never left sending", async () => {
@@ -644,6 +723,123 @@ describe('resumeCampaign — preconditions', () => {
     expect(sendsCalls).toBe(1);
     expect(deliveriesCalls).toBe(3);
     expect(sweepUpdate).toMatchObject({ status: 'skipped' });
+  });
+
+  test('a partially delivered Pest Insider campaign that no longer passes the claim scan is refused BEFORE anything is claimed (codex round 8 P1 on #5187)', async () => {
+    const tablesTouched = [];
+    let sendUpdate = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+      }
+      tablesTouched.push(table);
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 }); // somebody received it
+      return chain({});
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/correct the copy and resume again/) });
+    // only the ledger was read; nothing was claimed or written elsewhere
+    expect(tablesTouched).toEqual(['newsletter_send_deliveries']);
+    // …and the campaign KEEPS its delivered, publicly readable state — it is
+    // corrected in place through PATCH, never demoted to draft (codex round 12 P2).
+    expect(sendUpdate).toBeNull();
+  });
+
+  test('a promoted legacy flagship (newsletter_type NULL, calendar-linked) is validated as the flagship type on resume (codex round 12 P1)', async () => {
+    let sendUpdate = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: null, subject: 'Weekend events',
+            html_body: '<p>Tickets are $20 at the door.</p>', text_body: 'Tickets are $20 at the door.', event_ids: [],
+          },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 });
+      if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(sendUpdate).toBeNull();
+  });
+
+  test('a ZERO-ledger failed campaign that fails the claim scan goes back to an editable draft — nobody received it (codex round 13 P2)', async () => {
+    let sendUpdate = null;
+    const wheres = [];
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        const q = chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          updated: 1,
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+        const where = q.where;
+        q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+        return q;
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 0 });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/returned to draft/) });
+    expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_token: null, sending_claim_token: null });
+    expect(wheres).toContainEqual([{ id: 's', status: 'failed' }]);
+  });
+
+  test('an actively sending Pest Insider campaign that fails the claim scan is refused as STILL_SENDING and never reset to draft (pre-push audit P1)', async () => {
+    let sendUpdate = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'sending', updated_at: new Date(), newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'STILL_SENDING' });
+    expect(sendUpdate).toBeNull();
+  });
+
+  test('a stale sending Pest Insider campaign that fails the claim scan is released to failed only if still stale, and its claim token is revoked', async () => {
+    let sendUpdate = null;
+    const wheres = [];
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        const q = chain({
+          first: {
+            id: 's', status: 'sending', updated_at: new Date(Date.now() - 60 * 60 * 1000), sending_claim_token: 'old-token',
+            newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          updated: 1,
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+        const where = q.where;
+        q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+        return q;
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 }); // partially delivered
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    // released to 'failed' — publicly readable and correctable — never to draft (codex round 12 P2)
+    expect(sendUpdate).toMatchObject({ status: 'failed', sending_claim_token: null });
+    expect(sendUpdate.proof_approved_at).toBeUndefined();
+    expect(wheres).toContainEqual([{ id: 's', status: 'sending' }]);
+    expect(wheres.some(([col, op]) => col === 'updated_at' && op === '<=')).toBe(true);
   });
 
   test('resume with only ineligible outstanding rows terminalizes them, then reports NOTHING_TO_RESUME', async () => {
@@ -733,6 +929,7 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_send_deliveries: [
         chain({ count: 0 }),                                  // no rows exist yet
+        chain({ first: null }),                               // ledger guard in sendCampaign: still none → seed
         chain({}),                                            // insert onConflict
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
         chain({ updated: 1 }),                                // post-send bulk update
@@ -841,6 +1038,72 @@ describe('resumeCampaign — preconditions', () => {
       send_id: 's',
       send_attempt_token: 'attempt-2',
     });
+  });
+
+  // Codex round 11 on #5187: a partially delivered campaign returned to
+  // draft by an invalid resume, then sent through the NORMAL Send path, must
+  // not re-seed the segment — a subscriber who joined since the first pass
+  // never receives the old partial campaign.
+  test('a normal send of a campaign that already has a delivery ledger reaches only its outstanding rows — no new recipient is seeded', async () => {
+    let finalUpdate = null;
+    let subscriberWhereIn = null;
+    const draftSend = {
+      id: 's',
+      status: 'draft',
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const deliveryChains = [
+      chain({ first: { id: 'd-1' } }),                      // ledger guard: rows exist → no seeding
+      chain({ result: [
+        { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
+      ] }),
+      chain({ returning: [{ id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' }] }), // claim retryable row
+      chain({ updated: 1 }),                                // post-send bulk update
+      chain({ count: 0 }),                                  // final retryable ledger count
+    ];
+    const queues = {
+      newsletter_sends: [
+        chain({ first: draftSend }),                          // fetch
+        chain({ returning: [{ id: 's' }] }),                  // atomic claim draft → sending
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+        chain({ first: null }),                               // social-share refetch
+      ],
+      newsletter_send_deliveries: [...deliveryChains],
+      newsletter_subscribers: [
+        // 0-recipient guard: the segment now matches a THIRD subscriber who
+        // joined after the first pass.
+        chain({ count: 3 }),
+        chain({
+          result: [{ id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null }],
+          onWhereIn: (...args) => { subscriberWhereIn = args; },
+        }),
+        chain({ result: [{ id: 2, customer_id: null }] }),   // per-chunk eligibility re-check
+      ],
+      newsletter_calendar: [chain({ updated: 1 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await sendCampaign('s');
+
+    for (const q of deliveryChains) expect(q.insert).not.toHaveBeenCalled();
+    expect(subscriberWhereIn).toEqual(['id', [2]]);
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(result.recipients).toBe(2);
+    expect(finalUpdate.recipient_count).toBe(2);
   });
 
   test('resume preflight: a retryable ledger row whose recipient is no longer eligible is terminalized before dispatch', async () => {

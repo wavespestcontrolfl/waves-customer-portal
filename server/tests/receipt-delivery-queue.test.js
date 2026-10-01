@@ -210,14 +210,24 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
       prefs: { payment_receipt: true, payment_receipt_channels: ['sms'] },
     });
     InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'channel_email_only' });
+    // The routed receipt's authority read sees the Text-only choice.
+    sendReceiptEmail.mockResolvedValue({
+      ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected',
+    });
 
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(false);
+    // The email leg is the routed receipt: the authority reads the choice and
+    // refuses; nothing is sent, and the race is retried.
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'retry_scheduled', last_error: 'Receipt delivery preferences changed between channel checks',
     }));
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(invoicesTable.update).not.toHaveBeenCalled();
   });
 
@@ -277,20 +287,29 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 
-  test('portal-wide email opt-out (email_enabled=false) skips the receipt email as an expected skip', async () => {
-    // The transactional_required stream bypasses suppression groups, so the
-    // queue must honor the opt-out itself, like the deposit/no-show legs
-    // (codex P1 on d040aa76). The SMS leg carries the receipt.
+  test.each([
+    ['an explicit receipt choice without Email', {
+      ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected',
+    }],
+  ])('%s, read by the shared billing email authority inside sendReceiptEmail, is an expected skip', async (_label, emailResult) => {
+    // The queue no longer reads the switch or the channel choice itself: the
+    // routed receipt reads them through the shared billing email authority
+    // (owner ruling 2026-09-27) and reports the same expected skips. The SMS
+    // leg carries the receipt.
     primeDb({
       invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
-      prefs: { payment_receipt: true, email_enabled: false },
+      prefs: { payment_receipt: true, email_enabled: false, payment_receipt_channels: ['sms'] },
     });
     InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+    sendReceiptEmail.mockResolvedValue(emailResult);
 
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 
@@ -337,5 +356,53 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(sendReceiptEmail).toHaveBeenCalled();
     // The homeowner's prefs are never even read on the payer path.
     expect(prefsTable.first).not.toHaveBeenCalled();
+  });
+});
+
+describe('visit summary carried Text leg', () => {
+  const { TEXT_CARRIED_BY_SUMMARY } = ReceiptDeliveryQueue;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('an invoice read failure keeps the carried marker on the retry row', async () => {
+    const jobs = tableStub(null);
+    const invoices = tableStub(null);
+    invoices.first = jest.fn(() => Promise.reject(new Error('connection reset')));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices;
+      if (table === 'receipt_delivery_jobs') return jobs;
+      return tableStub(null);
+    });
+    const job = {
+      id: 'job1', invoice_id: 'inv1', attempts: 1, max_attempts: 5,
+      sms_result: { sent: false, reason: TEXT_CARRIED_BY_SUMMARY },
+    };
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(false);
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    const written = jobs.update.mock.calls.map(([patch]) => patch).find((patch) => 'sms_result' in patch);
+    const sms = typeof written.sms_result === 'string' ? JSON.parse(written.sms_result) : written.sms_result;
+    expect(sms).toEqual({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY });
+  });
+
+  test('only a job with no recorded SMS outcome (or already carried) can be folded', async () => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.whereIn = jest.fn(() => q);
+    q.update = jest.fn(() => Promise.resolve(0));
+    db.mockImplementation(() => q);
+
+    await ReceiptDeliveryQueue.markTextCarriedBySummary('inv1');
+
+    const guard = q.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(guard).toBeDefined();
+    const inner = { whereNull: jest.fn(() => inner), orWhereRaw: jest.fn(() => inner) };
+    guard(inner);
+    expect(inner.whereNull).toHaveBeenCalledWith('sms_result');
+    expect(inner.orWhereRaw).toHaveBeenCalledWith("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY]);
   });
 });

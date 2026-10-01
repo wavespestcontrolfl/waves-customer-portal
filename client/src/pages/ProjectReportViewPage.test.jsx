@@ -91,3 +91,57 @@ describe('ProjectReportViewPage action bar — same four boxes on every report (
     expect(download).toHaveAttribute('href', expect.stringContaining('/fdacs-pdf'));
   });
 });
+
+describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
+  it.each(['termite_treatment', 'flea', 'rodent_bait_station'])(
+    'a %s report the server marks poisonControl carries the tappable Poison Control line',
+    async (projectType) => {
+      const { findByTestId } = renderProjectReport(payload(projectType, { poisonControl: true }));
+      const card = await findByTestId('project-poison-control');
+      const link = card.querySelector('a[href="tel:+18002221222"]');
+      expect(link).not.toBeNull();
+      expect(link.textContent).toBe('1-800-222-1222');
+      // project findings list no products, so the line never points at one
+      expect(card.textContent).not.toMatch(/names each product/);
+    },
+  );
+
+  it.each([
+    ['flea', { poisonControl: false }],
+    ['termite_treatment', {}],
+    ['wdo_inspection', {}],
+    ['pre_treatment_termite_certificate', {}],
+  ])('a %s report without the server verdict carries no Poison Control line', async (projectType, extra) => {
+    const { findAllByText, container } = renderProjectReport(payload(projectType, extra));
+    await findAllByText(/this report is provided for your records|certificate of compliance/i);
+    expect(container.querySelector('[data-testid="project-poison-control"]')).toBeNull();
+    expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+  });
+
+  it('names the tech who performed the visit, not the project creator, beside the FDACS ID', async () => {
+    const { findByTestId } = renderProjectReport(payload('flea', {
+      poisonControl: true,
+      technicianName: 'Office Admin',
+      applicatorName: 'Alex',
+      applicatorFdacsId: 'JE000001',
+    }));
+    expect((await findByTestId('project-applicator-id')).textContent).toBe('Applicator: Alex · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', async () => {
+    const { findByTestId, container } = renderProjectReport(payload('flea', { poisonControl: true, applicatorFdacsId: null }));
+    await findByTestId('project-poison-control');
+    expect(container.querySelector('[data-testid="project-applicator-id"]')).toBeNull();
+  });
+
+  // Owner ask 2026-09-28: every report links to the public Products & Safety
+  // page from its closing strip, treatment evidence or not.
+  it.each([true, false])('links to the public Products & Safety page (poisonControl %s)', async (poisonControl) => {
+    const { findByRole } = renderProjectReport(payload('flea', { poisonControl }));
+    const link = await findByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link.closest('footer')).not.toBeNull();
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+});

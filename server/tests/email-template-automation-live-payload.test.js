@@ -83,6 +83,170 @@ describe('livePayloadForRun — scheduled_service refresh', () => {
   });
 });
 
+describe('livePayloadForRun — review revalidation (review.linked_5star)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function run(overrides = {}) {
+    return { entity_type: 'review', entity_id: 'rev-1', recipient_id: 'cust-1', ...overrides };
+  }
+
+  test('still valid: five-star, linked to the run\'s own customer, not dismissed, not missing — no block', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live).toEqual({});
+  });
+
+  test('blocked: the review no longer exists', async () => {
+    mockTables({ google_reviews: undefined });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review no longer exists');
+  });
+
+  test('blocked: reattributed to a different customer since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-2', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is attributed to a different customer now');
+  });
+
+  test('blocked: edited below five stars since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 4, customer_id: 'cust-1', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is no longer five-star');
+  });
+
+  test('blocked: dismissed since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: true, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review was dismissed');
+  });
+
+  test('blocked: removed from Google (missing_since stamped) since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: false, missing_since: new Date() },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is no longer visible on Google');
+  });
+});
+
+describe('livePayloadForRun — estimate revalidation (estimate.expired, codex P1 round 3 on #5154)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function run(overrides = {}) {
+    return {
+      entity_type: 'estimate', entity_id: 'est-1', trigger_event_key: 'estimate.expired', ...overrides,
+    };
+  }
+
+  test('still valid: estimate is still expired — no block', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', expires_at: '2026-06-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBeUndefined();
+    expect(live.status).toBe('expired');
+  });
+
+  test('blocked: revived through /extend before a delayed run came due (status back to sent)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate is no longer expired (status is sent)');
+  });
+
+  test('blocked: revived through /extend before a delayed run came due (status back to viewed)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'viewed', expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate is no longer expired (status is viewed)');
+  });
+
+  test('blocked: the estimate no longer exists', async () => {
+    mockTables({ estimates: undefined });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate no longer exists');
+  });
+
+  // Scoping guard (codex P1 round 3 fix-forward regression): a DIFFERENT
+  // estimate-entity automation (e.g. estimate.extension_notice) legitimately
+  // runs while the estimate is sent/viewed/anything else — this hard
+  // invalidation must apply ONLY to the estimate.expired trigger, never to
+  // every estimate-entity run.
+  test('a non-estimate.expired trigger on an estimate entity is never blocked by status', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', viewed_at: null, expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run({ trigger_event_key: 'estimate.extension_notice' }));
+
+    expect(live.__blocked).toBeUndefined();
+    expect(live.status).toBe('sent');
+  });
+
+  // codex P1 round 6 on #5154: the ONE shared follow-up rule
+  // (estimate-comms-eligibility.js), re-judged against the live row at
+  // execution so a pending/delayed/retried run obeys a later archive.
+  test('blocked: archived after the run was queued (status still expired)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', archived_at: new Date('2026-06-02T12:00:00Z'), estimate_data: {} },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('estimate is archived');
+  });
+
+  test('blocked: a zero-comms lane (estimate_data.noEngagementAutomation) never gets expiry copy', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', archived_at: null, estimate_data: JSON.stringify({ noEngagementAutomation: true }) },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toMatch(/noEngagementAutomation/);
+  });
+
+  test('the shared rule covers EVERY estimate-entity automation, not just estimate.expired', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', archived_at: null, estimate_data: { noEngagementAutomation: true } },
+    });
+
+    const live = await livePayloadForRun(run({ trigger_event_key: 'estimate.auto_renewed' }));
+
+    expect(live.__blocked).toMatch(/noEngagementAutomation/);
+  });
+});
+
 describe('exitReasonFor — send-time appointment guards', () => {
   const PREP_EXITS = { stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] };
 

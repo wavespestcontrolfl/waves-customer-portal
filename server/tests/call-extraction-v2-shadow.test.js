@@ -84,26 +84,110 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('courtesy heads-up');
   });
 
-  // codex #4919 round-8 P1: "Tuesday, 2 to 4" has no AM/PM anywhere, so the
-  // model had to invent a period to set confirmed_start_at — the window
-  // must be unambiguous, not merely a range with a start hour.
-  test('an arrival window with NO explicit period anywhere does NOT confirm — the model must never invent AM/PM (codex #4919 round-8 P1)', () => {
+  // codex #4919 round-8 P1 pinned that an arrival window with no period never
+  // confirms ("the model must never invent AM/PM"). Owner decision
+  // 2026-09-29 replaced the "never" with the business-hours reading the
+  // owner approved for reschedules on 2026-09-28 (prompt v18): a committed
+  // and accepted exact start hour with no AM/PM reads 7-11 morning, 12 and
+  // 1-6 afternoon. What stays closed is asserted here.
+  test('a committed and accepted start hour with NO AM/PM reads as business hours; everything else stays closed (owner decision 2026-09-29)', () => {
     const prompt = buildExtractionPrompt('', '', '');
-    expect(prompt).toContain('UNAMBIGUOUS period for that start');
-    expect(prompt).toContain('"Tuesday, 2 to 4 PM"');
-    expect(prompt).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
-    expect(prompt).toContain('does NOT qualify');
-    // The old ambiguous positive example is gone entirely, not just amended
-    // elsewhere — it must not still appear as a qualifying example.
+    expect(prompt).toContain('BUSINESS-HOURS READING');
+    expect(prompt).toContain('"can we plan on 2 o\'clock?" answered "Sure."');
+    expect(prompt).toContain('"Tuesday, 2 to 4"; "between 2 and 4"');
+    expect(prompt).toContain('7 to 11 is the morning, 12 and 1 to 6 the afternoon');
+    // Fail-closed shapes, and a stated period that conflicts with the reading.
+    for (const closed of ['"around two", "two-ish"', '"by two", "before two"', '"two or three"', '"two thirty"', 'an hour that is not one of 1 to 12']) {
+      expect(prompt).toContain(closed);
+    }
+    expect(prompt).toContain('conflicts with the business-hours reading');
+    expect(prompt).toContain('confirmed_start_at null');
+    // The old blanket refusal is gone, and an uncommitted offer still is not confirmed.
+    expect(prompt).not.toContain('so it does NOT qualify (you would otherwise have to invent AM or PM)');
+    expect(prompt).toContain('stays NOT confirmed');
     expect(prompt).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES qualify/);
-    // The already-unambiguous examples still qualify unchanged.
+    // Stated periods and the already-unambiguous examples are unchanged.
+    expect(prompt).toContain('"Tuesday, 2 to 4 PM"');
     expect(prompt).toContain('"between 6 and 9 tonight"');
     expect(prompt).toContain('"between 10 and noon tomorrow"');
+    // agreed_slot_words.period stays null for an unstated hour.
+    expect(prompt).toContain('BUSINESS-HOURS READING rule above, for a new booking or a reschedule, with period null');
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v11');
-    expect(PROMPT_HASH).toMatch(/^v11-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v20');
+    expect(PROMPT_HASH).toMatch(/^v20-[a-f0-9]{12}$/);
+  });
+
+  test('includes the family_member relationship instructions (schema 1.18.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('"family_member"');
+    expect(prompt).toContain('my grandfather\'s house');
+    expect(prompt).toContain('spouse/partner arranging service at the SAME household');
+  });
+
+  test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('caller_accepted_slot: for a booking or reschedule that ENDS with an agreed slot');
+    expect(prompt).toContain('Judge the WHOLE call');
+    expect(prompt).toContain('moved_appointment_date: for status "reschedule_requested" ONLY');
+    expect(prompt).toContain('never infer it from the new slot');
+    expect(prompt).toContain('scheduling.caller_accepted_slot (when true');
+    expect(prompt).toContain('ONE speaker\'s words from ONE turn');
+    expect(prompt).toContain('quote only the words that state the agreed day and time');
+  });
+
+  test('includes the agreed-slot and moved-appointment verbatim-words rules (schema 1.17.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('agreed_slot_words: set ONLY when confirmed_start_at is set');
+    expect(prompt).toContain('only the hour, no minutes, no AM/PM');
+    expect(prompt).toContain('never take a part of the day that describes the OLD appointment');
+    expect(prompt).toContain('null for noon/midnight');
+    expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
+    expect(prompt).toContain('null whenever moved_appointment_date is null');
+    expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
+  });
+
+  test('includes the commercial dictated booking judgements (schema 1.21.0, owner direction 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    for (const field of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot', 'selected_day_words']) {
+      expect(prompt).toContain(`- ${field}:`);
+    }
+    expect(prompt).toContain('never a question about a price ("did another company quote you $150?")');
+    expect(prompt).toContain('accepts that WHOLE proposal as stated');
+    expect(prompt).toContain('pin that ENTIRE reply turn as the agent_committed_booking quote');
+    expect(prompt).toContain('never one the caller rejected, called impossible or unavailable');
+    expect(prompt).toContain('/service_request/price_accepted_by_caller');
+    expect(prompt).toContain('/scheduling/selected_day_words');
+  });
+
+  test('includes the reschedule language-judgement rules (schema 1.20.0, owner direction 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('- definite_commitment: for a slot the call agreed');
+    expect(prompt).toContain('PREFER false when genuinely unsure');
+    // Real-call replay: firm bookings with a courtesy/contingency line stay definite.
+    expect(prompt).toContain('FALSE only when a hedge or condition applies to WHETHER or WHEN the appointment happens');
+    expect(prompt).toContain('A courtesy or contingency line about a LATER follow-up does NOT make it false');
+    expect(prompt).toContain("if anything comes up I'll let you know");
+    expect(prompt).toContain("we'll text you a confirmation");
+    expect(prompt).toContain('the clause that states the slot, not the courtesy line after it');
+    expect(prompt).toContain('"upon ..."');
+    expect(prompt).toContain('- relative_date_used: for a slot the call agreed');
+    expect(prompt).toContain('RESOLVE it against the call date');
+    expect(prompt).toContain('- moved_appointment_relative_date_used:');
+    // The contract states the verifier's closed set of weekday-less forms.
+    expect(prompt).toContain('the verifier computes such dates only for these forms');
+    expect(prompt).toContain('sends every other weekday-less relative date');
+    expect(prompt).toContain('- scheduling.relative_date_used (when true');
+  });
+
+  test('includes the sms_declined consent rule (schema 1.19.0, codex P1 on #5292)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('sms_declined: true only if the caller explicitly declines text messages');
+    expect(prompt).toContain('even if calls are fine');
+    expect(prompt).toContain('false otherwise, including when texting never came up');
+    // sms_consent_given's own wording is unchanged by this addition.
+    expect(prompt).toContain('sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -263,7 +347,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.14.0');
+    expect(SCHEMA_VERSION).toBe('1.21.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

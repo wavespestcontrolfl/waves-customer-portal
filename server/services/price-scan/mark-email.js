@@ -177,7 +177,7 @@ function renderHtml(lines, repName, opts) {
       </tr>
       ${rows}
     </table>
-    <p style="margin-top:18px;">Thanks,<br>Waves Pest Control &amp; Lawn Care</p>`;
+    <p style="margin-top:18px;">Thanks,<br>Waves Pest Control</p>`;
 
   return wrapServiceEmail({
     preheader: `${lines.length} price-match request${lines.length === 1 ? '' : 's'} with proof links`,
@@ -202,7 +202,7 @@ function renderText(lines, repName, opts) {
     rows,
     '',
     'Thanks,',
-    'Waves Pest Control & Lawn Care',
+    'Waves Pest Control',
   ].join('\n');
 }
 

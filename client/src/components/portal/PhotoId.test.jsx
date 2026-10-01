@@ -6,7 +6,7 @@
 // step kind the server can hand back.
 import React, { useState } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // This machine regularly runs many concurrent Claude Code lanes (see
@@ -44,7 +44,7 @@ function Harness({ onOpenRequest = () => {} }) {
   const available = gate.status === 'available';
   return (
     <>
-      {available && !open && <PhotoIdFab onOpen={() => setOpen(true)} hasBottomNav />}
+      {available && <PhotoIdFab onOpen={() => setOpen(true)} hasBottomNav hidden={open} />}
       <PhotoIdSheet
         open={open && available}
         onClose={() => setOpen(false)}
@@ -103,9 +103,13 @@ describe('gate: FAB + More-sheet entry point', () => {
     });
     render(<Harness />);
     const fab = await screen.findByRole('button', { name: /Photo ID/i });
+    expect(fab.style.bottom).toContain('--portal-bottom-nav-height');
     fireEvent.click(fab);
 
     expect(screen.getByRole('dialog', { name: 'Photo ID' })).toBeInTheDocument();
+    expect(fab).toBeInTheDocument();
+    expect(fab).toHaveAttribute('hidden');
+    expect(fab).toHaveStyle({ display: 'none' });
     expect(screen.getByText('Bug or pest')).toBeInTheDocument();
     expect(screen.getByText('Lawn spot')).toBeInTheDocument();
     expect(screen.getByText('Tree or shrub')).toBeInTheDocument();
@@ -154,6 +158,7 @@ describe('identify flow', () => {
     const fileInput = document.querySelector('input[type="file"]');
     fireEvent.change(fileInput, { target: { files: [photoFile()] } });
     await screen.findByRole('img');
+    expect(screen.getByRole('button', { name: 'Remove photo 1' })).toHaveStyle({ minWidth: '44px', minHeight: '44px' });
 
     fireEvent.change(screen.getByPlaceholderText('Anything else worth mentioning?'), {
       target: { value: 'Found it by the AC unit' },
@@ -192,6 +197,7 @@ describe('identify flow', () => {
     expect(payload.photos[0]).toMatch(/^data:image\/jpeg;base64,/);
 
     expect(await screen.findByText('Ghost ant')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Photo ID status' })).toHaveTextContent('Photo ID result ready.');
     expect(screen.getByText('High')).toBeInTheDocument();
     expect(screen.getByText('Common in Florida kitchens.')).toBeInTheDocument();
 
@@ -305,6 +311,7 @@ describe('result rendering per type + next-step CTAs', () => {
     // that only exists once the result view has actually mounted, so this
     // doesn't pass on the stale picker row still being in the document.
     expect(await screen.findByText('About this pest.')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Photo ID status' })).toHaveTextContent('Photo ID result ready.');
     expect(screen.getByText('Ghost ant')).toBeInTheDocument();
     expect(screen.getByText('Likely')).toBeInTheDocument();
     const cta = screen.getByRole('link', { name: 'Book free re-service' });
@@ -362,7 +369,7 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
     fireEvent.click(await screen.findByText('Ants'));
-    expect(await screen.findByRole('status')).toHaveTextContent('Original photos are unavailable. Add a new photo to your request.');
+    expect(await screen.findByText('Original photos are unavailable. Add a new photo to your request.')).toBeInTheDocument();
   });
 
   it('closing the sheet mid-identify discards a late response instead of resurrecting it on reopen', async () => {
@@ -430,10 +437,10 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     fireEvent.click(await screen.findByText('Front lawn'));
     await screen.findByText('Send this in');
     expect(screen.getByAltText('Saved photo 1')).toHaveAttribute('src', 'https://signed.example/photo-1.jpg');
-    expect(screen.getByRole('status')).toHaveTextContent('One saved photo could not be loaded.');
+    expect(screen.getByText('One saved photo could not be loaded.')).toBeInTheDocument();
     fireEvent.error(screen.getByAltText('Saved photo 2'));
     await waitFor(() => expect(screen.queryByAltText('Saved photo 2')).not.toBeInTheDocument());
-    expect(screen.getByRole('status')).toHaveTextContent('2 saved photos could not be loaded.');
+    expect(screen.getByText('2 saved photos could not be loaded.')).toBeInTheDocument();
     expect(screen.queryByAltText('Saved photo 1')).not.toHaveAttribute('src', expect.stringContaining('data:image/jpeg'));
     fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
 
@@ -709,7 +716,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
         ...v2Entry,
         candidates: [
           { slug: 'tropical-fire-ant', common_name: 'Top Species', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
-          { slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now' },
+          {
+            slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now', safety_line: 'Toxic to pets if chewed.',
+          },
           { slug: 'alt-2', common_name: 'Alt Two', strength: 'possible', difference_from_top: 'Solid black body.', local: 'uncommon_here' },
         ],
       },
@@ -724,6 +733,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
 
     expect(screen.getByText('Alt One')).toBeInTheDocument();
     expect(screen.getByText('Bigger, squarish head.')).toBeInTheDocument();
+    // A named alternative keeps its catalog warning (Codex #5250 r6).
+    expect(screen.getByText('Toxic to pets if chewed.')).toBeInTheDocument();
     expect(screen.getByText('Alt Two')).toBeInTheDocument();
     expect(screen.getByText('Solid black body.')).toBeInTheDocument();
     const strengthChips = screen.getAllByText('Possible match');
@@ -769,6 +780,32 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('Smaller, rounder head.')).toBeInTheDocument();
   });
 
+  it('renders source-backed generic medical guidance when an unapproved species cannot be named', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    const safety = 'Widow bites can be medically significant. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.';
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2medical', type: 'pest', created_at: '2026-09-26T00:00:00Z', result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'subgroup', node_id: 'widow-spiders', wording: 'group_only', headline: 'Looks like a widow spider', subhead: 'Latrodectus' },
+        group: { id: 'spiders', label: 'Spiders', generic: 'a spider' }, entry: null,
+        generic_safety_line: safety, evidence: {}, candidates: [], next_photo: null, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'A clearer photo would help.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('Looks like a widow spider')).toBeInTheDocument();
+    expect(screen.getByText(safety)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^About /i })).not.toBeInTheDocument();
+  });
+
   it('an unresolved group answer with next_photo shows the retake card; tapping it returns to photos with the ask banner and keeps the existing photo', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);
@@ -784,7 +821,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
       entry: null,
       evidence: {},
       candidates: [],
-      next_photo: { ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.' },
+      next_photo: {
+        ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.', safety_line: 'The compared look-alike can sting.',
+      },
       referral: null,
     };
     api.createPhotoId.mockResolvedValueOnce({
@@ -801,6 +840,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('A photo that would help confirm it')).toBeInTheDocument();
     expect(screen.getByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
     expect(screen.getByText('That view separates the two most likely ants.')).toBeInTheDocument();
+    // The compared look-alike's own warning shows with the comparison (Codex #5250 r7).
+    expect(screen.getByText('The compared look-alike can sting.')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
     // Back on the photos step, with the retake ask shown as a banner...
@@ -1130,5 +1171,450 @@ describe('request handoff falls back to live inputs (Codex r7 P2)', () => {
     expect(call.note).toBe('');
     expect(call.photos).toHaveLength(0);
     expect(call.photoIdSource).toEqual({ type: 'pest', id: 'h1' });
+  });
+});
+
+describe('lawn/tree_shrub/palm subject: picker, chips, guided shots (L5 — dark until the server sends v2.kind === "workup")', () => {
+  it('shows Palm alongside Lawn spot and Tree or shrub', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    expect(screen.getByText('Palm')).toBeInTheDocument();
+  });
+
+  it('a pest identify sends no subject/chips field at all (unchanged request shape)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    expect(screen.queryByText('A few quick questions (optional)')).not.toBeInTheDocument();
+    expect(screen.queryByText('Three photos that help most')).not.toBeInTheDocument();
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'p1', type: 'pest', created_at: '2026-09-28T00:00:00Z',
+      result: { label: 'x' }, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('pest');
+    expect(payload.subject).toBeUndefined();
+    expect(payload.chips).toBeUndefined();
+  });
+
+  it('a lawn identify sends subject: "lawn", the guided shot labels, and serializes tapped chips (grass type omitted; "not sure" on pets omits the key)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    expect(screen.getByText('Three photos that help most')).toBeInTheDocument();
+    expect(screen.getByText('The edge where bad meets good, from about 3 feet away')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /grass type/i })).not.toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watering, days per week' })).getByRole('button', { name: '3+ days' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Anything applied in the last 2 weeks, by anyone' })).getByRole('button', { name: 'Fertilizer' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'When did it start' })).getByRole('button', { name: 'Weeks' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Is it spreading' })).getByRole('button', { name: 'Yes' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Light' })).getByRole('button', { name: 'Full sun' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Do pets use this area' })).getByRole('button', { name: 'Not sure' }));
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'l1', type: 'lawn', created_at: '2026-09-28T00:00:00Z',
+      result: {}, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('lawn');
+    expect(payload.subject).toBe('lawn');
+    expect(payload.chips).toEqual({
+      watering_days: 3, recent_application: 'fertilizer', onset: 'weeks', spreading: true, light: 'full_sun',
+    });
+  });
+
+  it('a palm identify POSTs to the tree_shrub route with subject: "palm" and a free-text plant name (plant_slug stays null)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Palm'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    fireEvent.change(screen.getByPlaceholderText('e.g. Queen palm'), { target: { value: '  Queen palm  ' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Which fronds' })).getByRole('button', { name: 'Oldest' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Fruit dropping early' })).getByRole('button', { name: 'No' }));
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'pm1', type: 'tree_shrub', created_at: '2026-09-28T00:00:00Z',
+      result: {}, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('tree_shrub');
+    expect(payload.subject).toBe('palm');
+    expect(payload.chips).toEqual({ fronds: 'oldest', fruit_dropping: false, plant_slug: null, plant_name: 'Queen palm' });
+  });
+
+  it('a tree/shrub identify sends subject: "tree_shrub" with its own chip set (no recent_application/onset chips)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Tree or shrub'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watering' })).getByRole('button', { name: 'By hand' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Where it started' })).getByRole('button', { name: 'Top' }));
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 't1', type: 'tree_shrub', created_at: '2026-09-28T00:00:00Z',
+      result: {}, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('tree_shrub');
+    expect(payload.subject).toBe('tree_shrub');
+    expect(payload.chips).toEqual({ watering: 'hand', where_started: 'top', plant_slug: null });
+  });
+});
+
+describe('lawn/tree_shrub/palm workup card (renders only when data.v2.kind === "workup")', () => {
+  const workupSymptom = {
+    version: 2, kind: 'workup', catalog_version: '2026-09-28.1', subject_type: 'lawn', tier: 'needs_more_evidence',
+    subject: {
+      plant: { slug: 'st-augustinegrass', common_name: 'St. Augustinegrass', source: 'account', wording: null },
+      weeds: [{
+        slug: 'purple-nutsedge', common_name: 'Purple Nutsedge', scientific_name: 'Cyperus rotundus',
+        wording: 'pretty_sure', verdict: 'call', what_it_means: 'Nutsedge spreads by tubers.', fact: 'A nutsedge fact.',
+      }],
+    },
+    answer: { level: 'symptom', symptom: 'browning', headline: 'Brown patches in the lawn', subhead: null, wording: null, node_id: null },
+    observed: ['Irregular yellow to brown patches that do not recover from the center'],
+    possibilities: [{
+      slug: 'chinch-bug', common_name: 'Southern Chinch Bug', kind: 'organism', strength: 'possible', outcome: null,
+      confirmable_by: null, fits: ['Damage along a hot, sunny edge'], not_yet: ['A blade/crown close-up showing the bugs'],
+      local: ['peak_season'], what_it_means: 'Chinch bugs feed at the base of the grass and cause irregular patches.',
+      verdict: 'call', action: 'specialist',
+    }],
+    evidence: {
+      photos: 3,
+      chips: { watering_days: 3, recent_application: 'none', onset: 'weeks', spreading: true, light: 'full_sun' },
+      account: { grass_type: 'st-augustinegrass' },
+    },
+    settle_it: {
+      kind: 'field_test', who: 'customer', name: 'Soap flush',
+      how: 'Mix dish soap in a bucket of water and pour it on the edge.',
+      reads_as: 'Chinch bugs float up within 5 minutes.', photo_can_confirm: true,
+    },
+    next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+    referral: null,
+    quality: { usable: true, issue: 'none' },
+  };
+
+  async function openLawnResultWith(v2) {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'w1', type: 'lawn', created_at: '2026-09-28T00:00:00Z',
+      result: { grass_type: 'unused-v1-shape' }, v2,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText(v2.answer.headline);
+    return screen.getByRole('dialog', { name: 'Photo ID' });
+  }
+
+  it('renders every section, in order, with the fixed section labels and the weed identity chip under the headline', async () => {
+    const dialog = await openLawnResultWith(workupSymptom);
+    const text = dialog.textContent;
+
+    expect(screen.getByText('Brown patches in the lawn')).toBeInTheDocument();
+    expect(screen.getByText('Needs more evidence')).toBeInTheDocument();
+    expect(screen.getByText("Also spotted: Purple Nutsedge — we're pretty sure")).toBeInTheDocument();
+    expect(screen.getByText('What we can see')).toBeInTheDocument();
+    expect(screen.getByText('Irregular yellow to brown patches that do not recover from the center')).toBeInTheDocument();
+    expect(screen.getByText('What may explain it')).toBeInTheDocument();
+    expect(screen.getByText('Southern Chinch Bug')).toBeInTheDocument();
+    expect(screen.getByText('Possible match')).toBeInTheDocument();
+    expect(screen.getByText('Peak season')).toBeInTheDocument();
+    expect(screen.getByText('Evidence we have')).toBeInTheDocument();
+    expect(screen.getByText('3 photos')).toBeInTheDocument();
+    expect(screen.getByText('Watered 3+ days/week')).toBeInTheDocument();
+    expect(screen.getByText('No application in the last 2 weeks')).toBeInTheDocument();
+    expect(screen.getByText('The one thing that would settle it')).toBeInTheDocument();
+    expect(text).toContain('A technician checks this on your next visit.');
+    expect(screen.getByRole('button', { name: 'Request service' })).toBeInTheDocument();
+
+    // Order: headline -> tier -> What we can see -> What may explain it ->
+    // Evidence we have -> The one thing that would settle it -> next step.
+    const idx = (s) => text.indexOf(s);
+    expect(idx('Brown patches in the lawn')).toBeGreaterThanOrEqual(0);
+    expect(idx('Needs more evidence')).toBeGreaterThan(idx('Brown patches in the lawn'));
+    expect(idx('What we can see')).toBeGreaterThan(idx('Needs more evidence'));
+    expect(idx('What may explain it')).toBeGreaterThan(idx('What we can see'));
+    expect(idx('Evidence we have')).toBeGreaterThan(idx('What may explain it'));
+    expect(idx('The one thing that would settle it')).toBeGreaterThan(idx('Evidence we have'));
+    expect(idx('A technician checks this on your next visit.')).toBeGreaterThan(idx('The one thing that would settle it'));
+  });
+
+  it('a field_test settle_it marks the test optional and always pairs it with the technician line', async () => {
+    const dialog = await openLawnResultWith(workupSymptom);
+    expect(dialog.textContent).toContain('Soap flush');
+    expect(dialog.textContent).toContain('(optional)');
+    expect(screen.getByText('Chinch bugs float up within 5 minutes.')).toBeInTheDocument();
+    expect(dialog.textContent).toContain('or a technician checks it on your next visit.');
+    // field_test never gets a retake button — only photo/retake kinds do.
+    expect(screen.queryByRole('button', { name: 'Take this photo' })).not.toBeInTheDocument();
+  });
+
+  it('an inspection next_step_hint opens the same request handoff as today\'s next-step CTAs', async () => {
+    await openLawnResultWith(workupSymptom);
+    const onOpenRequest = vi.fn();
+    cleanup();
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness onOpenRequest={onOpenRequest} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'w1', type: 'lawn', created_at: '2026-09-28T00:00:00Z', result: {}, v2: workupSymptom,
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await screen.findByText(workupSymptom.answer.headline);
+    fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
+    expect(onOpenRequest).toHaveBeenCalledTimes(1);
+  });
+
+  const workupNamed = {
+    version: 2, kind: 'workup', catalog_version: 'x', subject_type: 'palm', tier: 'ai_suggestion',
+    subject: { plant: { slug: 'queen-palm', common_name: 'Queen Palm', source: 'photo', wording: 'likely' }, weeds: [] },
+    answer: {
+      level: 'entry', symptom: null, headline: "We're pretty sure: Potassium Deficiency",
+      subhead: 'Nutrient disorder', wording: 'pretty_sure', node_id: 'potassium-deficiency-palm',
+    },
+    observed: ['Translucent yellow-orange spotting on the oldest fronds', 'Frizzled leaflet tips'],
+    possibilities: [
+      {
+        slug: 'potassium-deficiency-palm', common_name: 'Potassium Deficiency', kind: 'disorder', strength: 'strong',
+        outcome: 'manageable', confirmable_by: 'photo', fits: ['Translucent yellow-orange spots on the oldest fronds'],
+        not_yet: [], local: ['fits_fronds'], what_it_means: 'Potassium moves from old to new growth, so deficiency shows oldest first.',
+        verdict: 'watch', action: 'fix_conditions',
+      },
+      {
+        slug: 'lethal-bronzing', common_name: 'Lethal Bronzing', kind: 'disease', strength: 'possible',
+        outcome: 'no_cure', confirmable_by: 'lab', fits: ['Also starts on the oldest fronds'],
+        not_yet: ['Premature fruit drop', 'Spear leaf condition'], local: [],
+        what_it_means: 'Lethal bronzing has no cure and is confirmed by a lab test.', verdict: 'call', action: 'specialist',
+      },
+    ],
+    evidence: { photos: 2, chips: { fronds: 'oldest', recently_planted: false }, account: {} },
+    settle_it: { kind: 'photo', text: 'A photo of the crown showing the spear leaf and any fruit stalks.', photo_can_confirm: true },
+    next_step_hint: { kind: 'specialist', text: 'This needs a licensed arborist or palm specialist; a technician can point you to one.' },
+    referral: null,
+    quality: { usable: true, issue: 'none' },
+  };
+
+  it('a named condition renders the "Likely/pretty sure" headline + subhead, the outcome chip, and a photo settle_it retake button; specialist next_step_hint shows text + Done (no request CTA)', async () => {
+    const dialog = await openLawnResultWith(workupNamed);
+    expect(screen.getByText("We're pretty sure: Potassium Deficiency")).toBeInTheDocument();
+    expect(screen.getByText('Nutrient disorder')).toBeInTheDocument();
+    expect(screen.getByText('AI suggestion')).toBeInTheDocument();
+    expect(screen.getByText('Cannot be cured')).toBeInTheDocument();
+    expect(screen.getByText('Fits which fronds')).toBeInTheDocument();
+    expect(dialog.textContent).toContain('A photo of the crown showing the spear leaf and any fruit stalks.');
+    expect(screen.getByRole('button', { name: 'Take this photo' })).toBeInTheDocument();
+    expect(dialog.textContent).toContain('This needs a licensed arborist or palm specialist');
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request service' })).not.toBeInTheDocument();
+  });
+
+  it('a possibility or weed carrying a catalog safety line shows it in the row, the sheet and under the weed chips (Codex #5250 r3)', async () => {
+    const poison = 'Some fairy-ring mushrooms are poisonous; keep children and pets away from them.';
+    const sap = 'The milky sap can irritate skin and eyes.';
+    const withWarnings = {
+      ...workupNamed,
+      subject: { ...workupNamed.subject, weeds: [{ slug: 'spotted-spurge', common_name: 'Spotted Spurge', wording: 'likely', safety_line: sap }] },
+      possibilities: [{ ...workupNamed.possibilities[1], slug: 'fairy-ring', common_name: 'Fairy Ring', safety_line: poison }],
+    };
+    await openLawnResultWith(withWarnings);
+    expect(screen.getByText(sap)).toBeInTheDocument();
+    expect(screen.getByText(poison)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Fairy Ring'));
+    const sheet = await screen.findByRole('dialog', { name: 'Fairy Ring' });
+    expect(within(sheet).getByText(poison)).toBeInTheDocument();
+  });
+
+  it('a referral renders its text once instead of crashing the card, and the named plant shows with its warning (Codex #5250 r4)', async () => {
+    const referralText = 'This needs a licensed arborist or palm specialist; a technician can point you to one.';
+    const petWarning = 'All parts of sago palm are toxic to dogs, cats and horses; call your vet right away if a pet chews any part.';
+    const referred = {
+      ...workupNamed,
+      subject_type: 'tree_shrub',
+      subject: { plant: { slug: 'sago-palm', common_name: 'Sago Palm', source: 'photo', wording: 'pretty_sure', safety_line: petWarning }, weeds: [] },
+      next_step_hint: { kind: 'specialist', text: referralText },
+      referral: { kind: 'arborist', text: referralText },
+    };
+    const dialog = await openLawnResultWith(referred);
+    expect(screen.getAllByText(referralText)).toHaveLength(1);
+    expect(screen.getByText("Plant: Sago Palm — we're pretty sure")).toBeInTheDocument();
+    expect(screen.getByText(petWarning)).toBeInTheDocument();
+    expect(dialog.textContent).toContain('Potassium Deficiency');
+  });
+
+  it('an account grass on file shows as the grass on file', async () => {
+    await openLawnResultWith(workupSymptom);
+    expect(screen.getByText('Grass on file: St. Augustinegrass')).toBeInTheDocument();
+  });
+
+  it('tapping a possibility opens a sheet with its what_it_means', async () => {
+    await openLawnResultWith(workupNamed);
+    fireEvent.click(screen.getByText('Lethal Bronzing'));
+    expect(await screen.findByRole('dialog', { name: 'Lethal Bronzing' })).toBeInTheDocument();
+    expect(screen.getByText('Lethal bronzing has no cure and is confirmed by a lab test.')).toBeInTheDocument();
+  });
+
+  const workupRetake = {
+    version: 2, kind: 'workup', catalog_version: 'x', subject_type: 'lawn', tier: 'needs_more_evidence',
+    subject: { plant: null, weeds: [] },
+    answer: { level: 'symptom', symptom: 'none', headline: "We couldn't tell from these photos", subhead: null, wording: null, node_id: null },
+    observed: [],
+    possibilities: [],
+    evidence: { photos: 1, chips: {}, account: {} },
+    settle_it: { kind: 'retake', text: 'Take the three photos again in better light: the whole area, the edge where bad meets good, and a close-up.' },
+    next_step_hint: { kind: 'unclear', text: "We're not sure yet — the team can take a look." },
+    referral: null,
+    quality: { usable: false, issue: 'blurry' },
+  };
+
+  it('a zero-possibility workup shows the retake settle_it + button, and tapping it returns to photos keeping the existing photo; unclear next_step_hint offers "Send to the team"', async () => {
+    await openLawnResultWith(workupRetake);
+    expect(screen.getByText(/Take the three photos again in better light/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to the team' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take these photos again' }));
+    expect(await screen.findByText(/Take the three photos again in better light/)).toBeInTheDocument();
+    // Back on the photos step with the existing (live) photo kept.
+    expect(screen.getAllByRole('img').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole('button', { name: 'Identify' })).toBeInTheDocument();
+  });
+
+  it('a palm workup opened from history (stored under the tree_shrub route) restores the palm subject on retake, so resubmitting still sends subject: "palm"', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'pmh1', type: 'tree_shrub', created_at: '2026-09-27T00:00:00Z', headline: workupNamed.answer.headline, next_step_kind: 'specialist' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'pmh1', type: 'tree_shrub', created_at: '2026-09-27T00:00:00Z',
+      result: { plant_groups: [] }, v2: workupNamed,
+      photos: [{ id: 'ph1', url: 'https://example.com/saved.jpg' }],
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText(workupNamed.answer.headline));
+    await screen.findByRole('button', { name: 'Take this photo' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
+    // Back on the photos step — a history-sourced retake starts with no
+    // photos (openHistoryItem clears live photos), so a new one is added.
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'pm2', type: 'tree_shrub', created_at: '2026-09-28T00:00:00Z', result: {}, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('tree_shrub');
+    expect(payload.subject).toBe('palm');
+  });
+
+  const workupIdentity = {
+    version: 2, kind: 'identity', subject_type: 'palm', tier: 'ai_suggestion',
+    answer: { level: 'entry', headline: "We're pretty sure: Queen Palm", subhead: 'Syagrus romanzoffiana', wording: 'pretty_sure' },
+    entry: {
+      slug: 'queen-palm', common_name: 'Queen Palm', scientific_name: 'Syagrus romanzoffiana', kind: 'host_plant',
+      verdict: 'ally', verdict_label: 'A palm we know well', what_it_means: 'A common landscape palm in SW Florida.',
+    },
+    candidates: [],
+    next_photo: null,
+    quality: { usable: true, issue: 'none' },
+  };
+
+  it('kind: "identity" still renders through the existing V2Result, unchanged', async () => {
+    const dialog = await openLawnResultWith(workupIdentity);
+    expect(screen.getByText("We're pretty sure: Queen Palm")).toBeInTheDocument();
+    expect(screen.getByText('Syagrus romanzoffiana')).toBeInTheDocument();
+    expect(screen.getByText('AI suggestion')).toBeInTheDocument();
+    expect(screen.getByText('A palm we know well')).toBeInTheDocument();
+    // None of the workup-only section headings render for an identity answer.
+    expect(dialog.textContent).not.toContain('What may explain it');
+    expect(dialog.textContent).not.toContain('The one thing that would settle it');
+  });
+
+  it('an unrecognized v2.kind falls back to today\'s v1 result body instead of guessing at a shape', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Lawn spot'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'w2', type: 'lawn', created_at: '2026-09-28T00:00:00Z',
+      result: { grass_type: 'Bahia', scores: { turf_density: 50, weed_coverage: 5, color_health: 6 } },
+      v2: { version: 2, kind: 'some_future_kind' },
+      next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    expect(await screen.findByText('Bahia')).toBeInTheDocument();
+  });
+
+  it('a v1 lawn response (no v2) renders LawnResult exactly as before', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'l1', type: 'lawn', created_at: '2026-09-02T00:00:00Z', headline: 'Front lawn', next_step_kind: 'request' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'l1', type: 'lawn', created_at: '2026-09-02T00:00:00Z',
+      result: {
+        grass_type: 'St. Augustine',
+        scores: { turf_density: 72, weed_coverage: 14, color_health: 7 },
+        signals: [{ key: 'watering', label: 'Watering', level: 'adequate' }],
+        observations: 'Lawn observations here.',
+      },
+      next_step: { kind: 'request', title: 'Send this in', body: 'Our team can take a look.', request_prefill: { category: 'lawn_concern', location: 'front_yard', note: 'From Photo ID' } },
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText('Front lawn'));
+    expect(await screen.findByText('St. Augustine')).toBeInTheDocument();
+    expect(screen.getByText('72%')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Request service' })).toBeInTheDocument();
+    expect(screen.queryByText('What may explain it')).not.toBeInTheDocument();
+  });
+
+  it('history reopen renders the stored workup the same way as a live result', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'w3', type: 'lawn', created_at: '2026-09-27T00:00:00Z', headline: workupSymptom.answer.headline, next_step_kind: 'inspection' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'w3', type: 'lawn', created_at: '2026-09-27T00:00:00Z',
+      result: { grass_type: 'unused-v1-shape' }, v2: workupSymptom,
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText(workupSymptom.answer.headline));
+    expect(await screen.findByText('What may explain it')).toBeInTheDocument();
+    expect(screen.getByText('Southern Chinch Bug')).toBeInTheDocument();
+    expect(screen.getByText('The one thing that would settle it')).toBeInTheDocument();
   });
 });

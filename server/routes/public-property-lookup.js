@@ -15,6 +15,8 @@ const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
 const { sanitizeAnonUnitId } = require('../services/experimentation/growthbook');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
 const { isEnabled } = require('../config/feature-gates');
+const { scrubMapsKeysDeep } = require('../services/estimate-map-image');
+const { signedMapImagePathFromStaticUrl } = require('../services/signed-map-image');
 
 // Aggressive rate limit — each lookup spends real AI + Google Maps dollars.
 // 5 per IP per hour is enough for a real lead to iterate on
@@ -51,6 +53,28 @@ function normalizePhone(raw) {
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   if (digits.length === 10) return `+1${digits}`;
   return null;
+}
+
+// A keyed Static Maps URL becomes an absolute, short-lived, signed proxy URL
+// (or null when it cannot be signed — the form then simply shows no image).
+// Lifetime is the 24 h cap, not the 2 h default: the marketing quote form
+// cannot re-request the lookup, so a form left open on the confirm step must
+// not blank its satellite image. Tradeoff: a leaked lookup URL replays for up
+// to a day (rate-limited, and it only ever shows that one already-shown map).
+const LOOKUP_IMAGE_TTL_SECONDS = 24 * 60 * 60;
+function publicSatelliteImageUrl(raw) {
+  if (!raw) return null;
+  return signedMapImagePathFromStaticUrl(raw, { absolute: true, ttlSeconds: LOOKUP_IMAGE_TTL_SECONDS });
+}
+
+function publicSatellitePayload(satellite) {
+  if (!satellite) return null;
+  return {
+    closeUrl: publicSatelliteImageUrl(satellite.closeUrl),
+    microCloseUrl: publicSatelliteImageUrl(satellite.microCloseUrl),
+    wideUrl: publicSatelliteImageUrl(satellite.wideUrl),
+    inServiceArea: satellite.inServiceArea,
+  };
 }
 
 function publicPropertySummary(record) {
@@ -370,7 +394,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       try {
         const updated = await db('leads')
           .where({ id: prefillLeadId })
-          .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+          .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'handled'])
           .whereNull('converted_at')
           .update({
             first_name: firstName,
@@ -685,17 +709,19 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(503).json({ error: 'We could not finish checking this address. Please try again in a moment.' });
     }
 
-    res.json({
+    // Scrub the SOURCE payload first, THEN attach the signed URLs: a signed
+    // token's signature can (rarely) contain a run that looks like a bare Google
+    // key, and the scrub must never truncate it.
+    const publicBody = scrubMapsKeysDeep({
       lead_id: lead.id,
       enriched,
       propertyRecord,
       rentcast: propertyRecord,
-      satellite: result.satellite ? {
-        closeUrl: result.satellite.closeUrl,
-        microCloseUrl: result.satellite.microCloseUrl,
-        wideUrl: result.satellite.wideUrl,
-        inServiceArea: result.satellite.inServiceArea,
-      } : null,
+      // The lookup builds keyed Static Maps URLs (the server key, which also
+      // serves Geocoding/Routes and so cannot be referrer-restricted). An
+      // anonymous caller only ever gets short-lived signed proxy URLs
+      // (absolute: the marketing site renders them cross-origin); the
+      // response is also scrubbed of any Maps key as a last line.
       aiAnalysis: result.aiAnalysis ? {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis._claudeConfidence || result.aiAnalysis.confidenceScore,
@@ -703,6 +729,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       errors: publicLookupErrors(result.errors),
       meta: publicLookupMeta(result.meta),
     });
+    publicBody.satellite = publicSatellitePayload(result.satellite);
+    res.json(publicBody);
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
@@ -711,6 +739,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicSatelliteImageUrl,
+  publicSatellitePayload,
   publicLookupErrors,
   publicLookupMeta,
   publicEnrichedProfile,

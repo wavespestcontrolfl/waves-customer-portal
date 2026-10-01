@@ -83,6 +83,8 @@ function makeFakeDb(seed = {}) {
       // whereRaw against this table (same shape as
       // admin-triage-reschedule-promise.test.js's builder).
       whereRaw(sql) {
+        // The street-level address-hold exclusion: none of these fixtures holds one.
+        if (sql.includes('street_level_address')) return api;
         if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
         rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
         return api;

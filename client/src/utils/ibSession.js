@@ -2,7 +2,7 @@
 // server-side. A request key isolates simultaneous requests; one logical
 // request keeps its key until the server answers, so a dropped response is
 // replayed as the saved task instead of running the request a second time.
-function uuid() {
+export function uuid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;

@@ -141,10 +141,23 @@ async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
     // the server-side scheduled-link fence (composer-customer-links.js
     // immediateOnlyLinkSendCheck) refuses to schedule this kind past the
     // window a queued send could deliver an already-expired token in.
-    return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true };
+    // `phone` (additive — codex pre-push P1) is the EXACT destination this
+    // token was minted for (this function's own fresh DB read above, not
+    // whatever phone a caller's in-memory lead object carries): an
+    // automated sender that fetched the lead moments earlier must verify
+    // its own `to` still matches this before sending, since a phone change
+    // in that narrow window would otherwise deliver a token proving
+    // delivery to the OLD number while it actually reaches the new one.
+    return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true, phone: lead.phone };
   } catch (err) {
     logger.warn(`[lead-consultation-link] build failed: ${err.message}`);
-    return { url: null, line: '', reason: 'Could not build a consultation link' };
+    // transient (additive, codex r2 P2): this catch is a genuine unexpected
+    // failure (a DB read, createShortCode's own insert) — never a
+    // deliberate refusal (gate off, an ineligible lead, an invalid phone,
+    // a missing signing secret all return their own {url:null, reason}
+    // ABOVE, inside the try, unflagged). An automated caller may retry a
+    // transient miss; it must never retry a permanent one.
+    return { url: null, line: '', reason: 'Could not build a consultation link', transient: true };
   }
 }
 
@@ -194,7 +207,10 @@ async function probeLeadConsultationLink(leadOrId) {
     }
   } catch (err) {
     logger.warn(`[lead-consultation-link] availability check failed: ${err.message}`);
-    return { available: false, reason: 'Could not check consultation link availability' };
+    // transient: a DB hiccup, not a refusal — callers with a retry rail
+    // (call-booking-link-text) requeue instead of recording a final skip
+    // (codex #5018 P2). The admin probe ignores the extra field.
+    return { available: false, transient: true, reason: 'Could not check consultation link availability' };
   }
   return { available: true };
 }
@@ -239,22 +255,37 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   // the real render below. A disabled, missing or STOP-less template never
   // leaves a live, unused 14-day short code behind.
   const availability = await consultationLinkAvailable(leadOrId);
-  if (!availability.available) return unavailable(availability.reason);
+  if (!availability.available) return { ...unavailable(availability.reason), ...(availability.transient ? { transient: true } : {}) };
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
     if (!row || row.is_active === false) return unavailable('template disabled');
     const templates = require('../routes/admin-sms-templates');
+    // throwOnError (codex r8 P2): getTemplate's own try/catch already
+    // swallows a genuine infrastructure failure (a schema/query/render
+    // error) into a bare `null` — indistinguishable from "the template is
+    // deliberately missing or disabled" without this. The `if (opts.
+    // throwOnError) throw err;` branch (admin-sms-templates.js) affects
+    // ONLY that caught-exception path; every deliberate return-null
+    // (missing table/row, is_active===false, a required placeholder lost,
+    // an unresolved placeholder) is a plain early return inside its own
+    // try block and never reaches that catch, so this never turns a
+    // genuine refusal into a false transient. The catch below maps the
+    // resulting throw to transient: true; every other caller of
+    // getTemplate is unaffected (additive option, opt-in only here).
     const dry = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: 'https://wavespest.co/l/preview',
-    }, {}, { requiredVars: ['consultation_url'] });
+    }, {}, { requiredVars: ['consultation_url'], throwOnError: true });
     if (!dry) return unavailable('Consultation text template is unavailable');
     if (!templates.hasStopLine(dry)) {
       return unavailable('Consultation text is missing the required "Reply STOP to opt out." disclosure');
     }
   } catch (err) {
     logger.warn(`[lead-consultation-link] template pre-check failed: ${err.message}`);
-    return unavailable('Consultation text template is unavailable');
+    // transient (codex r2 P2): an unexpected DB/require failure, not a
+    // deliberate refusal — see buildLeadConsultationLink's own catch for
+    // the full unflagged/flagged split this mirrors.
+    return { ...unavailable('Consultation text template is unavailable'), transient: true };
   }
   // The SMS helper mints the phone-bound SMS claim (Codex #4737 r13 P1):
   // every production text goes through here, so the page can treat the
@@ -267,10 +298,13 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
       return unavailable('template disabled');
     }
     const templates = require('../routes/admin-sms-templates');
+    // throwOnError (codex r8 P2) — see the dry-render pre-check's own doc
+    // comment above for the full reasoning; same mechanism, same reason,
+    // here for the real render.
     const body = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: built.url,
-    }, {}, { requiredVars: ['consultation_url'] });
+    }, {}, { requiredVars: ['consultation_url'], throwOnError: true });
     if (!body) {
       // getTemplate itself already audited WHY (missing table/row, a body
       // that lost {consultation_url}, or unresolved placeholders) — this
@@ -291,10 +325,11 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
       standalone: true,
       expiresAt: built.expiresAt || null,
       immediateOnly: built.immediateOnly,
+      phone: built.phone,
     };
   } catch (err) {
     logger.warn(`[lead-consultation-link] template render failed: ${err.message}`);
-    return unavailable('Could not render the consultation text template');
+    return { ...unavailable('Could not render the consultation text template'), transient: true };
   }
 }
 

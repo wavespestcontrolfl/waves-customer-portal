@@ -1,9 +1,11 @@
 /**
  * Referral invite email (referral.invite template) — owner trigger call
- * 2026-07-06: fires on a POSITIVE review submission (the existing
- * promoter definition in review-request.js, rating >= 7). The warmest
- * moment we have with a customer is right after they told us we did a
- * good job — that's when the ask lands as a favor, not a pitch.
+ * 2026-07-06: fired on a POSITIVE review submission (rating >= 7). The 1-10
+ * rating is retired (owner ruling 2026-09-29); the trigger is now the
+ * customer's first tracked tap through to Google (review-gate.js /go,
+ * trigger 'google_review_click'). The legacy submitRating path in
+ * review-request.js still passes 'positive_review'. `trigger` is a free-form
+ * label (it only names the enrollment source / event id).
  *
  * Once per customer EVER (idempotency key is customer-scoped): a repeat
  * promoter rating us 9/10 quarterly should not be re-invited each time.
@@ -68,7 +70,7 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
       // checked here before enrolling. Fails toward suppressed.
       try {
         const referralSuppression = await db('email_suppressions')
-          .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+          .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
           .where({ status: 'active' })
           .where(function referralStream() {
             this.where('group_key', 'marketing_referral')

@@ -9,8 +9,9 @@
  * `getCurrentDomainKey()` → checks `target_sites.includes(key)` → if
  * no match, the post is filtered out of that site's blog collection.
  *
- * When a post's `target_sites` is NULL or an empty array, the filter
- * falls back to "all sites" (backward-compat with pre-filter posts).
+ * The current Astro page filters normalize missing or empty frontmatter
+ * `domains` to the hub domain. Keep portal eligibility hub-only for that
+ * case so a relative hub liveness check never certifies an unprobed spoke.
  *
  * The "Hub" entry (wavespestcontrol.com) is the canonical home —
  * www.wavespestcontrol.com/<slug>/. Choosing just the hub is the

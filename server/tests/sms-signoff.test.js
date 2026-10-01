@@ -100,6 +100,10 @@ describe('stripTrailingSignature', () => {
     // answers it.
     'Who will be coming?\nAdam',
     'Who is your technician?\nAdam',
+    "Who's coming Tuesday?\nAdam",
+    'Which technician is coming?\nAdam',
+    'Which company is this?\nWaves Pest Control',
+    'What is your name?\nAdam',
     'Your technician will be\nAdam',
     'The charge will appear as\nWaves Pest Control',
     // A smiley in content is content.
@@ -171,6 +175,14 @@ describe('stripTrailingSignature — anySigner', () => {
     ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
+    // #4975 follow-up (owner ruling on #5083): a dashed Waves name after any
+    // question is a sign-off, as it is for every other caller.
+    ['When works best for you?\n— Adam', 'When works best for you?'],
+    ['What day works best for you?\n- Adam', 'What day works best for you?'],
+    ['Which works better, Tuesday or Wednesday?\n— Waves Pest Control', 'Which works better, Tuesday or Wednesday?'],
+    ['Who will be coming?\n— Adam', 'Who will be coming?'],
+    ['Which representative is coming?\n— Adam', 'Which representative is coming?'],
+    ['Which company is this?\n— Waves Team', 'Which company is this?'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -202,6 +214,17 @@ describe('stripTrailingSignature — anySigner', () => {
     'Who will be coming?\n— Sarah',
     'Your technician is:\n— Adam',
     'Options:\n- Lawn Care\n- Pest Control',
+    // #4975 follow-up: a dashed answer to an information question stays. An
+    // unknown name there has an answer's shape too, so it stays as well.
+    'Which service?\n— Lawn Care',
+    'Where are you located?\n— Lakewood Ranch',
+    'When works for you?\n— Sarah',
+    // Codex r1 + r2 on #5083: a three-word call to action is not a name, and
+    // a signature never runs onto the next line.
+    'Thanks!\nCall Us Today',
+    'Talk soon!\nSchedule Online Today',
+    'Options:\n- Lawn Care\nTuesday',
+    'Options:\n- Lawn Care,\nTuesday',
   ])('%j is not a sign-off and is kept', (text) => {
     expect(any(text)).toBe(text);
   });

@@ -31,18 +31,27 @@ function anthropicMaxTokens(model, cap) {
   return Math.max(Number(cap) || 0, THINKING_FLOOR_TOKENS);
 }
 
-// The pinned effort (MODEL_ANTHROPIC_EFFORT) when `model` accepts every
-// level, else undefined — the model's own default then applies.
-function anthropicEffortFor(model) {
+// `requested` (e.g. a per-call effort a caller asks for) wins when the served
+// `model` actually accepts that exact level — checked with the registry's own
+// anthropicAcceptsEffort, which covers both full-capable models (every level)
+// and partial ones (Opus 4.5/4.6's narrower sets) — so a caller never learns
+// which model tier is serving the request. Otherwise falls back to the pinned
+// MODEL_ANTHROPIC_EFFORT when `model` accepts every level, else undefined —
+// the model's own default then applies.
+function anthropicEffortFor(model, requested) {
+  if (requested && typeof MODELS.anthropicAcceptsEffort === 'function' && MODELS.anthropicAcceptsEffort(model, requested)) {
+    return requested;
+  }
   const pinned = MODELS.ANTHROPIC_EFFORT;
   return pinned && matches(MODELS.ANTHROPIC_EFFORT_CAPABLE_RE, model) ? pinned : undefined;
 }
 
 // Spread form for direct SDK sites that build their own request:
 // `...anthropicEffortConfig(MODELS.VISION)` adds `output_config: { effort }`
-// when pinned and applicable, nothing otherwise.
-function anthropicEffortConfig(model) {
-  const effort = anthropicEffortFor(model);
+// when pinned and applicable, nothing otherwise. `requested` is the same
+// per-call override anthropicEffortFor takes.
+function anthropicEffortConfig(model, requested) {
+  const effort = anthropicEffortFor(model, requested);
   return effort ? { output_config: { effort } } : {};
 }
 

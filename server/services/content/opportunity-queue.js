@@ -24,21 +24,77 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const effectiveActionSql = require('./opportunity-action-sql');
 
+const PAGE_EDIT_SUPERSEDED_KEY = 'page_edit_superseded';
+const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
+// pending_review parks that stand for a POSSIBLE external write whose PR or
+// live URL could not be recorded. Supersession marks them but never
+// terminalizes them: only a person who has checked GitHub may retire one.
+const UNRECONCILED_REFRESH_REASON = 'refresh_publish_unreconciled';
+const RECONCILIATION_HOLD_REASONS = [
+  'astro_pr_audit_failed', 'published_audit_failed',
+  'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
+  'named_competitor_publish_interrupted', UNRECONCILED_REFRESH_REASON,
+];
+// sweepExhaustedAttempts never retires these: owner review kinds plus every
+// reconciliation hold, so a new hold reason cannot be missed by the sweep.
+const SWEEP_PROTECTED_REASONS = ['named_competitor_review', 'affiliate_review', ...RECONCILIATION_HOLD_REASONS];
+
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
 // A failed status write may leave a published run's row pending. Fence every
 // blog claim, not just legacy approval holds. Only a verified closed PR with
 // its branch removed can cease blocking; published URLs never do.
+// aeo_question_gap refresh rows get the same own-run fence: a worker that
+// opened the refresh PR and crashed leaves the row pending after stale-claim
+// recovery, and re-claiming it would open a second PR for the same page.
 const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-         )) AND (${effectiveActionSql} <> 'new_supporting_blog' OR NOT EXISTS (
+         )) AND ((${effectiveActionSql} <> 'new_supporting_blog' AND opportunity_queue.bucket <> 'aeo_question_gap') OR NOT EXISTS (
            SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
              AND (r.published_url IS NOT NULL
                OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
-         )))`;
+         )))
+         AND NOT (bucket = 'citability_backfill'
+           AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), '${PAGE_EDIT_SUPERSEDED_KEY}'))`;
 
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
+const { writeRouteSql } = require('./opportunity-route-sql');
+
+// Route fence for aeo_question_gap, at the ONE chokepoint every producer's
+// rows pass through (claim). Producers insert independently (miner buckets,
+// intercept / category seeders), so insertion-order arbitration always has a
+// gap; claiming does not. Scoped to pairs involving a question row — other
+// buckets' claims are unchanged when none is involved:
+//   - no row is claimable while a question row for the same route is claimed
+//     or in review, and no question row while ANY other row for its route is;
+//   - an unpublished, unretired Astro PR holds its route whatever the queue
+//     status says: a worker that recorded the PR and crashed leaves the row
+//     pending after stale-claim recovery, and the PR is still an open write;
+//   - a question refresh also waits while another row wrote its page within
+//     the cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh
+//     cooldown), so a page a seed or another refresh just rewrote is not
+//     edited again straight away.
+// The day count is a parsed integer, never user text.
+function aeoRouteFenceSql() {
+  const raw = Number.parseInt(process.env.AEO_QUESTION_GAP_COOLDOWN_DAYS, 10);
+  const days = Number.isFinite(raw) && raw >= 0 ? raw : 28;
+  return `NOT EXISTS (
+           SELECT 1 FROM opportunity_queue route_fence
+            WHERE route_fence.id <> opportunity_queue.id
+              AND (route_fence.bucket = 'aeo_question_gap' OR opportunity_queue.bucket = 'aeo_question_gap')
+              AND (route_fence.status IN ('claimed', 'pending_review')
+                OR EXISTS (
+                  SELECT 1 FROM autonomous_runs route_run
+                   WHERE route_run.opportunity_id = route_fence.id
+                     AND route_run.astro_pr_url IS NOT NULL
+                     AND route_run.astro_pr_retired_at IS NULL
+                     AND route_run.published_url IS NULL)
+                OR (opportunity_queue.bucket = 'aeo_question_gap' AND route_fence.status = 'done'
+                  AND route_fence.updated_at >= now() - make_interval(days => ${days})))
+              AND ${writeRouteSql('route_fence')} = ${writeRouteSql('opportunity_queue')}
+         )`;
+}
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
@@ -58,6 +114,34 @@ function listicleFamilyLaneOpen() {
   }
 }
 
+// Same kill-switch contract for the citability_backfill lane (2026-09-25):
+// the seeder's gate check fences WRITES; this fences CONSUMPTION, so turning
+// GATE_CITABILITY_BACKFILL off after a bad first batch stops already-queued
+// rows from being claimed at all — they sit pending and age out (45d) —
+// instead of continuing to open refresh PRs on live posts (Sonnet fallback
+// P1 on edd0f96d32). Fail CLOSED: unreadable gate = lane shut.
+function citabilityBackfillLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('citabilityBackfill') === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Same kill-switch contract for the aeo_question_gap lane: its gate is the
+// no-redeploy kill switch, so gate-off must stop queued rows from being
+// claimed too, not only new mining. Rows stay pending (re-enabling resumes
+// them; expireStale ages them out). Read at call time; fail CLOSED.
+function aeoQuestionLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('aeoQuestionGapMining') === true;
+  } catch {
+    return false;
+  }
+}
+
 // Lifetime claim budget per opportunity. A row that keeps failing returns
 // to pending (release / stale-claim recovery) and, as the top-scored row,
 // gets re-claimed by the daily batch forever — one wasted LLM dispatch per
@@ -68,6 +152,108 @@ function listicleFamilyLaneOpen() {
 function maxClaimAttempts() {
   const n = Number(process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS);
   return Number.isFinite(n) && n > 0 ? n : 5;
+}
+
+function pageEditRouteIdentity(url) {
+  if (!url) return null;
+  const raw = String(url).trim();
+  if (!raw) return null;
+  const withoutFragment = raw.split('#')[0].split('?')[0];
+  const host = raw.startsWith('/')
+    ? 'wavespestcontrol.com'
+    : raw.replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0].replace(/^www\./i, '').toLowerCase();
+  const path = withoutFragment.replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '') || '/';
+  return `${host}::${path}`;
+}
+
+function pageEditSuperseded(rowOrMetadata) {
+  let metadata = rowOrMetadata?.signal_metadata ?? rowOrMetadata;
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch { return false; }
+  }
+  return Boolean(metadata && typeof metadata === 'object' && metadata[PAGE_EDIT_SUPERSEDED_KEY]);
+}
+
+// Caller holds opportunity_page_edit's transaction advisory lock. Once an
+// ordinary producer has actually queued a page edit, the older backfill no
+// longer owns that page even if its lane is enabled later. Pending work can be
+// retired immediately. Claimed/review rows retain their state and evidence;
+// the durable marker fences their worker/publication/merge boundaries.
+async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedupeKey, now = new Date() }) {
+  const identity = pageEditRouteIdentity(pageUrl);
+  if (!identity) return 0;
+  const boundary = identity.indexOf('::');
+  const host = identity.slice(0, boundary);
+  const path = identity.slice(boundary + 2);
+  const candidates = await trx('opportunity_queue')
+    .where({ bucket: 'citability_backfill' })
+    .whereIn('status', ['pending', 'claimed', 'pending_review'])
+    .whereNotNull('page_url')
+    // Narrow before FOR UPDATE: an ordinary edit should lock only backfills
+    // for its own canonical host/path, never the entire active backfill lane.
+    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN 'wavespestcontrol.com'
+      ELSE regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '') END = ?`, [host])
+    .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(split_part(page_url, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
+    .forUpdate()
+    .select('id', 'page_url', 'status', 'skip_reason', 'claim_id', 'claimed_at', 'signal_metadata');
+  const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);
+  for (const row of matched) {
+    let metadata = row.signal_metadata;
+    if (typeof metadata === 'string') {
+      try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    }
+    metadata = metadata && typeof metadata === 'object' ? metadata : {};
+    let hasParkedPr = false;
+    if (row.status === 'pending_review') {
+      // Keep the queue row parked until the poller has retired both records.
+      // astro_pr_retired_at can be stamped before that bookkeeping commits;
+      // treating the PR as absent in that window changes the queue state and
+      // prevents the poller's claim/status CAS from ever converging.
+      let parkedRun = trx('autonomous_runs')
+        .where('opportunity_id', row.id)
+        .where('outcome', 'completed_pending_review')
+        .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+        .whereNotNull('astro_pr_url')
+        .whereNull('published_url');
+      parkedRun = row.claim_id == null
+        ? parkedRun.whereNull('queue_claim_id')
+        : parkedRun.where('queue_claim_id', row.claim_id);
+      hasParkedPr = Boolean(await parkedRun.first('id'));
+    }
+    const reconciliationHold = row.status === 'pending_review' && RECONCILIATION_HOLD_REASONS.includes(row.skip_reason);
+    const terminal = row.status === 'pending'
+      || (row.status === 'pending_review' && !hasParkedPr && !reconciliationHold);
+    await trx('opportunity_queue').where('id', row.id).update({
+      signal_metadata: JSON.stringify({
+        ...metadata,
+        [PAGE_EDIT_SUPERSEDED_KEY]: {
+          ordinary_dedupe_key: ordinaryDedupeKey || null,
+          marked_at: now.toISOString(),
+        },
+      }),
+      ...(terminal ? {
+        status: 'skipped',
+        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
+        completed_at: now,
+      } : {}),
+      updated_at: now,
+    });
+    if (terminal && row.status === 'pending_review') {
+      let runs = trx('autonomous_runs')
+        .where('opportunity_id', row.id)
+        .where('outcome', 'completed_pending_review');
+      runs = row.claim_id == null
+        ? runs.whereNull('queue_claim_id')
+        : runs.where('queue_claim_id', row.claim_id);
+      await runs.update({
+        outcome: 'skipped_gate_fail',
+        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
+        completed_at: now,
+        updated_at: now,
+      });
+    }
+  }
+  return matched.length;
 }
 
 /**
@@ -120,6 +306,9 @@ class OpportunityQueue {
       // Same lane fence as claimNext (peek is consumed as "what the runner
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
+      if (!citabilityBackfillLaneOpen()) q = q.whereNot('bucket', 'citability_backfill');
+      if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
+      q = q.whereRaw(aeoRouteFenceSql());
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
         // listicle_family blog-floor ride), so previews show exactly what
@@ -150,7 +339,7 @@ class OpportunityQueue {
    * if nothing's available. Caller is responsible for calling complete()
    * or skip() (or letting the stale-claim timeout recover it).
    */
-  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
+  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [] } = {}) {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
@@ -159,6 +348,9 @@ class OpportunityQueue {
     // `notes` column (the migration in #1021 only defines status /
     // skip_reason / timestamps). Audit lives in the logger instead.
     const whereActionType = actionType ? `AND ${effectiveActionSql} = ?` : '';
+    // bucket scopes the claim to one lane (the daily batch's reserved
+    // citability backfill slots). Every other eligibility rule still applies.
+    const whereBucket = bucket ? 'AND bucket = ?' : '';
     // excludeIds lets the daily batch skip opportunities that already failed
     // this run. A failed runNext() releases its claim back to 'pending', so
     // without this the highest-scored failing row would just be re-claimed
@@ -167,8 +359,20 @@ class OpportunityQueue {
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
+    // See citabilityBackfillLaneOpen — gate-off backfill rows are unclaimable.
+    const whereCitabilityGate = citabilityBackfillLaneOpen() ? '' : `AND bucket <> 'citability_backfill'`;
+    // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
+    const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
 
-    const result = await db.raw(
+    // Claims are serialized: the route fence below is a NOT EXISTS over OTHER
+    // rows, and FOR UPDATE SKIP LOCKED locks only the chosen row — two
+    // overlapping claims could each miss the other's uncommitted claim of a
+    // same-route row. The transaction-scoped advisory lock is taken in its
+    // own statement first, so the claim statement's snapshot is read after
+    // any earlier claim committed. Held only for this one UPDATE.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_queue_claim'))");
+      return trx.raw(
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
@@ -204,8 +408,12 @@ class OpportunityQueue {
            -- separate floor would strand it persisted-but-unclaimable.
            AND score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
+           ${whereBucket}
            ${whereExclude}
            ${whereFamilyGate}
+           ${whereCitabilityGate}
+           ${whereAeoQuestionGate}
+           AND ${aeoRouteFenceSql()}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -213,8 +421,10 @@ class OpportunityQueue {
        RETURNING *, ${effectiveActionSql} AS effective_action_type`,
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
+        .concat(bucket ? [bucket] : [])
         .concat(exclude.length ? [exclude] : [])
-    );
+      );
+    });
     const row = result.rows?.[0];
     if (row) logger.info(`[opportunity-queue] claimed ${row.id} (${row.bucket}/${row.action_type}, score ${row.score}) by ${claimedBy}`);
     return row ? parseRow(row) : null;
@@ -313,14 +523,21 @@ class OpportunityQueue {
     if (!claimToken) {
       throw new Error('opportunity-queue.release: claimToken required (pass the claimed_at value returned by claimNext)');
     }
+    const now = new Date();
+    const superseded = "bucket = 'citability_backfill' AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')";
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
       .update({
-        status: 'pending',
+        // The marker can arrive while a worker is composing or dispatching.
+        // Keep the claim-token CAS, but never put that now-unclaimable row
+        // back into pending: terminalize it in this same update instead.
+        status: db.raw(`CASE WHEN ${superseded} THEN 'skipped' ELSE 'pending' END`),
         claimed_at: null,
-        updated_at: new Date(),
+        skip_reason: db.raw(`CASE WHEN ${superseded} THEN ? ELSE skip_reason END`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${superseded} THEN ?::timestamptz ELSE completed_at END`, [now]),
+        updated_at: now,
       });
     return updated > 0;
   }
@@ -343,14 +560,17 @@ class OpportunityQueue {
       throw new Error('opportunity-queue.defer: claimToken required (pass the claimed_at value returned by claimNext)');
     }
     const expiresFloor = new Date(availableAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const superseded = "bucket = 'citability_backfill' AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')";
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
       .update({
-        status: 'pending',
+        status: db.raw(`CASE WHEN ${superseded} THEN 'skipped' ELSE 'pending' END`),
         claimed_at: null,
-        skip_reason: null,
+        skip_reason: db.raw(`CASE WHEN ${superseded} THEN ? ELSE NULL END`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${superseded} THEN ?::timestamptz ELSE completed_at END`, [now]),
         available_at: availableAt,
         expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [expiresFloor, expiresFloor]),
         // A deferral is not a failure — refund the attempt claimNext just
@@ -358,7 +578,7 @@ class OpportunityQueue {
         // lifetime attempt budget and land the row in the
         // attempts_exhausted review path this method exists to avoid.
         attempt_count: db.raw('GREATEST(attempt_count - 1, 0)'),
-        updated_at: new Date(),
+        updated_at: now,
       });
     return updated > 0;
   }
@@ -371,6 +591,41 @@ class OpportunityQueue {
    */
   async recoverStaleClaims() {
     const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
+    // A worker can durably record its current-claim PR and then crash before
+    // moving the queue row to pending_review. Preserve that reconciliation
+    // evidence: the poller requires the queue park to close/retire a PR that
+    // an ordinary edit superseded. Claims without such evidence are terminal.
+    const currentClaimPrReason = `(SELECT r.skip_reason FROM autonomous_runs r
+      WHERE r.opportunity_id = opportunity_queue.id
+        AND r.queue_claim_id IS NOT DISTINCT FROM opportunity_queue.claim_id
+        AND r.outcome = 'completed_pending_review'
+        AND r.skip_reason IN ('astro_pr_pending_merge', 'metadata_pr_pending_merge')
+        AND r.astro_pr_url IS NOT NULL
+        AND r.published_url IS NULL
+      ORDER BY r.created_at DESC LIMIT 1)`;
+    // A worker whose timed-out GitHub write could not be reconciled records
+    // refresh_publish_unreconciled on its run before parking the row. If that
+    // park itself failed, the run is the durable evidence: recovery parks the
+    // row for a person instead of re-pending (a duplicate PR) or retiring it.
+    const unreconciledEvidence = `EXISTS (SELECT 1 FROM autonomous_runs r
+      WHERE r.opportunity_id = opportunity_queue.id
+        AND r.queue_claim_id IS NOT DISTINCT FROM opportunity_queue.claim_id
+        AND r.outcome = 'completed_pending_review'
+        AND r.skip_reason = '${UNRECONCILED_REFRESH_REASON}')`;
+    const supersededAt = new Date();
+    const superseded = await db('opportunity_queue')
+      .where('status', 'claimed')
+      .where('claimed_at', '<', cutoff)
+      .where('bucket', 'citability_backfill')
+      .whereRaw(`jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)`, [PAGE_EDIT_SUPERSEDED_KEY])
+      .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
+      .update({
+        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN 'pending_review' ELSE 'skipped' END`),
+        claimed_at: null,
+        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' END, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL OR ${unreconciledEvidence} THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
+        updated_at: supersededAt,
+      });
     const recovered = await db('opportunity_queue')
       .where('status', 'claimed')
       .where('claimed_at', '<', cutoff)
@@ -383,13 +638,17 @@ class OpportunityQueue {
       // carry a NULL skip_reason and NULL <> 'x' is NULL, which would
       // silently exclude every normal claim from recovery.
       .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
+      .whereRaw(`NOT (bucket = 'citability_backfill'
+        AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?))`, [PAGE_EDIT_SUPERSEDED_KEY])
       .update({
-        status: 'pending',
+        status: db.raw(`CASE WHEN ${unreconciledEvidence} THEN 'pending_review' ELSE 'pending' END`),
+        skip_reason: db.raw(`CASE WHEN ${unreconciledEvidence} THEN '${UNRECONCILED_REFRESH_REASON}' ELSE skip_reason END`),
         claimed_at: null,
         updated_at: new Date(),
       });
-    if (recovered > 0) logger.info(`[opportunity-queue] recovered ${recovered} stale claim(s) (cutoff ${cutoff.toISOString()})`);
-    return recovered;
+    const total = Number(superseded || 0) + Number(recovered || 0);
+    if (total > 0) logger.info(`[opportunity-queue] recovered ${total} stale claim(s) (cutoff ${cutoff.toISOString()}; superseded ${superseded || 0})`);
+    return total;
   }
 
   /**
@@ -441,15 +700,14 @@ class OpportunityQueue {
       .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
         ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
         -- A failed audit insert can leave no run evidence despite an external publish.
-        -- Reconciliation holds must survive until that external state is resolved.
-        AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review',
-          'astro_pr_audit_failed', 'published_audit_failed',
-          'astro_pr_queue_transition_failed', 'published_queue_complete_failed')
+        -- Reconciliation holds (every may-have-published reason, incl. an
+        -- interrupted approval) must survive until a person resolves them.
+        AND COALESCE(skip_reason, '') NOT IN (${SWEEP_PROTECTED_REASONS.map(() => '?').join(', ')})
         AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
         AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
           WHERE r.opportunity_id = opportunity_queue.id
             AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
-      )`, [maxClaimAttempts()])
+      )`, [maxClaimAttempts(), ...SWEEP_PROTECTED_REASONS])
       .update({
         status: db.raw(`CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END`),
         skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
@@ -492,4 +750,17 @@ function parseRow(row) {
 
 module.exports = new OpportunityQueue();
 module.exports.OpportunityQueue = OpportunityQueue;
-module.exports._internals = { parseRow, STALE_CLAIM_MS, maxClaimAttempts };
+module.exports._internals = {
+  parseRow,
+  STALE_CLAIM_MS,
+  maxClaimAttempts,
+  listicleFamilyLaneOpen,
+  citabilityBackfillLaneOpen,
+  pageEditRouteIdentity,
+  pageEditSuperseded,
+  supersedeCitabilityBackfillsForPage,
+  PAGE_EDIT_SUPERSEDED_KEY,
+  PAGE_EDIT_SUPERSEDED_REASON,
+  RECONCILIATION_HOLD_REASONS,
+  UNRECONCILED_REFRESH_REASON,
+};

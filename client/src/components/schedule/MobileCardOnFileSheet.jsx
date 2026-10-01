@@ -6,6 +6,9 @@
 
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { getAdminUser } from "../../lib/adminAuth";
+import { useCollectionHold } from "../../hooks/useCollectionHold";
+import { CollectionHoldStatus } from "../admin/CollectionHoldNotice";
 import {
   ActionFeedback,
   Button,
@@ -120,6 +123,22 @@ export default function MobileCardOnFileSheet({
     service?.customer_name ||
     "Customer";
 
+  // B10: charge-card goes past a collections dispute hold, so the hold (or a
+  // failed check) shows beside the Charge buttons. Admin-only read: the route
+  // itself is requireAdmin, so anyone else never reaches a charge.
+  const collectionHold = useCollectionHold(
+    resolvedCustomerId,
+    getAdminUser()?.role === "admin",
+  );
+
+  // The hold is UNKNOWN while the read is loading or failed: the Charge
+  // buttons stay disabled (no confirm step is added — owner decision F0348 —
+  // so the only safe one-tap charge is one made with the hold state known).
+  // A non-admin never reads the hold (status "idle") and never reaches an
+  // override charge (the route is requireAdmin), so they are not locked out.
+  const holdUnknown =
+    collectionHold.status === "loading" || collectionHold.status === "error";
+
   useEffect(() => {
     if (!resolvedCustomerId) {
       setLoading(false);
@@ -154,7 +173,7 @@ export default function MobileCardOnFileSheet({
   }, [resolvedCustomerId, readAttempt]);
 
   async function handleCharge(card) {
-    if (chargingRef.current || chargingId || chargeBlocked) return;
+    if (chargingRef.current || chargingId || chargeBlocked || holdUnknown) return;
     chargingRef.current = true;
     setChargingId(card.id);
     setError(null);
@@ -269,6 +288,7 @@ export default function MobileCardOnFileSheet({
           </div>
         </DialogHeader>
         <DialogBody className="space-y-4 text-ui-body u-nums">
+          <CollectionHoldStatus hold={collectionHold} variant="charge" />
           {loading ? (
             <ActionFeedback>Loading cards…</ActionFeedback>
           ) : readError ? (
@@ -300,7 +320,9 @@ export default function MobileCardOnFileSheet({
                   <Button
                     variant="secondary"
                     onClick={() => handleCharge(card)}
-                    disabled={chargeBlocked || chargingId !== null}
+                    disabled={
+                      chargeBlocked || chargingId !== null || holdUnknown
+                    }
                     loading={!chargeBlocked && chargingId === card.id}
                     aria-label={
                       chargeBlocked
@@ -361,6 +383,7 @@ export default function MobileCardOnFileSheet({
       </div>
 
       <div className="px-4 pt-6 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+        <CollectionHoldStatus hold={collectionHold} variant="charge" />
         {loading && (
           <div
             className="text-ink-secondary text-center"
@@ -382,7 +405,9 @@ export default function MobileCardOnFileSheet({
             const style = brandStyle(c.brand);
             const isCharging = chargingId === c.id;
             const anotherCharging =
-              chargeBlocked || (chargingId && chargingId !== c.id);
+              chargeBlocked ||
+              holdUnknown ||
+              (chargingId && chargingId !== c.id);
             return (
               <div
                 key={c.id}
