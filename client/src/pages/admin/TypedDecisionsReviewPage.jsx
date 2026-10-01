@@ -108,7 +108,7 @@ function AnswersBlock({ review }) {
   );
 }
 
-function ReviewRow({ review, onLabeled }) {
+function ReviewRow({ review, onLabeled, onStale }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -119,7 +119,7 @@ function ReviewRow({ review, onLabeled }) {
   const submit = async (verdict, force = false) => {
     setBusy(verdict);
     setError("");
-    const body = { verdict };
+    const body = { verdict, seen_answer: review.jevAnswer };
     if (verdict === "jev_wrong") body.correct_value = !review.jevAnswer.yes;
     if (note.trim()) body.note = note.trim();
     if (force) body.force = true;
@@ -131,7 +131,10 @@ function ReviewRow({ review, onLabeled }) {
       setConflict(null);
       onLabeled(review.id, result?.review || null);
     } catch (err) {
-      if (err?.status === 409) {
+      if (err?.status === 409 && err?.code === "answer_changed") {
+        setConflict(null);
+        onStale();
+      } else if (err?.status === 409) {
         setConflict({ verdict, status: err.details?.labelStatus || review.labelStatus || "labeled" });
       } else {
         setError(err?.message || "Could not save the label.");
@@ -195,17 +198,18 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("unreviewed");
   const [sampledOnly, setSampledOnly] = useState(true);
   const [reviews, setReviews] = useState([]);
-  const [cursor, setCursor] = useState(null);
+  const [cursor, setCursor] = useState(null); // id of the last row fetched
+  const [notice, setNotice] = useState("");
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const requestRef = useRef(0);
 
-  const buildUrl = useCallback((before) => {
+  const buildUrl = useCallback((beforeId) => {
     const params = new URLSearchParams({ status, limit: String(PAGE_SIZE) });
     if (sampledOnly) params.set("sampled_for", "disagreement,random_audit");
-    if (before) params.set("before", before);
+    if (beforeId) params.set("before_id", beforeId);
     return `/admin/typed-decisions/reviews?${params.toString()}`;
   }, [status, sampledOnly]);
 
@@ -222,7 +226,7 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
       if (request !== requestRef.current) return;
       const rows = Array.isArray(data?.reviews) ? data.reviews : [];
       setReviews(rows);
-      setCursor(rows.length ? rows[rows.length - 1].createdAt : null);
+      setCursor(rows.length ? rows[rows.length - 1].id : null);
       setHasMore(rows.length >= PAGE_SIZE);
     } catch (err) {
       if (request !== requestRef.current) return;
@@ -234,7 +238,7 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
 
   useEffect(() => { load(); }, [load]);
 
-  // Older rows: strictly older than the last row fetched, appended below.
+  // Older rows: strictly after the last row fetched (created_at desc, id desc), appended below.
   const loadOlder = useCallback(async () => {
     if (!cursor) return;
     const request = ++requestRef.current;
@@ -248,7 +252,7 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
         const seen = new Set(current.map((r) => r.id));
         return [...current, ...rows.filter((r) => !seen.has(r.id))];
       });
-      if (rows.length) setCursor(rows[rows.length - 1].createdAt);
+      if (rows.length) setCursor(rows[rows.length - 1].id);
       setHasMore(rows.length >= PAGE_SIZE);
     } catch (err) {
       if (request !== requestRef.current) return;
@@ -269,6 +273,12 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
     }));
   }, [status]);
 
+  // The server saw a different Jev answer than the one displayed: reload.
+  const handleStale = useCallback(() => {
+    setNotice("Jev's answer changed since this loaded — reloaded");
+    load();
+  }, [load]);
+
   return (
     <UiSurface density="comfortable" className="min-h-full space-y-4 text-zinc-800">
       {!embedded && <AdminCommandHeader title="Typed decisions" subtitle="Label Jev's typed answers against the baselines." />}
@@ -278,17 +288,18 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
           <select
             id="typed-status"
             value={status}
-            onChange={(e) => setStatus(e.target.value)}
+            onChange={(e) => { setNotice(""); setStatus(e.target.value); }}
             className="h-11 rounded-sm border border-zinc-300 bg-white px-3 text-ui-body text-zinc-900 sm:h-9"
           >
             {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
         <label htmlFor="typed-sampled" className="flex min-h-11 items-center gap-2 text-14 font-medium text-ink-secondary sm:min-h-0">
-          <input id="typed-sampled" type="checkbox" checked={sampledOnly} onChange={(e) => setSampledOnly(e.target.checked)} />
+          <input id="typed-sampled" type="checkbox" checked={sampledOnly} onChange={(e) => { setNotice(""); setSampledOnly(e.target.checked); }} />
           Sampled only
         </label>
       </div>
+      {notice && <ActionFeedback>{notice}</ActionFeedback>}
       {error && <ActionFeedback error onRetry={reviews.length ? undefined : load}>{error}</ActionFeedback>}
       {loading && !reviews.length && !error ? (
         <div className="text-ui-body text-ink-secondary">Loading…</div>
@@ -296,7 +307,7 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
         <div className="text-ui-body text-ink-secondary">Nothing to review.</div>
       ) : (
         <div className="space-y-3 min-w-0">
-          {reviews.map((review) => <ReviewRow key={review.id} review={review} onLabeled={handleLabeled} />)}
+          {reviews.map((review) => <ReviewRow key={review.id} review={review} onLabeled={handleLabeled} onStale={handleStale} />)}
         </div>
       )}
       {hasMore && reviews.length > 0 && (

@@ -119,14 +119,14 @@ router.get('/reviews', async (req, res, next) => {
     if (sampled.some((s) => !SAMPLED_FOR.includes(s))) {
       return res.status(400).json({ error: `sampled_for must be a comma list of ${SAMPLED_FOR.join(', ')}` });
     }
-    // `before`: rows strictly older than this ISO time (the client's "Load older").
-    let before = null;
-    if (req.query.before !== undefined) {
-      before = new Date(String(req.query.before));
-      if (Number.isNaN(before.getTime())) return res.status(400).json({ error: 'before must be an ISO timestamp' });
-    }
-    const query = db(TABLE).orderBy('created_at', 'desc').limit(clampLimit(req.query.limit));
-    if (before) query.where('created_at', '<', before);
+    // `before_id`: the last row the client already has ("Load older"). Rows
+    // come strictly after it in (created_at, id) order: one package's rows share
+    // a created_at, so a time-only cursor would skip the rest of a batch, and the
+    // cursor's time is read in SQL so no precision is lost in transit.
+    const beforeId = req.query.before_id === undefined ? null : String(req.query.before_id);
+    if (beforeId !== null && !UUID_RE.test(beforeId)) return res.status(400).json({ error: 'before_id must be a review id' });
+    const query = db(TABLE).orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(clampLimit(req.query.limit));
+    if (beforeId) query.whereRaw(`(created_at, id) < (SELECT created_at, id FROM ${TABLE} WHERE id = ?)`, [beforeId]);
     if (status !== 'all') query.where('label_status', status);
     if (sampled.length) query.whereIn('sampled_for', sampled);
     if (req.query.capability) query.where('capability', String(req.query.capability));
@@ -160,6 +160,14 @@ router.post('/reviews/:id/label', async (req, res, next) => {
       }
       correctValue = body.correct_value;
     }
+    // The Jev answer the reviewer was shown. The label is written only while
+    // the row still holds exactly that answer: a nightly re-record may replace
+    // an unreviewed row's answer, and a verdict must never attach to an answer
+    // nobody saw.
+    const seen = body.seen_answer;
+    if (!seen || typeof seen !== 'object' || Array.isArray(seen)) {
+      return res.status(400).json({ error: 'seen_answer (the Jev answer shown) is required' });
+    }
     const note = body.note === undefined || body.note === null ? null : String(body.note).trim().slice(0, MAX_NOTE_CHARS) || null;
     const force = body.force === true;
     const labelStatus = VERDICT_STATUS[verdict];
@@ -172,12 +180,16 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     });
     // A confirmed label is only replaced on purpose.
     if (!force) update.whereNotIn('label_status', CONFIRMED);
+    update.whereRaw('jev_answer = ?::jsonb', [JSON.stringify(seen)]);
     const [row] = await update.returning('*');
 
     if (!row) {
       const existing = await db(TABLE).where({ id }).first('id', 'label_status');
       if (!existing) return res.status(404).json({ error: 'Review not found' });
-      return res.status(409).json({ error: 'This review already has a confirmed label; send force: true to replace it', labelStatus: existing.label_status });
+      if (!force && CONFIRMED.includes(existing.label_status)) {
+        return res.status(409).json({ error: 'This review already has a confirmed label; send force: true to replace it', code: 'already_confirmed', labelStatus: existing.label_status });
+      }
+      return res.status(409).json({ error: "Jev's answer changed since this review was loaded; reload it", code: 'answer_changed', labelStatus: existing.label_status });
     }
 
     await recordAuditEvent({

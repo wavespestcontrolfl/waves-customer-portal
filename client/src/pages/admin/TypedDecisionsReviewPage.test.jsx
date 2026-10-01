@@ -59,7 +59,7 @@ it('sends the inverse correct_value on Jev wrong and removes the row', async () 
   fireEvent.click(screen.getByRole('button', { name: 'Jev wrong' }));
   await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/typed-decisions/reviews/r1/label', {
     method: 'POST',
-    body: JSON.stringify({ verdict: 'jev_wrong', correct_value: false, note: 'asked for text only' }),
+    body: JSON.stringify({ verdict: 'jev_wrong', seen_answer: { p: 0.91, yes: true, confident: true }, correct_value: false, note: 'asked for text only' }),
   }));
   await waitFor(() => expect(screen.getByText('Nothing to review.')).toBeInTheDocument());
 });
@@ -91,7 +91,7 @@ it('on 409 asks to replace and resends with force', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
   await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith('/admin/typed-decisions/reviews/r1/label', {
     method: 'POST',
-    body: JSON.stringify({ verdict: 'jev_right', force: true }),
+    body: JSON.stringify({ verdict: 'jev_right', seen_answer: { p: 0.91, yes: true, confident: true }, force: true }),
   }));
 });
 
@@ -117,22 +117,21 @@ it('drops sampled_for when Sampled only is toggled off', async () => {
   expect(adminFetch.mock.calls.at(-1)[0]).toContain('status=unreviewed');
 });
 
-it('Load older sends before=<last createdAt>, appends, and hides when a short page returns', async () => {
+it('Load older sends before_id=<last id>, appends, and hides when a short page returns', async () => {
   const page = Array.from({ length: 50 }, (_, i) => yesNoRow({
     id: `p${i}`,
     question: `Question ${i}`,
     createdAt: new Date(Date.UTC(2026, 9, 1, 12, 0, 0) - i * 60000).toISOString(),
   }));
-  const lastCreatedAt = page[49].createdAt;
   adminFetch.mockImplementation(async (url) => {
-    if (url.includes('before=')) return { reviews: [yesNoRow({ id: 'old1', question: 'Older question', createdAt: '2026-09-01T00:00:00Z' })], count: 1 };
+    if (url.includes('before_id=')) return { reviews: [yesNoRow({ id: 'old1', question: 'Older question', createdAt: '2026-09-01T00:00:00Z' })], count: 1 };
     return { reviews: page, count: 50 };
   });
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
   await screen.findByText('Question 0');
   fireEvent.click(screen.getByRole('button', { name: 'Load older' }));
   expect(await screen.findByText('Older question')).toBeInTheDocument();
-  expect(adminFetch.mock.calls.at(-1)[0]).toContain(`before=${encodeURIComponent(lastCreatedAt)}`);
+  expect(adminFetch.mock.calls.at(-1)[0]).toContain('before_id=p49');
   expect(screen.getByText('Question 0')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Load older' })).toBeNull();
 });
@@ -142,4 +141,21 @@ it('hides Load older when the first page is short', async () => {
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
   await screen.findByText('Does the customer want a call back?');
   expect(screen.queryByRole('button', { name: 'Load older' })).toBeNull();
+});
+
+it('on 409 answer_changed shows the notice and reloads the list without a replace prompt', async () => {
+  const stale = Object.assign(new Error('changed'), { status: 409, code: 'answer_changed', details: { code: 'answer_changed' } });
+  let lists = 0;
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method === 'POST') throw stale;
+    lists += 1;
+    return { reviews: [yesNoRow(lists > 1 ? { jevAnswer: { p: 0.2, yes: false, confident: true } } : {})], count: 1 };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Jev: Yes (0.91)');
+  fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
+  expect(await screen.findByText("Jev's answer changed since this loaded — reloaded")).toBeInTheDocument();
+  expect(await screen.findByText('Jev: No (0.20)')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
+  expect(lists).toBe(2);
 });

@@ -23,6 +23,7 @@ const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
 
 const ID = '11111111-1111-4111-8111-111111111111';
+const SEEN = { p: 0.9, yes: true, confident: true };
 const baseRow = (over = {}) => ({
   id: ID, capability: 'sms_courtesy', package_id: 'sms_courtesy.v1', package_hash: 'h', served_model: 'jev-1.13.0',
   subject_type: 'sms_log', subject_id: 'sms-1', question_id: 'is_courtesy_only',
@@ -103,11 +104,12 @@ describe('GET /reviews', () => {
     expect(Object.keys(log).flatMap((t) => log[t]).filter(([m]) => ['insert', 'update', 'delete'].includes(m))).toEqual([]);
   });
 
-  test('before pages to strictly older rows; a bad before is 400', async () => {
+  test('before_id pages strictly after that row in (created_at, id) order; a bad id is 400', async () => {
     const log = installDb({ decision_reviews: { list: [] } });
-    expect((await get('/reviews?before=2026-09-30T00:00:00.000Z')).status).toBe(200);
-    expect(called(log, 'decision_reviews', 'where')).toContainEqual(['created_at', '<', new Date('2026-09-30T00:00:00.000Z')]);
-    expect((await get('/reviews?before=yesterday')).status).toBe(400);
+    expect((await get(`/reviews?before_id=${ID}`)).status).toBe(200);
+    expect(called(log, 'decision_reviews', 'orderBy')).toContainEqual([[{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]]);
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['(created_at, id) < (SELECT created_at, id FROM decision_reviews WHERE id = ?)', [ID]]);
+    expect((await get('/reviews?before_id=yesterday')).status).toBe(400);
   });
 
   test('rejects an unknown status or sampled_for, clamps the limit', async () => {
@@ -139,7 +141,7 @@ describe('POST /reviews/:id/label', () => {
     ['unclear', 'disagreement'],
   ])('%s sets label_status %s, stamps who and when, and is audit-logged', async (verdict, status) => {
     const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: status })], first: [baseRow()] } });
-    const { status: http, body } = await post(`/reviews/${ID}/label`, { verdict, correct_value: false, note: 'checked the call' });
+    const { status: http, body } = await post(`/reviews/${ID}/label`, { verdict, correct_value: false, note: 'checked the call', seen_answer: SEEN });
     expect(http).toBe(200);
     expect(body.review.labelStatus).toBe(status);
     const [patch] = called(log, 'decision_reviews', 'update')[0];
@@ -151,6 +153,8 @@ describe('POST /reviews/:id/label', () => {
     expect(called(log, 'decision_reviews', 'where')).toContainEqual([{ id: ID }]);
     // Unforced: a confirmed label is not replaced.
     expect(called(log, 'decision_reviews', 'whereNotIn')).toContainEqual(['label_status', ['confirmed_correct', 'confirmed_error']]);
+    // only while the row still holds the answer the reviewer saw
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['jev_answer = ?::jsonb', [JSON.stringify(SEEN)]]);
     expect(mockAudit).toHaveBeenCalledWith(expect.objectContaining({
       actor_type: 'technician', actor_id: 'admin-1', action: 'typed_decision.labeled', resource_type: 'decision_review', resource_id: ID,
       metadata: expect.objectContaining({ verdict, label_status: status, forced: false }),
@@ -160,15 +164,16 @@ describe('POST /reviews/:id/label', () => {
 
   test('refuses to re-label a confirmed row without force (409), and says which status it holds', async () => {
     installDb({ decision_reviews: { returning: [undefined], first: [{ id: ID, label_status: 'confirmed_error' }] } });
-    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right' });
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN });
     expect(status).toBe(409);
     expect(body.labelStatus).toBe('confirmed_error');
+    expect(body.code).toBe('already_confirmed');
     expect(mockAudit).not.toHaveBeenCalled();
   });
 
   test('force: true replaces a confirmed label and the audit row says so', async () => {
     const log = installDb({ decision_reviews: { returning: [baseRow({ label_status: 'confirmed_correct' })] } });
-    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', force: true });
+    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', force: true, seen_answer: SEEN });
     expect(status).toBe(200);
     expect(called(log, 'decision_reviews', 'whereNotIn')).toEqual([]);
     expect(mockAudit.mock.calls[0][0].metadata.forced).toBe(true);
@@ -176,7 +181,7 @@ describe('POST /reviews/:id/label', () => {
 
   test('a missing review is 404; a malformed id never reaches the database', async () => {
     installDb({ decision_reviews: { returning: [undefined], first: [undefined] } });
-    expect((await post(`/reviews/${ID}/label`, { verdict: 'unclear' })).status).toBe(404);
+    expect((await post(`/reviews/${ID}/label`, { verdict: 'unclear', seen_answer: SEEN })).status).toBe(404);
     db.mockClear();
     expect((await post('/reviews/not-a-uuid/label', { verdict: 'unclear' })).status).toBe(404);
     expect(db).not.toHaveBeenCalled();
@@ -186,12 +191,22 @@ describe('POST /reviews/:id/label', () => {
     ['no verdict', {}],
     ['an unknown verdict', { verdict: 'maybe' }],
     ['jev_wrong with no correct_value', { verdict: 'jev_wrong' }],
+    ['no seen_answer', { verdict: 'jev_right' }],
+    ['a non-object seen_answer', { verdict: 'unclear', seen_answer: 'yes' }],
     ['jev_wrong with a string for a yes/no question', { verdict: 'jev_wrong', correct_value: 'no' }],
     ['jev_wrong with free text', { verdict: 'jev_wrong', correct_value: 'x'.repeat(3000) }],
   ])('%s is 400 and writes nothing', async (_name, payload) => {
     const log = installDb({ decision_reviews: { first: [baseRow()] } });
     expect((await post(`/reviews/${ID}/label`, payload)).status).toBe(400);
     expect(called(log, 'decision_reviews', 'update')).toEqual([]);
+  });
+
+  test('an answer re-recorded since the page loaded is 409 answer_changed, not a label', async () => {
+    installDb({ decision_reviews: { returning: [undefined], first: [{ id: ID, label_status: 'unreviewed' }] } });
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: { p: 0.2, yes: false, confident: false } });
+    expect(status).toBe(409);
+    expect(body.code).toBe('answer_changed');
+    expect(mockAudit).not.toHaveBeenCalled();
   });
 
   test('jev_wrong on a missing review is 404 before any write', async () => {
@@ -202,7 +217,7 @@ describe('POST /reviews/:id/label', () => {
 
   test('a note is trimmed to its cap and an absent correct_value is stored as null', async () => {
     const log = installDb({ decision_reviews: { returning: [baseRow()] } });
-    await post(`/reviews/${ID}/label`, { verdict: 'unclear', note: 'n'.repeat(5000) });
+    await post(`/reviews/${ID}/label`, { verdict: 'unclear', note: 'n'.repeat(5000), seen_answer: SEEN });
     const label = JSON.parse(called(log, 'decision_reviews', 'update')[0][0].label);
     expect(label.note).toHaveLength(2000);
     expect(label.correct_value).toBeNull();
