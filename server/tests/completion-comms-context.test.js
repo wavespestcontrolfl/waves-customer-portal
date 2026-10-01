@@ -314,6 +314,19 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(9.4), direction: 'inbound', message_body: 'Ants are coming in under the back door' },
           { created_at: mk(9.6), direction: 'inbound', message_body: 'blue is the access word for the side gate where ants are' },
           { created_at: mk(9.8), direction: 'inbound', message_body: 'blue is how I get in through the side gate where ants are' },
+          { created_at: mk(9.9), direction: 'inbound', message_body: 'blue gets me through the side gate where ants are' },
+          { created_at: mk(9.95), direction: 'inbound', message_body: 'blue lets her through the side gate where ants are' },
+          { created_at: mk(9.97), direction: 'inbound', message_body: 'blue gets me into the garage where mice are' },
+          { created_at: mk(9.98), direction: 'inbound', message_body: 'sunflower gets us into the house where mice are' },
+          { created_at: mk(9.99), direction: 'inbound', message_body: 'blue lets me inside the house where mice are' },
+          // The pests getting through is pest talk, not access.
+          { created_at: mk(10), direction: 'inbound', message_body: 'Ants use the hole that gets them through the wall' },
+          // "Gets me through" counts only when a gate or door is what it gets
+          // you through.
+          { created_at: mk(10.1), direction: 'inbound', message_body: 'Coffee gets me through the day, but ants are coming in under the back door' },
+          // A fronted or pronoun-linked access point still drops the sentence.
+          { created_at: mk(10.2), direction: 'inbound', message_body: 'For the side gate, use blue where the ants are' },
+          { created_at: mk(10.3), direction: 'inbound', message_body: 'The side gate is on the left and blue opens it near the ant mounds' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
@@ -321,6 +334,8 @@ describe('buildCompletionCommsContext', () => {
     });
     expect(ctx.text).not.toMatch(/blue|for entry|sunflower|side gate/i);
     expect(ctx.text).toMatch(/^Customer text .*: Ants are coming in under the back door$/m);
+    expect(ctx.text).toMatch(/^Customer text .*: Ants use the hole that gets them through the wall$/m);
+    expect(ctx.text).toContain('Coffee gets me through the day, but ants are coming in under the back door');
     expect(ctx.text).toMatch(/^Call .*: Customer said ants are back by the sink\.$/m);
     expect(ctx.text).not.toContain('3355');
     expect(ctx.text).not.toContain('Twilio create failed');

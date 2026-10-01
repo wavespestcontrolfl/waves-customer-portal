@@ -260,6 +260,8 @@ async function queueInvoiceOfDeadDeclineNotice(meta) {
     // texting a second one (Codex #5424 r15 P1).
     await require('../dispatch-completion-deferred').handOverHeldInvoiceToSender({
       invoiceId: meta.invoice_id, serviceRecordId: meta.service_record_id || null,
+      // the deferred sms_log row carries the one-time re-arm grant for a recordless hand-over (Codex #5459 r6 P2)
+      smsLogId: meta.deferred_sms_log_id || null,
     });
   } catch (err) {
     try {
@@ -2179,7 +2181,8 @@ async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}, { alrea
       logger.warn(`[deferred-replay] terminal_pending stamp failed for ${msgId}: ${err.message}`);
     });
   }
-  const res = await onTerminalDeferredReplay(entryPoint, claimMeta);
+  // The hook learns which sms_log row it is finishing, so it can persist one-time grants on that row.
+  const res = await onTerminalDeferredReplay(entryPoint, msgId ? { ...claimMeta, deferred_sms_log_id: msgId } : claimMeta);
   if (res.ok && msgId) {
     await db('sms_log').where({ id: msgId }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', false)"),

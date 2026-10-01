@@ -145,11 +145,11 @@ function mowHoldLine(untilLabel, days) {
   return `Mowing: hold off until ${untilLabel}, ${days} ${days === 1 ? 'day' : 'days'} after today's treatment.`;
 }
 
-// The longest valid label hold across the applied products, as an ET calendar
-// date: completion's ET date plus whole calendar days (pure date arithmetic, so
-// a DST change in between cannot move it by a day).
-const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
+// The longest valid label hold across the applied products. A label day is 24
+// elapsed hours from the visit ("postpone mowing for 24 hours"), so the end is
+// completion + days * 24 h, rounded UP to the hour (rounding down would let the
+// customer mow before the label interval ends), and the line names that clock
+// time ("Fri 4 PM"), never a bare weekday that reads as "any time Friday".
 function buildMowHold(entries, completedAt) {
   const at = toDate(completedAt);
   if (!at) return null;
@@ -158,15 +158,12 @@ function buildMowHold(entries, completedAt) {
     .filter((d) => d != null);
   if (!days.length) return null;
   const longest = Math.max(...days);
-  const start = etParts(at);
-  const until = new Date(Date.UTC(start.year, start.month - 1, start.day + longest));
-  // A week or more out, the weekday alone is ambiguous: add the date.
-  const untilLabel = longest >= 7
-    ? `${WEEKDAYS[until.getUTCDay()]}, ${MONTHS_SHORT[until.getUTCMonth()]} ${until.getUTCDate()}`
-    : WEEKDAYS[until.getUTCDay()];
+  const until = ceilToHour(new Date(at.getTime() + longest * 24 * HOUR_MS));
+  const untilLabel = formatWhen(until, at);
   return {
     days: longest,
-    untilDate: until.toISOString().slice(0, 10),
+    untilAt: until.toISOString(),
+    untilDate: etDateString(until),
     untilLabel,
     line: mowHoldLine(untilLabel, longest),
   };
@@ -178,6 +175,9 @@ function isValidMowHold(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     && normalizeMowHoldDays(value.days) != null
     && typeof value.untilDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.untilDate)
+    // untilAt arrived after the first shape: a record frozen without it replays
+    // as written (record, not clock); when present it must parse.
+    && (value.untilAt === undefined || (typeof value.untilAt === 'string' && Number.isFinite(Date.parse(value.untilAt))))
     && typeof value.untilLabel === 'string' && value.untilLabel.length > 0
     && typeof value.line === 'string' && value.line.length > 0;
 }

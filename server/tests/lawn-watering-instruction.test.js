@@ -593,52 +593,51 @@ describe('mow hold', () => {
   const entry = (rule, mowHoldDays) => ({ name: 'Product', rule, mowHoldDays });
   const mow = (rules, completedAt = COMPLETED) => buildWateringInstruction({ rules, completedAt }).mowHold;
 
-  test('weekday label and ET date: completion ET date + days, with the exact line', () => {
-    // 2026-09-30 14:40 ET (a Wednesday) + 2 days.
+  test('a label day is 24 elapsed hours from completion, rounded UP to the hour, with the exact line', () => {
+    // 2026-09-30 14:40 ET (a Wednesday) + 48 h = Fri 2:40 PM -> 3 PM.
     expect(mow([entry(HOLD(24), 2)])).toEqual({
       days: 2,
+      untilAt: '2026-10-02T19:00:00.000Z',
       untilDate: '2026-10-02',
-      untilLabel: 'Fri',
-      line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.',
+      untilLabel: 'Fri 3 PM',
+      line: 'Mowing: hold off until Fri 3 PM, 2 days after today\'s treatment.',
     });
   });
 
-  test('one day reads "1 day"', () => {
-    expect(mow([entry(HOLD(24), 1)])).toMatchObject({ untilDate: '2026-10-01', untilLabel: 'Thu', line: 'Mowing: hold off until Thu, 1 day after today\'s treatment.' });
+  test('one day reads "1 day", and a late-afternoon visit never reads as "any time tomorrow"', () => {
+    expect(mow([entry(HOLD(24), 1)])).toMatchObject({ untilLabel: 'Thu 3 PM', line: 'Mowing: hold off until Thu 3 PM, 1 day after today\'s treatment.' });
+    // Thu 4 PM ET visit, 24 h label: never before Fri 4 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-01T20:00:00Z')).toMatchObject({ untilAt: '2026-10-02T20:00:00.000Z', untilLabel: 'Fri 4 PM' });
   });
 
-  test('uses the ET calendar date, not the UTC one (late evening ET is already the next UTC day)', () => {
-    // 2026-09-30 21:30 ET = 2026-10-01T01:30Z. ET is still Sep 30.
-    expect(mow([entry(HOLD(24), 1)], '2026-10-01T01:30:00Z')).toMatchObject({ untilDate: '2026-10-01', untilLabel: 'Thu' });
-    // 2026-10-01 00:30 ET = 04:30Z, same UTC date as ET here.
-    expect(mow([entry(HOLD(24), 1)], '2026-10-01T04:30:00Z')).toMatchObject({ untilDate: '2026-10-02', untilLabel: 'Fri' });
+  test('ET clock and date, not UTC (late evening ET is already the next UTC day)', () => {
+    // 2026-09-30 21:30 ET = 2026-10-01T01:30Z; +24 h = Thu 9:30 PM -> 10 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-01T01:30:00Z')).toMatchObject({ untilDate: '2026-10-01', untilLabel: 'Thu 10 PM' });
   });
 
-  test('crosses the early-November fall-back without moving a day', () => {
-    // Sat Oct 31 20:30 EDT (= 2026-11-01T00:30Z); DST ends overnight. +2 = Mon Nov 2.
-    expect(mow([entry(HOLD(24), 2)], '2026-11-01T00:30:00Z')).toMatchObject({ untilDate: '2026-11-02', untilLabel: 'Mon' });
-    // Sat Oct 31 23:30 EDT (= 2026-11-01T03:30Z). +1 = Sun Nov 1, the 25-hour day itself.
-    expect(mow([entry(HOLD(24), 1)], '2026-11-01T03:30:00Z')).toMatchObject({ untilDate: '2026-11-01', untilLabel: 'Sun' });
-    // Sun Nov 1 22:30 EST (= 2026-11-02T03:30Z) is ET Nov 1; +3 = Wed Nov 4.
-    expect(mow([entry(HOLD(24), 3)], '2026-11-02T03:30:00Z')).toMatchObject({ untilDate: '2026-11-04', untilLabel: 'Wed' });
+  test('crosses the early-November fall-back on elapsed hours', () => {
+    // Sat Oct 31 4:30 PM EDT + 24 h = Sun Nov 1 3:30 PM EST -> 4 PM.
+    expect(mow([entry(HOLD(24), 1)], '2026-10-31T20:30:00Z')).toMatchObject({ untilAt: '2026-11-01T21:00:00.000Z', untilDate: '2026-11-01', untilLabel: 'Sun 4 PM' });
   });
 
-  test('crosses the March spring-forward without moving a day', () => {
-    // Fri Mar 6 2026 12:00 EST; DST starts Sun Mar 8. +3 = Mon Mar 9.
-    expect(mow([entry(HOLD(24), 3)], '2026-03-06T17:00:00Z')).toMatchObject({ untilDate: '2026-03-09', untilLabel: 'Mon' });
+  test('crosses the March spring-forward on elapsed hours', () => {
+    // Fri Mar 6 2026 12:00 EST + 72 h = Mon Mar 9 1:00 PM EDT.
+    expect(mow([entry(HOLD(24), 3)], '2026-03-06T17:00:00Z')).toMatchObject({ untilDate: '2026-03-09', untilLabel: 'Mon 1 PM' });
   });
 
-  test('month, year and leap-day ends', () => {
-    expect(mow([entry(HOLD(24), 3)])).toMatchObject({ untilDate: '2026-10-03', untilLabel: 'Sat' });
-    expect(mow([entry(HOLD(24), 3)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-02', untilLabel: 'Sat' });
-    // A week or more out, the label carries the date too.
-    expect(mow([entry(HOLD(24), 7)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-06', untilLabel: 'Wed, Jan 6', line: 'Mowing: hold off until Wed, Jan 6, 7 days after today\'s treatment.' });
-    expect(mow([entry(HOLD(24), 3)], '2028-02-27T17:00:00Z')).toMatchObject({ untilDate: '2028-03-01', untilLabel: 'Wed' });
+  test('month, year and leap-day ends; six or more days out names the date', () => {
+    expect(mow([entry(HOLD(24), 3)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-02', untilLabel: 'Sat 12 PM' });
+    expect(mow([entry(HOLD(24), 7)], '2026-12-30T17:00:00Z')).toMatchObject({
+      untilDate: '2027-01-06',
+      untilLabel: 'Wed, Jan 6 at 12 PM',
+      line: 'Mowing: hold off until Wed, Jan 6 at 12 PM, 7 days after today\'s treatment.',
+    });
+    expect(mow([entry(HOLD(24), 3)], '2028-02-27T17:00:00Z')).toMatchObject({ untilDate: '2028-03-01', untilLabel: 'Wed 12 PM' });
     expect(mow([entry(HOLD(24), 14)], '2026-12-30T17:00:00Z')).toMatchObject({ untilDate: '2027-01-13' });
   });
 
   test('the longest label hold across the applied products wins', () => {
-    expect(mow([entry(HOLD(24), 2), entry(NONE(), 5), entry(WATER_IN(), 3)])).toMatchObject({ days: 5, untilDate: '2026-10-05' });
+    expect(mow([entry(HOLD(24), 2), entry(NONE(), 5), entry(WATER_IN(), 3)])).toMatchObject({ days: 5, untilDate: '2026-10-05', untilLabel: 'Mon 3 PM' });
   });
 
   test('null, absent and invalid values are ignored; no valid value means no mow hold at all', () => {
@@ -656,7 +655,7 @@ describe('mow hold', () => {
     const unknown = buildWateringInstruction({ rules: [entry(null, 2), entry(HOLD(24), null)], completedAt: COMPLETED });
     expect(unknown.state).toBeNull();
     expect(unknown.lines).toEqual([]);
-    expect(unknown.mowHold).toMatchObject({ days: 2, untilLabel: 'Fri' });
+    expect(unknown.mowHold).toMatchObject({ days: 2, untilLabel: 'Fri 3 PM' });
     // A hold-vs-water-in conflict (no claim) too.
     const conflict = buildWateringInstruction({ rules: [entry(HOLD(48), 4), entry(WATER_IN({ water_in_by_hours: 24 }), null)], completedAt: COMPLETED });
     expect(conflict.state).toBeNull();
@@ -694,7 +693,10 @@ describe('mow hold', () => {
     const { isValidMowHold } = require('../services/service-report/lawn-watering-instruction');
     const good = mow([entry(HOLD(24), 2)]);
     expect(isValidMowHold(good)).toBe(true);
-    for (const bad of [null, undefined, 'x', [], {}, { ...good, days: 0 }, { ...good, days: 15 }, { ...good, days: '2' }, { ...good, untilDate: 'Friday' }, { ...good, untilLabel: '' }, { ...good, line: '' }]) {
+    // A record frozen before untilAt existed still replays as written.
+    const { untilAt: _u, ...legacy } = good;
+    expect(isValidMowHold({ ...legacy, untilLabel: 'Fri', line: 'Mowing: hold off until Fri, 2 days after today\'s treatment.' })).toBe(true);
+    for (const bad of [null, undefined, 'x', [], {}, { ...good, days: 0 }, { ...good, days: 15 }, { ...good, days: '2' }, { ...good, untilDate: 'Friday' }, { ...good, untilAt: 'later' }, { ...good, untilLabel: '' }, { ...good, line: '' }]) {
       expect(isValidMowHold(bad)).toBe(false);
     }
   });
