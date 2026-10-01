@@ -11,6 +11,7 @@ const {
   summarizeProtocolContext,
 } = require('./lawn-protocol-operating-layer');
 const { describeInventoryConversion } = require('./inventory-units');
+const { resolveAddressCounty } = require('../config/address-county');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -972,19 +973,26 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   return { trackKey, track, month, visit };
 }
 
-async function getApplicableOrdinances(knex, profile, cities = {}) {
-  if (!profile) return [];
-  // Same city resolution the completion path uses (actualProductBlackoutBlocks):
-  // the STAMPED visit address outranks the turf-profile municipality — the 1:1
-  // profile describes the primary home, so a visit stamped at a rental in
-  // another city must evaluate the treated property's ordinances. Customer
-  // city is the last resort. When the stamped city DIVERGES from the profile's
-  // context, the profile county is dropped too — the query ORs county and city
-  // jurisdictions, and the rental's county is unknown, so keeping the primary
-  // home's county would bolt its blackout onto the rental's rules.
+// The ordinance jurisdictions (county + city) one visit is judged under —
+// shared by the plan and the completion path (actualProductBlackoutBlocks).
+// The STAMPED visit address outranks the turf-profile municipality — the 1:1
+// profile describes the primary home, so a visit stamped at a rental in
+// another city must evaluate the treated property's ordinances. Customer
+// city is the last resort. When the stamped city DIVERGES from the profile's
+// context, the profile county is dropped too — the query ORs county and city
+// jurisdictions, so keeping the primary home's county would bolt its blackout
+// onto the rental's rules.
+// A profile with no county (all active profiles today) falls back to the
+// county of the ADDRESS being treated — stamped zip+city when a visit is
+// stamped, else the customer's own zip+city — through the canonical
+// address-county resolver (the table irrigation-restrictions uses). A
+// straddling or unknown ZIP resolves to no county (fail closed, no guessing).
+function resolveOrdinanceJurisdiction(profile, cities = {}) {
   const stamped = String(cities.stampedCity || '').trim();
-  const profileCity = String(profile.municipality || '').trim();
+  const stampedZip = String(cities.stampedZip || '').trim();
+  const profileCity = String(profile?.municipality || '').trim();
   const customerCity = String(cities.customerCity || '').trim();
+  const customerZip = String(cities.customerZip || '').trim();
   // The county belongs to the PROFILE, so divergence is measured against the
   // profile's own city context (its municipality, else the customer city as
   // its implied context): a stamped visit in a different city drops the
@@ -993,8 +1001,19 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   const countyReferenceCity = profileCity || customerCity;
   const stampedDiverges = !!stamped && !!countyReferenceCity &&
     countyReferenceCity.toLowerCase() !== stamped.toLowerCase();
-  const county = stampedDiverges ? '' : String(profile.county || '').trim();
-  const city = stamped || profileCity || customerCity;
+  const profileCounty = stampedDiverges ? '' : String(profile?.county || '').trim();
+  const addressCounty = (stamped || stampedZip)
+    ? resolveAddressCounty({ zip: stampedZip, city: stamped })
+    : resolveAddressCounty({ zip: customerZip, city: customerCity });
+  return {
+    county: profileCounty || addressCounty || '',
+    city: stamped || profileCity || customerCity,
+  };
+}
+
+async function getApplicableOrdinances(knex, profile, cities = {}) {
+  if (!profile) return [];
+  const { county, city } = resolveOrdinanceJurisdiction(profile, cities);
   if (!county && !city) return [];
 
   let query = knex('municipality_ordinances').where({ active: true });
@@ -1357,7 +1376,9 @@ async function buildPlanForService(serviceId, options = {}) {
   ).trim() || null;
   const ordinances = await getApplicableOrdinances(knex, profile, {
     stampedCity: service.service_address_city,
+    stampedZip: service.service_address_zip,
     customerCity: service.city,
+    customerZip: service.zip,
   });
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
@@ -1786,4 +1807,6 @@ module.exports = {
   itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
+  resolveOrdinanceJurisdiction,
+  getApplicableOrdinances,
 };

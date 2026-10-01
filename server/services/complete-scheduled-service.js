@@ -57,7 +57,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -1273,26 +1273,15 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
     .select('id', 'name', 'analysis_n', 'analysis_p'), []);
   if (!profile) return [];
 
-  // Stamped visit address OUTRANKS the turf-profile municipality (matches
-  // the plan engine): the 1:1 profile describes the primary home, so a visit
-  // stamped at a rental in another city must use the treated property's
-  // ordinances, not the profile's — and when the stamped city diverges, the
-  // profile county is dropped too (the rental's county is unknown; keeping
-  // the primary home's county would OR its blackout onto the rental).
-  const stampedCity = String(svc.service_address_city || '').trim();
-  const profileCity = String(profile.municipality || '').trim();
-  const customerCity = String(svc.city || '').trim();
-  // The county belongs to the PROFILE, so divergence is measured against the
-  // profile's own city context (its municipality, else the customer city as
-  // its implied context): a stamped visit in a different city drops the
-  // profile county even when the CUSTOMER's city happens to match the stamp
-  // (stale-profile case: Charlotte profile, Bradenton customer+visit). No
-  // known reference city -> keep the county (can't prove divergence).
-  const countyReferenceCity = profileCity || customerCity;
-  const stampedDiverges = !!stampedCity && !!countyReferenceCity &&
-    countyReferenceCity.toLowerCase() !== stampedCity.toLowerCase();
-  const county = stampedDiverges ? '' : String(profile.county || '').trim();
-  const city = stampedCity || profileCity || customerCity;
+  // Same jurisdiction resolution as the plan (stamped visit address outranks
+  // the profile; a county-less profile falls back to the treated address's
+  // county via address-county).
+  const { county, city } = resolveOrdinanceJurisdiction(profile, {
+    stampedCity: svc.service_address_city,
+    stampedZip: svc.service_address_zip,
+    customerCity: svc.city,
+    customerZip: svc.customer_zip,
+  });
   if (!county && !city) return [];
 
   const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
@@ -2866,7 +2855,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.property_type',
+        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).
@@ -13934,6 +13923,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
 module.exports = {
   completeScheduledService,
+  actualProductBlackoutBlocks,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
