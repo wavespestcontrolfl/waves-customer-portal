@@ -52,7 +52,8 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some 
 // WAVES_RE, COMPETITORS and the all-companies ranking live in
 // llm-mention-companies.js.
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
-// 240 = six platforms × the 40 benchmark questions, so every pair is observed daily.
+// 240 = six platforms × the 40 benchmark questions: the benchmark is observed
+// daily (its pairs run first); ancillary queries rotate through what is left.
 const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 240);
 const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 240;
 
@@ -91,7 +92,30 @@ function observationGroups(rows, keyFor) {
   }));
 }
 
-function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
+// App-scraper rows carry a `dataforseo:` model label; everything else is an API row.
+const surfaceOf = row => (String(row.model_version || '').startsWith('dataforseo:') ? 'app' : 'api');
+
+// Headline rows: for a platform that has a current surface (ChatGPT and Gemini
+// have two, the API probe and the consumer app), only that surface's newest
+// row per question counts, so the 30-day overlap after a switch never counts a
+// question twice or mixes surfaces in one rate. Other platforms keep every
+// model cohort, as before. `grid` is newest first, so the first row seen for a
+// (question, platform) is its newest.
+function headlineRows(grid, currentSurfaces) {
+  if (!currentSurfaces) return grid;
+  const seen = new Set();
+  return grid.filter(row => {
+    const wanted = currentSurfaces[row.llm_platform];
+    if (!wanted) return true;
+    if (surfaceOf(row) !== wanted) return false;
+    const key = `${row.query}::${row.llm_platform}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildDashboard(rows, queries, { configuredPlatforms = null, currentSurfaces = null } = {}) {
   const questionMap = new Map(benchmark.questions.map(q => [q.query, q]));
   const managed = new Map(queries.map(q => [q.query, q]));
   const latest = new Map();
@@ -111,13 +135,17 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
     city: managed.get(row.query)?.city || questionMap.get(row.query)?.city || 'SWFL',
     intent: questionMap.get(row.query)?.intent || (isEntityQuestion(row.query) ? 'entity' : 'custom'),
   }));
-  const fixed = grid.filter(row => row.benchmark_id);
+  // `grid` keeps every model cohort (per-model breakdowns); `headline` is what
+  // the summary, benchmark and entity rates and the competitor counts read.
+  const headline = headlineRows(grid, currentSurfaces);
+  const fixed = headline.filter(row => row.benchmark_id);
+  const fixedAll = grid.filter(row => row.benchmark_id);
   const pageCites = new Map();
   const competitors = new Map();
   for (const row of rows) {
     for (const url of ownedCitations(row)) pageCites.set(url, (pageCites.get(url) || 0) + 1);
   }
-  for (const row of grid.filter(isMeasuredAnswer)) {
+  for (const row of headline.filter(isMeasuredAnswer)) {
     for (const name of rivalsOf(row)) competitors.set(name, (competitors.get(name) || 0) + 1);
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
@@ -159,11 +187,11 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   const pairs = summarizeObservations([...newestByPair.values()]);
   return {
     summary: {
-      ...summarizeObservations(grid),
-      queriesTracked: new Set(grid.map(row => row.query)).size,
+      ...summarizeObservations(headline),
+      queriesTracked: new Set(headline.map(row => row.query)).size,
       platforms: observedEngines,
       configuredPlatforms: configuredEngines,
-      rankMethods: rankMethodsOf(grid),
+      rankMethods: rankMethodsOf(headline),
     },
     benchmark: {
       version: benchmark.version,
@@ -182,13 +210,13 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
         unresolved: pairs.unresolved,
         missing,
       },
-      byPlatform: observationGroups(fixed, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
+      byPlatform: observationGroups(fixedAll, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
       byCity: observationGroups(fixed, row => row.city),
       byIntent: observationGroups(fixed, row => row.intent),
     },
     // What the engines say ABOUT Waves (owner-approved facts vs forbidden
     // claims). Separate cohort; never blended into the citation benchmark.
-    entity: buildEntityDashboard(grid, queries),
+    entity: buildEntityDashboard(headline, queries),
     byPlatform,
     trend: observationGroups(rows.filter(row => questionMap.has(row.query)), row => `${observationDate(row.check_date)} · ${row.llm_platform} · ${row.model_version || 'legacy'}`),
     grid,
@@ -478,6 +506,16 @@ class LLMMentionProber {
     return { citedUrls, complete };
   }
 
+  /**
+   * Which surface each two-surface platform is measured on right now (read
+   * with `providers`, from the same switch): the dashboard's headline rates
+   * count only that surface's rows.
+   */
+  get currentSurfaces() {
+    const surface = appScraper.appScraperEnabled(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured) ? 'app' : 'api';
+    return { chatgpt: surface, gemini: surface };
+  }
+
   /** Map platform key → probe fn. */
   get providers() {
     const providers = {};
@@ -589,11 +627,23 @@ class LLMMentionProber {
     // Advance one attempt window each ET calendar day, including failed pairs.
     // Successful-observation timestamps cannot rotate failures: enough broken
     // pairs would remain perpetually oldest and monopolize the run ceiling.
+    // The fixed benchmark's pairs run first, every day; ancillary queries
+    // (custom, entity cohort) rotate through whatever budget is left, so a
+    // larger managed list can never push a benchmark pair out of the ceiling.
+    const benchmarkQueries = new Set(benchmark.questions.map(q => q.query));
     const pairs = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })))
       .sort((a, b) => a.key.localeCompare(b.key));
     const dayOrdinal = Math.floor(Date.parse(`${checkDate}T00:00:00Z`) / 86400000);
-    const offset = pairs.length ? (dayOrdinal * MAX_PROBES_PER_RUN) % pairs.length : 0;
-    const pending = [...pairs.slice(offset), ...pairs.slice(0, offset)];
+    const rotate = (list, window) => {
+      const offset = list.length ? (dayOrdinal * window) % list.length : 0;
+      return [...list.slice(offset), ...list.slice(0, offset)];
+    };
+    const benchmarkPairs = pairs.filter(pair => benchmarkQueries.has(pair.qrow.query));
+    const ancillaryPairs = pairs.filter(pair => !benchmarkQueries.has(pair.qrow.query));
+    const pending = [
+      ...rotate(benchmarkPairs, MAX_PROBES_PER_RUN),
+      ...rotate(ancillaryPairs, Math.max(0, MAX_PROBES_PER_RUN - benchmarkPairs.length)),
+    ];
 
     // Today's already-recorded (query, platform) pairs → idempotency set.
     const existing = await db('seo_llm_mentions')
@@ -676,6 +726,7 @@ class LLMMentionProber {
     const queries = await this.getQueries();
     return buildDashboard(rows.filter(row => queries.some(q => q.query === row.query)), queries, {
       configuredPlatforms: Object.keys(this.providers),
+      currentSurfaces: this.currentSurfaces,
     });
   }
 }

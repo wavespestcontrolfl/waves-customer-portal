@@ -337,15 +337,46 @@ describe('rank computation', () => {
     expect(names(companies.buildCompaniesNamed('Mosquito Joe of Exampleville is open. Mosquito Joe helps.'))).toEqual(['Mosquito Joe of Exampleville']);
   });
 
-  test('rank honesty: provider entities give all_named_v2; text-only gives all_named_text_v2 and no rank when no other company was found', () => {
+  test('rank honesty: provider entities give all_named_v2; text-only gives all_named_text_v2 with a conservative upper-bound rank', () => {
     const entities = [{ title: 'Example Bug Control', category: 'local_business' }, { title: 'Waves Pest Control', category: 'local_business' }];
     expect(companies.rankFor('Example Bug Control then Waves Pest Control.', { entities })).toMatchObject({ rankMethod: 'all_named_v2', rankPosition: 2 });
     expect(companies.rankFor('Example Bug Control then Waves Pest Control.')).toMatchObject({ rankMethod: 'all_named_text_v2', rankPosition: 2 });
-    // Waves alone from text: completeness cannot be shown, so no rank (stays out of the top-3 "recommended" count).
-    expect(companies.rankFor('Go with Waves Pest Control, they are good.')).toMatchObject({ rankMethod: 'all_named_text_v2', rankPosition: null });
-    expect(new LLMMentionProber().parse({ text: 'Go with Waves Pest Control, they are good.' })).toMatchObject({ wavesMentioned: true, rankPosition: null });
+    // Nothing brand-like precedes Waves, so the bound is 1; text that never names Waves has no rank.
+    expect(companies.rankFor('Go with Waves Pest Control, they are good.')).toMatchObject({ rankMethod: 'all_named_text_v2', rankPosition: 1 });
+    expect(new LLMMentionProber().parse({ text: 'Inspect first.' })).toMatchObject({ wavesMentioned: false, rankPosition: null });
     // An unusable entity list falls back to the text path.
     expect(companies.rankFor('Waves Pest Control', { entities: [{ title: 'Yelp', category: 'website' }] })).toMatchObject({ rankMethod: 'all_named_text_v2' });
+  });
+
+  test('text rank is an upper bound: brands the strict list misses still push Waves down (TruGreen / Weed Man example gives 4)', () => {
+    const text = 'TruGreen is first. Weed Man is second. Massey Services is third. Waves Pest Control is fourth.';
+    expect(companies.textRankBound(text)).toBe(4);
+    expect(new LLMMentionProber().parse({ text })).toMatchObject({ rankPosition: 4, rankMethod: 'all_named_text_v2' });
+    // companies_named stays the stricter list (competitor counts).
+    expect(names(companies.buildCompaniesNamed(text))).not.toContain('TruGreen');
+  });
+
+  test('the bound excludes places, platforms, sentence-start function words and generic labels', () => {
+    const text = 'However, Pest Control in Sarasota, Florida and Southwest Florida varies. Yelp, Google, Angi, BBB, Nextdoor, Facebook and Reddit rate it. Top picks: Example Bug Control. Go with Waves Pest Control.';
+    expect(companies.textRankBound(text)).toBe(2);
+    // A place beside a service word is still a company name; a bare place is not.
+    expect(companies.textRankBound('Bradenton is lovely. Sarasota Pest Control is first. Waves Pest Control is second.')).toBe(2);
+    expect(companies.textRankBound('Bradenton is lovely. Waves Pest Control is first.')).toBe(1);
+  });
+
+  test('the bound never ranks Waves higher than the true rank on the existing fixtures', () => {
+    const fixtures = [
+      { text: scraper.parseChatGPTScraper(chatgptResponse()).text, entities: scraper.parseChatGPTScraper(chatgptResponse()).entities, truth: 3 },
+      { text: GEMINI_MARKDOWN, entities: null, truth: 3 },
+      { text: aiModeResponse().tasks[0].result[0].items[0].markdown, entities: null, truth: 3 },
+      { text: '**Example Bug Control** and **Sample Pest Solutions** lead. **Waves Pest Control** follows, then Orkin.', entities: null, truth: 3 },
+      { text: 'Example Bug Control is first. Waves Pest Control is second.', entities: null, truth: 2 },
+    ];
+    for (const { text, entities, truth } of fixtures) {
+      expect(companies.textRankBound(text)).toBeGreaterThanOrEqual(truth);
+      expect(companies.rankFor(text, { entities: null }).rankPosition).toBeGreaterThanOrEqual(truth);
+      expect(companies.rankFor(text, { entities }).rankPosition).toBeGreaterThanOrEqual(truth);
+    }
   });
 
   test('rankAmong accepts plain names and returns null when Waves is absent', () => {
@@ -429,7 +460,7 @@ describe('Google AI Mode probe', () => {
     });
     const parsed = new LLMMentionProber().parse(probe);
     expect(names(parsed.companiesNamed)).toEqual(['Prodigy Pest Solutions', 'Example Bug Control', 'Waves Pest Control']);
-    expect(parsed).toMatchObject({ rankPosition: 3, rankMethod: 'all_named_text_v2', wavesMentioned: true, answerAvailable: true });
+    expect(parsed).toMatchObject({ rankPosition: 4, rankMethod: 'all_named_text_v2', wavesMentioned: true, answerAvailable: true });
   });
 
   test('no answer item is an empty observation; a request or task error is null (no row)', async () => {
@@ -477,7 +508,7 @@ describe('Google AI Mode probe', () => {
       insert: row => { inserted.push(row); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
     });
     await prober.runDaily();
-    expect(inserted[0]).toMatchObject({ llm_platform: 'google_ai_mode', model_version: 'dataforseo:google_ai_mode', rank_method: 'all_named_text_v2', rank_position: 3, answer_available: true });
+    expect(inserted[0]).toMatchObject({ llm_platform: 'google_ai_mode', model_version: 'dataforseo:google_ai_mode', rank_method: 'all_named_text_v2', rank_position: 4, answer_available: true });
 
     const dashboard = buildDashboard([{ ...inserted[0], measurement_version: 2, check_date: '2026-10-01', waves_cited_urls: '[]' }], queries,
       { configuredPlatforms: ['chatgpt', 'google_ai_overview', 'google_ai_mode'] });
@@ -498,5 +529,84 @@ describe('rivalsOf', () => {
   test('rivalEntries keeps a known-list hit\'s stored context', () => {
     expect(companies.rivalEntries({ companies_named: [{ name: 'Orkin' }, { name: 'Example Bug Control' }], competitors_mentioned: [{ name: 'orkin', context: 'Orkin is national' }] }))
       .toEqual([{ name: 'Orkin', context: 'Orkin is national' }, { name: 'Example Bug Control', context: null }]);
+  });
+});
+
+describe('benchmark pairs run first under the probe cap', () => {
+  const benchmark = require('../data/aeo-benchmark-v1.json');
+
+  test('with more than 240 pairs every benchmark pair is attempted, whatever the day', async () => {
+    jest.useFakeTimers();
+    try {
+      const platforms = ['chatgpt', 'gemini', 'claude', 'google_ai_overview', 'google_ai_mode', 'perplexity'];
+      const extra = Array.from({ length: 50 }, (_, i) => ({ query: `ancillary question ${i}` }));
+      for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z', '2030-01-03T12:00:00Z']) {
+        jest.setSystemTime(new Date(day));
+        const prober = new LLMMentionProber();
+        jest.spyOn(prober, 'getQueries').mockResolvedValue([...extra, ...benchmark.questions.map(q => ({ query: q.query }))]);
+        const attempted = new Set();
+        const probes = Object.fromEntries(platforms.map(p => [p, async q => { attempted.add(`${q}::${p}`); return null; }]));
+        Object.defineProperty(prober, 'providers', { value: probes });
+        db.mockReturnValue({ where: () => ({ select: async () => [] }) });
+        expect((await prober.runDaily()).attempted).toBe(240);
+        for (const q of benchmark.questions) for (const p of platforms) expect(attempted.has(`${q.query}::${p}`)).toBe(true);
+      }
+    } finally { jest.useRealTimers(); }
+  });
+});
+
+describe('dashboard headline counts the current surface once', () => {
+  const benchmark = require('../data/aeo-benchmark-v1.json');
+  const query = benchmark.questions[0].query;
+  const q2 = benchmark.questions[1].query;
+  const row = (extra = {}) => ({
+    query, llm_platform: 'chatgpt', model_version: 'gpt-5-search-api-test', check_date: '2026-10-01',
+    measurement_version: 2, answer_available: true, citations_complete: true, waves_mentioned: false,
+    waves_cited_urls: [], ...extra,
+  });
+  // Newest first, as getDashboard orders them: new app rows, then 30-day-old API rows.
+  const history = () => [
+    row({ model_version: 'dataforseo:chatgpt_app:gpt-5-6', waves_mentioned: true, check_date: '2026-10-02' }),
+    row({ llm_platform: 'gemini', model_version: 'dataforseo:gemini_app:3.5', check_date: '2026-10-02' }),
+    row({ model_version: 'gpt-5-search-api-test', check_date: '2026-10-01' }),
+    row({ model_version: 'gpt-5-search-api-old', check_date: '2026-09-25', waves_mentioned: true }),
+    row({ llm_platform: 'gemini', model_version: 'gemini-2.5-flash', check_date: '2026-10-01', waves_mentioned: true }),
+    row({ query: q2, model_version: 'gpt-5-search-api-test', check_date: '2026-10-01' }),
+  ];
+  const managed = [{ query }, { query: q2 }];
+
+  test('app is current: API rows of the same question and platform are left out of the headline, kept in byPlatform', () => {
+    const dashboard = buildDashboard(history(), managed, { configuredPlatforms: ['chatgpt', 'gemini'], currentSurfaces: { chatgpt: 'app', gemini: 'app' } });
+    // Q1: one chatgpt app row + one gemini app row. The API-only Q2 row is not a current-surface observation.
+    expect(dashboard.summary).toMatchObject({ measured: 2, mentioned: 1 });
+    expect(dashboard.benchmark).toMatchObject({ measured: 2, mentioned: 1, observedQuestions: 1 });
+    expect(dashboard.benchmark.coverage).toMatchObject({ expected: 4, measured: 2, missing: 2 });
+    expect(dashboard.benchmark.byPlatform.map(g => g.key).sort()).toEqual([
+      'chatgpt · dataforseo:chatgpt_app:gpt-5-6', 'chatgpt · gpt-5-search-api-old', 'chatgpt · gpt-5-search-api-test',
+      'gemini · dataforseo:gemini_app:3.5', 'gemini · gemini-2.5-flash',
+    ]);
+    expect(dashboard.grid.length).toBeGreaterThan(dashboard.summary.measured);
+  });
+
+  test('api is current: only the newest API row per question and platform counts, never one per model', () => {
+    const dashboard = buildDashboard(history(), managed, { configuredPlatforms: ['chatgpt', 'gemini'], currentSurfaces: { chatgpt: 'api', gemini: 'api' } });
+    // chatgpt Q1 (newest API row), chatgpt Q2, gemini Q1.
+    expect(dashboard.summary).toMatchObject({ measured: 3, mentioned: 1 });
+    expect(dashboard.benchmark.coverage).toMatchObject({ measured: 3 });
+  });
+
+  test('no surface info keeps the per-model cohorts exactly as before', () => {
+    const dashboard = buildDashboard(history(), managed, { configuredPlatforms: ['chatgpt', 'gemini'] });
+    expect(dashboard.summary.measured).toBe(6);
+  });
+
+  test('currentSurfaces follows LLM_MENTIONS_APP_SCRAPER and DataForSEO credentials', () => {
+    const saved = process.env.LLM_MENTIONS_APP_SCRAPER;
+    try {
+      delete process.env.LLM_MENTIONS_APP_SCRAPER;
+      expect(new LLMMentionProber().currentSurfaces).toEqual({ chatgpt: 'app', gemini: 'app' });
+      process.env.LLM_MENTIONS_APP_SCRAPER = 'false';
+      expect(new LLMMentionProber().currentSurfaces).toEqual({ chatgpt: 'api', gemini: 'api' });
+    } finally { if (saved === undefined) delete process.env.LLM_MENTIONS_APP_SCRAPER; else process.env.LLM_MENTIONS_APP_SCRAPER = saved; }
   });
 });

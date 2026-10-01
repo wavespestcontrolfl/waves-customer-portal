@@ -317,12 +317,12 @@ test('an overview needs element attribution when only a possible source pool is 
 
 test('failed provider calls consume the attempt cap', async () => {
   const prober = new LLMMentionProber();
-  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 220 }, (_, i) => ({ query: `benchmark ${i}` })));
+  jest.spyOn(prober, 'getQueries').mockResolvedValue(Array.from({ length: 260 }, (_, i) => ({ query: `benchmark ${i}` })));
   const probe = jest.fn().mockResolvedValue(null);
   Object.defineProperty(prober, 'providers', { value: { chatgpt: probe } });
   db.mockReturnValue({ select: () => ({ max: () => ({ groupBy: async () => [] }) }), where: () => ({ select: async () => [] }) });
-  expect(await prober.runDaily()).toMatchObject({ attempted: 200, probed: 0, inserted: 0 });
-  expect(probe).toHaveBeenCalledTimes(200);
+  expect(await prober.runDaily()).toMatchObject({ attempted: 240, probed: 0, inserted: 0 });
+  expect(probe).toHaveBeenCalledTimes(240);
 });
 
 test('probe rotation honors same-day dedupe', async () => {
@@ -383,7 +383,7 @@ test('four failing engines cannot permanently starve a healthy engine under the 
   });
   for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z']) {
     jest.setSystemTime(new Date(day));
-    expect((await prober.runDaily()).attempted).toBe(200);
+    expect((await prober.runDaily()).attempted).toBe(240);
   }
   expect(healthyQuestions.size).toBe(60);
 });

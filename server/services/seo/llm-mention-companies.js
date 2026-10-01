@@ -389,19 +389,117 @@ function buildCompaniesNamed(text, options) {
   return buildCompaniesNamedDetailed(text, options).companies;
 }
 
+// ── Conservative rank for text-read answers ─────────────────────────────────
+// Extraction from prose cannot be proven complete ("TruGreen is first. Weed Man
+// is second. ... Waves Pest Control is fourth." names brands the strict list
+// does not know), so a text rank is an UPPER BOUND on Waves' true place:
+// 1 + the number of distinct brand-like spans that appear before Waves' first
+// mention. Over-counting only makes Waves look worse, the safe direction.
+const PLACE_WORDS = new Set([
+  'sarasota', 'bradenton', 'venice', 'parrish', 'lakewood', 'ranch', 'palmetto', 'ellenton', 'north', 'south', 'east', 'west',
+  'port', 'charlotte', 'longboat', 'key', 'siesta', 'nokomis', 'osprey', 'englewood', 'manatee', 'county', 'tampa', 'bay',
+  'florida', 'fl', 'southwest', 'swfl', 'gulf', 'coast', 'st', 'petersburg', 'fort', 'myers', 'cortez', 'anna', 'maria',
+  'holmes', 'beach', 'bradenton-sarasota', 'u.s', 'usa', 'america', 'american',
+]);
+const PLATFORM_WORDS = new Set([
+  'google', 'yelp', 'angi', 'angie', 'angie\'s', 'bbb', 'nextdoor', 'facebook', 'reddit', 'maps', 'thumbtack', 'homeadvisor',
+  'instagram', 'youtube', 'bing', 'better', 'business', 'bureau', 'chatgpt', 'gemini', 'openai', 'trustpilot', 'birdeye',
+  'expertise', 'pestsearch', 'wikipedia', 'tripadvisor', 'yellow', 'pages',
+]);
+const FUNCTION_WORDS = new Set([
+  'a', 'an', 'the', 'if', 'for', 'when', 'here', 'this', 'that', 'these', 'those', 'it', 'its', 'they', 'we', 'you', 'i',
+  'in', 'on', 'at', 'as', 'and', 'but', 'or', 'so', 'also', 'however', 'overall', 'then', 'next', 'first', 'second', 'third',
+  'fourth', 'fifth', 'finally', 'lastly', 'based', 'many', 'some', 'most', 'both', 'another', 'yes', 'no', 'please', 'note',
+  'because', 'while', 'after', 'before', 'since', 'our', 'your', 'my', 'there', 'what', 'which', 'who', 'how', 'why', 'where',
+  'sure', 'great', 'good', 'looking', 'consider', 'call', 'ask', 'get', 'try', 'choose', 'each', 'every', 'other', 'with',
+  'from', 'by', 'of', 'to', 'is', 'are', 'was', 'be', 'can', 'will', 'may', 'might', 'should', 'would', 'could', 'do', 'does',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'january', 'february', 'march', 'april',
+  'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december', 'mr', 'mrs', 'ms', 'dr', 'quick', 'summary',
+  'bottom', 'line', 'top', 'best', 'pick', 'picks', 'option', 'options', 'verdict', 'tip', 'tips', 'pros', 'cons',
+  'go', 'let', 'see', 'use', 'look', 'check', 'book', 'schedule', 'contact', 'visit', 'find', 'start', 'keep', 'make', 'take',
+  'work', 'need', 'want', 'avoid', 'hire', 'compare', 'pay', 'save', 'expect', 'remember', 'regardless', 'between', 'among', 'about',
+]);
+
+function boundTokenKind(word) {
+  const w = word.toLowerCase().replace(/['’]s$/, '').replace(/[^a-z0-9.'’-]/g, '');
+  if (!w) return 'skip';
+  if (PLATFORM_WORDS.has(w)) return 'platform';
+  if (PLACE_WORDS.has(w)) return 'place';
+  if (FUNCTION_WORDS.has(w) || STOP_START.has(w)) return 'function';
+  if (GENERIC_WORDS.has(w) || CARD_CHROME.has(w)) return 'generic';
+  return 'proper';
+}
+
+// A run is brand-like when it has a proper token, or a place beside a service
+// word ("Sarasota Pest Control" is a company; "Pest Control" and "Sarasota" alone are not).
+function boundRunIsBrand(kinds) {
+  if (kinds.includes('proper')) return true;
+  return kinds.includes('place') && kinds.includes('generic');
+}
+
+function boundCandidates(before) {
+  const tokens = [...before.matchAll(/[^\s|]+/g)].map(m => ({ raw: m[0], idx: m.index, end: m.index + m[0].length }));
+  const found = new Set();
+  let run = [];
+  let runStartsSentence = false;
+  const flush = () => {
+    if (run.length) {
+      let words = run;
+      // A sentence-initial function word ("However Massey Services") is not part of the name.
+      if (runStartsSentence) {
+        while (words.length && boundTokenKind(words[0]) === 'function') words = words.slice(1);
+      }
+      const kinds = words.map(boundTokenKind).filter(k => k !== 'skip');
+      if (words.length && boundRunIsBrand(kinds)) found.add(words.join(' ').toLowerCase().replace(/['’]s\b/g, '').replace(/[^a-z0-9]+/g, ''));
+    }
+    run = [];
+  };
+  let sentenceStart = true;
+  tokens.forEach((token, i) => {
+    const gap = i > 0 ? before.slice(tokens[i - 1].end, token.idx) : '\n';
+    if (/[\n|]/.test(gap)) { flush(); sentenceStart = true; }
+    const word = token.raw.replace(/^[*_`#>[(\-\u2022]+|[*_`\])]+$/g, '');
+    const bare = word.replace(/[.,;:!?]+$/, '');
+    const endsSentence = /[.!?:]$/.test(word) && !/^(?:Inc|LLC|Co|Corp|Ltd|St|Mr|Mrs|Ms|Dr)\.$/i.test(word);
+    if (!bare) { return; }
+    if (CAPITALISED_TOKEN_RE.test(bare)) {
+      if (!run.length) runStartsSentence = sentenceStart;
+      run.push(bare);
+      sentenceStart = false;
+    } else {
+      flush();
+      sentenceStart = false;
+    }
+    if (word !== bare || endsSentence) {
+      flush();
+      sentenceStart = endsSentence;
+    }
+  });
+  flush();
+  return found;
+}
+
+/** Upper bound on Waves' rank from text alone; null when the text never names Waves. */
+function textRankBound(text) {
+  const prose = proseOf(text);
+  const wavesIdx = prose.search(WAVES_RE);
+  if (wavesIdx < 0) return null;
+  return 1 + boundCandidates(prose.slice(0, wavesIdx)).size;
+}
+
 /**
  * Waves' rank and the method that produced it. Provider brand entities give
- * 'all_named_v2'. Names read from text give 'all_named_text_v2', and when the
- * text yields no company besides Waves the list cannot be shown complete (a
- * missed name would make Waves look first), so there is no rank.
+ * 'all_named_v2' (the provider's own list). Names read from text give
+ * 'all_named_text_v2', and that rank is a conservative upper bound
+ * (textRankBound), never below the strict list's own rank.
  */
 function rankFor(text, { entities = null } = {}) {
   const { companies, source } = buildCompaniesNamedDetailed(text, { entities });
-  const waves = rankAmong(companies);
-  const othersFound = companies.some(c => c.name !== WAVES_NAME);
-  const rankMethod = source === 'entities' ? RANK_METHOD_ALL_NAMED : RANK_METHOD_ALL_NAMED_TEXT;
-  const rankPosition = source === 'text' && !othersFound ? null : waves;
-  return { companies, rankMethod, rankPosition };
+  const strict = rankAmong(companies);
+  if (source === 'entities') return { companies, rankMethod: RANK_METHOD_ALL_NAMED, rankPosition: strict };
+  const bound = textRankBound(text);
+  const rankPosition = bound == null ? null : Math.max(bound, strict || 0);
+  return { companies, rankMethod: RANK_METHOD_ALL_NAMED_TEXT, rankPosition };
 }
 
 /** Waves' 1-based position among the named companies; null when not named. */
@@ -443,5 +541,5 @@ module.exports = {
   rivalsOf, rivalEntries,
   RANK_METHOD_ALL_NAMED, RANK_METHOD_ALL_NAMED_TEXT, RANK_METHOD_KNOWN_LIST, WAVES_RE, WAVES_NAME, URL_RE, COMPETITORS,
   proseOf, knownCompetitorHits, knownCompetitorKey, canonicalCompany, looksLikeCompany, candidateNames,
-  buildCompaniesNamed, buildCompaniesNamedDetailed, rankAmong, rankFor, proseNameSpans,
+  buildCompaniesNamed, buildCompaniesNamedDetailed, rankAmong, rankFor, textRankBound, proseNameSpans,
 };

@@ -2208,8 +2208,11 @@ function BacklinksTab() {
                 {llmDash.benchmark.measured} measured answers (a model change
                 keeps its answers separate). Recommended counts a mentioned
                 answer with positive sentiment ranked in the top 3 brands
-                {(llmDash.benchmark.rankMethods || []).length > 1
-                  ? " (newer answers rank against every company named; older ones ranked against a fixed competitor list, so this rate mixes both until older answers age out)"
+                {(llmDash.benchmark.rankMethods || []).includes("known_list_v1")
+                  ? " (older answers ranked against a fixed competitor list, so this rate mixes both until they age out)"
+                  : ""}
+                {(llmDash.benchmark.rankMethods || []).includes("all_named_text_v2")
+                  ? " (ChatGPT ranks come from the app's own company list; other engines' ranks are read from the answer text and are conservative, never better than the true rank)"
                   : ""}
                 {llmDash.benchmark.unclassified > 0
                   ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
