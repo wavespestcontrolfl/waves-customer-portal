@@ -37,7 +37,11 @@
  *     that guards against a regression neither rate has caught yet.
  *
  * Escalation intents never graduate (locked) — enforced here and in
- * sms-suggest-mode.validateModeChange. The auto_send rung is RECOMMEND-ONLY
+ * sms-suggest-mode.validateModeChange. The ladder is climbed one rung at a
+ * time: sms-suggest-mode.setIntentMode writes auto_send only over a stored
+ * suggest mode (judge-graded evidence accrues in shadow too, and this engine
+ * evaluates the rung without reading the stored mode); the fixed-copy
+ * gratitude lane is the documented exception and qualifies from shadow. The auto_send rung is RECOMMEND-ONLY
  * until the executor ships (next PR); eligibleFor:'auto_send' surfaces the
  * recommendation without enabling the flip.
  */
