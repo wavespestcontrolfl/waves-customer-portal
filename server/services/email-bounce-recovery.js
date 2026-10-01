@@ -995,12 +995,16 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
     try {
       // Recheck right before alerting (Codex #5459 r5 P2): a late delivery webhook may have committed the recovery
       // since it was settled uncertain, in which case the customer got the email and there is nothing to tell.
-      const fresh = await db('email_bounce_recoveries').where({ id: row.id }).first('status');
-      if (!fresh || fresh.status !== RESEND_UNCERTAIN_STATUS) continue;
+      const stillUncertain = async () => {
+        const r = await db('email_bounce_recoveries').where({ id: row.id }).first('status', 'metadata');
+        const meta = typeof r?.metadata === 'string' ? JSON.parse(r.metadata || '{}') : (r?.metadata || {});
+        return Boolean(r) && r.status === RESEND_UNCERTAIN_STATUS && !meta.delivery_confirmed_at;
+      };
+      if (!(await stillUncertain())) continue;
       await alertRecoveryResendUncertain(row);
-      // A commit can still land between that recheck and the alert: retire the keyed alert then.
-      const after = await db('email_bounce_recoveries').where({ id: row.id }).first('status');
-      if (!after || after.status !== RESEND_UNCERTAIN_STATUS) { await retireResendUncertainAlertOrRecordObligation(row.id); continue; }
+      // A delivery can still land between that recheck and the alert (its evidence is written before it retires
+      // anything): retire the keyed alert we just raised.
+      if (!(await stillUncertain())) { await retireResendUncertainAlertOrRecordObligation(row.id); continue; }
       await db('email_bounce_recoveries').where({ id: row.id, status: RESEND_UNCERTAIN_STATUS })
         .update({ updated_at: new Date(), metadata: jsonbMerge({ resend_alerted_at: new Date().toISOString() }) });
     } catch (err) {
@@ -1192,6 +1196,12 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     if (!rec) return;
     // The re-send was DELIVERED: any standing "may not have gone" alert (a recovery settled resend_uncertain before
     // this late webhook arrived) is now wrong, whether or not the record commit below applies (Codex #5459 r5 P2).
+    // The delivery evidence is persisted FIRST (Codex pre-push audit on #5459 r6): this function awaits customer-record
+    // writes before the ledger leaves resend_uncertain, and in that window the sweep could otherwise pass its status
+    // checks and raise a fresh alert that nothing retires. The sweep reads delivery_confirmed_at before and after it
+    // alerts, so whichever order the two interleave, the keyed alert is retired.
+    await db('email_bounce_recoveries').where({ id: rec.id })
+      .update({ updated_at: new Date(), metadata: jsonbMerge({ delivery_confirmed_at: new Date().toISOString() }) });
     await retireResendUncertainAlertOrRecordObligation(rec.id);
     if (rec.record_updated || rec.status === 'committed') return; // already done
 

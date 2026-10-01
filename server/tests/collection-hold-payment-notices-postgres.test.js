@@ -873,6 +873,42 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         } finally { close.mockRestore(); notify.mockRestore(); }
       });
 
+      // Codex pre-push audit on #5459 r6: the webhook awaits customer-record writes before the ledger leaves
+      // resend_uncertain. Its delivery evidence (delivery_confirmed_at) is written first, so a sweep that interleaves
+      // either never alerts or retires the alert it just raised.
+      test('a late delivery in flight (evidence written, status not yet committed) is never alerted, and an alert raised across its landing is retired', async () => {
+        const Recovery = require('../services/email-bounce-recovery');
+        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+        try {
+          // (a) the webhook already persisted its evidence but has not committed: the sweep raises nothing
+          const a = await strandedResent({ withMarker: true });
+          await db('email_bounce_recoveries').where({ id: a.rec.id }).update({
+            status: Recovery.RESEND_UNCERTAIN_STATUS, metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ resend_outcome: 'uncertain', delivery_confirmed_at: new Date().toISOString() })]),
+          });
+          await Recovery.retryHeldRecoveries();
+          expect(notify).not.toHaveBeenCalled();
+
+          // (b) the evidence lands DURING the sweep's alert: the alert it raised is retired by the sweep itself
+          const b = await strandedResent({ withMarker: true });
+          const keyB = `bounce-recovery-resend-uncertain:${b.rec.id}`;
+          await db('email_bounce_recoveries').where({ id: b.rec.id }).update({
+            status: Recovery.RESEND_UNCERTAIN_STATUS, metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ resend_outcome: 'uncertain' })]),
+          });
+          notify.mockImplementation(async (_cat, _title, _body, opts) => {
+            if (opts.dedupeKey !== keyB) return { id: 'other' };
+            await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Comms - check a re-sent email', body: 'x', metadata: JSON.stringify({ dedupeKey: keyB }) });
+            // the webhook's evidence write lands while the alert is being raised; its own retirement already ran
+            await db('email_bounce_recoveries').where({ id: b.rec.id }).update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ delivery_confirmed_at: new Date().toISOString() })]) });
+            return { id: 'synthetic' };
+          });
+          await Recovery.retryHeldRecoveries();
+          const alertRow = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [keyB]).first();
+          expect(alertRow.read_at).not.toBeNull();
+          expect(alertRow.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'late_delivery_confirmed' });
+          await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [keyB]).del();
+        } finally { notify.mockRestore(); }
+      });
+
       test('a marked row whose provider outcome WAS recorded (provider id published) is settled: not reclaimed, not alerted', async () => {
         const sendgrid = require('../services/sendgrid-mail');
         const Recovery = require('../services/email-bounce-recovery');
