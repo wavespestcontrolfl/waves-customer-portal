@@ -30,10 +30,11 @@ describe('EstimateViewPage accept consent attestation', () => {
     // r5: the base card / ACH text's version is attested too, and a newer
     // server-side base copy forces a full reload (the copy lives in the bundle).
     expect(src).toMatch(/const version = rendered \? rendered\.version : \(afterVisit \? cur\.version : CONSENT_VERSION\);/);
-    expect(src).toMatch(/body\.collectionPromise\.version !== CONSENT_VERSION\)\s*\{\s*recurringCardSetupIntentIdRef\.current = null;\s*window\.location\.reload\(\);/);
+    expect(src).toMatch(/body\.collectionPromise\.version !== \(body\.collectionPromise\.variant \? AFTER_VISIT_CONSENT_VERSION : CONSENT_VERSION\)\)\s*\{\s*recurringCardSetupIntentIdRef\.current = null;\s*window\.location\.reload\(\);/);
     expect(src).toMatch(/recurringCardConsentTender: recurringCardSetupIntentIdRef\.current \? tender : undefined,/);
-    // The version the server emits wins over the mirrored constant.
-    expect(src).toMatch(/version: data\?\.recurringCardPolicy\?\.afterVisitConsentVersion \|\| AFTER_VISIT_CONSENT_VERSION,/);
+    // r6: the version of the text THIS bundle renders, never the server's.
+    expect(src).not.toMatch(/afterVisitConsentVersion \|\| AFTER_VISIT_CONSENT_VERSION/);
+    expect(src).toMatch(/afterVisitRenderedRef\.current = \{[\s\S]{0,400}version: AFTER_VISIT_CONSENT_VERSION,/);
   });
 
   it('the capture surfaces render from the SAME promise flag the attestation reads (server best case AND a setup-only invoice is not the after-visit promise)', () => {

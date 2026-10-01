@@ -10030,6 +10030,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({
         error: 'Your payment terms were just updated. Please reload the page and review the card authorization before confirming.',
         code: 'CONSENT_VARIANT_STALE',
+        // The best-case promise this accept could record, so a tab whose
+        // bundled copy is a different version reloads instead of retrying it.
+        ...(recurringCardPolicy.required === true && !annualPrepaySelected
+          ? { collectionPromise: { variant: recurringCardPromiseCeiling.variant, tender: 'card', version: recurringCardPromiseCeiling.version } }
+          : {}),
       });
     }
     // Acceptance deposits RETIRED (owner ruling 2026-08-10): the deposit

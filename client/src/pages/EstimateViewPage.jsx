@@ -7361,9 +7361,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // The base card / ACH copy lives in this bundle: when the server
             // would record a newer version of it, only a full reload shows
             // that text (a /data refetch would re-render the old wording).
-            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise
-              && !body.collectionPromise.variant && body.collectionPromise.version
-              && body.collectionPromise.version !== CONSENT_VERSION) {
+            if (body.code === 'CONSENT_VARIANT_STALE' && body.collectionPromise?.version
+              && body.collectionPromise.version !== (body.collectionPromise.variant ? AFTER_VISIT_CONSENT_VERSION : CONSENT_VERSION)) {
               recurringCardSetupIntentIdRef.current = null;
               window.location.reload();
               throw new Error(body.error || 'Your payment terms were updated — reloading the page.');
@@ -8417,7 +8416,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   afterVisitTimingShownRef.current = payAfterFirstVisitEffective && afterVisitInvoiceShape.hasFirstVisitInvoice;
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
-    version: data?.recurringCardPolicy?.afterVisitConsentVersion || AFTER_VISIT_CONSENT_VERSION,
+    // The version of the text THIS BUNDLE renders (AFTER_VISIT_CARD_CONSENT_TEXT
+    // ships with it), never the server's: an older tab must not attest newer
+    // copy it never showed (GitHub Codex #5481 r6 audit).
+    version: AFTER_VISIT_CONSENT_VERSION,
   };
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
