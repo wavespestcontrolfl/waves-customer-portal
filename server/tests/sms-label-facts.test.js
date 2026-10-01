@@ -2546,6 +2546,24 @@ describe('r34: deictic indoor stay; one consistent read of the last visit; the i
       const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: ['S1'], asked: [] };
       await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body: 'S1', conn: twoHomes(['2026-06-05']), today: TODAY })).resolves.toBe('label_facts_no_longer_current');
     });
+    test('r33: the re-check reads the newest performed date LAST, after both guards (a visit committed mid-check is seen)', async () => {
+      const order = [];
+      const base = makeConn({ newestDates: ['2026-06-05'] });
+      const conn = (table) => {
+        const q = base(table);
+        const first = q.first; const select = q.select;
+        q.first = (...a) => { order.push(`${table}:first`); return first(...a); };
+        q.select = (...a) => { order.push(`${table}:select`); return select(...a); };
+        return q;
+      };
+      conn.counters = base.counters;
+      expect((await read(conn)).serviceDate).toBe('2026-06-05');
+      const recheck = order.slice(order.lastIndexOf('service_records:first', order.length - 2) + 1);
+      expect(order[order.length - 1]).toBe('service_records:first');
+      expect(recheck.length).toBeGreaterThan(0);
+      // a newer visit that lands during the guards: the final newest-date read sees it
+      expect(await read(makeConn({ newestDates: ['2026-06-05', '2026-06-09'] }))).toBeNull();
+    });
     test('fetchLabelFacts keeps its time limit and fails safe when the transaction never settles', async () => {
       const conn = { transaction: () => new Promise(() => {}) };
       expect(await labelFactsLib.fetchLabelFacts({ customerId: 'c1', conn, timeoutMs: 20 })).toBeNull();

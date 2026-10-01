@@ -267,11 +267,14 @@ async function isStillTheLastVisit({ customerId, conn, today, serviceDate }) {
       `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
       NON_PERFORMED_VISIT_OUTCOMES,
     );
-  const newest = await performed().max('service_records.service_date as service_date').first();
-  if (dateOnlyString(newest && newest.service_date) !== serviceDate) return false;
+  // ORDER (Codex #5416 r33): on READ COMMITTED each statement sees every commit made before it starts, so the newest-date read
+  // goes LAST. A visit that commits while the guards run is then seen by it (a newer date refuses); a visit that commits after it
+  // lands after this final read, at the send itself. Read first, a visit committing between it and the guards would pass both.
   if (await hasVisitToday(conn, customerId, today)) return false;
   if (await hasMultipleProperties(conn, customerId)) return false;
-  return !(await hasUnrecordedVisitSince(conn, customerId, serviceDate, today));
+  if (await hasUnrecordedVisitSince(conn, customerId, serviceDate, today)) return false;
+  const newest = await performed().max('service_records.service_date as service_date').first();
+  return dateOnlyString(newest && newest.service_date) === serviceDate;
 }
 
 // A customer with more than one active property (a home and a rental, say) cannot be answered from "the latest visit": the
