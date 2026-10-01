@@ -8656,6 +8656,11 @@ async function handleEstimateView(req, res, next) {
     // form. Policy-resolved (not just flag-gated) so exempt estimates — plan
     // members, payer-billed, already-on-Auto-Pay — keep their legacy/holdback
     // rendering. Dark by default: required is false until RECURRING_CARD_ON_FILE.
+    // GATE_PAF_EXISTING_CUSTOMERS: the whole after-visit cohort (capture, saved
+    // method, held) must accept through the React view — only it attests the
+    // "billed after your first visit" timing the accept now verifies
+    // (PAYMENT_TIMING_REFRESH), which the legacy confirmBooking never sends.
+    let pafExistingForcesReactView = false;
     const recurringCardForcesReactView = RecurringCards.isRecurringCardOnFileEnabled()
       && !effectiveInvoiceMode
       && !isStructuralOneTimeOnlyEstimate(estData, estimate)
@@ -8678,6 +8683,10 @@ async function handleEstimateView(req, res, next) {
           billByInvoice: effectiveInvoiceMode,
           paymentMethodPreference: null,
         });
+        if (viewPolicy.afterVisitCard === true) {
+          pafExistingForcesReactView = true;
+          return true;
+        }
         if (viewPolicy.required) return true;
         // In-lane prepay (GATE_PREPAY_CARD_AND_CHARGE) widens the React
         // requirement to the auto-satisfy exemptions: a customer whose
@@ -8801,7 +8810,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView || contactGapsForceReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView || pafExistingForcesReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
