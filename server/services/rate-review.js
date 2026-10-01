@@ -74,6 +74,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etMonthStart, addETDays, validCalendarDate } = require('../utils/datetime-et');
 const { addMonthsSameDay } = require('../utils/date-only');
+const { sanitizeClientIdentityFields } = require('./estimate-client-identity-fields');
 const { rateReviewLive, isEnabled } = require('../config/feature-gates');
 const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
@@ -313,8 +314,11 @@ function reviewWindowFor(now) {
   return { from: etDateString(addETDays(now, REVIEW_WINDOW_FROM_DAYS)), to: etDateString(addETDays(now, REVIEW_WINDOW_TO_DAYS)) };
 }
 
+// N ET calendar days before `now` — addETDays walks the ET calendar, so a
+// window that crosses a DST transition never lands a day early (fixed
+// 24-hour subtraction did, just after midnight EDT).
 function daysAgoYmd(now, days) {
-  return etDateString(new Date(now.getTime() - days * DAY_MS));
+  return etDateString(addETDays(now, -days));
 }
 
 // The anniversary's occurrence inside [from, to] (YYYY-MM-DD), or null when
@@ -593,7 +597,7 @@ const EXCEPTION_FLAGS = Object.freeze([
   'tenure_under_lock', 'prepay_mid_term', 'prepay_term_missing', 'reviewed_within_12mo', 'manual_rate_edit_recent',
   'retention_offer_active', 'plan_hold_active', 'callback_recent', 'cancellation_case_recent', 'complaint_open',
   'past_due', 'hand_picked_tier', 'commercial', 'termite_program', 'multi_property', 'lane_cleanup', 'cadence_conflict',
-  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
+  'prepay_term_ambiguous', 'rate_unattributed', 'list_low_confidence', 'unsupported_family', 'facts_unavailable', 'facts_degraded', 'no_anniversary', 'no_current_rate',
 ]);
 
 function evaluateExceptions(line, config = DEFAULT_CONFIG) {
@@ -622,6 +626,7 @@ function evaluateExceptions(line, config = DEFAULT_CONFIG) {
   // recurring series on either, or on the legacy NULL lane, is cleanup first.
   if (line.billingLane === 'per_visit' || line.billingLane === 'one_time' || line.billingLane == null) flags.push('lane_cleanup');
   if (line.listLowConfidence) flags.push('list_low_confidence');
+  if (line.familyKey === 'other') flags.push('unsupported_family');
   if (!f) flags.push('facts_unavailable');
   else if (f.moneyFactsDegraded) flags.push('facts_degraded');
   return flags;
@@ -649,9 +654,9 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   let classified;
   if (current <= 0) {
     classified = { band: null, gapPct: null, proposedCents: 0, deltaCents: 0, noChange: true, flags: ['no_current_rate'] };
-  } else if (!monthlyUnit) {
+  } else if (!monthlyUnit && vpy > 0) {
     classified = classifyBand({ currentCents: current, listCents: line.listRateCents, rph: line.revenuePerHourCents, lineRph: line.lineRph, usableVisits: line.usableVisits, config });
-  } else if (vpy > 0) {
+  } else if (monthlyUnit && vpy > 0) {
     // Monthly dues are a cadence's annual price spread over 12 months; the
     // bands, the $ cap and the minimum are PER APPLICATION. Normalize to the
     // per-application equivalent (monthly × 12 ÷ visits), classify there,
@@ -662,6 +667,9 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
     const proposedMonthly = perApp.noChange ? current : Math.round((perApp.proposedCents * vpy) / 12);
     classified = { ...perApp, proposedCents: proposedMonthly, deltaCents: proposedMonthly - current, perApplication: { current: perAppCurrent, list: perAppList, proposed: perApp.proposedCents, delta: perApp.deltaCents } };
   } else {
+    // No annual visit count (a legacy/custom cadence with no catalog count):
+    // a proposal with no annual impact is not actionable — skipped, never
+    // green with annual_delta_cents 0.
     classified = { band: null, gapPct: null, proposedCents: current, deltaCents: 0, noChange: true, flags: ['no_visits_per_year'] };
   }
   for (const flag of classified.flags) if (!flags.includes(flag)) flags.push(flag);
@@ -826,7 +834,12 @@ const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersio
 // added since (on another estimate) goes in as a prior qualifying service —
 // and the list carries today's tier, not the one the old quote was sold at.
 function listReplayInputs(inputs, { familyKey = null, cadence = null, activeFamilies = null } = {}) {
-  const clean = JSON.parse(JSON.stringify(inputs));
+  // The shared client-identity sanitizer first (estimate-client-identity-
+  // fields.js: every server-owned replay stamp — treeShrubPricingKnobs,
+  // palmAnnualRounding, catalogPricing, the identity flags …), the same
+  // pass admin-estimate-persistence runs before an authoritative recompute;
+  // the local pin list below covers the service-level pins it does not.
+  const clean = sanitizeClientIdentityFields(JSON.parse(JSON.stringify(inputs)));
   for (const key of REPLAY_PIN_KEYS) delete clean[key];
   if (clean.services && typeof clean.services === 'object') {
     for (const [service, keys] of Object.entries(REPLAY_PIN_SERVICE_KEYS)) {
@@ -918,7 +931,13 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   const riderKeys = includeRiders
     ? (ENGINE_RIDER_KEYS[line] || []).filter((k) => !Array.isArray(riderAllow) || riderAllow.includes(k))
     : [];
-  const riders = items.filter((i) => riderKeys.includes(i.service) && !engineItemLowConfidence(i));
+  const riders = items.filter((i) => riderKeys.includes(i.service));
+  // A rider the current slice carries is part of the compared bundle: one
+  // that needs a human holds the whole line, never a silent drop that
+  // compares a rider-inclusive current rate against a rider-free list.
+  if (riders.some((i) => engineItemLowConfidence(i))) {
+    return { lowConfidence: true, tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null };
+  }
   const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
     perAppCents: Math.round((annual / visits) * 100),
@@ -929,20 +948,29 @@ function listRateFromEngineResult(result, line, cadence, { includeRiders = false
   };
 }
 
+// One authoritative refresh of the engine's DB-backed constants per batch,
+// UNCONDITIONALLY — the process-local needsSync() interval can report
+// "fresh" on a pod whose constants another pod's pricing edit just made
+// stale. false (the bridge never rejects) = no engine list for the batch.
+async function syncPricingConstants(deps = {}) {
+  const engine = deps.pricingEngine || require('./pricing-engine');
+  if (typeof engine.syncConstantsFromDB !== 'function') return true;
+  try {
+    const synced = await engine.syncConstantsFromDB();
+    if (synced === false) logger.warn('[rate-review] pricing constants did not sync — no engine list rates this batch');
+    return synced !== false;
+  } catch (err) {
+    logger.warn(`[rate-review] pricing constants sync threw — no engine list rates this batch: ${err.message}`);
+    return false;
+  }
+}
+
 async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, deps) {
   const inputs = engineInputsFromEstimate(estimate, deps);
   if (!inputs) return null;
+  if (deps.engineSynced === false) return { unavailable: 'engine_sync_failed' };
   const engine = deps.pricingEngine || require('./pricing-engine');
   try {
-    // syncConstantsFromDB resolves false (never rejects) when the DB read
-    // fails. Stale in-memory constants are not today's list: no replay.
-    if (typeof engine.needsSync === 'function' && engine.needsSync() && typeof engine.syncConstantsFromDB === 'function') {
-      const synced = await engine.syncConstantsFromDB();
-      if (synced === false) {
-        logger.warn(`[rate-review] pricing constants did not sync — no engine list rate for estimate ${estimate.id}`);
-        return { unavailable: 'engine_sync_failed' };
-      }
-    }
     return { inputs, result: engine.generateEstimate(listReplayInputs(inputs, { familyKey, cadence, activeFamilies })) };
   } catch (err) {
     logger.warn(`[rate-review] engine replay failed for estimate ${estimate.id}: ${err.message}`);
@@ -1010,6 +1038,7 @@ async function loadActivePlanLines(dbh, { today }) {
         AND s.status IN ('pending', 'confirmed', 'rescheduled')
         AND ${RECURRING_SQL}
         AND c.deleted_at IS NULL
+        AND c.active = true
         AND c.pipeline_stage IN ('active_customer', 'won', 'at_risk')
     )
     SELECT customer_id, line AS family_key, cadence,
@@ -1092,7 +1121,11 @@ async function loadLatestSnapshots(dbh, customerIds, { batchKey }) {
 }
 
 // Completed non-callback recurring visits of the last 12 months with every
-// duration source pricing-reality-check reads, plus the settled revenue.
+// duration source pricing-reality-check reads, plus the settled revenue —
+// the paid invoice total NET of any refund recorded on its payments (a
+// partially refunded invoice stays 'paid'; the refund lives on the payment,
+// linked the way invoice.js links them: Stripe intent / charge id, or the
+// payment's metadata invoice_id — there is no payments.invoice_id).
 async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return [];
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
@@ -1117,7 +1150,13 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
       apt.prepay_amount AS term_prepay_amount, apt.coverage_visit_count AS term_visit_count,
       te.time_entry_minutes, te.time_entry_clock_in, te.time_entry_clock_out,
       sr.service_record_started_at, sr.service_record_ended_at, sr.service_record_structured_notes, sr.customer_interaction,
-      (SELECT sum(i.total) FROM invoices i
+      (SELECT sum(i.total) - COALESCE(sum((
+          SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
+          WHERE COALESCE(p.refund_amount, 0) > 0
+            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+              OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
+        )), 0) FROM invoices i
         WHERE i.scheduled_service_id = s.id AND i.archived_at IS NULL AND i.annual_prepay_term_id IS NULL
           AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
           AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
@@ -1573,7 +1612,9 @@ function computeLineReferences(book) {
   const modeByGroup = new Map();
   const rphByFamily = new Map();
   for (const entry of book) {
-    if (entry.current.cents > 0 && entry.current.unit === 'application') {
+    // An unclassified family ('other') has no shared identity — its lines
+    // never establish each other's list rate.
+    if (entry.current.cents > 0 && entry.current.unit === 'application' && entry.familyKey !== 'other') {
       const key = `${entry.familyKey}|${entry.cadence}`;
       if (!modeByGroup.has(key)) modeByGroup.set(key, []);
       modeByGroup.get(key).push(entry.current.cents);
@@ -1750,10 +1791,11 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
   const config = await loadConfig(dbh);
   const inputs = await loadBookInputs(dbh, { today, sinceYmd: daysAgoYmd(now, LOOKBACK_DAYS) });
   const { planLines, allowances } = inputs;
+  const engineSynced = await syncPricingConstants(deps);
   const replayCache = new Map();
   const book = [];
   for (const planLine of planLines) {
-    const entry = await assembleBookEntry(inputs, planLine, { config, replayCache, deps });
+    const entry = await assembleBookEntry(inputs, planLine, { config, replayCache, deps: { ...deps, engineSynced } });
     if (entry) book.push(entry);
   }
   const refs = computeLineReferences(book);
@@ -2024,7 +2066,7 @@ module.exports = {
   composeBatchEmail,
   _private: {
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
-    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel,
+    isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,

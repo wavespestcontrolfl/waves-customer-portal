@@ -298,6 +298,7 @@ describe('exception rules', () => {
     ['two cadences open in one family', { cadenceConflict: true }, 'cadence_conflict'],
     ['one_time lane on a recurring series', { billingLane: 'one_time' }, 'lane_cleanup'],
     ['engine replay needs a human (manual review / heuristic turf / LOW confidence)', { listLowConfidence: true }, 'list_low_confidence'],
+    ['unclassified service family', { familyKey: 'other' }, 'unsupported_family'],
     ['two live prepay terms could cover the line', { prepayTermAmbiguous: true }, 'prepay_term_ambiguous'],
     ['monthly dues with no per-family attribution', { rateUnattributed: true }, 'rate_unattributed'],
     ['facts loader failed (fail closed)', { facts: null }, 'facts_unavailable'],
@@ -331,9 +332,14 @@ describe('exception rules', () => {
     const noRate = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', currentRateCents: 0, listRateCents: 11700 });
     expect(noRate.status).toBe('skipped');
     expect(noRate.flags).toContain('no_current_rate');
-    const noList = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', currentRateCents: 11700, listRateCents: null });
+    const noList = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'quarterly', visitsPerYear: 4, currentRateCents: 11700, listRateCents: null });
     expect(noList.status).toBe('skipped');
     expect(noList.flags).toContain('no_list_rate');
+    // an application-unit line with no annual visit count is skipped, never green with annual_delta_cents 0
+    const noVpy = P.computeSnapshot({ ...base(), batchKey: '2026-12', customerId: 'c1', cadence: 'other', visitsPerYear: null, currentRateCents: 10400, listRateCents: 11700 });
+    expect(noVpy.status).toBe('skipped');
+    expect(noVpy.flags).toContain('no_visits_per_year');
+    expect(noVpy.delta_cents).toBe(0);
   });
   test('computeSnapshot: monthly dues are normalized to per-application dollars before the bands, cap and minimum apply', () => {
     // 12 visits/yr billed monthly: $55/mo = $55/application; list $60 → C → to list $60/application = $60/mo
@@ -542,6 +548,15 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(Object.keys(P.listReplayInputs(sold, { familyKey: 'pest_control', cadence: 'quarterly' }).services).sort()).toEqual(['lawn', 'mosquito', 'pest']);
     expect(sold.services.lawn).toBeDefined();
   });
+  test('every server-owned replay stamp comes off through the shared client-identity sanitizer', () => {
+    const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
+    for (const stamp of ['treeShrubPricingKnobs', 'palmAnnualRounding', 'catalogPricing', 'termitePricingKnobs', 'rodentWaveguardPostureReplay']) expect(CLIENT_IDENTITY_FIELDS).toContain(stamp);
+    const saved = { homeSqFt: 2100, treeShrubPricingKnobs: { x: 1 }, palmAnnualRounding: { y: 2 }, catalogPricing: { z: 3 }, services: { pest: { frequency: 'quarterly' } } };
+    const clean = P.listReplayInputs(saved, { familyKey: 'pest_control', cadence: 'quarterly' });
+    for (const stamp of CLIENT_IDENTITY_FIELDS) expect(clean[stamp]).toBeUndefined();
+    expect(clean.homeSqFt).toBe(2100);
+    expect(saved.catalogPricing).toEqual({ z: 3 }); // never mutates the stored inputs
+  });
   test('historical pins come off: a v1-pinned pest quote, frozen floors and minimums reprice at today\'s list', () => {
     const saved = {
       homeSqFt: 2100, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 89, lawnProgramMinimumMonthly: 45, useLawnCostFloor: true,
@@ -597,9 +612,12 @@ describe('engine replay runs at the line\'s own cadence', () => {
     expect(monthly).toMatchObject({ monthlyCents: 4250, perAppCents: 6000, riderServices: ['palm_injection'] });
     const perApp = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly');
     expect(perApp).toMatchObject({ monthlyCents: 3000, perAppCents: 6000, riderServices: [] });
-    // a rider that needs a custom quote is left out rather than priced at $0
+    // a rider the slice carries that needs a human holds the WHOLE line (the current rate includes the rider; a rider-free list would compare mismatched bundles)
     const quoteRequired = { lineItems: [result.lineItems[0], { ...result.lineItems[1], quoteRequired: true }], waveGuard: { tier: 'silver' } };
-    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true }).monthlyCents).toBe(3000);
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true })).toMatchObject({ lowConfidence: true });
+    // … but a rider the slice does NOT carry is ignored entirely, confident or not
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly')).toMatchObject({ monthlyCents: 3000 });
     // a rider on the saved estimate that the ledger no longer carries (cancelled since) stays out of the list
     expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub'] })).toMatchObject({ monthlyCents: 3000, riderServices: [] });
     expect(P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: ['tree_shrub', 'palm_injection'] })).toMatchObject({ monthlyCents: 4250, riderServices: ['palm_injection'] });
@@ -710,6 +728,12 @@ describe('the review window: anniversaries 35–65 days out from the build date'
     expect(() => P.assertYmd('2026-02-29', 'x')).toThrow(/real calendar date/);
     expect(() => P.assertYmd('2028-02-29', 'x')).not.toThrow();
   });
+  test('day lookbacks walk the ET calendar: a window crossing the spring DST change never lands a day early', () => {
+    // 2027-03-15 00:30 EDT (04:30Z), the day after the Mar 14 transition: 10 ET days back is Mar 5; fixed 24h ms arithmetic would say Mar 4 (23:30 EST)
+    expect(P.daysAgoYmd(new Date('2027-03-15T04:30:00Z'), 10)).toBe('2027-03-05');
+    expect(P.daysAgoYmd(new Date('2026-11-01T11:20:00Z'), 90)).toBe('2026-08-03');
+    expect(P.daysAgoYmd(new Date('2026-11-01T11:20:00Z'), 365)).toBe('2025-11-01');
+  });
   test('the manual-edit cutoff is calendar-exact (Mar 31 − 6 months = Sep 30, never Oct 1)', () => {
     expect(P.monthsAgoYmd(new Date('2027-03-31T16:00:00Z'), 6)).toBe('2026-09-30');
     expect(P.monthsAgoYmd(new Date('2026-11-01T11:20:00Z'), 12)).toBe('2025-11-01');
@@ -802,6 +826,19 @@ describe('engine replay guards', () => {
     expect(row.list_rate_source).toBe('cadence_mode');
     expect(JSON.parse(row.flags)).toEqual(expect.arrayContaining(['engine_sync_failed', 'list_from_cadence_mode']));
   });
+  test('constants are refreshed once per batch UNCONDITIONALLY — needsSync() saying "fresh" on this pod is not trusted', async () => {
+    const engine = { ...fixture.fakePricingEngine(), needsSync: () => false, syncConstantsFromDB: jest.fn(async () => false) };
+    const { scripted, run } = scenarioWith(engine);
+    await run();
+    expect(engine.syncConstantsFromDB).toHaveBeenCalledTimes(1);
+    expect(engine.generateEstimate).not.toHaveBeenCalled();
+    expect(JSON.parse(scripted.writes.snapshotInserts.find((r) => r.customer_id === book.customers.belowList.id).flags)).toContain('engine_sync_failed');
+    const throwing = { ...fixture.fakePricingEngine(), syncConstantsFromDB: jest.fn(async () => { throw new Error('db down'); }) };
+    const b = scenarioWith(throwing);
+    await b.run();
+    expect(throwing.generateEstimate).not.toHaveBeenCalled();
+    expect(await P.syncPricingConstants({ pricingEngine: { generateEstimate: () => ({}) } })).toBe(true); // an engine with no bridge has nothing to refresh
+  });
   test('a replay that throws is engine_replay_failed, and a sync that succeeds prices normally', async () => {
     const throwing = { ...fixture.fakePricingEngine(), needsSync: () => false, generateEstimate: jest.fn(() => { throw new Error('boom'); }) };
     const a = scenarioWith(throwing);
@@ -848,6 +885,38 @@ describe('engine replay guards', () => {
     expect(replayed[0]).toBe(3400); // newest first
     const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === customer.id);
     expect(row.anniversary_date).toBe('2025-12-05'); // first completed visit after the EARLIEST acceptance (2025-11-28)
+  });
+  test('an unclassified family never borrows a list rate from other unclassified lines and is held', async () => {
+    const others = [16, 17, 18].map((n) => fixture.customer(n, { member_since: '2024-12-0' + (n - 15), last_name: 'Other ' + n }));
+    const scenario = {
+      planLines: [...book.planLines, ...others.map((c) => fixture.planLine(c.id, 'other', 'quarterly', 150))],
+      customers: [...book.customerRows, ...others], firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms,
+      ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    for (const c of others) {
+      const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === c.id);
+      expect(row.list_rate_source).toBe('none');
+      expect(row.status).toBe('exception');
+      expect(JSON.parse(row.flags)).toContain('unsupported_family');
+    }
+  });
+  test('the plan-line query takes live accounts only and visit revenue is net of recorded refunds', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    expect(planQuery).toMatch(/c\.active = true/);
+    expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);
+    const revenue = src.slice(src.indexOf('AS paid_revenue') - 900, src.indexOf('AS paid_revenue'));
+    expect(revenue).toMatch(/refund_amount/);
+    // linked the way invoice.js links payments to invoices — never a payments.invoice_id (there is none)
+    expect(revenue).toMatch(/p\.stripe_payment_intent_id = i\.stripe_payment_intent_id/);
+    expect(revenue).toMatch(/metadata::jsonb ->> 'invoice_id' = i\.id::text/);
+    expect(revenue).not.toMatch(/p\.invoice_id/);
   });
   test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
     const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };
