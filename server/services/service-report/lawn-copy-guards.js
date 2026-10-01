@@ -278,7 +278,7 @@ function extractNumericTokens(text) {
 
   // 1. [cadence] [quantity [range end]] unit
   const quantRe = new RegExp(
-    `(?<![\\w.])(?:(?<cad>${CADENCE_SRC})[-\\s]+)?(?:(?<q1>${QTY_SRC})(?:${RANGE_SEP_SRC}(?<q2>${QTY_SRC}))?[-\\s]*)?${UNIT_SRC}(?![a-z])`,
+    `(?<![\\w.])(?:(?<cad>${CADENCE_SRC})[-\\s]+)?(?:(?<q1>${QTY_SRC})(?:${RANGE_SEP_SRC}(?<q2>${QTY_SRC}))?[-\\s]*(?:(?:more|full|whole|additional|extra)[-\\s]+)?)?${UNIT_SRC}(?![a-z])`,
     'g'
   );
   let m;
@@ -450,15 +450,20 @@ function checkProgressCoupling(text, facts = {}) {
 // Banned re-entry pattern (SCOPE s3) and the keep-off regression lists
 
 const REENTRY_TRIGGER_RE = /\bkeep(?:ing)?\b[^.!?]{0,40}\boff\b|\bstay(?:ing|s)?\s+off\b|\bwait(?:ing|s|ed)?\b|\bdr(?:y|ies|ied|ying|ier)\b/i;
-const REENTRY_FIGURE_SRC = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
-const REENTRY_FIGURE_RE = new RegExp(`\\b${REENTRY_FIGURE_SRC}[-\\s]*(?:more\\s+)?(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)\\b`, 'i');
+// The figure is ANY hours or minutes quantity the numeric grammar reads: digits,
+// every spelled number (thirteen through nineteen included, "a dozen"), ranges,
+// "an hour", "half an hour", the vague forms (a few, a couple of, several), and
+// any number phrase the parser cannot read in full. A bare cadence ("every
+// hour") carries no figure. Nothing in `facts` can allow it.
+const isReentryFigure = (t) => (t.unit === 'hour' || t.unit === 'minute')
+  && !(t.kind === 'cadence' && !t.values.length);
 
 function checkReentryPattern(text) {
   const reasons = [];
   splitSentences(text).forEach((s) => {
     const trig = s.match(REENTRY_TRIGGER_RE);
-    const fig = s.match(REENTRY_FIGURE_RE);
-    if (trig && fig) reasons.push({ rule: 'reentry_figure', match: s, detail: `"${trig[0]}" with "${fig[0]}"` });
+    const fig = trig && extractNumericTokens(s).find(isReentryFigure);
+    if (trig && fig) reasons.push({ rule: 'reentry_figure', match: s, detail: `"${trig[0]}" with "${fig.match}"` });
   });
   return reasons;
 }

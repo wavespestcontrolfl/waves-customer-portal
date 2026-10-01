@@ -486,6 +486,97 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
     expect(checkReentryPattern(text)).toEqual([]);
   });
 
+  // Pre-push audit: the re-entry figure is the full quantity grammar and an
+  // absolute rule. No allowlist, score list or approved sentence can waive it.
+  describe('re-entry figure uses the full quantity grammar and cannot be allowlisted', () => {
+    const SPELLED = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+      'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty', 'twenty-one',
+      'twenty-two', 'twenty-three', 'twenty-four', 'thirty', 'forty-eight', 'seventy-two', 'a dozen', 'two dozen'];
+    const NUMBER_FORMS = [...SPELLED, ...Array.from({ length: 24 }, (_, i) => String(i + 1)), '30', '48', '72', '1.5', '2 to 3', 'two to three'];
+    const TRIGGERS = [
+      (f, u) => `Stay off the turf for ${f} ${u}.`,
+      (f, u) => `Keep the kids off the grass for ${f} ${u}.`,
+      (f, u) => `Please wait ${f} ${u} before heading out.`,
+      (f, u) => `Let the lawn dry for ${f} ${u}.`,
+    ];
+
+    test.each(NUMBER_FORMS)('"%s" hours and minutes are a figure, under every trigger', (figure) => {
+      ['hours', 'minutes', 'hrs', 'mins'].forEach((unit) => {
+        TRIGGERS.forEach((make) => {
+          expect(checkReentryPattern(make(figure, unit)).length).toBe(1);
+        });
+      });
+    });
+
+    test('the audit case: fourteen minutes', () => {
+      const text = 'Stay off the turf for fourteen minutes.';
+      expect(checkReentryPattern(text).length).toBe(1);
+      expect(checkLawnModelCopy(text, { allowedText: ['14 minutes'] }).ok).toBe(false);
+      rejects(text, 'reentry_figure', { allowedText: ['14 minutes'] });
+    });
+
+    test.each([
+      'Stay off the turf for an hour.',
+      'Stay off the turf for half an hour.',
+      'Stay off the turf for half-hour.',
+      'Stay off the turf for a half hour.',
+      'Stay off the turf for a few minutes.',
+      'Stay off the turf for a couple of hours.',
+      'Stay off the turf for several hours.',
+      'Stay off the turf for 30 more minutes.',
+      'Stay off the turf for two full hours.',
+      'Stay off the turf for 2-3 hours.',
+      'Stay off the turf for 2\u20133 hours.',
+      'STAY OFF THE TURF FOR FOURTEEN MINUTES.',
+      'Stay off the turf within the hour.',
+      'Stay off the turf for the next hour.',
+    ])('vague and half forms count: %s', (text) => {
+      expect(checkReentryPattern(text).length).toBe(1);
+    });
+
+    test('a number phrase the parser cannot read in full still counts', () => {
+      ['twenty twenty minutes', 'a couple hundred minutes', 'one and a half hours', 'one two hours'].forEach((figure) => {
+        expect(checkReentryPattern(`Stay off the turf for ${figure}.`).length).toBe(1);
+      });
+    });
+
+    test('no allowedText, allowedNumbers or approvedSentences entry can waive it', () => {
+      SPELLED.slice(0, 24).concat(['thirty', 'forty-eight', 'seventy-two', 'a dozen']).forEach((figure) => {
+        TRIGGERS.forEach((make) => {
+          const sentence = make(figure, 'minutes');
+          const waivers = [
+            { allowedText: [sentence] },
+            { allowedText: [`${figure} minutes`] },
+            { allowedNumbers: [1, 2, 3, 4, 5, 6, 7, 12, 14, 24, 30, 48, 72] },
+            { approvedSentences: [sentence] },
+            { approvedSentences: [sentence], allowedText: [sentence], allowedNumbers: [14], droughtFlagged: true, progress: 'up' },
+          ];
+          waivers.forEach((facts) => {
+            const result = checkLawnModelCopy(sentence, facts);
+            expect(result.ok).toBe(false);
+            expect(rules(result)).toContain('reentry_figure');
+          });
+        });
+      });
+    });
+
+    test('an approved sentence stays rejected beside clean sentences, and clean ones still pass', () => {
+      const bad = 'Stay off the turf for fourteen minutes.';
+      const facts = { approvedSentences: [bad], allowedText: [bad] };
+      rejects(`Your lawn looks even. ${bad}`, 'reentry_figure', facts);
+      accepts('Your lawn looks even. Stay off the new sod.', facts);
+    });
+
+    test('a bare cadence is not a figure', () => {
+      expect(checkReentryPattern('Please wait for your technician every hour.')).toEqual([]);
+    });
+
+    test('hours or minutes outside a trigger sentence are not re-entry figures', () => {
+      expect(checkReentryPattern('The visit took fourteen minutes.')).toEqual([]);
+      expect(checkReentryPattern('Stay off the new sod. The visit took fourteen minutes.')).toEqual([]);
+    });
+  });
+
   test('the trigger and the figure must share a sentence', () => {
     expect(checkReentryPattern('Stay off the turf. The visit took 30 minutes.')).toEqual([]);
     expect(checkReentryPattern('The visit took 30 minutes. Stay off the turf.')).toEqual([]);
