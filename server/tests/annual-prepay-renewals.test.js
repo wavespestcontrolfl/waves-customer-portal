@@ -176,6 +176,9 @@ function setDbQueues(queues) {
       // r41: every seeding insert presence-probes the term owner under the
       // comms fence via this alias. Default = owner unchanged, so seeding
       // tests stay focused; the moved-owner defer pin queues its own miss.
+      // Concurrent-seed recheck under the comms lock: default = no visit
+      // appeared since the seeder read its gaps.
+      if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
       if (table === 'annual_prepay_terms as apt_owner_probe') {
         return query({ first: { customer_id: 'owner-unchanged' } });
       }
@@ -7781,23 +7784,33 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
   });
 
   // One entry per term, in order: the canonical-rows read, and — for a term
-  // that reaches the refresh — the invoice share lock + the paid-backing
-  // recheck (annual_prepay_terms as t, second read onward).
+  // that reaches the refresh — the invoice share lock, the term row FOR UPDATE
+  // (plain `annual_prepay_terms`), the paid-backing recheck (second
+  // `annual_prepay_terms as t` read onward) and the customer row FOR UPDATE.
+  // `link` queues the "was any visit ever linked" probe the never-seeded
+  // branch makes when no canonical row is open.
   function queues({ terms, perTerm, extra = {} }) {
     const scheduled = [query({ columnInfo: COLUMNS })];
     const invoices = [];
     const recheck = [];
+    const termLocks = [];
+    const customerLocks = [];
     perTerm.forEach((entry) => {
       scheduled.push(query({ rows: entry.rows }));
+      if (entry.link !== undefined) scheduled.push(query({ first: entry.link }));
       if (entry.reachesRefresh) {
         invoices.push(shareable(query({ first: { id: 'inv' } })));
+        termLocks.push(query({ first: { id: 'lock' } }));
         recheck.push(query({ first: entry.recheck === undefined ? entry.term : entry.recheck }));
+        customerLocks.push(query({ first: { id: 'cust' } }));
       }
     });
     return setDbQueues({
       'annual_prepay_terms as t': [query({ rows: terms }), ...recheck],
+      annual_prepay_terms: termLocks,
       scheduled_services: scheduled,
       invoices,
+      customers: customerLocks,
       notifications: [query({ first: undefined }), query({ first: undefined })],
       ...extra,
     });
@@ -8001,5 +8014,274 @@ describe('restampUnstampedActiveTerms — the nightly leg for active terms a fai
     await expect(AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh }))
       .resolves.toEqual({ scanned: 0, restamped: 0, held: 0, skipped: 0, failed: 0 });
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test('lock order inside the refresh: invoice share -> term row FOR UPDATE -> covered recheck -> customer row FOR UPDATE -> refresh; the billing-mode stamp then runs', async () => {
+    const term = termRow('term-1', { term_end: '2099-01-01' });
+    const customerLock = query({ first: { id: 'cust' } });
+    const currentCustomer = query({ first: { billing_mode: 'per_application' } });
+    const stampCustomer = query({});
+    queues({
+      terms: [term],
+      perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '2026-10-15')] }],
+      extra: {
+        customers: [customerLock, currentCustomer, stampCustomer],
+        annual_prepay_terms: [query({ first: { id: 'lock' } }), query({})],
+      },
+    });
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true), hasColumn: jest.fn().mockResolvedValue(true) };
+    const order = [];
+    const inner = db.getMockImplementation();
+    db.mockImplementation((table) => { order.push(table); return inner(table); });
+    const refresh = jest.fn(async () => { order.push('REFRESH'); return term; });
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary.restamped).toBe(1);
+    const at = (name, from = 0) => order.indexOf(name, from);
+    const txStart = at('invoices');
+    expect(txStart).toBeGreaterThan(-1);
+    expect(at('annual_prepay_terms', txStart)).toBeGreaterThan(txStart);
+    expect(at('annual_prepay_terms as t', txStart)).toBeGreaterThan(at('annual_prepay_terms', txStart));
+    expect(at('customers', txStart)).toBeGreaterThan(at('annual_prepay_terms as t', txStart));
+    expect(at('REFRESH')).toBeGreaterThan(at('customers', txStart));
+    expect(customerLock.forUpdate).toHaveBeenCalled();
+    // stampUnlessYearEnded: the customer is stamped annual_prepay after the refresh.
+    expect(stampCustomer.update).toHaveBeenCalledWith(expect.objectContaining({ billing_mode: 'annual_prepay' }));
+  });
+
+  test('an ended year is not billing-mode stamped by the leg (stampUnlessYearEnded)', async () => {
+    const term = termRow('term-1', { term_end: '2000-01-01' });
+    const stampCustomer = query({});
+    queues({
+      terms: [term],
+      perTerm: [{ term, reachesRefresh: true, rows: [visit('v1', 'term-1', '1999-12-15')] }],
+      extra: { customers: [query({ first: { id: 'cust' } }), stampCustomer] },
+    });
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true), hasColumn: jest.fn().mockResolvedValue(true) };
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '1999-12-01', conn: db, refresh: jest.fn(async () => term) });
+
+    expect(summary.restamped).toBe(1);
+    expect(stampCustomer.update).not.toHaveBeenCalled();
+  });
+
+  test('a mixed term (one price-held row, one genuinely open row) still refreshes — the refresh itself keeps the hold', async () => {
+    const term = termRow('term-h');
+    queues({
+      terms: [term],
+      perTerm: [{
+        term,
+        reachesRefresh: true,
+        rows: [visit('v1', 'term-h', '2026-10-15', { estimated_price: 125 }), visit('v2', 'term-h', '2027-01-15', { estimated_price: 100 })],
+      }],
+      extra: { activity_log: [query({ first: SECURE_MINT_RECORD })] },
+    });
+    const refresh = jest.fn(async () => term);
+
+    const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+    expect(summary).toEqual({ scanned: 1, restamped: 1, held: 0, skipped: 0, failed: 0 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test('the prefilter also admits terms no visit was ever linked to, behind a 15-minute settle window', async () => {
+    const q = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [q],
+      scheduled_services: [query({ columnInfo: COLUMNS })],
+    });
+
+    await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh: jest.fn() });
+
+    const sqls = q.whereRaw.mock.calls.map(([sql]) => sql);
+    expect(sqls.some((sql) => /updated_at.*interval '15 minutes'/.test(sql))).toBe(true);
+    expect(sqls.some((sql) => /or not exists \(\s*select 1 from scheduled_services lk/.test(sql))).toBe(true);
+  });
+
+  describe('a term whose activation failed before seeding (no canonical rows at all)', () => {
+    test('with no visit EVER linked to it, the leg refreshes it so the seeder runs', async () => {
+      const term = termRow('term-1');
+      queues({ terms: [term], perTerm: [{ term, reachesRefresh: true, rows: [], link: null }] });
+      const refresh = jest.fn(async () => term);
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary.restamped).toBe(1);
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    test('a visit linked in ANY status means the office may have cancelled slots on purpose — never re-seeded', async () => {
+      const term = termRow('term-1');
+      queues({ terms: [term], perTerm: [{ term, rows: [], link: { id: 'cancelled-linked-visit' } }] });
+      const refresh = jest.fn();
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary).toEqual({ scanned: 1, restamped: 0, held: 0, skipped: 0, failed: 0 });
+      expect(refresh).not.toHaveBeenCalled();
+    });
+
+    test('a termite plan awaiting installation and a renewal successor cannot seed yet — left alone', async () => {
+      const awaiting = termRow('term-a', { annual_plan_version: 1, installation_anchored_at: null });
+      const successor = termRow('term-r', { renewed_from_term_id: 'term-old' });
+      queues({ terms: [awaiting, successor], perTerm: [{ term: awaiting, rows: [] }, { term: successor, rows: [] }] });
+      const refresh = jest.fn();
+
+      const summary = await AnnualPrepayRenewals.restampUnstampedActiveTerms({ today: '2026-10-20', conn: db, refresh });
+
+      expect(summary.restamped).toBe(0);
+      expect(refresh).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('overlapping refreshes of one term never seed duplicate visits (re-evaluated under the insert lock)', () => {
+    const SS_COLS = {
+      scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, is_recurring: {}, recurring_pattern: {},
+      recurring_parent_id: {}, recurring_ongoing: {}, technician_id: {}, window_start: {}, window_end: {},
+      time_window: {}, customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+    };
+    const SEED_TERM = {
+      id: 'term-1', customer_id: 'customer-1', term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4,
+    };
+    const other = (id, scheduled_date) => ({
+      id, customer_id: 'customer-1', scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+      annual_prepay_term_id: 'term-1',
+    });
+    const inserted = (id, scheduled_date) => query({ returning: [{ id, scheduled_date }] });
+
+    test('a concurrent refresh already committed the first two dates: only the two missing visits are inserted', async () => {
+      const lateInserts = [inserted('svc-3', '2026-12-15'), inserted('svc-4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined }), ...lateInserts],
+        // One recheck per date, each seeing what the OTHER refresh has committed by then.
+        'scheduled_services as seed_recheck': [
+          query({ rows: [other('b1', '2026-06-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15')] }),
+          query({ rows: [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('svc-3', '2026-12-15')] }),
+        ],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(2);
+      expect(lateInserts[0].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-12-15' }));
+      expect(lateInserts[1].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+    });
+
+    test('a concurrent refresh already filled every sold slot: nothing is inserted', async () => {
+      const fill = [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('b3', '2026-12-15'), other('b4', '2027-03-15')];
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined })],
+        'scheduled_services as seed_recheck': [query({ rows: fill }), query({ rows: fill }), query({ rows: fill }), query({ rows: fill })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, undefined, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(0);
+    });
+
+    test('inside a caller transaction the same recheck runs under the held comms lock', async () => {
+      const fill = [other('b1', '2026-06-15'), other('b2', '2026-09-15'), other('b3', '2026-12-15'), other('b4', '2027-03-15')];
+      const trx = jest.fn((table) => db(table));
+      trx.isTransaction = true;
+      trx.transaction = jest.fn(async (cb) => cb(trx));
+      trx.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SS_COLS }), query({ rows: [] }), query({ first: undefined })],
+        'scheduled_services as seed_recheck': [query({ rows: fill }), query({ rows: fill }), query({ rows: fill }), query({ rows: fill })],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm({ ...SEED_TERM }, trx, { today: '2026-01-01' });
+
+      expect(result.createdCount).toBe(0);
+    });
+  });
+
+  describe('the late-payment window slide is applied once, not once per retry', () => {
+    const SLIDE_COLS = {
+      scheduled_date: {}, service_type: {}, annual_prepay_term_id: {}, window_start: {}, window_end: {},
+      time_window: {}, technician_id: {}, estimated_duration_minutes: {}, notes: {},
+    };
+    const baseTerm = () => ({
+      id: 'term-s', customer_id: 'customer-s', term_start: '2026-07-30', term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+    });
+
+    test('the first slide records the ORIGINAL end in a marker row BEFORE term_end moves', async () => {
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide, query({})],
+        activity_log: [query({ first: undefined }), marker],
+      });
+
+      await _private.ensureCoverageRowsForTerm(baseTerm(), undefined, { today: '2026-12-30' });
+
+      expect(marker.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'annual_prepay_window_slid',
+        metadata: expect.objectContaining({ term_id: 'term-s', original_term_end: '2027-07-30', effective_term_end: '2027-12-30' }),
+      }));
+      expect(slide.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2027-12-30' }));
+      expect(marker.insert.mock.invocationCallOrder[0]).toBeLessThan(slide.update.mock.invocationCallOrder[0]);
+    });
+
+    test('a retry after the slide persisted (activation failed before any visit linked) does NOT slide again', async () => {
+      const slidTerm = { ...baseTerm(), term_end: '2027-12-30' };
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide],
+        activity_log: [query({ first: { metadata: { term_id: 'term-s', original_term_end: '2027-07-30', effective_term_end: '2027-12-30' } } }), marker],
+      });
+
+      const result = await _private.ensureCoverageRowsForTerm(slidTerm, undefined, { today: '2026-12-30' });
+
+      // Without the marker this retry would extend 2027-12-30 by the lag again.
+      expect(slide.update).not.toHaveBeenCalledWith(expect.objectContaining({ term_end: expect.any(String) }));
+      expect(marker.insert).not.toHaveBeenCalled();
+      expect(slidTerm.term_end).toBe('2027-12-30');
+      expect(result.targetDates).toEqual(['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30']);
+    });
+
+    test('a later retry grows the end only by what its later anchor adds, from the recorded original', async () => {
+      const slidTerm = { ...baseTerm(), term_end: '2027-12-30' };
+      const marker = query({});
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }), query({ rows: [] }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] }), query({ returning: [{ id: 'd' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), slide, query({})],
+        activity_log: [query({ first: { metadata: { term_id: 'term-s', original_term_end: '2027-07-30' } } }), marker],
+      });
+
+      await _private.ensureCoverageRowsForTerm(slidTerm, undefined, { today: '2027-01-15' });
+
+      // original 2027-07-30 + 169 days (2026-07-30 -> 2027-01-15) = 2028-01-15, not 2027-12-30 + 169.
+      expect(slide.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2028-01-15' }));
+      expect(marker.insert).not.toHaveBeenCalled();
+    });
+
+    test('an unreadable marker fails safe: the window is not extended this run', async () => {
+      const failing = query({});
+      failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      const slide = query({});
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: SLIDE_COLS }), query({ rows: [] }), query({ first: undefined }),
+          query({ returning: [{ id: 'a' }] }), query({ returning: [{ id: 'b' }] }), query({ returning: [{ id: 'c' }] })],
+        annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), slide],
+        activity_log: [failing],
+      });
+
+      await _private.ensureCoverageRowsForTerm(baseTerm(), undefined, { today: '2026-12-30' });
+
+      expect(slide.update).not.toHaveBeenCalledWith(expect.objectContaining({ term_end: expect.any(String) }));
+    });
   });
 });

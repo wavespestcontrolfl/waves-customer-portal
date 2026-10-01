@@ -47,7 +47,10 @@ async function runPrepayRestampLeg(prepay) {
   try {
     const service = prepay || require('../annual-prepay-renewals');
     if (service.restampUnstampedActiveTerms) {
-      await service.restampUnstampedActiveTerms();
+      // Same lease as the hourly tick (scheduler.js): the two runners never
+      // overlap, and a held lease just skips this leg until the next tick.
+      const { runExclusive } = require('../../utils/cron-lock');
+      await runExclusive('annual-prepay-restamp-sweep', () => service.restampUnstampedActiveTerms());
     }
   } catch (err) {
     logger.error(`Annual prepay restamp sweep failed: ${err.message}`);
