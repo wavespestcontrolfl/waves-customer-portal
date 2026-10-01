@@ -17302,9 +17302,6 @@ const CallRecordingProcessor = {
                 const promoteArgs = { hold: reuseHold, callLogId: call.id, leadId, keepOpenForQuote: callQuotePromised, followUpPlan: callFollowUpPlan, extraction: v2ApprovedExtraction || extracted };
                 if (existing) {
                   reusedExistingSchedule = true;
-                  // A pending voice booking the relay inserted that this pass found to be a street-level
-                  // address: it becomes the durable hold before anything converts or activates it.
-                  await promoteReusedRowToStreetLevelHold(trx, existing, promoteArgs);
                   // An ATTACHED human booking resurfacing through the linked
                   // (source_call_log_id) lookup keeps its attach semantics on
                   // reprocess (Codex #2771 r5): no AI follow-up child on a
@@ -17373,6 +17370,11 @@ const CallRecordingProcessor = {
                         .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
                     }
                   }
+                  // A pending voice booking the relay inserted that this pass found to be a street-level
+                  // address becomes the durable hold before anything converts or activates it. AFTER the
+                  // tech-day fences above (dispatch assignment takes those fences, then the visit row):
+                  // the promotion's own visit lock then follows the same order.
+                  await promoteReusedRowToStreetLevelHold(trx, primaryRow, promoteArgs);
                   // A reused appointment still closed the deal: reprocessing a
                   // call (or recovering from an earlier savepoint-contained
                   // conversion failure) must not strand the lead as open. The

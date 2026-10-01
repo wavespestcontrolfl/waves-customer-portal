@@ -853,7 +853,9 @@ describe('r21: a reused pending voice booking this pass finds to be a street-lev
 
   test('wired on BOTH reuse paths, before the lead converts and before the reuse activation', () => {
     const s = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-    const a = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, existing, promoteArgs);');
+    const a = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, primaryRow, promoteArgs);');
+    // After the tech-day fences (lock order: fences, then the visit row).
+    expect(a).toBeGreaterThan(s.indexOf('lockTechDays', s.indexOf('const holdBinds')));
     const b = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, existingByKey, promoteArgs);');
     expect(a).toBeGreaterThan(0);
     expect(b).toBeGreaterThan(a);
