@@ -723,8 +723,11 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
       const touchColumns = ['lead_source', 'lead_source_detail', 'lead_date', ...CLICK_ID_COLUMNS, 'utm_campaign', 'utm_term', 'is_paid'];
       const bookingRow = await trx('ad_service_attribution')
         .where({ self_booked_appointment_id: booking.id }).forUpdate().first();
-      const paidRow = (row) => !!row && row.is_paid === true && PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
-      if (bookingRow && !paidRow(bookingRow)) {
+      const hasPaidClick = (row) => !!row && PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
+      const paidRow = (row) => hasPaidClick(row) && row.is_paid === true;
+      // The booking's own row keeps any paid click it has, whatever its is_paid
+      // flag (attributeSelfBooking's new-customer mint leaves it NULL).
+      if (bookingRow && !hasPaidClick(bookingRow) && bookingRow.is_paid !== true) {
         const requestRows = (await trx('ad_service_attribution')
           .whereIn('lead_id', closedIds)
           .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))

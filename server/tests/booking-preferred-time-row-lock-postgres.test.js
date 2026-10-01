@@ -324,6 +324,11 @@ jest.setTimeout(60000);
         expect(String(rows[0].lead_date instanceof Date ? rows[0].lead_date.toISOString() : rows[0].lead_date)).toMatch(/^2026-09-20/);
       });
 
+      test('a booking with a paid click of its own keeps it even with a NULL is_paid (the new-customer mint leaves it unset)', async () => {
+        const { sbaId } = await setupPaid({ bookingTouch: { lead_source: 'google_ads', gclid: 'g-own', is_paid: null } });
+        expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'google_ads', gclid: 'g-own', utm_campaign: null });
+      });
+
       test('a booking with a paid click of its own keeps it', async () => {
         const { sbaId } = await setupPaid({ bookingTouch: { lead_source: 'facebook_ads', fbclid: 'f-own', is_paid: true } });
         expect((await bookingRows(sbaId))[0]).toMatchObject({ lead_source: 'facebook_ads', fbclid: 'f-own', gclid: null });
