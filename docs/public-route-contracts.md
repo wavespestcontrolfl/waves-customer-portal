@@ -1528,6 +1528,21 @@ multi-property account's report can never list another property's visits.
 Gate off (default): the field is absent and the payload is byte-identical
 to today.
 
+Four-section report (owner "ok go" 2026-10-01, `GATE_REPORT_WRITER_RULES`,
+dark): on the same `/api/reports/:token/*` payload, a report whose summary is
+the technician-reviewed four-section report (`summarySource:
+'technician_report'`) also carries `reportSections: [{ key, title,
+paragraphs[] }]` — keys `whatWeFound` / `whatWeDid` / `whatToExpect` /
+`whatsNext` — the server's screened parse of that same text
+(`technician-report-copy.js`; the raw notes column never egresses), which the
+report page and PDF render with its titles wherever they would print exactly
+that text. Live view only, the same payload adds `nextSameServiceAppointment:
+{ serviceType, scheduledDate, windowStart }`, the next booked visit on the
+report's own service line (same statuses as `nextAppointment`, no cross-line
+fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
+from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
+are absent for every other report.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the

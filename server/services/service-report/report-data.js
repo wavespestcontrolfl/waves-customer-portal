@@ -2094,6 +2094,7 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.nextSameServiceAppointment;
   delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
@@ -6166,6 +6167,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // The four-section report's screened sections (GATE_REPORT_WRITER_RULES),
+  // set only when that report is the summary; surfaces render them where
+  // they would print exactly that text.
+  let reportSections = null;
   // Tech-reviewed AI report copy ("Generate AI report" → notes, parsed by
   // its WHAT WE DID / WHAT WE FOUND shape and banned-copy-screened) is the
   // fullest customer-facing account of the visit — it beats the SMS-style
@@ -6269,6 +6274,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';
+      reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
     }
   }
   if (
@@ -6625,6 +6631,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Present only for the four-section report (see reportSections above).
+    ...(reportSections && visitSummarySource === 'technician_report' ? { reportSections } : {}),
     // Customer concern captured at completion — feeds the pest V2 "what you
     // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
     // tree & shrub already consume it inside their own V2 builders.
@@ -6704,6 +6712,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // The next visit on THIS report's own service line, for the four-section
+    // report's "What's next" line (owner 2026-10-01: same service only).
+    // Live view only, like nextAppointment (stripLiveOnlyScheduleFields).
+    ...(reportSections && visitSummarySource === 'technician_report' && sameLineNextAppointment
+      ? { nextSameServiceAppointment: sameLineNextAppointment } : {}),
     // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
     // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
     // same as nextAppointment. The KEY itself (not just its value) is

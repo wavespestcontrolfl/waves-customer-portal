@@ -1488,3 +1488,41 @@ describe('ReportViewPage — expiring signed map links', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(1);
   });
 });
+
+describe('ReportViewPage — four-section report (writer rules)', () => {
+  const sections = [
+    { key: 'whatWeFound', title: 'What we found', paragraphs: ['Ghost ants were trailing along the slider track.'] },
+    { key: 'whatWeDid', title: 'What we did and why', paragraphs: ['We placed bait along the counter, because ants carry it back to the colony.'] },
+    { key: 'whatToExpect', title: 'What to expect', paragraphs: ['You may see a few more ants for a few days.'] },
+    { key: 'whatsNext', title: 'What’s next', paragraphs: ['Let us know if they keep trailing after about 1–2 weeks.'] },
+  ];
+  const body = sections.map((section) => section.paragraphs.join(' ')).join(' ');
+  const payload = {
+    ...pestReportV2,
+    pestTraceOrNothing: false,
+    summary: body,
+    summarySource: 'technician_report',
+    reportSections: sections,
+    nextSameServiceAppointment: { serviceType: 'Quarterly Pest Control', scheduledDate: '2026-12-09', windowStart: '09:00:00' },
+    pestReportV2: {
+      ...pestReportV2.pestReportV2,
+      aiSummary: { headline: null, body },
+      expectations: { whatToExpect: { lines: ['Ants that find the bait carry it back to the colony.'] } },
+    },
+  };
+
+  it('the pest hero shows the sections, opens "What’s next" with the same-service visit, and drops the duplicate expectations card', async () => {
+    renderReport(payload);
+    expect(await screen.findByText('What we did and why')).toBeInTheDocument();
+    expect(screen.getByText('We placed bait along the counter, because ants carry it back to the colony.')).toBeInTheDocument();
+    expect(screen.getByText(/^Next visit: Quarterly Pest Control · /)).toBeInTheDocument();
+    expect(screen.queryByText('Ants that find the bait carry it back to the colony.')).toBeNull();
+  });
+
+  it('a hero summary that is not the report keeps its paragraph and the expectations card', async () => {
+    renderReport({ ...payload, pestReportV2: { ...payload.pestReportV2, aiSummary: { headline: null, body: 'Exterior perimeter treated.' } } });
+    expect(await screen.findByText('Exterior perimeter treated.')).toBeInTheDocument();
+    expect(screen.queryByText('What we did and why')).toBeNull();
+    expect(screen.getByText('Ants that find the bait carry it back to the colony.')).toBeInTheDocument();
+  });
+});

@@ -14,6 +14,7 @@ import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap'
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
+import ReportText from '../components/report/ReportSections';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
@@ -3048,7 +3049,7 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
-function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null }) {
+function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverride = null, reportSections = null, nextVisitLabel = null }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
   // The gated typed-report narrative (summarySource 'typed_narrative')
@@ -3080,7 +3081,7 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result', bodyOverri
       {/* Strip a trailing period — headlines aren't sentences, and snapshots
           persisted before the 2026-07-21 template fix still carry one. */}
       <h2>{String(result.headline).replace(/\.$/, '')}</h2>
-      {body && <p className="ai-summary-body">{body}</p>}
+      {body && <ReportText text={body} sections={reportSections} nextVisitLabel={nextVisitLabel} className="ai-summary-body" />}
       {/* The snapshot builder embeds nextStep in body on most paths — only
           render the bullet when it adds something the paragraph doesn't.
           This containment rule applies to the narrative override too: the
@@ -5968,6 +5969,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       || (data.companionReports || []).some(
         (companion) => companion?.todaysResult?.bodySource === 'technician_report',
       ));
+  // Four-section report (GATE_REPORT_WRITER_RULES): its sections, shown
+  // wherever the report's text prints, and the next visit on this report's
+  // own service line for "What's next" (live view only: the server strips
+  // it from every other render).
+  const reportSections = Array.isArray(data.reportSections) ? data.reportSections : null;
+  const nextSameServiceLabel = formatNextAppointmentLabel(data.nextSameServiceAppointment);
   // Bed bug also folds its cross-visit activity history into the Visit
   // Timeline card (one chronological story) — the standalone "Visit
   // history" card is suppressed only when the merged rows actually render.
@@ -9065,6 +9072,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
               ? cleanVisitSummary(data.summary)
               : null}
+            reportSections={reportSections}
+            nextVisitLabel={nextSameServiceLabel}
           />
         )}
 
@@ -9122,6 +9131,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <PestReportV2Section
               data={data.pestReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9156,6 +9167,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div id="visit-summary">
             <MosquitoReportV2Section
               data={data.mosquitoReportV2}
+              reportSections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
               print={mode === 'pdf' || mode === 'static'}
               token={token}
               mode={mode}
@@ -9199,6 +9212,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  top-level nextAppointment may be ANY service line. */
               nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* Cross-visit trend from the activity gauge payload OF THE
                  REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
                  for a primary dashboard, the bait companion's gauge for a
@@ -9228,6 +9242,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  next ROACH-FAMILY appointment (live view only). */
               nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              reportSections={reportSections}
               /* the gauge trend describes the frozen select; when the status
                  was reconciled away from it the trend is stale (codex P2 #3613 r1) */
               activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
@@ -9275,7 +9290,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !routineFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
-            <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            <ReportText
+              text={visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}
+              sections={reportSections}
+              nextVisitLabel={nextSameServiceLabel}
+            />
             {recordedFindingsList}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
@@ -9486,6 +9505,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 <TodaysResultCard
                   typedReport={companion}
                   sectionId={`companion-${companion.type}-todays-result`}
+                  reportSections={reportSections}
                 />
               )}
               <TypedFindingsCard

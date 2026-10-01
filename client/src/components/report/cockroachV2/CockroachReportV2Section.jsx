@@ -26,6 +26,10 @@ export default function CockroachReportV2Section({
   nextVisitLabel = null,
   // Tech-reviewed narrative, cleaned by the page (cleanVisitSummary).
   narrative = null,
+  // The four-section report's sections (payload reportSections); shown in
+  // place of the narrative when it is that report. The dashboard prints its
+  // own next visit, so none rides inside.
+  reportSections = null,
   // Activity gauge payload (score / trend / isBaseline) — the hero prints
   // the cross-visit trend sentence; the reading itself is the hero status.
   activityTrend = null,
@@ -38,6 +42,7 @@ export default function CockroachReportV2Section({
         statusSummary={data.statusSummary}
         metrics={data.metrics}
         narrative={narrative}
+        reportSections={reportSections}
         activityTrend={activityTrend}
         program={data.program}
       />

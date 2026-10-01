@@ -42,8 +42,15 @@ describe('writer expectations', () => {
   test('services without product classes use their own lines; others get none', () => {
     expect(writerExpectations({ line: 'rodent', findingsType: 'rodent_trapping' }).lines).toEqual([...SERVICE_EXPECTATIONS.rodent_trapping]);
     expect(writerExpectations({ line: 'termite', findingsType: 'termite_bait_station' }).lines).toEqual([...SERVICE_EXPECTATIONS.termite_bait_station]);
-    expect(writerExpectations({ line: 'mosquito' }).lines).toEqual([...SERVICE_EXPECTATIONS.mosquito]);
+    expect(writerExpectations({ line: 'mosquito', applications: [{ name: 'Bifen I/T', method: 'foliar_spray' }] }).lines)
+      .toEqual([...SERVICE_EXPECTATIONS.mosquito]);
     expect(writerExpectations({ line: 'lawn' }).lines).toEqual([]);
+  });
+
+  test('the mosquito leaf line needs a recorded foliar application; the standing-water line always applies', () => {
+    expect(writerExpectations({ line: 'mosquito' }).lines).toEqual([SERVICE_EXPECTATIONS.mosquito[1]]);
+    expect(writerExpectations({ line: 'mosquito', applications: [{ name: 'Larvicide', method: 'spot_treatment' }] }).lines)
+      .toEqual([SERVICE_EXPECTATIONS.mosquito[1]]);
   });
 
   test('no service line promises a visit, a check, a result or a price', () => {

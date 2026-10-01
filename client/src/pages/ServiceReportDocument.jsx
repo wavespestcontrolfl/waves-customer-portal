@@ -8,6 +8,7 @@ import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
+import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -1014,8 +1015,16 @@ export default function ServiceReportDocument({ data, token }) {
         {summaryParagraphs.length > 0 && (
           <div className="doc-keep">
             <SectionHeader>Summary of today&apos;s service</SectionHeader>
+            {/* The four-section report prints with its titles; any other
+                paragraph prints as before. */}
             {summaryParagraphs.map((paragraph) => (
-              <p key={paragraph} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{paragraph}</p>
+              <ReportText
+                key={paragraph}
+                text={paragraph}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             ))}
           </div>
         )}
@@ -1618,18 +1627,35 @@ export default function ServiceReportDocument({ data, token }) {
                 result prints in the Station protection row above, so the
                 frozen headline/body stay out (sole-summary rule). */}
             {!(termiteV2Companion && companion.type === 'termite_bait_station') && companion.todaysResult?.headline && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {String(companion.todaysResult.headline).replace(/\.$/, '')}.
-                {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
-              </p>
+              reportSectionsForText(data.reportSections, companion.todaysResult.body) ? (
+                <>
+                  <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                    {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  </p>
+                  <ReportText
+                    text={companion.todaysResult.body}
+                    sections={data.reportSections}
+                    style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                    titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+                  />
+                </>
+              ) : (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                  {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+                </p>
+              )
             )}
             {/* …but the companion's ACCEPTED narrative (the dashboard's
                 aiSummary) still prints here — the suppressed body was its
                 only PDF surface (codex P2 #3600 r28). */}
             {termiteV2Companion && companion.type === 'termite_bait_station' && cleanVisitSummary(termiteV2?.aiSummary?.body || '') && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {cleanVisitSummary(termiteV2.aiSummary.body)}
-              </p>
+              <ReportText
+                text={cleanVisitSummary(termiteV2.aiSummary.body)}
+                sections={data.reportSections}
+                style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}
+                titleStyle={{ fontSize: 12, margin: '8px 0 2px', color: NAVY }}
+              />
             )}
             {/* Same containment rule TodaysResultCard uses: the snapshot
                 builder usually folds nextStep into the body, so only print it

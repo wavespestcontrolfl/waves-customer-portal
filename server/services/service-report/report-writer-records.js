@@ -37,6 +37,14 @@ const SERVICE_EXPECTATIONS = Object.freeze({
   ]),
 });
 
+// A line that describes today's work holds only with that work on the
+// record: the leaf line needs a recorded foliar application (a larvicide-
+// or station-only visit treated no leaves). Lines with no entry here are
+// the customer's own task or how a service works, and always apply.
+const LINE_REQUIRES = new Map([
+  [SERVICE_EXPECTATIONS.mosquito[0], (applications) => applications.some((application) => application?.method === 'foliar_spray')],
+]);
+
 // Days to the far end of each pest class's stated window (EXPECTATION_TEXT
 // in pest-report-expectations.js: "about 1–2 weeks", "a week or two",
 // "about 10–14 days"). The longest one dates the reach-out line on one-time
@@ -74,7 +82,9 @@ function writerExpectations({ line = null, findingsType = null, applications = [
   const products = line === 'pest' ? expectationProducts(applications) : [];
   const pestLines = products.length ? (buildWhatToExpect({ products })?.lines || []) : [];
   const classes = products.length ? whatToExpectClasses({ products }) : [];
+  const recorded = Array.isArray(applications) ? applications : [];
   const serviceLines = (SERVICE_EXPECTATIONS[findingsType] || SERVICE_EXPECTATIONS[line] || [])
+    .filter((text) => !LINE_REQUIRES.has(text) || LINE_REQUIRES.get(text)(recorded))
     .filter((text) => validateCustomerCopy(text));
   const windowDays = Math.max(0, ...classes.map((cls) => EXPECTATION_WINDOW_DAYS[cls] || 0));
   return {

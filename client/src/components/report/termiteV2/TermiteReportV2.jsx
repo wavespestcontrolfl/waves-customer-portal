@@ -17,6 +17,7 @@
 import { useState } from 'react';
 import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import ReportText from '../ReportSections';
 
 // ── Surface tokens (shared with the pest / mosquito V2 surface) ─────────────────
 const TEXT = 'var(--text)';
@@ -81,7 +82,7 @@ export function activityTrendLine(activity) {
   return null;
 }
 
-export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, visitSequence = 1 }) {
+export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, visitSequence = 1, reportSections = null }) {
   if (!status) return null;
   const t = tone(status.tone);
   const trendLine = activityTrendLine(activityTrend);
@@ -96,7 +97,13 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
         <p style={{ margin: '10px 0 0', fontSize: 15, lineHeight: 1.55, color: TEXT }}>{statusSummary}</p>
       ) : null}
       {narrative ? (
-        <p className="ai-summary-body" style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}>{narrative}</p>
+        <ReportText
+          text={narrative}
+          sections={reportSections}
+          className="ai-summary-body"
+          style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}
+          titleStyle={{ color: TEXT }}
+        />
       ) : null}
       {trendLine ? (
         <p style={{ margin: '10px 0 0', fontSize: 14, color: MUTED }}>{trendLine}</p>
