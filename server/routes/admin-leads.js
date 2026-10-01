@@ -1301,7 +1301,9 @@ router.post('/:id/convert', async (req, res, next) => {
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
-      ...(seen === 'handled' ? {} : { onlyIfStatusIn: LEAD_STATUSES.filter((s) => s !== 'handled') }),
+      // Only 'handled' is excluded (any other status converts exactly as before): the
+      // claim's where() takes a callback, re-asserting it in the win's own UPDATE.
+      ...(seen === 'handled' ? {} : { onlyIfIdentity: (q) => q.whereNot('status', 'handled') }),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();

@@ -107,7 +107,7 @@ describe("lead status 'handled'", () => {
     expect(route).toMatch(/notIfStatusIn: seen === 'handled' \? \[\] : \['handled'\]/);
     // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status, req\.body\.seen_updated_at, lead\.updated_at\);/);
-    expect(route).toMatch(/\.\.\.\(seen === 'handled' \? \{\} : \{ onlyIfStatusIn: LEAD_STATUSES\.filter\(\(s\) => s !== 'handled'\) \}\)/);
+    expect(route).toMatch(/\.\.\.\(seen === 'handled' \? \{\} : \{ onlyIfIdentity: \(q\) => q\.whereNot\('status', 'handled'\) \}\)/);
     const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
     expect(la).toMatch(/\.whereNotIn\('status', notIfStatusIn\)\.update\(\{\s*status: 'lost',/);
     const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
