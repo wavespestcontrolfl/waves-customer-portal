@@ -152,6 +152,34 @@ describe('the shown range stays inside the label band', () => {
   });
 });
 
+describe('the dose shown passes the label check', () => {
+  const AMOUNT = /^(?:≈ )?(\d*)([⅛¼⅜½⅝¾⅞]?)(\.\d+)?$/;
+  const FRACTION = { '': 0, '⅛': 0.125, '¼': 0.25, '⅜': 0.375, '½': 0.5, '⅝': 0.625, '¾': 0.75, '⅞': 0.875 };
+  const topOf = (text) => {
+    const [, ends, unit] = /^(.+) (tsp|fl oz)$/.exec(text);
+    const m = AMOUNT.exec(ends.split(' – ').pop().trim());
+    return { amount: Number(m[1] || 0) + FRACTION[m[2]] + Number(m[3] || 0), unit: unit === 'tsp' ? 'tsp' : 'fl_oz' };
+  };
+
+  it('never warns on the top of the dose it suggests', () => {
+    const products = [IMA_JET_10, IMA_JET, PHOSPHO_JET, PALM_JET,
+      { name: 'Arborjet Propizol', default_rate: '10-20', default_unit: 'ml/inch dbh' },
+      { name: 'ArborJet Mn-Jet Fe Micros', default_rate: '5-15', default_unit: 'ml/inch dbh' }];
+    for (const product of products) {
+      const rate = injectionLabelRate(product);
+      for (const band of rate.bands) {
+        for (let tenths = 5; tenths <= 480; tenths += 1) {
+          const inches = tenths / 10;
+          const text = injectionDoseText(rate, inches, band.key);
+          if (!text) continue;
+          const { amount, unit } = topOf(text);
+          expect(doseOverLabel(rate, inches, amount, unit, band.key), `${product.name} ${band.key} ${inches} in: ${text}`).toBe(false);
+        }
+      }
+    }
+  });
+});
+
 describe('doseOverLabel', () => {
   // 10-inch trunk at 1-6 mL per inch: the label allows up to 60 mL (2.03 fl oz).
   const rate = injectionLabelRate(IMA_JET_10);

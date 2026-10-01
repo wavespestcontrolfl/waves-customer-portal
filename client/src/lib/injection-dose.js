@@ -69,11 +69,14 @@ export function injectionBand(rate, trunkInches, pickKey) {
 // A single-rate dose in the truck's measures, never more than 5% under it
 // (the job card's spoon tolerance): a spoon or a quarter fl oz at or just
 // under the dose when one is that close, else the exact fl oz, cut (never
-// rounded up) to hundredths.
+// rounded up) to hundredths, or thousandths under 1 fl oz.
 const FIXED_DOSE_TOLERANCE = 0.05;
 function fixedDoseText(ml) {
   const flOz = ml / ML_PER_FL_OZ;
-  if (flOz < 1) return formatMeasuredAmount(ml, "ml");
+  if (flOz < 1) {
+    const spoon = formatMeasuredAmount(ml, "ml");
+    return / tsp$/.test(spoon) ? spoon : `${Math.floor(flOz * 1000 + 1e-9) / 1000} fl oz`;
+  }
   const quarter = Math.floor(flOz * 4 + 1e-9) / 4;
   if ((flOz - quarter) / flOz <= FIXED_DOSE_TOLERANCE) return formatMeasuredAmount(ml, "ml", { truckMeasures: true });
   return `${Math.floor(flOz * 100 + 1e-9) / 100} fl oz`;
