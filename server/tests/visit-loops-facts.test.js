@@ -299,6 +299,13 @@ describe('pastWindow', () => {
     expect(out.pastWindow).toBeNull();
   });
 
+  test('a lagging pending/confirmed row whose tracker is cancelled or skipped is never "passed"', async () => {
+    for (const track_state of ['cancelled', 'skipped', 'complete', 'on_property']) {
+      expect((await run({ status: 'confirmed', track_state })).pastWindow).toBeNull();
+    }
+    expect((await run({ status: 'confirmed', track_state: 'scheduled' })).pastWindow).toMatchObject({ visitId: 'visit-1' });
+  });
+
   test('a started visit, or one whose tracker is live, is never "passed"', async () => {
     expect((await run({ status: 'on_site' })).pastWindow).toBeNull();
     expect((await run({ status: 'pending', track_state: 'en_route' })).pastWindow).toBeNull();
@@ -356,8 +363,11 @@ describe('missedVisit', () => {
     const dq = dst.calls.find((c) => c.table === 'scheduled_services' && isUnfinishedQuery(c.ops));
     expect(hasOp(dq.ops, 'where', (a) => a[0] === 'scheduled_date' && a[1] === '>=' && a[2] === '2026-03-02')).toBe(true);
     expect(hasOp(q.ops, 'whereIn', (a) => a[0] === 'status' && a[1].join() === 'pending,confirmed')).toBe(true);
-    // performed-but-not-closed rows are excluded: a tracker 'complete' or a written service record
-    expect(hasOp(q.ops, 'where', (a) => typeof a[0] === 'function')).toBe(true);
+    // only an unset / 'scheduled' tracker is not started (live, complete, cancelled, skipped are excluded)
+    const seen = [];
+    const stub = { whereNull: (...a) => { seen.push(['whereNull', ...a]); return stub; }, orWhereIn: (...a) => { seen.push(['orWhereIn', ...a]); return stub; } };
+    q.ops.filter((o) => o.op === 'where' && typeof o.args[0] === 'function').forEach((o) => o.args[0](stub));
+    expect(seen).toEqual([['whereNull', 'track_state'], ['orWhereIn', 'track_state', ['scheduled']]]);
     expect(hasOp(q.ops, 'whereNotExists')).toBe(true);
   });
 

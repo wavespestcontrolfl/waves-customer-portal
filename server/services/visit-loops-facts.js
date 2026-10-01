@@ -45,6 +45,11 @@ const LATE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 // or a "never completed" reading is true of.
 const NOT_STARTED_STATUSES = ['pending', 'confirmed'];
 const LIVE_TRACK_STATES = ['en_route', 'on_property', 'on_site'];
+// The tracker can lead a lagging status column (customer-lifecycle-guard): a row
+// only reads as not-started — missed, or past its window — while its tracker is
+// unset or still 'scheduled' (never live, complete, cancelled or skipped).
+const NOT_STARTED_TRACK_STATES = ['scheduled'];
+const trackNotStarted = (state) => state == null || NOT_STARTED_TRACK_STATES.includes(state);
 const ON_SITE_STATUSES = ['on_site', 'on_property'];
 
 function emptyVisitLoops() {
@@ -261,11 +266,9 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
 
 async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
   const nowMin = nowEtMinutes(now);
-  const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status)
-    && !LIVE_TRACK_STATES.includes(row.track_state)
-    // the same completion evidence loadMissedVisit honors: a tracker that reached
-    // 'complete' ahead of a lagging status, or a written service record
-    && row.track_state !== 'complete');
+  // the same not-started rule loadMissedVisit honors (tracker unset or
+  // 'scheduled'), plus the service-record check below
+  const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
   if (!candidates.length) return null;
   const recorded = await conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id');
   const done = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
@@ -297,11 +300,11 @@ async function loadUnfinishedVisit({ conn, customerId, now, deriveWindow }, { to
     .where({ customer_id: customerId })
     .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
     .whereIn('status', NOT_STARTED_STATUSES)
-    // Performed but never closed out is not a miss: the tracker can reach
-    // 'complete' ahead of a lagging status, and a written service record
-    // means the work was done (an invoice alone proves nothing — they can be
-    // minted before the visit).
-    .where((b) => b.whereNull('track_state').orWhereNot('track_state', 'complete'))
+    // The tracker leads a lagging status: only an unset / 'scheduled' tracker is
+    // not started (live, complete, cancelled, skipped are not misses), and a
+    // written service record means the work was done (an invoice alone proves
+    // nothing — they can be minted before the visit).
+    .where((b) => b.whereNull('track_state').orWhereIn('track_state', NOT_STARTED_TRACK_STATES))
     .whereNotExists(function serviceRecorded() {
       this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
     })
