@@ -926,18 +926,31 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     mockDb.reset({ annual_prepay_terms: [term()] });
     expect(await apply.noticedRenewalAmountConflict(mockDb, { customerId: CUSTOMER(2), amount: 468, coverageServiceType: 'Quarterly Pest Control', termStart: '2027-05-15', today: '2027-05-14' })).toBeNull();
   });
-  test('both admin prepay routes consult it with the requested coverage and term start, behind the gate, and 409 without the acknowledgement', () => {
+  test('inside a write transaction the candidate terms are read FOR UPDATE, so the nightly apply\'s write serializes against the renewal', async () => {
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    expect(await renew(468, { lock: true })).toEqual({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(true);
+    mockDb.reset({ annual_prepay_terms: [term()] });
+    await renew(468);
+    expect(mockDb.log.some((e) => e[0] === 'forUpdate' && e[1] === 'annual_prepay_terms')).toBe(false);
+  });
+  test('both admin prepay routes consult it with the requested coverage and term start, behind the gate, before AND inside the write transaction (under the lock), and 409 without the acknowledgement', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
     expect(src.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart \}\)/g)).toHaveLength(2);
+    expect(src.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart, trx \}\)/g)).toHaveLength(2);
     expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
-    expect(src.match(/code: 'RENEWAL_AMOUNT_NOTICED'/g)).toHaveLength(2);
-    expect(src.match(/acknowledgeNoticedAmount !== true/g)).toHaveLength(2);
-    // the guard sits AFTER termStart is known in both routes
-    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, amount/g)) {
-      const before = src.slice(Math.max(0, m.index - 1500), m.index);
-      expect(before).toMatch(/const termStart = termStartInput\.date/);
+    expect(src).toMatch(/noticedRenewalAmountConflict\(trx \|\| db, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: !!trx \}\)/);
+    expect(src.match(/acknowledgeNoticedAmount !== true/g)).toHaveLength(4);
+    expect(src.match(/throw noticedRenewalAmountError\(noticedInTrx\)/g)).toHaveLength(2);
+    expect(src.match(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/g)).toHaveLength(2);
+    // the pre-check sits AFTER termStart is known; the re-check sits right after the customer's annual-prepay lock
+    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart \}\)/g)) {
+      expect(src.slice(Math.max(0, m.index - 1500), m.index)).toMatch(/const termStart = termStartInput\.date/);
+    }
+    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart, trx \}\)/g)) {
+      expect(src.slice(Math.max(0, m.index - 600), m.index)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
     }
   });
 });

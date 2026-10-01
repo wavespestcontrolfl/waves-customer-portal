@@ -1011,17 +1011,21 @@ async function retireDraftNotices(batchKey, { dbh = db } = {}) {
 // than one candidate the one ending nearest the new start is the
 // predecessor. Returns null when nothing applies or the amount matches,
 // else { termId, termEnd, noticedAmount }.
-async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today }) {
+// `lock` (inside the caller's write transaction): the candidate rows are
+// read FOR UPDATE, so a concurrent nightly apply writing
+// next_term_prepay_amount serializes against the renewal that reads it.
+async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageServiceType = null, termStart = null, today, lock = false }) {
   if (!customerId || !(Number(amount) > 0)) return null;
   const start = ymd(termStart) || today;
   const family = familyOfCoverage(coverageServiceType);
-  const terms = await dbh('annual_prepay_terms')
+  const query = dbh('annual_prepay_terms')
     .where({ customer_id: customerId })
     .whereNotNull('next_term_prepay_amount')
     .where('term_end', '>=', addDaysYmd(start, -60))
     .where('term_end', '<=', addDaysYmd(start, 60))
-    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'renewed', 'switch_plan'])
-    .select('id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
+    .whereNotIn('status', ['cancelled', 'canceled', 'refunded', 'renewed', 'switch_plan']);
+  if (lock) query.forUpdate();
+  const terms = await query.select('id', 'term_end', 'next_term_prepay_amount', 'coverage_service_type', 'renewal_decision');
   const candidates = terms
     .filter((t) => !['cancel', 'renew', 'switch_plan'].includes(String(t.renewal_decision || '')))
     .filter((t) => (family ? familyOfCoverage(t.coverage_service_type) === family : !familyOfCoverage(t.coverage_service_type)))

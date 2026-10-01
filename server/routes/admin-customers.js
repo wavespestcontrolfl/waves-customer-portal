@@ -1553,9 +1553,25 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
 // The annual rate review's renewal consumer (services/rate-review-apply.js
 // noticedRenewalAmountConflict): null when the gate is off, no noticed
 // successor amount applies, or the amount matches. Read at call time.
-async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart }) {
+// `trx`: the write transaction — the re-check under the customer's
+// annual-prepay lock locks the candidate term rows too, so the nightly
+// apply's write of next_term_prepay_amount serializes against it.
+async function noticedRenewalAmountConflictFor(customerId, amount, { coverageServiceType, termStart, trx = null }) {
   if (!require('../config/feature-gates').rateReviewLive()) return null;
-  return require('../services/rate-review-apply').noticedRenewalAmountConflict(db, { customerId, amount, coverageServiceType, termStart, today: etDateString() });
+  return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx || db, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: !!trx });
+}
+
+// The 409 the in-transaction re-check throws (same shape as the pre-check's
+// response; the handlers' catch returns err.noticedRenewalAmount as 409).
+function noticedRenewalAmountError(conflict) {
+  return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
+    noticedRenewalAmount: {
+      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+      code: 'RENEWAL_AMOUNT_NOTICED',
+      noticedAmount: conflict.noticedAmount,
+      termId: conflict.termId,
+    },
+  });
 }
 
 function parseAnnualPrepayAmount(value) {
@@ -5462,6 +5478,11 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an annual prepay term through',
       );
+      // Re-checked UNDER the lock, on the transaction (the pre-check above ran
+      // on the global handle): the nightly rate review apply can commit a
+      // noticed successor amount in between.
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart, trx });
+      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       // The credit consumes ONLY the estimate the operator was shown in the
       // preview banner (echoed back as depositCreditEstimateId) — never a
       // server-side pick, so an unrelated job's rolled-forward deposit can't
@@ -5774,6 +5795,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
     if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     if (err && err.depositCreditUnavailable) return res.status(409).json({ error: err.message });
     if (err && err.switchConflict) return res.status(409).json({ error: err.message });
@@ -5932,6 +5954,11 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
+      // Re-checked UNDER the lock, on the transaction (the pre-check above ran
+      // on the global handle): the nightly rate review apply can commit a
+      // noticed successor amount in between.
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart, trx });
+      if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       // Fee-free TOCTOU guard under the trx (same posture as the draft
       // mint, codex #3591 r48/r50): a claim restored or a waiving family
       // lost in the gap must abort, not mint coverage-only.
@@ -6141,6 +6168,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
     next(err);
   }
 });
