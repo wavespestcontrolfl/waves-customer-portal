@@ -156,7 +156,10 @@ describe('accept route wiring (source pins)', () => {
 
   test('r3 pre-push P0: the mint route stamps after-visit provenance (fail closed) before offering the capture, and the webhook refuses an unbound stamped intent', () => {
     const slots = read('routes/estimate-slots-public.js');
-    expect(slots).toMatch(/if \(policy\.afterVisitCard === true\) \{\s*const stamped = await markAfterVisitCaptureIntent\(intent\.setupIntentId\);\s*if \(!stamped\.ok\) \{\s*return res\.status\(503\)/);
+    // ...and a fresh capture on the setup-fee rail (GATE_PAF_SETUP_FEE, PR-C),
+    // which may render the after-visit text for a customer with no marker.
+    expect(slots).toMatch(/const setupFeeCapture = req\.body\?\.paymentMethodPreference !== 'prepay_annual'\s*&& require\('\.\.\/config\/feature-gates'\)\.pafSetupFeeLive\(\)\s*&& payAfterFirstVisitSetupFeeRail\(policy\);/);
+    expect(slots).toMatch(/if \(policy\.afterVisitCard === true \|\| setupFeeCapture\) \{\s*const stamped = await markAfterVisitCaptureIntent\(intent\.setupIntentId\);\s*if \(!stamped\.ok\) \{\s*return res\.status\(503\)/);
     expect(slots.indexOf('markAfterVisitCaptureIntent(intent.setupIntentId)')).toBeLessThan(slots.indexOf('CHECKOUT_KIND.RECURRING_CARD'));
     // "Use a different payment method": the replacement intent is stamped too —
     // the stamp runs after BOTH mint branches, on whichever intent is returned.
