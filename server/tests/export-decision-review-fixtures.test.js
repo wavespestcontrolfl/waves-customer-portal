@@ -27,6 +27,7 @@ describe('rowToCase', () => {
       subject_type: 'call_log',
       subject_id: '11111111-1111-4111-8111-111111111111',
       package_id: 'call_judge.v1',
+      package_hash: 'h',
       question_id: 'is_lead',
       label: { is_lead: true },
       label_status: 'confirmed_error',
@@ -62,12 +63,14 @@ describe('exportCases (stubbed db)', () => {
     const query = {
       where: jest.fn((w) => { calls.where = w; return query; }),
       whereIn: jest.fn((c, v) => { calls.whereIn = [c, v]; return query; }),
+      whereNot: jest.fn((c, op, v) => { calls.whereNot = [c, op, v]; return query; }),
       select: jest.fn((cols) => { calls.select = cols; return query; }),
       orderBy: jest.fn(async () => [ROW]),
     };
     const db = jest.fn((table) => { calls.table = table; return query; });
     const result = await exportCases({ db, capability: 'call_judge', now: () => new Date('2026-10-01T00:00:00Z') });
-    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], select: COLUMNS });
+    expect(calls).toMatchObject({ table: 'decision_reviews', where: { capability: 'call_judge' }, whereIn: ['label_status', ['confirmed_error', 'confirmed_correct']], whereNot: ['package_hash', 'like', 'unknown-%'], select: COLUMNS });
+    expect(rowToCase(ROW).package_hash).toBe('h');
     expect(result).toEqual({ capability: 'call_judge', exported_at: '2026-10-01T00:00:00.000Z', cases: [rowToCase(ROW)] });
   });
 });

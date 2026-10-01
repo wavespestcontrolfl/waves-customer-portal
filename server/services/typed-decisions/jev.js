@@ -11,7 +11,7 @@
  */
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { dispatch } = require('../llm/call');
+const { dispatch, rejectCall } = require('../llm/call');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 const { packageFor, packageHash } = require('./packages');
 
@@ -78,7 +78,13 @@ async function askPackage(packageId, state, { laneId } = {}) {
     const answers = {};
     for (const [id, question] of Object.entries(pkg.questions)) {
       const normalised = normaliseAnswer(question, result.json && result.json[id], pkg.thresholds);
-      if (!normalised) return { ok: false, reason: 'incomplete_answers', ...base, usage: result.usage };
+      if (!normalised) {
+        // The adapter filed this call as ok (a 200 with answers); an answer
+        // that is missing, mistyped or out of range makes it unusable, so the
+        // ledger row flips to invalid_output like any rejected dispatch leg.
+        rejectCall(result, 'invalid_output');
+        return { ok: false, reason: 'incomplete_answers', ...base, usage: result.usage };
+      }
       answers[id] = normalised;
     }
     return { ok: true, answers, servedModel: result.servedModel || null, ...base, usage: result.usage || null };

@@ -16,7 +16,10 @@ const path = require('path');
 
 const DEFAULT_STATUSES = ['confirmed_error', 'confirmed_correct'];
 const ALL_STATUSES = ['unreviewed', 'suspected_error', 'confirmed_error', 'disagreement', 'confirmed_correct'];
-const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'question_id', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
+const COLUMNS = ['subject_type', 'subject_id', 'package_id', 'package_hash', 'question_id', 'label', 'label_status', 'baseline_answers', 'outcome_evidence'];
+// Rows the package-hash correction migration (20261001100000) stamped because
+// they were written without provenance; they are never evidence.
+const UNKNOWN_HASH_PREFIX = 'unknown-';
 
 // One decision_reviews row -> one fixture case. Picks only the allowed fields,
 // so a column added to the table later can never leak into a fixture.
@@ -25,6 +28,7 @@ function rowToCase(row) {
     subject_type: row.subject_type,
     subject_id: row.subject_id,
     package_id: row.package_id,
+    package_hash: row.package_hash,
     question_id: row.question_id,
     label: row.label ?? null,
     label_status: row.label_status,
@@ -53,6 +57,7 @@ async function exportCases({ db, capability, statuses = DEFAULT_STATUSES, now = 
   const rows = await db('decision_reviews')
     .where({ capability })
     .whereIn('label_status', statuses)
+    .whereNot('package_hash', 'like', `${UNKNOWN_HASH_PREFIX}%`)
     .select(COLUMNS)
     .orderBy([{ column: 'package_id' }, { column: 'subject_type' }, { column: 'subject_id' }, { column: 'question_id' }]);
   return { capability, exported_at: now().toISOString(), cases: rows.map(rowToCase) };

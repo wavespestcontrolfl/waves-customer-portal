@@ -1,6 +1,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockDispatch = jest.fn();
-jest.mock('../services/llm/call', () => ({ dispatch: (...a) => mockDispatch(...a) }));
+const mockRejectCall = jest.fn();
+jest.mock('../services/llm/call', () => ({ dispatch: (...a) => mockDispatch(...a), rejectCall: (...a) => mockRejectCall(...a) }));
 
 const { askPackage, normaliseAnswer } = require('../services/typed-decisions/jev');
 const { PACKAGES, packageHash } = require('../services/typed-decisions/packages');
@@ -98,8 +99,11 @@ describe('askPackage', () => {
     const pkg = PACKAGES['call_judge.v1'];
     const missing = answersFor(pkg, 0.9);
     delete missing.complaint;
-    mockDispatch.mockResolvedValueOnce({ ok: true, json: missing });
+    const filed = { ok: true, json: missing };
+    mockDispatch.mockResolvedValueOnce(filed);
     expect(await askPackage('call_judge.v1', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
+    // The adapter filed the call as ok; the ledger row flips to invalid_output (Codex #5476 r1).
+    expect(mockRejectCall).toHaveBeenCalledWith(filed, 'invalid_output');
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { ...answersFor(pkg, 0.9), is_lead: { type: 'choice', choice: 'x' } } });
     expect(await askPackage('call_judge.v1', CALL_STATE)).toMatchObject({ ok: false, reason: 'incomplete_answers' });
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { ...answersFor(pkg, 0.9), is_lead: { type: 'noul', noul: 1.4 } } });

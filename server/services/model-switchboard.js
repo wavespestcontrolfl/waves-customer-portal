@@ -64,7 +64,11 @@ const SELECTORS = [
   // the same thinking floor deep.js does and reads past thinking blocks and
   // refusals, so the Opus 5.5 default and the models like it are pickable.
   { key: 'NEWSLETTER', env: 'MODEL_NEWSLETTER', description: 'Newsletter writer + event curation scoring (owner ruling 2026-09-27: Opus 5.5, effort max)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
-  { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' } },
+  // lock: the picker's discovery/probing (model-discovery.js) speaks only
+  // Anthropic / OpenAI / Gemini text+vision, and Jev is a decision-only model
+  // with one pinned catalog version, so the row is read-only here: moving it
+  // is the env change below after a replay on the new pinned version.
+  { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; pin a new jev-N.N.N via MODEL_TYPESAFE_JEV after a replay, no picker discovery' } },
   // deep: true — same rationale as NEWSLETTER above: its only call site
   // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
   // through llm/call.js#dispatch, which already floors max_tokens for
