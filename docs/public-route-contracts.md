@@ -304,12 +304,12 @@ equivalent fetch exactly (no deadline there either). Both PDF
 cache-decision sites (the direct `/:token` route and the queued renderer
 in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
 object `buildReportV1Data` returns and skip storing under the stable
-`-pex1` key when it is set, so a later render — once the window closes or
+`-pex2` key when it is set, so a later render — once the window closes or
 the provider recovers — is what gets cached, not a permanent "no rain
 block" copy. This flag rides the JSON payload the same way
 `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
-`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+`spiders: { headline, whatWeDid, expectation }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
 that eaves were treated — the tech may have tagged it while applying it
@@ -321,7 +321,7 @@ completedActions "serviced-eaves" choice, "Completed the recorded eave and
 soffit service." (`client/src/lib/service-completion-choices.js`), names the
 eaves/soffit and so opens the section, but records no web-removal work of
 any kind — it could just as easily be a residual application or a plain
-inspection. Every wording below opens with "We knocked down webs...", so
+inspection. Every wording below opens with "We swept webs and egg sacs...", so
 that specific claim additionally requires an action that actually says a web
 was removed: either it names web(s)/webbing/a cobweb directly (the
 completedActions "removed-webs" choice, "Removed accessible webs from the
@@ -329,14 +329,15 @@ recorded exterior areas.") or it explicitly SWEPT (the protocol library's
 "Swept eaves, window frames, door frames, and lanai" — sweeping IS the
 web-removal act). A location-only eave/soffit action with neither gets NO
 card at all, gate on or off, residual evidence or not — an unproven "we
-knocked down webs" claim is never invented just because a treatment
-happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
-ALWAYS one of two fixed combinations: (1) the action was recorded but no
+swept webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` are
+ALWAYS one of two fixed combinations (no `nextStep`: owner 2026-10-01, webs
+are not a return-visit item): (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
 tying it to the eaves — de-web-only wording, no treatment claim ("We
-knocked down webs around the eaves and entry points.") and an expectation
-that never says "the residual we applied"; (2) the action was recorded AND
+swept webs and egg sacs from your eaves and entry points.") and an
+expectation that never credits a residual; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
 (owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
@@ -347,8 +348,8 @@ nothing else stands in for it — matched by exact key, never a substring),
 or the visit separately recorded a genuine `treatmentApplied: true` eave
 action, never just the sweep-only action that gates the section in the
 first place) → combined wording ("We
-knocked down webs and treated the eaves and entry points where spiders
-build.") with a residual-backed expectation — even here, the eaves-treated
+swept webs and egg sacs, then applied a residual insecticide to the eaves
+and entry points where spiders build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
 alone and never on free text. Neither combination ever interpolates a raw
 completed protocol-action label. Raw protocol-action labels
@@ -375,7 +376,8 @@ Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 (owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
 cracks/voids, never a surface barrier, so it never shares the pyrethroid
 barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
-Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Bait → roach gel bait; Advion Ant Bait Gel → ant bait; Advion WDG Granular
+→ non-repellent (a sprayed granule, not a bait);
 Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
 explicitly mapped to no class. A product NOT in this map gets no line —
 fail closed, never guessed; extending the map to a new product requires an
@@ -390,9 +392,16 @@ recorded) method is treated as unknown, never assumed exterior; an
 unrecognized or free-text area string never qualifies either, fail closed;
 when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
-rather than silently asserting the claim. Never a "guarantee"
-or "eliminate" claim (screened through the existing `validateCustomerCopy`
-banned-copy guard). The what-to-expect facts (never the rain block, never
+rather than silently asserting the claim. The non-repellent "6-foot
+perimeter band" sentence likewise needs one non-repellent application that
+is both ant-tagged and recorded exterior by the same evidence; otherwise the
+general non-repellent wording. Each line names the active ingredient from a
+closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
+lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
+pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the
+barrier sentence names only the products recorded exterior. Never a
+"guaranteed" or "eliminated" claim (screened through the existing
+`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
 the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,

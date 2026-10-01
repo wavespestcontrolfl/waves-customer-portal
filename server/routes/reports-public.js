@@ -2362,7 +2362,7 @@ router.get('/:token', async (req, res, next) => {
         } else if (renderedData?.pestWeekWeatherUncacheable) {
           // Same rule as the lawn branch above, mirrored for the pest-line
           // rain block (codex P0 2026-09-28): a still-OPEN 7-day window
-          // must never be baked into the stable '-pex1' PDF key, or later
+          // must never be baked into the stable '-pex2' PDF key, or later
           // downloads keep serving the "no rain block" bytes forever even
           // after the window settles.
           logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);

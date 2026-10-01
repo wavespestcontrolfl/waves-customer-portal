@@ -12,6 +12,9 @@ const {
   formatRainfastMinutes,
 } = require('../services/service-report/pest-report-expectations');
 
+// An application recorded outside (explicit perimeter method).
+const EXTERIOR_APPLICATION = { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false, rainfastMinutes: null };
+
 describe('pestReportExpectationsGateOn', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
@@ -39,14 +42,14 @@ describe('buildRainExpectation', () => {
 
   it('states the weekly rain fact when rainInches is known (normal confidence)', () => {
     const out = buildRainExpectation({ weekWeather: { rainInches: 0.4, rainConfidence: null }, serviceMonth: 2 });
-    expect(out.lines[0]).toMatch(/rained about 0\.4" at your property/);
+    expect(out.lines[0]).toMatch(/Our rain tracker recorded about 0\.4" of rain at your property over the past 7 days\./);
     expect(out.lines).toHaveLength(1); // Feb, < 1" — no ants-after-rain line
   });
 
   it('hedges the number on low-confidence (city-collective fallback) rain', () => {
     const out = buildRainExpectation({ weekWeather: { rainInches: 2.1, rainConfidence: 'low' }, serviceMonth: 2 });
-    expect(out.lines[0]).toMatch(/Rain gauges for your area suggest roughly 2\.1"/);
-    expect(out.lines[0]).toMatch(/can vary/);
+    expect(out.lines[0]).toMatch(/Our rain tracker recorded roughly 2\.1" of rain in your area/);
+    expect(out.lines[0]).not.toMatch(/gauge/i);
   });
 
   // Owner ruling 2026-09-28, revised: the rain-fast clause appears ONLY
@@ -111,20 +114,27 @@ describe('buildRainExpectation', () => {
 
   it('adds the forecast heavy-rain caveat only when forecastHeavyRain is true (caller\'s job to gate LIVE-only)', () => {
     const live = buildRainExpectation({
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [EXTERIOR_APPLICATION], serviceMonth: 2, forecastHeavyRain: true,
+    });
+    expect(live.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
+
+    // The caveat names an exterior application, so an application with no
+    // exterior method or area on record gets none.
+    const interiorOnly = buildRainExpectation({
       weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true,
     });
-    expect(live.lines[0]).toMatch(/Heavy rain right after a treatment/);
+    expect(interiorOnly.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
 
     // No recorded application (inspection / sweep only): no treatment caveat.
     const untreated = buildRainExpectation({
       weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
     });
-    expect(untreated.lines.join(' ')).not.toMatch(/Heavy rain right after a treatment/);
+    expect(untreated.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
 
     const notLive = buildRainExpectation({
       weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: false,
     });
-    expect(notLive.lines[0]).not.toMatch(/Heavy rain right after a treatment/);
+    expect(notLive.lines[0]).not.toMatch(/Heavy rain soon after an exterior application/);
   });
 
   // Owner ruling 2026-09-28: never on the calendar month alone — a rain
@@ -137,34 +147,34 @@ describe('buildRainExpectation', () => {
   it('rainy season (Jun–Oct): the ants line needs >= 0.5" — under the bar is silent, at/over fires', () => {
     const under = buildRainExpectation({ weekWeather: { rainInches: 0.4, rainConfidence: null }, serviceMonth: 7 });
     expect(under.lines).toHaveLength(1); // rain line only — no ants line
-    expect(under.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+    expect(under.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
 
     const over = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 7 });
     expect(over.lines).toHaveLength(2);
-    expect(over.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(over.lines[1]).toMatch(/Heavy rain floods ant nests/);
   });
 
   it('outside rainy season: the ants line needs >= 1" — 0.5" (the rainy-season bar) is not enough', () => {
     const halfInch = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 2 });
     expect(halfInch.lines).toHaveLength(1);
-    expect(halfInch.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+    expect(halfInch.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
 
     const under = buildRainExpectation({ weekWeather: { rainInches: 0.9, rainConfidence: null }, serviceMonth: 2 });
     expect(under.lines).toHaveLength(1); // rain line only — no ants line
     const over = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: null }, serviceMonth: 2 });
     expect(over.lines).toHaveLength(2);
-    expect(over.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(over.lines[1]).toMatch(/Heavy rain floods ant nests/);
   });
 
   it('low-confidence (city-collective) rain always uses the higher 1" bar, even in rainy season', () => {
     // 0.6" is over the 0.5" rainy-season bar but under the 1" low-confidence bar.
     const hedgedUnder = buildRainExpectation({ weekWeather: { rainInches: 0.6, rainConfidence: 'low' }, serviceMonth: 7 });
     expect(hedgedUnder.lines).toHaveLength(1);
-    expect(hedgedUnder.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+    expect(hedgedUnder.lines.join(' ')).not.toMatch(/Heavy rain floods ant nests/);
 
     const hedgedOver = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: 'low' }, serviceMonth: 7 });
     expect(hedgedOver.lines).toHaveLength(2);
-    expect(hedgedOver.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(hedgedOver.lines[1]).toMatch(/Heavy rain floods ant nests/);
   });
 
   // codex P2 #5137 deferred finding c: settledWeekWeatherForRender
@@ -173,17 +183,17 @@ describe('buildRainExpectation', () => {
   // forecast warning must still reach the customer as its OWN line rather
   // than being silently swallowed by the (unrelated) missing settled total.
   it('the LIVE-only forecast heavy-rain signal alone adds BOTH its own warning line and the ants line, even with no rain data', () => {
-    const out = buildRainExpectation({ weekWeather: null, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true });
+    const out = buildRainExpectation({ weekWeather: null, products: [EXTERIOR_APPLICATION], serviceMonth: 2, forecastHeavyRain: true });
     expect(out.lines).toHaveLength(2);
-    expect(out.lines[0]).toMatch(/Heavy rain right after a treatment/);
-    expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(out.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
+    expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
   });
 
   it('an inspection- or sweep-only visit gets no treatment caveat from the forecast alone — only the neutral ants line', () => {
     const out = buildRainExpectation({ weekWeather: null, products: [], serviceMonth: 2, forecastHeavyRain: true });
     expect(out.lines).toHaveLength(1);
     expect(out.lines[0]).not.toMatch(/treatment/);
-    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors for a few days/);
+    expect(out.lines[0]).toMatch(/Heavy rain floods ant nests and pushes foragers indoors for a few days/);
   });
 
   it('with no rain data and NO forecast signal, no heavy-rain warning line is invented', () => {
@@ -200,7 +210,7 @@ describe('buildRainExpectation', () => {
     });
     const joined = out.lines.join(' ');
     expect(joined).not.toMatch(/guarantee/i);
-    expect(joined).not.toMatch(/eliminat/i);
+    expect(joined).not.toMatch(/eliminated\b/i);
   });
 
   // codex P1 2026-09-29 (pre-push audit round 2): "moving through the
@@ -213,8 +223,8 @@ describe('buildRainExpectation', () => {
     it('no applications at all (inspection/sweep-only visit): treatment-neutral wording, never "treated band"', () => {
       const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
       expect(out.lines).toHaveLength(2);
-      expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
       expect(out.lines[1]).toMatch(/text us/i);
     });
 
@@ -224,7 +234,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'spot_treatment', methodInferred: false, applicationArea: 'Kitchen' }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('a product applied with UNKNOWN method/area (nothing recorded): treatment-neutral wording', () => {
@@ -233,7 +243,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Demand CS' }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('an INFERRED method (the pest-line default guess) is treated as unknown, never confirms perimeter evidence', () => {
@@ -242,7 +252,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: true }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('an ant bait / roach gel / IGR with confirmed exterior evidence STILL does not earn the band claim (not a perimeter band)', () => {
@@ -251,7 +261,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Advion Ant Bait Gel', method: 'perimeter_spray', methodInferred: false }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('an EXPLICIT perimeter spray (non_repellent) TAGGED for ants earns the treated-band wording', () => {
@@ -260,16 +270,26 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Ants'] }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).toMatch(/treated band/);
+      expect(out.lines[1]).toMatch(/6-foot perimeter band/);
     });
 
-    it('an applicationArea naming an exterior/perimeter chip (no explicit method), tagged for ants, also earns the treated-band wording', () => {
+    it('an applicationArea naming an exterior/perimeter chip (no explicit method), tagged for ants, also earns the 6-foot band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Alpine WSG', applicationArea: 'Foundation perimeter', targets: ['ants', 'spiders'] }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).toMatch(/6-foot perimeter band/);
+    });
+
+    it('a repellent barrier sprayed outside for ants never earns the 6-foot band wording (it describes a non-repellent)', () => {
       const out = buildRainExpectation({
         weekWeather: HEAVY_WEEK,
         products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter', targets: ['ants', 'spiders'] }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
+      expect(out.lines[1]).toMatch(/we'll come back out/);
     });
 
     // codex P1 2026-09-28 round 4: the colony/trail claim is ANT-specific —
@@ -281,8 +301,8 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Roaches'] }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).toMatch(/Heavy rain floods ant nests/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('a confirmed perimeter spray with NO targets recorded never earns the treated-band wording', () => {
@@ -291,7 +311,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('the ant target match is word-bounded ("Giant water bugs" is not an ant tag)', () => {
@@ -300,7 +320,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Giant water bugs', 'pantry pests'] }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     // codex P1 2026-09-29 (pre-push audit round 3): same collision as the
@@ -313,7 +333,7 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Demand CS', method: 'spot_treatment', methodInferred: false, applicationArea: 'Interior entry points' }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('an unrecognized / free-text area string never qualifies as exterior (fail closed, no guessing)', () => {
@@ -322,12 +342,12 @@ describe('buildRainExpectation', () => {
         products: [{ name: 'Demand CS', applicationArea: 'Somewhere out back, per the tech\'s note' }],
         serviceMonth: 7,
       });
-      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).not.toMatch(/6-foot perimeter band/);
     });
 
     it('never guarantees/eliminates in the neutral wording either', () => {
       const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
-      expect(out.lines[1]).not.toMatch(/guarantee|eliminat/i);
+      expect(out.lines[1]).not.toMatch(/guarantee|eliminated\b/i);
     });
   });
 });
@@ -356,7 +376,7 @@ describe('classifyProductExpectation — explicit product-name map (no heuristic
     [{ name: 'Advion Evolution Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Ant Bait Gel' }, 'ant_bait'],
-    [{ name: 'Advion WDG Granular' }, 'ant_bait'],
+    [{ name: 'Advion WDG Granular' }, 'non_repellent'],
     [{ name: 'Gentrol IGR' }, 'igr'],
     [{ name: 'Tekko Pro IGR' }, 'igr'],
     // Surfactant — explicitly mapped to no class, not merely absent.
@@ -407,7 +427,7 @@ describe('every catalog product name this map claims to know classifies (codex P
     ['Advion Evolution Cockroach Gel Bait', 'roach_gel_bait'],
     ['Advion Cockroach Gel Bait', 'roach_gel_bait'],
     ['Advion Ant Bait Gel', 'ant_bait'],
-    ['Advion WDG Granular', 'ant_bait'],
+    ['Advion WDG Granular', 'non_repellent'],
     ['Gentrol IGR', 'igr'],
     ['Tekko Pro IGR', 'igr'],
     // Deliberately mapped to no class (documented decision, not a gap) —
@@ -484,37 +504,57 @@ describe('buildWhatToExpect', () => {
   it('Advion Ant Bait Gel gets the ant_bait line, never the roach gel bait line', () => {
     const out = buildWhatToExpect({ products: [{ name: 'Advion Ant Bait Gel' }] });
     expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).toMatch(/carry it back to the colony/);
-    expect(out.lines[0]).not.toMatch(/dead roaches/);
+    expect(out.lines[0]).toMatch(/share it through the colony/);
+    expect(out.lines[0]).not.toMatch(/Roaches/);
   });
 
-  // codex P1 2026-09-28 round 4: "ants may show up more" is ant-specific
-  // copy — it needs a non-repellent application the tech TAGGED for ants.
-  describe('non-repellent ant wording requires an ant-tagged application', () => {
-    it('tagged for ants → the ant/colony transfer line', () => {
+  // codex P1 2026-09-28 round 4: the ant line is ant-specific copy — it
+  // needs a non-repellent application the tech TAGGED for ants. Owner
+  // 2026-10-01: it also names the 6-foot perimeter band, so the same
+  // application must be recorded outside.
+  describe('non-repellent ant wording requires an ant-tagged application recorded outside', () => {
+    it('tagged for ants and sprayed on the perimeter → the 6-foot band line, active ingredient, no brand', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Taurus SC', targets: ['Ants'], method: 'perimeter_spray', methodInferred: false }] });
+      expect(out.lines[0]).toMatch(/^We applied a fipronil-based non-repellent as a 6-foot perimeter band around your foundation\./);
+      expect(out.lines[0]).toMatch(/spike in ant activity/);
+      expect(out.lines[0]).not.toMatch(/Taurus/);
+    });
+
+    it('tagged for ants but nowhere recorded outside → the general wording, no band', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Taurus SC', targets: ['Ants'] }] });
-      expect(out.lines[0]).toMatch(/ants may show up more/);
+      expect(out.lines[0]).toMatch(/Insects can't detect the treated zone/);
+      expect(out.lines[0]).not.toMatch(/6-foot|ants/i);
+    });
+
+    it('the ant tag and the exterior record must be on the SAME application', () => {
+      const out = buildWhatToExpect({ products: [
+        { name: 'Taurus SC', targets: ['Ants'] },
+        { name: 'Alpine WSG', targets: ['Roaches'], method: 'perimeter_spray', methodInferred: false },
+      ] });
+      expect(out.lines[0]).not.toMatch(/6-foot/);
     });
 
     it('tagged for roaches only → pest-neutral transfer wording, no ants', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Alpine WSG', targets: ['Roaches'] }] });
-      expect(out.lines[0]).toMatch(/Non-repellent products/);
+      expect(out.lines[0]).toMatch(/^We applied a dinotefuran-based non-repellent\. Insects can't detect the treated zone/);
       expect(out.lines[0]).not.toMatch(/ants/i);
       expect(out.lines[0]).not.toMatch(/colony/i);
     });
 
     it('no targets recorded (e.g. the grounding path) → pest-neutral transfer wording', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Taurus SC' }] });
-      expect(out.lines[0]).toMatch(/Non-repellent products/);
+      expect(out.lines[0]).toMatch(/Insects can't detect the treated zone/);
       expect(out.lines[0]).not.toMatch(/ants/i);
     });
 
     it('one ant-tagged non-repellent among several applications is enough', () => {
       const out = buildWhatToExpect({ products: [
         { name: 'Alpine WSG', targets: ['Roaches'] },
-        { name: 'Taurus SC', targets: ['ants'] },
+        { name: 'Taurus SC', targets: ['ants'], method: 'perimeter_spray', methodInferred: false },
       ] });
-      expect(out.lines[0]).toMatch(/ants may show up more/);
+      expect(out.lines[0]).toMatch(/spike in ant activity/);
+      // Two non-repellents: both active ingredients are named.
+      expect(out.lines[0]).toMatch(/dinotefuran and fipronil-based/);
     });
 
     it('toExpectationProduct carries the application targets (trimmed), null when absent', () => {
@@ -523,9 +563,11 @@ describe('buildWhatToExpect', () => {
     });
   });
 
-  it('Advion WDG Granular also classifies ant_bait', () => {
+  // A sprayed granule, not a bait: its label calls indoxacarb non-repellent.
+  it('Advion WDG Granular takes the non-repellent line, never the gel bait line', () => {
     const out = buildWhatToExpect({ products: [{ name: 'Advion WDG Granular' }] });
-    expect(out.lines[0]).toMatch(/carry it back to the colony/);
+    expect(out.lines[0]).toMatch(/^We applied a indoxacarb-based non-repellent|^We applied an indoxacarb-based non-repellent/);
+    expect(out.lines[0]).not.toMatch(/gel bait/);
   });
 
   it('LESCO 90/10 Nonionic Surfactant gets no line (explicitly mapped to no class)', () => {
@@ -539,7 +581,7 @@ describe('buildWhatToExpect', () => {
     it('gets its own dust-class line, not the pyrethroid barrier line', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Delta Dust' }] });
       expect(out.lines).toHaveLength(1);
-      expect(out.lines[0]).toMatch(/cracks, voids/);
+      expect(out.lines[0]).toMatch(/cracks, crevices and voids/);
       expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
     });
 
@@ -560,7 +602,7 @@ describe('buildWhatToExpect', () => {
       const out = buildWhatToExpect({
         products: [{ name: 'Demand CS', method: 'perimeter_spray', methodInferred: false }],
       });
-      expect(out.lines[0]).toMatch(/barrier treatment/);
+      expect(out.lines[0]).toMatch(/barrier around the outside/);
       expect(out.lines[0]).toMatch(/near doors and windows/);
     });
 
@@ -568,13 +610,13 @@ describe('buildWhatToExpect', () => {
       const out = buildWhatToExpect({
         products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter' }],
       });
-      expect(out.lines[0]).toMatch(/barrier treatment/);
+      expect(out.lines[0]).toMatch(/barrier around the outside/);
     });
 
     it('UNKNOWN method/area (nothing recorded) falls back to non-barrier wording for the SAME product class', () => {
       const out = buildWhatToExpect({ products: [{ name: 'Demand CS' }] });
       expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
-      expect(out.lines[0]).toMatch(/keeps working after it's applied/);
+      expect(out.lines[0]).toMatch(/a residual insecticide that binds to treated surfaces/);
     });
 
     it('an INFERRED method (methodInferred: true) is treated as UNKNOWN, never assumed exterior — even though the pest-line default guess IS perimeter_spray', () => {
@@ -617,7 +659,7 @@ describe('buildWhatToExpect', () => {
       'Exterior perimeter',
     ])('the real controlled exterior chip %j still earns the barrier line', (applicationArea) => {
       const out = buildWhatToExpect({ products: [{ name: 'Demand CS', applicationArea }] });
-      expect(out.lines[0]).toMatch(/barrier treatment/);
+      expect(out.lines[0]).toMatch(/barrier around the outside/);
     });
 
     it('an unrecognized / free-text area string never qualifies as exterior (fail closed, no guessing)', () => {
@@ -630,8 +672,8 @@ describe('buildWhatToExpect', () => {
     it('never guarantees/eliminates in either pyrethroid wording', () => {
       const confirmed = buildWhatToExpect({ products: [{ name: 'Demand CS', method: 'perimeter_spray', methodInferred: false }] });
       const unconfirmed = buildWhatToExpect({ products: [{ name: 'Demand CS' }] });
-      expect(confirmed.lines[0]).not.toMatch(/guarantee|eliminat/i);
-      expect(unconfirmed.lines[0]).not.toMatch(/guarantee|eliminat/i);
+      expect(confirmed.lines[0]).not.toMatch(/guarantee|eliminated\b/i);
+      expect(unconfirmed.lines[0]).not.toMatch(/guarantee|eliminated\b/i);
     });
   });
 
@@ -659,10 +701,10 @@ describe('buildWhatToExpect', () => {
     expect(out.lines).toHaveLength(3);
     // priority order: non_repellent, ant_bait, roach_gel_bait, pyrethroid, igr
     // — pyrethroid and igr dropped.
-    expect(out.lines[0]).toMatch(/Non-repellent/);
-    expect(out.lines[1]).toMatch(/carry it back to the colony/);
-    expect(out.lines[2]).toMatch(/gel bait/);
-    expect(out.lines.join(' ')).not.toMatch(/barrier treatment|next generation/);
+    expect(out.lines[0]).toMatch(/non-repellent/);
+    expect(out.lines[1]).toMatch(/share it through the colony/);
+    expect(out.lines[2]).toMatch(/crack-and-crevice placements/);
+    expect(out.lines.join(' ')).not.toMatch(/barrier around the outside|breeding cycle/);
   });
 
   it('never uses guarantee/eliminate language', () => {
@@ -674,7 +716,56 @@ describe('buildWhatToExpect', () => {
     });
     const joined = out.lines.join(' ');
     expect(joined).not.toMatch(/guarantee/i);
-    expect(joined).not.toMatch(/eliminat/i);
+    expect(joined).not.toMatch(/eliminated\b/i);
+  });
+});
+
+// Owner 2026-10-01 (review page v7): the active ingredient, never a brand;
+// "eliminates", never "die"/"kill"; every class keeps a line through the
+// customer-copy guard.
+describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
+  const ALL = [
+    { name: 'Taurus SC', targets: ['Ants'], method: 'perimeter_spray', methodInferred: false },
+    { name: 'Alpine WSG' },
+    { name: 'Advion WDG Granular' },
+    { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false },
+    { name: 'Demand CS' },
+    { name: 'Onslaught Fastcap' },
+    { name: 'Delta Dust' },
+    { name: 'Advion Evolution Cockroach Gel Bait' },
+    { name: 'Advion Ant Bait Gel' },
+    { name: 'Gentrol IGR' },
+    { name: 'Tekko Pro IGR' },
+  ];
+
+  it.each(ALL.map((p) => [p.name, p]))('%s gets a line with no brand name and no die/kill wording', (_name, product) => {
+    const out = buildWhatToExpect({ products: [product] });
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).not.toMatch(/Taurus|Alpine|Advion|Talak|Demand|Onslaught|Delta Dust|Gentrol|Tekko/);
+    expect(out.lines[0]).not.toMatch(/\b(die|dies|dying|dead|kill\w*)\b/i);
+  });
+
+  it('the barrier sentence names only the products recorded outside', () => {
+    const out = buildWhatToExpect({ products: [
+      { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false },
+      { name: 'Demand CS' },
+    ] });
+    expect(out.lines[0]).toMatch(/^We applied a residual bifenthrin barrier around the outside of your home\. Bifenthrin binds/);
+    expect(out.lines[0]).not.toMatch(/lambda-cyhalothrin/);
+  });
+
+  it('only a Tekko Pro visit states the label\'s 6-month duration', () => {
+    const gentrol = buildWhatToExpect({ products: [{ name: 'Gentrol IGR' }] });
+    expect(gentrol.lines[0]).toMatch(/with \(S\)-hydroprene/);
+    expect(gentrol.lines[0]).not.toMatch(/6 months/);
+    const tekko = buildWhatToExpect({ products: [{ name: 'Tekko Pro IGR' }] });
+    expect(tekko.lines[0]).toMatch(/with pyriproxyfen and novaluron.*up to 6 months of activity on cockroach nymphs\.$/);
+  });
+
+  it('the roach gel line keeps the over-the-counter spray warning from the label', () => {
+    const out = buildWhatToExpect({ products: [{ name: 'Advion Evolution Cockroach Gel Bait' }] });
+    expect(out.lines[0]).toMatch(/^We placed an indoxacarb gel bait as crack-and-crevice placements/);
+    expect(out.lines[0]).toMatch(/a residual spray contaminates the bait/);
   });
 });
 
@@ -704,12 +795,12 @@ describe('buildSpiderExpectation', () => {
       applications: [],
     });
     expect(out.headline).toBe('Spiders');
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
     // No treatment/residual claim anywhere in the card.
     expect(out.whatWeDid).not.toMatch(/treated|residual/i);
-    expect(out.expectation).not.toMatch(/residual we applied/i);
-    expect(out.expectation).toMatch(/New webs can appear within days/);
-    expect(out.nextStep).toMatch(/keeps coming back/);
+    expect(out.expectation).not.toMatch(/The residual binds/);
+    expect(out.expectation).toMatch(/takes out established harborage/);
+    expect(out.nextStep).toBeUndefined();
     // The raw protocol-action label text never leaks into the customer copy.
     expect(out.whatWeDid).not.toMatch(/Swept eaves, window frames, door frames, and lanai/);
   });
@@ -719,7 +810,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
       applications: [],
     });
-    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
     expect(out.whatWeDid).not.toMatch(/eaves/);
   });
@@ -734,9 +825,9 @@ describe('buildSpiderExpectation', () => {
       applications: [],
     });
     expect(out).not.toBeNull();
-    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
     expect(out.whatWeDid).not.toMatch(/eaves|entry points/);
-    expect(out.expectation).toMatch(/New webs can appear within days/);
+    expect(out.expectation).toMatch(/takes out established harborage/);
   });
 
   it('a generic web action plus a TREATED generic web entry (no eave named anywhere) never earns the eave residual wording', () => {
@@ -745,8 +836,8 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: 'Treated webs on exterior surfaces', treatmentApplied: true }],
       applications: [{ product: { name: 'Demand CS' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
-    expect(out.expectation).not.toMatch(/residual we applied/);
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
+    expect(out.expectation).not.toMatch(/The residual binds/);
   });
 
   // P1-C fix (owner ruling 2026-09-28, P1 audit round 2): a spider-targeted
@@ -761,8 +852,8 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
-    expect(out.expectation).not.toMatch(/residual we applied/i);
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.expectation).not.toMatch(/The residual binds/);
   });
 
   it('action recorded AND a spider-labeled pyrethroid residual applied WITH its own application area naming eaves/soffit: combined wording', () => {
@@ -770,10 +861,10 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
-    expect(out.expectation).toMatch(/residual we applied/i);
-    expect(out.expectation).toMatch(/thin out over about two weeks/);
-    expect(out.nextStep).toMatch(/come take another look/);
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
+    expect(out.expectation).toMatch(/The residual binds/);
+    expect(out.expectation).toMatch(/thins out over the next few weeks/);
+    expect(out.nextStep).toBeUndefined();
   });
 
   it('the OTHER real controlled eave chip, "Eaves / soffits" (plural), also earns the combined wording', () => {
@@ -781,7 +872,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffits' }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
   });
 
   // codex P1 2026-09-29 (pre-push audit round 3): eave/soffit area evidence
@@ -794,7 +885,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Interior entry points' }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
   });
 
   it('an eave-sounding but uncontrolled free-text area does not qualify as eave/soffit evidence', () => {
@@ -802,7 +893,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Cleaned out the eaves and gutters' }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
   });
 
   it('action recorded AND a spider-labeled pyrethroid residual applied, AND the visit separately recorded a genuine (treatmentApplied: true) eave action: combined wording', () => {
@@ -811,8 +902,8 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: 'Treated eaves and soffit with residual', treatmentApplied: true }],
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }], // no area of its own
     });
-    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
-    expect(out.expectation).toMatch(/residual we applied/i);
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
+    expect(out.expectation).toMatch(/The residual binds/);
   });
 
   it('a SWEEP-only actionEntries (treatmentApplied: false) does NOT count as eave-treatment evidence', () => {
@@ -821,7 +912,7 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: EAVE_ACTION[0], treatmentApplied: false }],
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
   });
 
   it('action recorded, a spider-targeted product applied but it is NOT pyrethroid-classified: still de-web only (no false residual credit)', () => {
@@ -829,7 +920,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Taurus SC' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }], // non_repellent, not pyrethroid
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
   });
 
   it('action recorded, a pyrethroid product applied but NOT targeted for spiders: still de-web only', () => {
@@ -837,7 +928,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Demand CS' }, targets: ['ants'], applicationArea: 'Eaves / soffit' }],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
   });
 
   // codex P2 #5137 deferred finding b: "Completed the recorded eave and
@@ -869,7 +960,7 @@ describe('buildSpiderExpectation', () => {
         applications: [],
       });
       expect(out).not.toBeNull();
-      expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+      expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
     });
 
     it('the protocol library\'s "Swept eaves, window frames, door frames, and lanai" action still counts as web-removal evidence (sweeping IS the act)', () => {
@@ -878,7 +969,7 @@ describe('buildSpiderExpectation', () => {
         applications: [],
       });
       expect(out).not.toBeNull();
-      expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+      expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
     });
   });
 
@@ -891,7 +982,7 @@ describe('buildSpiderExpectation', () => {
       }),
     ];
     for (const out of combos) {
-      expect(out.expectation + out.nextStep).not.toMatch(/guarantee/i);
+      expect(out.expectation).not.toMatch(/guarantee/i);
     }
   });
 });
@@ -915,8 +1006,8 @@ describe('buildPestExpectations — composition', () => {
     // for ants, not spiders, and non_repellent-classified anyway) => de-web
     // wording, not the combined/residual wording.
     expect(out.spiders.headline).toBe('Spiders');
-    expect(out.spiders.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
-    expect(out.whatToExpect.lines[0]).toMatch(/Non-repellent/);
+    expect(out.spiders.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
 
   // codex P2 #5137 deferred finding c: a same-day live report with an open
@@ -926,12 +1017,12 @@ describe('buildPestExpectations — composition', () => {
   it('surfaces the rain key from the live forecast signal alone, with no settled weekly total', () => {
     const out = buildPestExpectations({
       weekWeather: null,
-      applications: [{ product: { name: 'Demand CS' }, targets: [] }],
+      applications: [{ product: { name: 'Demand CS' }, targets: [], method: 'perimeter_spray', methodInferred: false }],
       actionLabels: [],
       serviceMonth: 2,
       forecastHeavyRain: true,
     });
-    expect(out.rain.lines[0]).toMatch(/Heavy rain right after a treatment/);
+    expect(out.rain.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
   });
 });
 

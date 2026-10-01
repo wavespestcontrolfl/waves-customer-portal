@@ -12,8 +12,8 @@ describe('writer expectations', () => {
   test('pest product classes give the approved lines and the longest closing window', () => {
     const { lines, windowDays } = writerExpectations({ line: 'pest', applications: [TAURUS, ADVION] });
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/^Non-repellent products .*ants may show up more for a few days/);
-    expect(lines[1]).toMatch(/^Ants that find the bait carry it back to the colony/);
+    expect(lines[0]).toMatch(/^We applied a fipronil-based non-repellent as a 6-foot perimeter band .*spike in ant activity for several days/);
+    expect(lines[1]).toMatch(/^We placed an indoxacarb gel bait along active foraging trails/);
     expect(windowDays).toBe(14);
   });
 
@@ -77,7 +77,7 @@ describe('writer records', () => {
     expect(text).toContain('HOW IT WORKS (approved product wording');
     expect(text).toContain('SERVICE TYPE: re-service');
     expect(text).toContain('REACH-OUT DATE: Wednesday, October 14');
-    expect(allowedPhrases).toEqual(expect.arrayContaining(['a few days', 'about 1–2 weeks']));
+    expect(allowedPhrases).toEqual(expect.arrayContaining(['several days', 'a few days']));
     expect(allowedDates).toEqual(['Wednesday, October 14', 'October 14']);
   });
 

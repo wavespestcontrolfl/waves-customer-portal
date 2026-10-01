@@ -48,8 +48,8 @@ const LINE_REQUIRES = new Map([
 ]);
 
 // Days to the far end of each pest class's stated window (EXPECTATION_TEXT
-// in pest-report-expectations.js: "about 1–2 weeks", "a week or two",
-// "about 10–14 days"). The longest one dates the reach-out line on one-time
+// in pest-report-expectations.js: "the next couple of weeks", "a week or
+// two"). The longest one dates the reach-out line on one-time
 // services and re-services (owner 2026-10-01). Classes with no closing
 // window ("a few days", "several weeks") set no date.
 const EXPECTATION_WINDOW_DAYS = Object.freeze({
