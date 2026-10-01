@@ -14,7 +14,12 @@
  *
  * Every number is an ESTIMATE: tokens from the ledger (llm_dispatch_log,
  * GATE_LLM_CALL_LEDGER) times today's list price, at the long-prompt tier
- * the feed lists for a call whose prompt reaches it. Rows the ledger has no
+ * the feed lists for a call whose prompt reaches it. Where the ledger cannot
+ * tell which of two listed rates applied (cache lifetime; a missing cache or
+ * reasoning rate), the higher one is used: an estimate may run high, never
+ * low. Where it cannot tell at all (a session turn reaching a tier), the
+ * call is unpriced. Per-request fees that are not tokens (web search, image
+ * inputs) are not recorded in the ledger and are not included. Rows the ledger has no
  * usage for, and models the feed does not list, are counted as unpriced —
  * never guessed. Image, video, audio and embedding calls write no ledger
  * row, so they are not in these totals. Nothing here is customer-facing.
@@ -123,7 +128,7 @@ function parseTiers(overrides) {
       input_per_mtok: perMillion(o.prompt),
       output_per_mtok: perMillion(o.completion),
       cache_read_per_mtok: perMillion(o.input_cache_read),
-      cache_write_per_mtok: perMillion(o.input_cache_write),
+      cache_write_per_mtok: cacheWriteRate(o),
       reasoning_per_mtok: perMillion(o.internal_reasoning),
     });
   }
@@ -136,6 +141,14 @@ function perMillion(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return null;
   return Number((n * 1e6).toFixed(6));
+}
+
+// The ledger's cache_write_tokens does not say which cache lifetime a write
+// bought, and a one-hour write costs more than a five-minute one: the higher
+// listed rate (overestimate, never under).
+function cacheWriteRate(pricing) {
+  const rates = [perMillion(pricing?.input_cache_write), perMillion(pricing?.input_cache_write_1h)].filter((v) => v != null);
+  return rates.length ? Math.max(...rates) : null;
 }
 
 /** Feed JSON → price rows (pure). Unknown providers, variants and unpriced models are dropped. */
@@ -159,7 +172,7 @@ function parseFeed(body, fetchedAt) {
       input_per_mtok: input,
       output_per_mtok: output,
       cache_read_per_mtok: perMillion(m.pricing?.input_cache_read),
-      cache_write_per_mtok: perMillion(m.pricing?.input_cache_write),
+      cache_write_per_mtok: cacheWriteRate(m.pricing),
       reasoning_per_mtok: perMillion(m.pricing?.internal_reasoning),
       pricing_tiers: tiers.length ? JSON.stringify(tiers) : null,
       fetched_at: fetchedAt,

@@ -122,6 +122,13 @@ describe('long-prompt tiers', () => {
     expect(byKey['gpt-6-astra'].pricing_tiers).toBeNull();
   });
 
+  test('a cache write bills at the higher of the five-minute and one-hour rates: the ledger does not say which', () => {
+    const [row] = llmCost.parseFeed({ data: [{ id: 'anthropic/claude-opus-5.5', pricing: { prompt: '0.000004', completion: '0.00002', input_cache_write: '0.000005', input_cache_write_1h: '0.000008' } }] }, new Date());
+    expect(row.cache_write_per_mtok).toBe(8);
+    const [only5m] = llmCost.parseFeed({ data: [{ id: 'anthropic/claude-opus-5.5', pricing: { prompt: '0.000004', completion: '0.00002', input_cache_write: '0.000005' } }] }, new Date());
+    expect(only5m.cache_write_per_mtok).toBe(5);
+  });
+
   test('a call bills at the highest tier its whole prompt reaches', () => {
     const p = { input: 2, output: 8, tiers: [{ minPromptTokens: 272000, input: 4, output: 15 }] };
     expect(llmCost.ratesForCall(p, 271999)).toBe(p);
