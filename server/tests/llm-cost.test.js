@@ -24,7 +24,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const llmCost = require('../services/llm-cost');
 
 const saved = {};
-const ENV = ['GATE_LLM_COST_TRACKING', 'LLM_COST_ALERT_MIN_USD', 'LLM_COST_ALERT_MULTIPLIER'];
+const ENV = ['GATE_LLM_COST_TRACKING', 'GATE_LLM_CALL_LEDGER', 'LLM_COST_ALERT_MIN_USD', 'LLM_COST_ALERT_MULTIPLIER'];
 beforeAll(() => { for (const k of ENV) saved[k] = process.env[k]; });
 afterAll(() => { for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 beforeEach(() => {
@@ -184,6 +184,9 @@ describe('costUsd', () => {
 
   test('a missing cache rate bills at the input rate; no price or an unknown provider is null', () => {
     expect(llmCost.costUsd('anthropic', { cached_input_tokens: M }, { input: 3, output: 15 })).toBeCloseTo(3, 9);
+    // a cache write can cost more than input: no listed write rate = unpriced, never the input rate
+    expect(llmCost.costUsd('anthropic', { input_tokens: M, cache_write_tokens: 1 }, { input: 3, output: 15 })).toBeNull();
+    expect(llmCost.costUsd('anthropic', { input_tokens: M, cache_write_tokens: 0 }, { input: 3, output: 15 })).toBeCloseTo(3, 9);
     expect(llmCost.costUsd('anthropic', { input_tokens: M }, null)).toBeNull();
     expect(llmCost.costUsd('typesafe', { input_tokens: M }, p)).toBeNull();
   });
@@ -222,9 +225,12 @@ describe('pullPrices', () => {
         insert: jest.fn((rows) => { calls.push(rows); return q; }),
         onConflict: jest.fn(() => q),
         merge: jest.fn(async () => undefined),
+        whereNotIn: jest.fn(() => q),
+        del: jest.fn(async () => 0),
       };
       return q;
     });
+    conn.transaction = jest.fn((work) => work(conn));
     return { conn, calls };
   }
 
@@ -242,6 +248,15 @@ describe('pullPrices', () => {
     await expect(llmCost.pullPrices({ conn, fetchImpl: jest.fn(async () => ({ ok: false, status: 503 })) })).rejects.toThrow(/503/);
     expect(calls).toHaveLength(0);
   });
+});
+
+test('the spend check does nothing while the call ledger is off: no data is not a recovery', async () => {
+  process.env.GATE_LLM_COST_TRACKING = 'true';
+  const fetchImpl = jest.fn();
+  await expect(llmCost.runLlmCostCheck({ conn: jest.fn(), fetchImpl })).resolves.toEqual({ ran: false, reason: 'ledger_off' });
+  expect(fetchImpl).not.toHaveBeenCalled();
+  expect(mockRaise).not.toHaveBeenCalled();
+  expect(mockCloseKeys).not.toHaveBeenCalled();
 });
 
 test('the spend check does nothing while the gate is off', async () => {
@@ -329,6 +344,17 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(map.get('claude-sonnet-5')).toMatchObject({ input: 4, output: 15, cacheRead: null });
   });
 
+  test('a pull is a snapshot: a model the feed no longer lists loses its stored price', async () => {
+    const sonnet = { id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } };
+    const opus = { id: 'anthropic/claude-opus-5.5', pricing: { prompt: '0.000005', completion: '0.000025' } };
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([sonnet, opus])), now: NOW });
+    const res = await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([sonnet])), now: NOW });
+    expect(res.retired).toBe(1);
+    const { map } = await llmCost.loadPrices(app);
+    expect(map.has('claude-opus-5-5')).toBe(false);
+    expect(map.has('claude-sonnet-5')).toBe(true);
+  });
+
   test('laneCosts reads only live call / session_turn rows inside the window', async () => {
     await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }])), now: NOW });
     const at = atET('2026-09-30');
@@ -377,6 +403,7 @@ postgres('llm cost (PostgreSQL)', () => {
 
   test('the spend check pulls missing prices, raises one item for a spike, then closes it once spend is normal', async () => {
     process.env.GATE_LLM_COST_TRACKING = 'true';
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
     mockRaise.mockResolvedValue({ id: 1 });
     const fetchImpl = okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }]));
     // yesterday (09-30 ET): 4M input = $12; the 7 days before: $3 in total
@@ -398,8 +425,14 @@ postgres('llm cost (PostgreSQL)', () => {
     const { composeAdminAlert } = jest.requireActual('../services/admin-alert-compose');
     expect(() => composeAdminAlert(spec)).not.toThrow();
 
-    // the next morning: prices are fresh (no fetch) and spend is normal → the standing item closes
+    // the next morning with no ledger rows for 10-01 at all: no data, so the standing item stays
     mockOpenKeys.mockResolvedValue(['llm-cost-spike:2026-09-30']);
+    const silent = await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
+    expect(silent).toMatchObject({ ran: true, raised: false, reason: 'no_ledger_rows' });
+    expect(mockCloseKeys).not.toHaveBeenCalled();
+
+    // with 10-01's ordinary spend recorded: prices are fresh (no fetch) and spend is normal → the item closes
+    await app('llm_dispatch_log').insert(row({ created_at: atET('2026-10-01'), input_tokens: 100_000 }));
     const next = await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(next).toMatchObject({ ran: true, raised: false, spikes: 0 });
@@ -408,6 +441,7 @@ postgres('llm cost (PostgreSQL)', () => {
 
   test('with no stored prices and a failing feed, the check fails loudly', async () => {
     process.env.GATE_LLM_COST_TRACKING = 'true';
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
     await expect(llmCost.runLlmCostCheck({ now: NOW, conn: app, fetchImpl: jest.fn(async () => ({ ok: false, status: 500 })) })).rejects.toThrow(/500/);
     expect(mockRaise).not.toHaveBeenCalled();
   });

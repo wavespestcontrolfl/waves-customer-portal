@@ -508,8 +508,8 @@ function basisFor(window, cost = null) {
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString(), unit: window.unit },
     // false = deltaVsPrior is null everywhere: the ledger keeps RETENTION_DAYS
     priorAvailable: window.priorAvailable,
-    // null = no cost phase. pricesFetchedAt = the OLDEST stored price, so a
-    // model the weekly pull stopped listing shows how stale its price is.
+    // null = no cost phase. pricesFetchedAt = when the stored prices were
+    // pulled (each pull replaces the whole table).
     cost: cost ? { source: 'openrouter_list_prices', estimate: true, priced: cost.priced, pricesFetchedAt: cost.pricesFetchedAt ? new Date(cost.pricesFetchedAt).toISOString() : null } : null,
   };
 }

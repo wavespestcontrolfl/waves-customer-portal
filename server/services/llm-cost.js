@@ -15,10 +15,11 @@
  * Every number is an ESTIMATE: tokens from the ledger (llm_dispatch_log,
  * GATE_LLM_CALL_LEDGER) times today's list price, at the long-prompt tier
  * the feed lists for a call whose prompt reaches it. Where the ledger cannot
- * tell which of two listed rates applied (cache lifetime; a missing cache or
- * reasoning rate), the higher one is used: an estimate may run high, never
- * low. Where it cannot tell at all (a session turn reaching a tier), the
- * call is unpriced. Per-request fees that are not tokens (web search, image
+ * tell which of two listed rates applied (cache lifetime; a missing
+ * cache-read or reasoning rate), the higher one is used: an estimate may run
+ * high, never low. Where no safe rate exists (a session turn reaching a
+ * tier, cache writes with no listed write rate), the call is unpriced. Each
+ * weekly pull replaces the table, so a model the feed dropped is unpriced. Per-request fees that are not tokens (web search, image
  * inputs) are not recorded in the ledger and are not included. Rows the ledger has no
  * usage for, and models the feed does not list, are counted as unpriced —
  * never guessed. Image, video, audio and embedding calls write no ledger
@@ -27,7 +28,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { llmCostTrackingLive } = require('../config/feature-gates');
+const { llmCostTrackingLive, gateEnvValue } = require('../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const PRICES = 'llm_model_prices';
@@ -197,8 +198,13 @@ async function pullPrices({ conn = db, fetchImpl = fetch, now = new Date() } = {
   }
   const rows = parseFeed(body, now);
   if (rows.length < MIN_FEED_ROWS) throw new Error(`price feed listed only ${rows.length} usable models; kept the stored prices`);
-  await conn(PRICES).insert(rows).onConflict('model_key').merge();
-  return { models: rows.length };
+  // a pull is a snapshot: a model the feed stopped listing loses its price
+  // (its calls count as unpriced) rather than billing at a stale one
+  const retired = await conn.transaction(async (trx) => {
+    await trx(PRICES).insert(rows).onConflict('model_key').merge();
+    return trx(PRICES).whereNotIn('model_key', rows.map((r) => r.model_key)).del();
+  });
+  return { models: rows.length, retired: Number(retired) || 0 };
 }
 
 const num = (v) => (v == null ? null : Number(v));
@@ -252,12 +258,15 @@ function ratesForCall(p, prompt) {
  *   anthropic  input EXCLUDES cache reads and writes, which are reported beside it
  *   openai     input INCLUDES cached tokens; output INCLUDES reasoning
  *   gemini     input INCLUDES cached tokens; thoughts are billed beside output
- * A missing cache / reasoning rate bills at the plain input / output rate
- * (an overestimate, never an underestimate). Unknown provider → null.
+ * A missing cache-read / reasoning rate bills at the plain input / output
+ * rate (an overestimate, never an underestimate); cache writes with no
+ * listed write rate, or an unknown provider → null (unpriced).
  */
 function costUsd(provider, t, p) {
   if (!p || p.input == null || p.output == null) return null;
   const n = (v) => Math.max(0, Number(v) || 0);
+  // a cache write can cost more than plain input: with no listed rate, unpriced
+  if (provider === 'anthropic' && n(t.cache_write_tokens) > 0 && p.cacheWrite == null) return null;
   const input = n(t.input_tokens);
   const cached = n(t.cached_input_tokens);
   const cacheWrite = n(t.cache_write_tokens);
@@ -266,7 +275,7 @@ function costUsd(provider, t, p) {
   const cacheRead = p.cacheRead ?? p.input;
   let perMillion;
   if (provider === 'anthropic') {
-    perMillion = input * p.input + cached * cacheRead + cacheWrite * (p.cacheWrite ?? p.input) + output * p.output;
+    perMillion = input * p.input + cached * cacheRead + cacheWrite * (p.cacheWrite || 0) + output * p.output;
   } else if (provider === 'openai') {
     perMillion = Math.max(0, input - cached) * p.input + cached * cacheRead + output * p.output;
   } else if (provider === 'gemini') {
@@ -408,6 +417,8 @@ async function refreshPricesIfStale({ conn, fetchImpl, now }) {
 
 async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch } = {}) {
   if (!llmCostTrackingLive()) return { ran: false, reason: 'gate_off' };
+  // no ledger = no spend data: never read silence as a recovery
+  if (!gateEnvValue('GATE_LLM_CALL_LEDGER')) return { ran: false, reason: 'ledger_off' };
   const prices = await refreshPricesIfStale({ conn, fetchImpl, now });
 
   const todayStart = etMidnight(now);
@@ -417,6 +428,9 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
     laneCosts(dayStart, todayStart, { conn }),
     laneCosts(baselineStart, dayStart, { conn }),
   ]);
+  // not one lane call recorded all day: the ledger was off or broken, so
+  // standing items are left as they are
+  if (!day.byLane.size) return { ran: true, raised: false, reason: 'no_ledger_rows', prices };
   const spikes = findSpikes(day.byLane, baseline.byLane);
   if (!spikes.length) {
     await closeSpikeItems(conn, now, 'spend_normal').catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
