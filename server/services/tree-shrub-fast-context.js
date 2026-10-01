@@ -90,6 +90,14 @@ const positiveOrNull = (value) => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
+// An amount unit, or null for a per-area rate unit ("lb/1000sf", which the
+// completion writer can store when no amount unit was sent): a rate is not an
+// amount applied, so it never pre-fills (pest-recap's common-products rule).
+const quantityUnit = (unit) => {
+  const value = String(unit || '').trim();
+  return value && !value.includes('/') ? value : null;
+};
+
 /**
  * This customer's recent completed T&S records at THIS property (newest
  * first) and their recorded products. records[0] is the last visit; a product
@@ -140,8 +148,8 @@ function buildLastVisit(history) {
     products: last.products.map((p) => ({
       productId: p.product_id ?? null,
       productName: p.product_name,
-      totalAmount: positiveOrNull(p.total_amount),
-      amountUnit: String(p.amount_unit || '').trim() || null,
+      totalAmount: quantityUnit(p.amount_unit) ? positiveOrNull(p.total_amount) : null,
+      amountUnit: quantityUnit(p.amount_unit),
     })),
   };
 }
@@ -152,7 +160,7 @@ function lastAmountsByProduct(history) {
   for (const record of history) {
     for (const p of record.products) {
       const totalAmount = positiveOrNull(p.total_amount);
-      const amountUnit = String(p.amount_unit || '').trim();
+      const amountUnit = quantityUnit(p.amount_unit);
       if (!p.product_id || !totalAmount || !amountUnit || byProduct.has(String(p.product_id))) continue;
       byProduct.set(String(p.product_id), { totalAmount, amountUnit, serviceDate: etCalendarDayOf(record.service_date) });
     }

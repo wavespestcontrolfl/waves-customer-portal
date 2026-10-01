@@ -14,6 +14,7 @@ const {
   treeShrubProductFlags,
   buildTreeShrubWarnings,
   lastAmountsByProduct,
+  buildLastVisit,
 } = require('../services/tree-shrub-fast-context');
 
 const TS_PROFILE = { category: 'tree_shrub', serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub', projectBacked: false, requiresProject: false, companions: [] };
@@ -257,6 +258,21 @@ describe('lastAmountsByProduct', () => {
     expect(map.has('b')).toBe(false);
     expect(map.get('c')).toEqual({ totalAmount: 4.5, amountUnit: 'lb', serviceDate: '2026-09-01' });
     expect(map.size).toBe(2);
+  });
+});
+
+describe('per-area rate units never pre-fill', () => {
+  test('a lb/1000sf row is skipped and an older real amount is used', () => {
+    const history = [
+      { id: 'r2', service_date: '2026-09-02', products: [{ product_id: 'snap', total_amount: '2.3', amount_unit: 'lb/1000sf' }] },
+      { id: 'r1', service_date: '2026-07-01', products: [{ product_id: 'snap', total_amount: '25', amount_unit: 'lb' }] },
+    ];
+    expect(lastAmountsByProduct(history).get('snap')).toEqual({ totalAmount: 25, amountUnit: 'lb', serviceDate: '2026-07-01' });
+  });
+
+  test('the last visit lists a rate row with no amount', () => {
+    const last = buildLastVisit([{ id: 'r2', status: 'completed', service_date: '2026-09-02', typed_values: {}, products: [{ product_id: 'snap', product_name: 'Snapshot 2.5TG', total_amount: '2.3', amount_unit: 'lb/1000sf' }] }]);
+    expect(last.products).toEqual([{ productId: 'snap', productName: 'Snapshot 2.5TG', totalAmount: null, amountUnit: null }]);
   });
 });
 
