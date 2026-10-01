@@ -4291,6 +4291,41 @@ function logGateStatus() {
   }
 }
 
+// Known GATE_* Railway variable names, for the Intelligence Bar's
+// set_railway_gate tool (it refuses a name not listed here, so a typo can
+// never create a new variable). Derived from THIS file's own source so a new
+// gate is known the moment it is documented or registered here, with no
+// second list to keep in step: every gate name the file mentions, in code or
+// in its comments. For a name the header block documents, the entry carries
+// that description, and `boolean: false` when the header says the gate takes
+// something other than "true" (a timestamp, "shadow") — the tool refuses to
+// flip those to a bare 'true'/'false'. RETIRED names stay out: the owner
+// ruled they must not be re-enabled. A gate read only by some other module,
+// and never mentioned in this file, is not known here.
+const RETIRED = new Set(['GATE_ONE_TIME_WELCOME_EMAIL']);
+const MAX_DESC = 300;
+let gateCatalogCache = null;
+
+function knownGateCatalog() {
+  if (gateCatalogCache) return gateCatalogCache;
+  const src = require('fs').readFileSync(__filename, 'utf8');
+  const catalog = new Map();
+  const headerEnd = src.indexOf('*/');
+  for (const line of src.slice(0, headerEnd).split('\n')) {
+    const m = line.match(/^ \*   (GATE_[A-Z0-9_]*[A-Z0-9])=(\S*)\s*(.*)$/);
+    if (!m) continue;
+    const text = m[3].replace(/^\(/, '').replace(/\)\s*$/, '').trim();
+    catalog.set(m[1], { name: m[1], boolean: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
+  }
+  for (const name of src.match(/GATE_[A-Z0-9_]*[A-Z0-9]/g) || []) {
+    // Names that carry a timestamp / list, not an on-off value.
+    if (!catalog.has(name)) catalog.set(name, { name, boolean: !/(_SINCE|_AT|_ALLOWLIST)$/.test(name), description: null });
+  }
+  for (const name of RETIRED) catalog.delete(name);
+  gateCatalogCache = catalog;
+  return catalog;
+}
+
 // GATE_OUTLINK_TRACKING read at CALL time — strict `=== 'true'`, same
 // convention as visitPrepPhotosLive(). The canonical reader for
 // server/services/outlink-tracking.js (render-time rewrite of outside links
@@ -4362,6 +4397,9 @@ function zoneRouteDaysLive() {
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
+// Exported on its own line (not in the shared list above) so concurrent gate
+// PRs appending to that one-line list never conflict with this one.
+module.exports.knownGateCatalog = knownGateCatalog;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;

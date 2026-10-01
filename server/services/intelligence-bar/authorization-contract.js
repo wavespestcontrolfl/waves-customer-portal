@@ -186,6 +186,8 @@ const ACTION_LABELS = {
   add_github_pr_label: 'Add a GitHub PR label',
   request_codex_review: 'Request a Codex review',
   submit_gsc_sitemap: 'Submit a sitemap to Search Console',
+  set_railway_gate: 'Change a Railway feature gate',
+  set_growthbook_feature: 'Toggle a GrowthBook feature',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
