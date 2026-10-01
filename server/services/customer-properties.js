@@ -158,17 +158,29 @@ function premisesKey({ address_line1, address_line2, zip } = {}) {
     .replace(/[^a-z0-9]/g, '');
 }
 
+/**
+ * The row in `existingProps` that is the same house as `candidate`: the full
+ * address key, else street + unit + ZIP (premisesKey). Without a ZIP on both
+ * sides the city is the only locality evidence, so the full key decides alone.
+ * A caller resolving the row recordCallProperty declined to insert uses this,
+ * so it finds exactly the row the dedupe matched (pure).
+ */
+function findSamePremises(existingProps, candidate = {}) {
+  const key = addressKey(candidate);
+  if (!key) return null;
+  const zip = normalizeZip(candidate.zip);
+  const premises = zip ? premisesKey(candidate) : null;
+  const rows = existingProps || [];
+  return rows.find((p) => addressKey(p) === key)
+    || (premises && rows.find((p) => normalizeZip(p.zip) === zip && premisesKey(p) === premises))
+    || null;
+}
+
 /** True when `candidate` has a street and its full address isn't already in `existingProps` (pure). */
 function isNewAddress(existingProps, candidate = {}) {
   if (!String(candidate.address_line1 || '').trim()) return false;
-  const key = addressKey(candidate);
-  if (!key) return false;
-  // Without a ZIP on both sides the city is the only locality evidence, so
-  // the full address key decides alone.
-  const zip = normalizeZip(candidate.zip);
-  const premises = zip ? premisesKey(candidate) : null;
-  return !(existingProps || []).some((p) => addressKey(p) === key
-    || (premises && normalizeZip(p.zip) === zip && premisesKey(p) === premises));
+  if (!addressKey(candidate)) return false;
+  return !findSamePremises(existingProps, candidate);
 }
 
 /** Active properties for a customer, primary first. */
@@ -1122,6 +1134,7 @@ module.exports = {
   defaultOccupancyForContactRole,
   defaultRelationshipForContactRole,
   isNewAddress,
+  findSamePremises,
   completePrimaryFromCall,
   syncPrimaryAddress,
   syncPrimaryCoordsFromCustomer,

@@ -1,4 +1,4 @@
-const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
+const { normStreet, addressKey, findSamePremises, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole, syncPrimaryAddress } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -120,6 +120,15 @@ describe('customer-properties pure helpers', () => {
     expect(isNewAddress([{ address_line1: '200 Example Gln', zip: '34219' }], { address_line1: '202 Example Glen', zip: '34219' })).toBe(true);
     expect(isNewAddress([{ address_line1: '100 Main Cv', zip: '34219' }], { address_line1: '100 Main Ct', zip: '34219' })).toBe(true);
     expect(isNewAddress([{ address_line1: '100 Main St', city: 'Parrish', zip: '34219' }], { address_line1: '100 Main St', city: 'Bradenton', zip: '34211' })).toBe(true);
+  });
+
+  test('findSamePremises returns the row the duplicate check matched, so a declined insert still resolves', () => {
+    const exact = { id: 'a', address_line1: '500 Demo Ln', city: 'Venice', zip: '34285' };
+    const glen = { id: 'b', address_line1: '200 Example Gln', city: 'Duette', zip: '34219' };
+    expect(findSamePremises([exact, glen], { address_line1: '200 Example Glen', city: 'Parrish', zip: '34219' })).toBe(glen);
+    expect(findSamePremises([exact, glen], { address_line1: '500 Demo Lane', city: 'Venice', zip: '34285' })).toBe(exact);
+    expect(findSamePremises([exact, glen], { address_line1: '200 Example Glen', city: 'Parrish' })).toBeNull();
+    expect(findSamePremises([], { address_line1: '' })).toBeNull();
   });
 });
 
