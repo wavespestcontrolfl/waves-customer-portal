@@ -294,6 +294,8 @@ const SCOPE_SNAPSHOT = {
     // list_gap_reports' free-text summary/attempted fields are cleaned but not
     // customer-proven — a gap report can still carry an operator's phrasing.
     'list_gap_reports',
+    // needs_me returns alert headlines and reasons, which name customers.
+    'needs_me',
     // Operator free text passed through verbatim (a name or address can be
     // typed into any of these): technician notes and call snippets, restock
     // reasons, the pricing changelog, estimate service_interest, lost reasons.

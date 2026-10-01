@@ -107,7 +107,8 @@ const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeS
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
+const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
 // The follow-up override chain (German knockdown windows, two-treatment
@@ -1936,6 +1937,117 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Plain words for each writer-rules rejection, for the edit heads-up.
+const REPORT_RULE_FINDING_LABELS = Object.freeze({
+  amount: 'An amount or measurement',
+  footage: 'A measured area (feet or acres)',
+  percent: 'A percentage',
+  rate: 'A rate or mix strength',
+  per_visit: '"Per visit"',
+  company_name: 'A company name other than Waves Pest Control',
+  safe_word: 'The word "safe" (or harmless, non-toxic)',
+  chemical: 'The word "chemical"',
+  owner_phrase: 'A word the report leaves out',
+  unscoped_absence: '"No activity" for the whole property',
+  aftercare: 'Care instructions (the report prints its own)',
+  reentry: 'Re-entry or drying instructions (the report prints its own)',
+  timeframe: 'A timeframe not from the approved wording',
+  gauge: "The activity gauge's number",
+  quote: 'The customer quoted word for word',
+  price: 'A price, or free, included or covered',
+  date: 'A date or day',
+  time: 'A time or arrival window',
+  active_ingredient: 'An active ingredient name',
+  report_shape: 'The report no longer has its four titled parts with one line each, so the customer would get the standard summary instead',
+});
+// The writer's own titles, so a re-checked sentence is screened inside its
+// section: a timeframe allowed in WHAT TO EXPECT is refused in WHAT WE DID
+// AND WHY (Codex #5500). An unknown key screens as WHAT WE FOUND, where
+// nothing extra is allowed.
+const SECTION_SCREEN_TITLES = Object.freeze({
+  whatWeFound: 'WHAT WE FOUND', whatWeDid: 'WHAT WE DID AND WHY', whatToExpect: 'WHAT TO EXPECT', whatsNext: "WHAT'S NEXT",
+});
+const normalizeSentence = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const reportSentences = (sections) => (Array.isArray(sections) ? sections : [])
+  .flatMap((section) => (section?.paragraphs || []).join(' ').split(/(?<=[.!?])\s+/)
+    .map((sentence) => ({ key: section?.key || null, sentence: sentence.trim() })))
+  .filter((entry) => entry.sentence);
+const REFUSED_WORDS_LABEL = 'Words the report can\'t publish (it would show the plain summary instead)';
+// Unchanged means the same sentence in the same section.
+const sectionSentenceKey = (entry) => `${entry.key}|${normalizeSentence(entry.sentence)}`;
+
+// Edit heads-up for the four-section report (owner 2026-10-01: "it
+// shouldn't stop us, but we should rerun it if I or a tech edits it";
+// Codex #5500). The writer rules run again on every sentence that differs
+// from the installed generated draft; any finding returns one 409 the tech
+// confirms ("send as is") or goes back to edit. Never blocks: a confirmed
+// resubmit passes. Only the four-section report is checked, and it exists
+// only while GATE_REPORT_WRITER_RULES is live. Fail-open on checker errors.
+function reportRulesReviewBlockPayload({
+  isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase = null, activeIngredients = [],
+}) {
+  if (isIncompleteVisit || reportRulesConfirmed) return null;
+  try {
+    // Structure, not the publishable parse: an edit that adds a refused
+    // word ("safe") drops the whole body at render, and the tech must hear
+    // about that too (Codex #5500).
+    const base = typeof reportDraftBase === 'string' && reportDraftBase.trim()
+      ? fourSectionReport(reportDraftBase)
+      : null;
+    const submitted = fourSectionReport(technicianNotes);
+    if (!submitted) {
+      // An installed draft edited out of its shape (a second line in a
+      // section, a changed title): the render parse refuses it too and the
+      // customer gets the standard summary, so the tech hears about it
+      // (Codex #5500). Notes with no installed draft are not a report, and
+      // notes in the older two-section layout still publish as one.
+      if (!base || normalizeSentence(technicianNotes) === normalizeSentence(reportDraftBase)) return null;
+      const legacy = technicianReportCustomerCopy(technicianNotes);
+      if (legacy?.body) return null;
+      return reportRulesReviewPayload([legacy
+        ? { reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: legacy.violations.join(', ') }
+        : { reason: 'report_shape', label: REPORT_RULE_FINDING_LABELS.report_shape, sentence: null }]);
+    }
+    const unchanged = new Set(reportSentences(base?.sections).map(sectionSentenceKey));
+    // The same context the generation screen had: this visit's catalog
+    // actives, and the timeframes and dates the generated draft carried
+    // (they passed that screen), so an edit that keeps them is no finding.
+    const screenOptions = {
+      activeIngredients,
+      allowedPhrases: groundedTimeframePhrases([base?.body || '']),
+      allowedDates: draftDatePhrases(base?.body || ''),
+    };
+    const findings = [];
+    if (submitted.violations.length) {
+      findings.push({ reason: 'refused_words', label: REFUSED_WORDS_LABEL, sentence: submitted.violations.join(', ') });
+    }
+    for (const entry of reportSentences(submitted.sections)) {
+      if (unchanged.has(sectionSentenceKey(entry))) continue;
+      const titled = `${SECTION_SCREEN_TITLES[entry.key] || SECTION_SCREEN_TITLES.whatWeFound}\n${entry.sentence}`;
+      const reason = writerRulesRejection(titled, screenOptions);
+      if (reason) findings.push({ reason, label: REPORT_RULE_FINDING_LABELS[reason] || 'A rule the report follows', sentence: entry.sentence });
+    }
+    if (!findings.length) return null;
+    return reportRulesReviewPayload(findings);
+  } catch {
+    return null;
+  }
+}
+
+function reportRulesReviewPayload(findings) {
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code, so the plain-words list
+      // rides in the error string; the structured list stays for tests.
+      error: findings.map((finding) => (finding.sentence ? `${finding.label}: "${finding.sentence}"` : finding.label)).join('\n'),
+      code: 'report_rules_review',
+      findings,
+      confirmable: true,
+    },
+  };
+}
+
 // Completion invoice-candidate lookups + reconciliation live in
 // services/completion-invoice-candidate.js (shared with the card-expiry
 // exemption so both read the same rows through the same rules).
@@ -2565,6 +2677,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the visit is actually an inspection.
       offerInspectionCredit = true,
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
+      reportRulesConfirmed = false, // tech confirmed the edit heads-up ("send as is")
+      reportDraftBase = null, // the installed generated draft the notes were edited from
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
       // The visit identity the client's form was built against (customer,
@@ -3193,6 +3307,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (reconcileBlock
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
+      }
+    }
+    // Edit heads-up on the four-section report (see
+    // reportRulesReviewBlockPayload): same 409 shape, same committed-retry
+    // exemption as the reconciliation prompt just above.
+    {
+      // This visit's catalog actives, as the generation screen reads them
+      // (fail-soft: the common list still applies inside the screen).
+      const reviewProductIds = (Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean);
+      const reviewActives = reportRulesConfirmed || !reviewProductIds.length
+        ? []
+        : (await failSoftRead(db, (k) => k('products_catalog').whereIn('id', reviewProductIds).select('active_ingredient'), []))
+          .map((row) => row?.active_ingredient).filter(Boolean);
+      const rulesBlock = reportRulesReviewBlockPayload({
+        isIncompleteVisit, reportRulesConfirmed, technicianNotes, reportDraftBase, activeIngredients: reviewActives,
+      });
+      if (rulesBlock
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
+        return ({ status: rulesBlock.status, body: rulesBlock.payload });
       }
     }
     // A committed completion (a saved visit member, a lost-response retry)
@@ -5268,6 +5401,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // The body came from the four-section report (writer rules): the
+        // frozen cards carrying it are stamped so a later kill switch hides
+        // them (report-data).
+        let technicianReportFourSection = false;
         // Request-context rejections (trade names from THIS visit's
         // products, companion contradictions) must survive to the RENDER
         // path: untyped completions have no governing snapshot, so
@@ -5281,6 +5418,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          technicianReportFourSection = Boolean(technicianReport?.sections);
           // The generate endpoint screens trade names per-request, but a
           // post-generation inline edit reaches completion with only the
           // static banned-word checks — rerun the visit-specific product
@@ -6405,6 +6543,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (companionActivity) companionActivityInserts.push(companionActivity);
             }
             if (companionSnapshots.length) serviceData.companionReportSnapshots = companionSnapshots;
+          }
+          if (technicianReportFourSection) {
+            for (const snapshot of [serviceData.typedReportSnapshot, ...(serviceData.companionReportSnapshots || [])]) {
+              if (snapshot?.todaysResult?.bodySource === 'technician_report') snapshot.todaysResult.bodyFormat = 'four_section';
+            }
           }
           const [priorVisitCountRow] = serviceRecordCols.visit_number
             ? await trx('service_records')
@@ -14022,6 +14165,7 @@ module.exports = {
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,
+  reportRulesReviewBlockPayload,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   reportV1InvoiceBodyCarriesPayLink,

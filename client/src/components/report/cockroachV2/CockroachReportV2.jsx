@@ -7,6 +7,7 @@
 import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
+import ReportText from '../ReportSections';
 
 const TEXT = 'var(--text)';
 const MUTED = 'var(--muted)';
@@ -62,7 +63,7 @@ export function activityTrendLine(activity) {
 }
 
 // ── 1. Today's result ─────────────────────────────────────────────────────────
-export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null }) {
+export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null, reportSections = null, reportNextVisitLabel = null }) {
   if (!status) return null;
   const t = tone(status.tone);
   // The headline already carries the comparison on a trend visit
@@ -80,7 +81,14 @@ export function CockroachStatusHero({ status, statusSummary, metrics, narrative 
         <p style={{ margin: '10px 0 0', fontSize: 15, lineHeight: 1.55, color: TEXT }}>{statusSummary}</p>
       ) : null}
       {narrative && narrative !== statusSummary ? (
-        <p className="ai-summary-body" style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}>{narrative}</p>
+        <ReportText
+          text={narrative}
+          sections={reportSections}
+          nextVisitLabel={reportNextVisitLabel}
+          className="ai-summary-body"
+          style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}
+          titleStyle={{ color: TEXT }}
+        />
       ) : null}
       {trendLine ? (
         <p style={{ margin: '10px 0 0', fontSize: 14, color: MUTED }}>{trendLine}</p>

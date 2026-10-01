@@ -11,7 +11,7 @@ jest.mock('../services/twilio', () => ({}));
 
 const { isUsableAdsReport, normalizeAdsReport } = require('../services/ads/campaign-advisor');
 
-const GOOD = { grade: 'B', overall_assessment: 'ROAS steady, one campaign underspending.' };
+const GOOD = { grade: 'B', overall_assessment: 'ROAS steady, one campaign underspending.', recommendations: [], waste_alerts: [], scaling_opportunities: [], capacity_warnings: [], seo_insights: [] };
 
 describe('isUsableAdsReport', () => {
   test('accepts a minimal usable report', () => {
@@ -52,7 +52,7 @@ describe('isUsableAdsReport', () => {
     expect(isUsableAdsReport({
       ...GOOD,
       insights: ['CPA trending down'],
-      recommendations: [{ priority: 'high', action: 'raise budget' }],
+      recommendations: [{ priority: 'high', action: 'raise budget', reasoning: '7.0x ROAS on $40 spend' }],
       waste_alerts: [],
     })).toBe(true);
   });
@@ -68,21 +68,21 @@ describe('recommendations must be usable', () => {
     ['an object reasoning (would throw as a React child)', { action: 'raise budget', reasoning: { why: 'x' } }],
     ['an array campaign', { action: 'raise budget', campaign: ['Pest'] }],
   ])('%s fails the report', (_label, rec) => {
-    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'high', action: 'ok' }, { priority: 'high', ...rec }] })).toBe(false);
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'high', action: 'ok', reasoning: '7.0x ROAS on $40 spend' }, { priority: 'high', ...rec }] })).toBe(false);
   });
 
   test('a rec with an action and text fields is usable', () => {
-    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest', reasoning: 'headroom', estimated_impact: '+$40/wk' }] })).toBe(true);
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest', reasoning: 'headroom: 25% lost IS (budget)', estimated_impact: '+$40/wk' }] })).toBe(true);
   });
 });
 
 // An off-contract member fails the leg (the next provider gets a turn)
 // instead of being rewritten or trimmed after the leg was accepted.
 describe('rendered items must be usable as given', () => {
-  const rec = { priority: 'high', action: 'raise budget' };
+  const rec = { priority: 'high', action: 'raise budget', reasoning: '7.0x ROAS on $40 spend' };
   test.each([
     ['a rec without a priority', { recommendations: [{ action: 'a' }] }],
-    ['a rec with an off-enum priority (would never be shown)', { recommendations: [{ priority: 'urgent', action: 'a' }] }],
+    ['a rec with an off-enum priority (would never be shown)', { recommendations: [{ priority: 'urgent', action: 'a', reasoning: '7.0x ROAS on $40 spend' }] }],
     ['a waste alert without its search term (a copied template)', { recommendations: [rec], waste_alerts: [{ search_term: '', spend: 0 }] }],
     ['a waste alert with an object spend', { recommendations: [rec], waste_alerts: [{ search_term: 'bugs', spend: { usd: 3 } }] }],
     ['a scaling opportunity without its campaign', { scaling_opportunities: [{ current_budget: 20 }] }],
@@ -96,16 +96,17 @@ describe('rendered items must be usable as given', () => {
   test('a full report with every list well formed is usable; an extra non-rendered field is fine', () => {
     expect(isUsableAdsReport({
       ...GOOD,
-      recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest' }],
+      recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest', reasoning: '7.0x ROAS on $40 spend' }],
       waste_alerts: [{ search_term: 'free pest control', spend: 12.5, conversions: 0, action: 'add_negative', extra: [1] }],
       scaling_opportunities: [{ campaign: 'Pest', current_budget: 20, suggested_budget: 30, headroom_reason: 'IS lost to budget' }],
       capacity_warnings: [{ area: 'Venice', utilization: 95, recommendation: 'slow spend' }],
+      seo_insights: [],
       insights: ['CPA is down'],
     })).toBe(true);
   });
 
   test('normalizeAdsReport only lower-cases an accepted priority so the page groups it', () => {
-    const out = normalizeAdsReport({ ...GOOD, recommendations: [{ priority: ' High ', action: 'a' }, { priority: 'low', action: 'b' }] });
+    const out = normalizeAdsReport({ ...GOOD, recommendations: [{ priority: ' High ', action: 'a', reasoning: '7.0x ROAS on $40 spend' }, { priority: 'low', action: 'b', reasoning: '7.0x ROAS on $40 spend' }] });
     expect(out.recommendations.map((r) => r.priority)).toEqual(['high', 'low']);
   });
 });
@@ -113,7 +114,7 @@ describe('rendered items must be usable as given', () => {
 // Codex r20 on #4884: the manual-action hint calls .replace() on
 // apply_action / manual_action, so a non-string one crashed the Ads page.
 describe('recommendation apply fields', () => {
-  const rec = { priority: 'high', action: 'raise budget' };
+  const rec = { priority: 'high', action: 'raise budget', reasoning: '7.0x ROAS on $40 spend' };
   test.each([
     ['a numeric apply_action', { apply_action: 5 }],
     ['an object apply_action', { apply_action: { kind: 'increase_budget' } }],
@@ -133,4 +134,48 @@ test.each([['Excellent'], ['G'], ['AA'], [7]])('grade %p fails the report', (gra
 });
 test.each([[' a '], ['B+'], ['C-'], ['F']])('grade %p is usable', (grade) => {
   expect(isUsableAdsReport({ ...GOOD, grade })).toBe(true);
+});
+
+describe('owner quality bar (2026-10-01)', () => {
+  test('an omitted recommendations list is off-contract (it must not be texted as "no changes")', () => {
+    const { recommendations, ...noList } = GOOD;
+    expect(recommendations).toEqual([]);
+    expect(isUsableAdsReport(noList)).toBe(false);
+    expect(isUsableAdsReport(GOOD)).toBe(true);
+  });
+
+  test.each([
+    ['missing reasoning', { priority: 'high', action: 'raise budget' }],
+    ['blank reasoning', { priority: 'high', action: 'raise budget', reasoning: '  ' }],
+    ['reasoning with no figures', { priority: 'high', action: 'raise budget', reasoning: 'it is doing well' }],
+  ])('a recommendation with %s is rejected', (_label, rec) => {
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [rec] })).toBe(false);
+  });
+});
+
+describe('secondary findings need numeric evidence (Codex r3 on #5486)', () => {
+  test.each([
+    ['an SEO insight with no figures', { seo_insights: [{ detail: 'Update metadata', type: 'opportunity', action: 'rewrite title' }] }],
+    ['a waste alert without spend', { waste_alerts: [{ search_term: 'free pest control', conversions: 0, action: 'add_negative' }] }],
+    ['a scaling row without budgets', { scaling_opportunities: [{ campaign: 'Pest', headroom_reason: 'room to grow' }] }],
+    ['a capacity warning without utilization', { capacity_warnings: [{ area: 'Venice', recommendation: 'slow spend' }] }],
+  ])('%s fails the leg', (_label, extra) => {
+    expect(isUsableAdsReport({ ...GOOD, ...extra })).toBe(false);
+  });
+
+  test('numeric strings count as evidence; figures in SEO detail count', () => {
+    expect(isUsableAdsReport({
+      ...GOOD,
+      waste_alerts: [{ search_term: 'free pest control', spend: '12.50', conversions: '0', action: 'add_negative' }],
+      seo_insights: [{ detail: 'pest control venice at position 11, 420 impressions', type: 'opportunity', action: 'add FAQ' }],
+    })).toBe(true);
+  });
+});
+
+describe('action-bearing lists are required (Codex r6 on #5486)', () => {
+  test.each(['waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'])(
+    'a report missing %s is incomplete, not "nothing flagged"', (key) => {
+      const { [key]: _omitted, ...partial } = GOOD;
+      expect(isUsableAdsReport(partial)).toBe(false);
+    });
 });

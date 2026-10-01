@@ -59,6 +59,8 @@ const { OWNER_RULES, TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER } = require('
 
 const handler = router.stack.find((layer) => layer.route?.path === '/generate-report').route.stack.at(-1).handle;
 const CLEAN = 'WHAT WE DID\n\nWe treated the door thresholds and the foundation on the lanai side.\n\nWHAT WE FOUND\n\nGhost ants were trailing along the slider track, and activity was light.';
+// The writer rules accept only the four-section report.
+const CLEAN_V2 = "WHAT WE FOUND\n\nGhost ants were trailing along the slider track, and activity was light.\n\nWHAT WE DID AND WHY\n\nWe treated the door thresholds and the foundation on the lanai side.\n\nWHAT TO EXPECT\n\nThe technician will look at the slider track again next time.\n\nWHAT'S NEXT\n\nLet us know if the ants keep trailing along the slider track.";
 
 function mkReq(body) {
   return {
@@ -78,7 +80,9 @@ function mkRes() {
 
 beforeEach(() => {
   mockProvider.mockReset();
-  mockProvider.mockImplementation(async () => ({ ok: true, text: CLEAN }));
+  mockProvider.mockImplementation(async () => ({
+    ok: true, text: process.env.GATE_REPORT_WRITER_RULES === 'true' ? CLEAN_V2 : CLEAN,
+  }));
   mockBuildContext.mockClear();
   mockComms.mockReset();
   mockComms.mockImplementation(async () => ({ text: '', promptHint: '' }));
@@ -155,13 +159,13 @@ test('gate off: pest keeps the exact legacy user message', async () => {
 test('gate on: copy that breaks a rule is rejected and retried', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds') }))
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Ants on the slider track; treated thresholds (retry case).' }), res);
   expect(res.statusCode).toBe(200);
   expect(mockProvider).toHaveBeenCalledTimes(2);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate on: a cached draft is never served for a different product set', async () => {
@@ -231,44 +235,44 @@ test('gate on: a catalog product the note mentions is screened even though it wa
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about Termidor. Ghost ants were trailing') }))
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'You asked about Termidor. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Customer asked about Termidor. Treated the thresholds (catalog mention case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(2);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'In2Care Mosquito Station', active_ingredient: 'Beauveria bassiana; Pyriproxyfen' }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about a Beauveria bassiana station. Ghost ants were trailing') }))
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'You asked about a Beauveria bassiana station. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Customer asked about In2Care stations. Treated the thresholds (mentioned actives case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(2);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate on: a catalog active the note names on its own is screened', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'AzaGuard', active_ingredient: 'Azadirachtin' }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about azadirachtin. Ghost ants were trailing') }))
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('Ghost ants were trailing', 'You asked about azadirachtin. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Customer asked about azadirachtin. Treated the thresholds (direct active case).' }), res);
   expect(mockProvider).toHaveBeenCalledTimes(2);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate on: a name-only product still has its catalog actives screened', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ name: 'Mosquito Dunks', active_ingredient: 'Beauveria bassiana' }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We placed Beauveria bassiana in the pond and treated the door thresholds') }))
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2.replace('We treated the door thresholds', 'We placed Beauveria bassiana in the pond and treated the door thresholds') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
   const res = mkRes();
   await handler(mkReq({
     serviceNotes: 'Dunks in the pond (name-only product case).',
@@ -276,7 +280,7 @@ test('gate on: a name-only product still has its catalog actives screened', asyn
     products: [{ productId: null, name: 'Mosquito Dunks', applicationMethod: 'spot_treatment' }],
   }), res);
   expect(mockProvider).toHaveBeenCalledTimes(2);
-  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
 });
 
 test('gate off: the same amount is not screened by the rules', async () => {
@@ -370,5 +374,78 @@ describe('booked reason', () => {
     expect(text).not.toContain('BOOKED REASON');
     expect(text).not.toContain('Ants on the kitchen counter again');
     expect(system).not.toContain('CALLBACK / RESERVICE');
+  });
+});
+
+describe('four-section report (writer rules v2)', () => {
+  test('gate on: an answer in the old two-section shape is rejected and retried', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }))
+      .mockImplementationOnce(async () => ({ ok: true, text: CLEAN_V2 }));
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (shape retry case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN_V2 }));
+  });
+
+  test('gate off: the two-section shape is still the one accepted', async () => {
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (gate-off shape case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(1);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+  });
+
+  test('gate on: the four-section report gets room to run longer', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (room case).' }), mkRes());
+    expect(mockProvider.mock.calls[0][0].maxTokens).toBe(2000);
+  });
+
+  test('gate off: the paragraph keeps its budget', async () => {
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (budget case).' }), mkRes());
+    expect(mockProvider.mock.calls[0][0].maxTokens).toBe(800);
+  });
+
+  test.each([
+    ['a re-service', { serviceKey: 'pest_re_service', findingsType: null, billingType: 'one_time' }, {}, 're_service'],
+    ['a callback', { serviceKey: 'pest_general_quarterly', findingsType: null, billingType: 'recurring' }, { is_callback: true }, 're_service'],
+    ['a one-time service', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, {}, 'one_time'],
+    ['a one-time key on a recurring series', { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, { recurring_parent_id: 'parent-1' }, 'recurring'],
+    ["a one-time service carrying the 'one_time' pattern marker", { serviceKey: 'one_time_pest_control', findingsType: null, billingType: 'one_time' }, { recurring_pattern: 'one_time' }, 'one_time'],
+    ['a recurring plan visit', { serviceKey: 'pest_general_quarterly', findingsType: null, billingType: 'recurring' }, {}, 'recurring'],
+    ['an unresolved profile', { serviceKey: null, findingsType: null, billingType: null, synthesized: true }, {}, null],
+    ['an unresolved profile on a recurring series', { serviceKey: null, findingsType: null, billingType: null }, { recurring_parent_id: 'parent-1' }, 'recurring'],
+  ])('gate on: %s reaches the context builder with its service type', async (label, profile, row, kind) => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockProfile = profile;
+    mockBooked = row;
+    await handler(mkReq({ serviceNotes: `Ants on the slider track (${label} case).` }), mkRes());
+    // (An unresolved profile has no in-scope writer; only its kind is judged here.)
+    expect(mockBuildContext.mock.calls[0][0]).toEqual(expect.objectContaining({ serviceKind: kind }));
+  });
+
+  test('gate on: a timeframe from the approved wording passes; an invented one is retried', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockBuildContext.mockImplementationOnce(async () => ({ contextText: '', signals: {}, writerAllowedPhrases: ['a few days'] }));
+    const supplied = CLEAN_V2.replace('The technician will look at the slider track again next time.', 'You may see a few more ants for a few days.');
+    const invented = CLEAN_V2.replace('The technician will look at the slider track again next time.', 'Activity should drop within 3 weeks.');
+    mockProvider
+      .mockImplementationOnce(async () => ({ ok: true, text: invented }))
+      .mockImplementationOnce(async () => ({ ok: true, text: supplied }));
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ants on the slider track (timeframe case).' }), res);
+    expect(mockProvider).toHaveBeenCalledTimes(2);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: supplied }));
+  });
+
+  test('gate on: the typed activity score reads as a gauge, not a severity', () => {
+    const { buildTypedFindingsPromptBlock } = router._test;
+    const values = { termite_activity: 'Active termites present', bait_consumption: 'Light termite feeding on the bait' };
+    const gauge = buildTypedFindingsPromptBlock({ findingsType: 'termite_bait_station', values, activityScore: 4, activityGauge: true });
+    expect(gauge).toContain('gauge on the report, set by the form from the recorded answers (never restate it, and never call it high or low): 4/5');
+    expect(gauge).not.toContain('4/5 (high)');
+    const legacy = buildTypedFindingsPromptBlock({ findingsType: 'termite_bait_station', values, activityScore: 4 });
+    expect(legacy).toContain('4/5 (high)');
   });
 });
