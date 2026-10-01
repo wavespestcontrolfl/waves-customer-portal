@@ -11,10 +11,11 @@
  * can never silently disagree about what "eligible" or "the plan" means.
  * `docs/design/rider-series-scheduling.md` has the full rule set.
  *
- * Nothing in this repository sets `scheduled_services.rides_parent_id` yet
- * (schema-only migration 20260928220000_scheduled_services_rides_parent —
- * see its own header) and nothing calls `previewRiderPair` from any hook,
- * cron, or writer. It is reached ONLY from
+ * `scheduled_services.rides_parent_id` is written in ONE place: estimate
+ * accept, behind GATE_PEST_RIDES_LAWN_AT_ACCEPT (rider-accept-seeding.js
+ * links a quarterly rider series to the lawn series it was seeded on). No
+ * hook, cron or extension reads it yet, and nothing calls `previewRiderPair`
+ * from any hook, cron, or writer. It is reached ONLY from
  * scripts/rider-series-preview-report.js, a read-only ops report the owner
  * runs by hand.
  *
@@ -180,11 +181,6 @@ function riderHostKind(row) {
   if (row.recurring_pattern !== 'custom') return null;
   const interval = row.recurring_interval_days;
   return Number(interval) === 42 || (interval == null && snapshot === 'lawn_care_6week') ? 'lawn_6wk' : null;
-}
-
-// Seeder family key ('pest_control', 'tree_shrub', ...) of a series row.
-function riderFamilyOf(row) {
-  return require('./recurring-appointment-seeder').serviceKeyFor({ service_type: row?.service_type });
 }
 
 function riderPairingEnabled(hostRow, riderFamily, riderPattern) {
@@ -947,7 +943,6 @@ module.exports = {
   planRiderDates,
   computeRiderHorizon,
   riderHostKind,
-  riderFamilyOf,
   riderPairingEnabled,
   RIDER_PAIRINGS,
   liveHostRows,

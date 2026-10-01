@@ -41,14 +41,42 @@ const inSavepoint = (conn, fn) => (conn.isTransaction ? conn.transaction(fn) : f
 
 // null while the gate is off (read at call time). Optional call: suites that
 // mock feature-gates partially never define this reader, which means off.
+// Riding means ONE stop, so visit grouping must be on too (off = no context).
 function createContext() {
-  return require('../config/feature-gates').pestRidesLawnAtAcceptLive?.() ? { lawn: null } : null;
+  const fg = require('../config/feature-gates');
+  return fg.pestRidesLawnAtAcceptLive?.() && fg.gates?.visitGroups ? { lawn: null } : null;
 }
 
 // A lawn host (6-week or monthly) before it is stamped recurring: only the
 // converter's resolved family + pattern exist on the parent at this point.
+// The family is already resolved as lawn (from the catalog identity when the
+// row's own label is stale), so the host is classified from it, never from
+// the row label.
 function hostRow(parentRow, pattern) {
-  return { ...parentRow, service_type: parentRow.service_type || 'Lawn Care', recurring_pattern: pattern };
+  const snapshot = String(parentRow.service_key_snapshot || '');
+  return {
+    ...parentRow,
+    service_key_snapshot: snapshot.startsWith('lawn_care') ? snapshot : 'lawn_care',
+    recurring_pattern: pattern,
+  };
+}
+
+// The first rider visit and the first lawn visit must form ONE stop under the
+// canonical grouping rules (gate, property, placed window, family, status,
+// autopay, technician): already in the same visit, or visit-groups' own
+// preview says the rider would join the lawn. Anything else is not a ride.
+async function firstVisitsGroup(conn, riderId, lawnId) {
+  const rows = await inSavepoint(conn, (sp) => sp('scheduled_services').whereIn('id', [riderId, lawnId]).select('id', 'visit_id'));
+  const visitOf = (id) => rows.find((r) => String(r.id) === String(id))?.visit_id || null;
+  if (visitOf(riderId) && String(visitOf(riderId)) === String(visitOf(lawnId))) return true;
+  const preview = await require('./visit-groups').maybeGroupRow(riderId, { database: conn, preview: true });
+  return !!preview?.rowIds?.some((id) => String(id) === String(lawnId));
+}
+
+// The converter's seeding of this lawn failed: later riders must not plan
+// against it (they seed their own walk).
+function forgetLawn(ctx, parentRow) {
+  if (ctx?.lawn && String(ctx.lawn.parent.id) === String(parentRow?.id)) ctx.lawn = null;
 }
 
 function isHostPlan(family, pattern, parentRow = {}) {
@@ -88,6 +116,12 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     || dateOnly(lawn.scheduled_date) !== firstDate
     || String(lawn.property_id || '') !== String(rider.property_id || '')) {
     logger.warn(`[rider-accept] lawn ${lawn.id} and rider ${rider.id} do not start at the same stop (seeding the quarterly walk)`);
+    return null;
+  }
+  // A lawn that has already seeded can be checked now; a reserved lawn's
+  // projected plan is checked when it seeds (settleProjectedRiders).
+  if (ctx.lawn.seededDates && !(await firstVisitsGroup(conn, rider.id, lawn.id))) {
+    logger.warn(`[rider-accept] rider ${rider.id} would not group with lawn ${lawn.id} (seeding the quarterly walk)`);
     return null;
   }
   const Seeder = require('./recurring-appointment-seeder');
@@ -152,14 +186,16 @@ async function settleProjectedRiders(ctx, conn) {
   ctx.lawn.projectedRiders = [];
   const actual = new Set(ctx.lawn.seededDates);
   for (const r of pending) {
-    if (r.dates.every((d) => actual.has(d))) {
+    let groups = false;
+    try { groups = await firstVisitsGroup(conn, r.id, ctx.lawn.parent.id); } catch { /* not a ride */ }
+    if (groups && r.dates.every((d) => actual.has(d))) {
       await linkRider(conn, r.id, ctx.lawn.parent.id);
     } else {
-      logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on — left unlinked`);
+      logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on, or the two do not group — left unlinked`);
     }
   }
 }
 
 module.exports = {
-  createContext, isHostPlan, noteLawn, beforeSeed, afterSeed,
+  createContext, isHostPlan, noteLawn, forgetLawn, beforeSeed, afterSeed,
 };

@@ -312,7 +312,7 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
-  test('gate on, no reservation (auto-schedule), pest listed before lawn: lawn seeds first and pest rides it', async () => {
+  test('gate on, no reservation (auto-schedule): the unplaced first visits cannot group, so the pest walks its own cadence unlinked', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
     try {
@@ -325,16 +325,14 @@ postgres('pest rides the lawn from accept', () => {
         estimate_data: { result: { recurring: { services: [PEST_QUARTERLY, LAWN_LINE] } } },
       });
       await converter.convertEstimate(estimateId, { ...options, database: trx });
-      const { lawnParent, pestParent, lawn, pest } = await seriesRows(trx, estimateId);
+      const { lawnParent, pestParent, pest } = await seriesRows(trx, estimateId);
       expect(lawnParent).toBeDefined();
-      expect(pestParent.rides_parent_id).toBe(lawnParent.id);
+      // Auto-scheduled parents carry no window, and visit groups never group a
+      // windowless row — so this is not one stop, and nothing is linked.
+      expect(lawnParent.window_start).toBeNull();
+      expect(pestParent.rides_parent_id).toBeNull();
       const first = dateOf(pestParent.scheduled_date);
-      expect(dateOf(lawnParent.scheduled_date)).toBe(first);
-      const lawnDates = new Set(lawn.map((r) => dateOf(r.scheduled_date)));
-      const pestDates = pest.map((r) => dateOf(r.scheduled_date));
-      expect(pestDates).toHaveLength(4);
-      for (const d of pestDates) expect(lawnDates.has(d)).toBe(true);
-      expect(pestDates[1]).toBe(addDays(first, 84));
+      expect(pest.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(first, 84));
     } finally { await trx.rollback(); }
   });
 });

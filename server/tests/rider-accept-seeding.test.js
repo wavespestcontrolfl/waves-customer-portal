@@ -84,10 +84,26 @@ describe('host / rider pairing table', () => {
 
 describe('rider context fall-backs', () => {
   const originalGate = process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT;
-  beforeEach(() => { process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT = 'true'; });
+  const { gates } = require('../config/feature-gates');
+  const originalVisitGroups = gates.visitGroups;
+  const VisitGroups = require('../services/visit-groups');
+  let groupSpy;
+  beforeEach(() => {
+    process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT = 'true';
+    gates.visitGroups = true;
+    // Canonical grouping preview: the rider joins the lawn unless a test says otherwise.
+    groupSpy = jest.spyOn(VisitGroups, 'maybeGroupRow').mockResolvedValue({ preview: true, rowIds: ['pest', 'lawn'] });
+  });
   afterEach(() => {
     if (originalGate === undefined) delete process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT;
     else process.env.GATE_PEST_RIDES_LAWN_AT_ACCEPT = originalGate;
+    gates.visitGroups = originalVisitGroups;
+    groupSpy.mockRestore();
+  });
+
+  test('visit grouping off: no context, so nothing rides (riding means one stop)', () => {
+    gates.visitGroups = false;
+    expect(RiderAccept.createContext()).toBeNull();
   });
 
   const seedOpts = { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: true, weekendShift: 'forward' };
@@ -174,6 +190,7 @@ describe('rider context fall-backs', () => {
     const updates = [];
     const conn = (table) => ({
       where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
+      whereIn: () => ({ select: async () => [] }),
     });
     const ctx = RiderAccept.createContext();
     RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
@@ -193,7 +210,10 @@ describe('rider context fall-backs', () => {
 
   test('a rider planned on projected dates stays linked when the lawn seeds exactly those dates', async () => {
     const updates = [];
-    const conn = (table) => ({ where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }) });
+    const conn = (table) => ({
+      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
+      whereIn: () => ({ select: async () => [] }),
+    });
     const ctx = RiderAccept.createContext();
     RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
     const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
@@ -207,6 +227,41 @@ describe('rider context fall-backs', () => {
       insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
     });
     expect(updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
+  });
+
+  test('a projected rider whose first visit would NOT group with the lawn is left unlinked', async () => {
+    groupSpy.mockResolvedValue(null);
+    const updates = [];
+    const conn = (table) => ({
+      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
+      whereIn: () => ({ select: async () => [] }),
+    });
+    const ctx = RiderAccept.createContext();
+    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
+    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
+    let rider;
+    try {
+      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
+    } finally { spy.mockRestore(); }
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, {
+      insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
+    });
+    expect(updates).toEqual([]);
+  });
+
+  test('a lawn row with a stale non-lawn label is still a host when its resolved family is lawn', () => {
+    const ctx = RiderAccept.createContext();
+    expect(RiderAccept.noteLawn(ctx, parent({ id: 'lawn', service_type: 'General Service' }), lawnPlan)).toBe(true);
+    expect(ctx.lawn.parent.id).toBe('lawn');
+  });
+
+  test('a lawn whose seeding failed is forgotten: later riders seed their own walk', async () => {
+    const ctx = RiderAccept.createContext();
+    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
+    RiderAccept.forgetLawn(ctx, parent({ id: 'lawn' }));
+    expect(ctx.lawn).toBeNull();
+    expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan)).toBeNull();
   });
 });
 
