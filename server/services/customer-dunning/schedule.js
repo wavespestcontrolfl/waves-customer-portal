@@ -32,6 +32,7 @@ const {
 } = require('./constants');
 const { promotionSeed, seedRefusal, oldestActive, firstLiveStep } = require('./seed');
 const { resolveDunnableSet } = require('./balance-set');
+const { claimVerdict } = require('../collections/contact-ledger');
 
 const TABLE = 'customer_dunning_schedules';
 const STEPS = config.stepsThrough90;
@@ -402,12 +403,20 @@ function namedForFinal(run, facts) {
 
 const EVERY_CHANNEL = Object.freeze(['email', 'push', 'sms']);
 
+// A leg whose keyed reservation exists but whose outcome was never confirmed (a sender that died between the
+// reservation and the provider's answer): the ledger's own claim decision (claimVerdict, the one the live
+// claim and the shadow run use) refuses to retry it (`held`), and the live run holds the step on
+// REMINDER_OUTCOME_UNCONFIRMED. It may have reached the customer.
+const outcomeUnconfirmed = (event) => (event.entries || []).some((entry) => !event.delivered.has(entry.channel)
+  && claimVerdict({ id: entry.id, reused: true, metadata: metadataOf(entry) }).held === true);
+
 /**
- * What the schedule's CURRENT step already delivered, read from that touch's own ledger event exactly as
+ * What the schedule's CURRENT step already did, read from that touch's own ledger event exactly as
  * recover-first reads it (reminderProgress by its event key, no time window, read-only: nothing repaired).
- * null = nothing delivered. Otherwise { final, named }: `named` is the Set of invoices the delivered legs
- * quoted (namedForFinal), or null when a delivered leg's names cannot be read. Throws when the ledger
- * cannot be read: the caller must not hand members back blind.
+ * null = nothing delivered and nothing unconfirmed. Otherwise { delivered, unconfirmed, final, named }:
+ * `unconfirmed` = a leg's outcome is unknown (release must not hand members back: it could resend it);
+ * `named` = the Set of invoices the delivered legs quoted (namedForFinal), or null when a delivered leg's
+ * names cannot be read. Throws when the ledger cannot be read: the caller must not hand members back blind.
  */
 async function currentStepDelivery(schedule) {
   const step = STEPS[Number(schedule.step_index)];
@@ -415,9 +424,14 @@ async function currentStepDelivery(schedule) {
   const key = eventKey(schedule, step.id);
   const progress = await reminderProgress(schedule.customer_id, SOURCE, EVERY_CHANNEL, { eventKey: key, repair: false });
   const event = (progress || []).find((e) => e?.metadata?.notificationEventKey === key);
-  if (!event || !event.delivered?.size) return null;
-  const { ids, unreadable } = namedForFinal({}, { event, delivered: event.delivered });
-  return { final: isFinalIndex(schedule.step_index), named: unreadable.length ? null : new Set(ids) };
+  if (!event) return null;
+  const delivered = event.delivered?.size > 0;
+  const unconfirmed = outcomeUnconfirmed({ ...event, delivered: event.delivered || new Set() });
+  if (!delivered && !unconfirmed) return null;
+  const { ids, unreadable } = delivered ? namedForFinal({}, { event, delivered: event.delivered }) : { ids: [], unreadable: [] };
+  return {
+    delivered, unconfirmed, final: isFinalIndex(schedule.step_index), named: unreadable.length ? null : new Set(ids),
+  };
 }
 
 // ── release of surviving members (§7) ────────────────────────────────────
@@ -464,7 +478,8 @@ function landingFrom(row, fromIndex, now) {
  * Returns { kind: 'land', stepIndex, nextAt } | { kind: 'paused', stepIndex, pausedReason, pausedBy }
  *   | { kind: 'complete' } | { kind: 'pause_for_person', reason }.
  */
-function memberLanding(row, schedule, delivery, now) {
+function memberLanding(row, schedule, evidence, now) {
+  const delivery = evidence?.delivered === false ? null : evidence; // only DELIVERED evidence moves a landing
   const scheduleStep = Number(schedule.step_index) || 0;
   const named = !delivery?.named || delivery.named.has(String(row.invoice_id));
   if (delivery?.final) {
@@ -568,6 +583,12 @@ async function closeOnce(schedule, reason, now, at, delivery, { database, extra,
     if (Number(row.step_index) !== Number(at.step_index) || Number(row.episode) !== Number(at.episode)) {
       return { closed: false, landed: [], restep: { step_index: row.step_index, episode: row.episode } };
     }
+    // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
+    // again on their own ladders, so nothing is released while one remains to land (judged after the
+    // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
+    if (delivery?.unconfirmed && (await activeMemberRows(row.customer_id, { database: trx, forUpdate: true })).length) {
+      return { closed: false, landed: [], reason: 'outcome_unconfirmed' };
+    }
     await trx(TABLE).where({ id: row.id }).update({
       status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
       next_touch_at: null, updated_at: trx.fn.now(), ...extra,
@@ -585,7 +606,8 @@ async function closeOnce(schedule, reason, now, at, delivery, { database, extra,
  * step the caller saw; when the locked row is at another step, that step's
  * evidence is read and the close tried once more. Evidence that cannot be read
  * closes nothing (`evidence_unreadable`): handing members back blind could send
- * a step that already went out.
+ * a step that already went out. Nor does a current step with a leg whose outcome
+ * is unconfirmed while members remain to land (`outcome_unconfirmed`).
  */
 async function close(schedule, reason, now = new Date(), {
   database = db, extra = {}, claimStamp = null, expectedStepIndex = schedule.step_index,

@@ -113,9 +113,11 @@ async function releaseOne(schedule, reason, now, tally) {
     } else if (out.reason === 'in_flight') {
       tally.inFlight += 1;
       logger.warn(`[customer-dunning] schedule ${schedule.id} not released (${reason}): a send is in flight; the next run releases it`);
-    } else if (out.reason === 'evidence_unreadable') {
-      // Nothing was handed back (the current step's delivery could not be read): the office hears of it.
+    } else if (out.reason === 'evidence_unreadable' || out.reason === 'outcome_unconfirmed') {
+      // Nothing was handed back (the current step's delivery could not be read, or a leg's outcome is
+      // unconfirmed and handing back could send it again): the office hears of it.
       tally.failed += 1;
+      logger.error(`[customer-dunning] kill switch did not release schedule ${schedule.id} (${reason}): ${out.reason}`);
       await alertReleaseFailed({ customerId: schedule.customer_id, dedupeKey: `customer-dunning-release-failed:${schedule.id}` });
     }
   } catch (err) {
@@ -151,6 +153,11 @@ const CONTROLS = Object.freeze({
 const SCHEDULE_CHANGED = 'The reminder schedule changed. Reload and try again.';
 const NO_OPEN_SCHEDULE = Object.freeze({ status: 404, body: { error: 'This customer has no open reminder schedule.', code: 'NO_OPEN_SCHEDULE' } });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Refusals whose own message is the copy the office reads.
+const CONFLICT_CODES = Object.freeze({
+  in_flight: 'IN_FLIGHT', schedule_not_live: 'SCHEDULE_NOT_LIVE', evidence_unreadable: 'EVIDENCE_UNREADABLE', outcome_unconfirmed: 'OUTCOME_UNCONFIRMED',
+});
 
 // A send-now that reached the customer: the step went out (advanced / completed), or one leg did and the
 // other retries (told). A settle of a step delivered earlier (`recovered`) also lands here: that step
@@ -191,8 +198,8 @@ function notSentMessage(out) {
  * the customer, and a control that did what it said (pause, resume, release), is a 200.
  */
 function httpResult(out) {
-  if (out?.reason === 'in_flight' || out?.reason === 'schedule_not_live' || out?.reason === 'evidence_unreadable') {
-    const code = { in_flight: 'IN_FLIGHT', schedule_not_live: 'SCHEDULE_NOT_LIVE', evidence_unreadable: 'EVIDENCE_UNREADABLE' }[out.reason];
+  if (CONFLICT_CODES[out?.reason]) {
+    const code = CONFLICT_CODES[out.reason];
     return { status: 409, body: { error: out.message, code, scheduleId: out.scheduleId } };
   }
   if (out?.reason === 'schedule_paused' || (out?.outcome && !SENT_OUTCOMES.has(out.outcome) && out.outcome !== 'skipped' && out.outcome !== 'stale')) {

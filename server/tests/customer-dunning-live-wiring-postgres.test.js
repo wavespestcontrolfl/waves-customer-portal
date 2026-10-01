@@ -461,13 +461,15 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       await app('customer_dunning_schedules').whereIn('status', ['active', 'held', 'paused', 'autopay_hold'])
         .update({ status: 'released', closed_reason: 'released_admin', closed_at: new Date(), touch_claimed_at: null });
     });
-    // A delivered leg of the schedule's touch at `stepIndex`, quoting `invoiceIds` (the reservation snapshot).
-    async function delivered(schedule, stepIndex, invoiceIds, { channel = 'sms' } = {}) {
+    // A leg of the schedule's touch at `stepIndex`, quoting `invoiceIds` (the reservation snapshot): delivered by
+    // default; `outcome: {}` is a reservation with no outcome stamped (unconfirmed), `{ send_failed: true }` a
+    // confirmed non-send.
+    async function delivered(schedule, stepIndex, invoiceIds, { channel = 'sms', outcome = { delivered: true } } = {}) {
       const key = eventKey(schedule, Schedule.STEPS[stepIndex].id);
       await app('collections_contact_ledger').insert({
         customer_id: schedule.customer_id, channel, purpose: 'late_payment', source: SOURCE,
         invoice_ids: JSON.stringify(invoiceIds), idempotency_key: reminderReservationKey(schedule.customer_id, key, channel),
-        metadata: JSON.stringify({ notificationEventKey: key, delivered: true, selectedChannels: ['email', 'sms'] }),
+        metadata: JSON.stringify({ notificationEventKey: key, ...outcome, selectedChannels: ['email', 'sms'] }),
       });
     }
 
@@ -541,6 +543,29 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
       expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toMatchObject({ status: 'active' });
       expect(await seqRow(a.seq.id)).toMatchObject({ status: 'active', step_index: 3 });
       expect(mockNotify).toHaveBeenCalledTimes(1);
+    });
+
+    test('a current-step leg whose outcome is UNCONFIRMED releases nothing (it may have gone out); a confirmed non-send does not block', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 40, step: 3, due: false });
+      const b = await member(c, { sentDaysAgo: 20, step: 1, due: false });
+      const schedule = await openSchedule(c, { step_index: 3 });
+      await delivered(schedule, 3, [a.invoiceId, b.invoiceId], { outcome: {} }); // reserved, never stamped
+      expect(await Schedule.release(schedule, 'released_admin', new Date())).toMatchObject({ closed: false, reason: 'outcome_unconfirmed' });
+      delete process.env.GATE_DUNNING_CUSTOMER_SCHEDULE;
+      const tally = await Wiring.releaseIfDark(new Date());
+      expect(tally).toMatchObject({ released: 0, failed: 1 });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockNotify.mock.calls[0][3]).toMatchObject({ dedupeKey: `customer-dunning-release-failed:${schedule.id}` });
+      expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toMatchObject({ status: 'active' });
+      expect(await seqRow(b.seq.id)).toMatchObject({ status: 'active', step_index: 1 }); // untouched: still owned
+      // admin release says so
+      expect(await require('../services/customer-dunning/admin').release(schedule.id, { now: new Date() }))
+        .toMatchObject({ ok: false, reason: 'outcome_unconfirmed' });
+      // the same leg confirmed NOT sent: nothing went out, so the members are handed back on the step
+      await app('collections_contact_ledger').where({ customer_id: c }).update({ metadata: app.raw('metadata || ?::jsonb', [JSON.stringify({ send_failed: true })]) });
+      expect((await Schedule.release(schedule, 'released_admin', new Date())).closed).toBe(true);
+      expect(await seqRow(b.seq.id)).toMatchObject({ status: 'active', step_index: 3 });
     });
 
     test('a PAUSED schedule\'s members stay paused on their own ladder, carrying the office\'s reason and admin', async () => {

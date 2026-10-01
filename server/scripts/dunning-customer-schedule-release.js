@@ -85,7 +85,7 @@ async function planRelease(database, { customerId = null, now, Schedule }) {
     const landings = rows.map((row) => ({
       invoice_id: String(row.invoice_id), seq_id: row.id, landing: Schedule.memberLanding(row, schedule, delivery, now),
     }));
-    plans.push({ schedule, landings });
+    plans.push({ schedule, landings, delivery });
   }
   return plans;
 }
@@ -102,11 +102,21 @@ function landingText(landing, rawStepIdAt) {
   }
 }
 
-function printPlan({ schedule, landings, evidenceError }, stepIdAt) {
+function printPlan({
+  schedule, landings, evidenceError, delivery,
+}, stepIdAt) {
   console.log(`schedule ${schedule.id}  customer ${schedule.customer_id}  ${schedule.status}  step ${stepIdAt(schedule.step_index) || schedule.step_index}  next ${iso(schedule.next_touch_at)}  claimed ${iso(schedule.touch_claimed_at)}`);
   if (evidenceError) console.log('  NOT RELEASABLE NOW: the current step\'s delivery evidence could not be read');
+  else if (delivery?.unconfirmed && landings.length) console.log('  NOT RELEASABLE NOW: a reminder for the current step may already have gone out (outcome unconfirmed)');
   for (const l of landings) console.log(`  member invoice ${l.invoice_id}  seq ${l.seq_id}  -> ${landingText(l.landing, stepIdAt)}`);
 }
+
+// Refusals that released nothing and need a person (or another run).
+const NOT_RELEASED = Object.freeze({
+  evidence_unreadable: 'its current step\'s delivery could not be read; run again',
+  step_changed: 'its step kept changing; run again',
+  outcome_unconfirmed: 'a reminder for its current step may already have gone out (outcome unconfirmed); check it before releasing',
+});
 
 /** Release each planned schedule through the engine. Returns a tally; one failure never stops the rest. */
 async function executeRelease(plans, { now, Schedule }) {
@@ -120,9 +130,9 @@ async function executeRelease(plans, { now, Schedule }) {
       } else if (out.reason === 'in_flight') {
         tally.inFlight += 1;
         console.warn(`NOT released schedule ${schedule.id}: a reminder is sending right now; run again in a few minutes`);
-      } else if (out.reason === 'evidence_unreadable' || out.reason === 'step_changed') {
+      } else if (NOT_RELEASED[out.reason]) {
         tally.failed += 1;
-        console.error(`NOT released schedule ${schedule.id}: ${out.reason === 'step_changed' ? 'its step kept changing' : 'its current step\'s delivery could not be read'}; run again`);
+        console.error(`NOT released schedule ${schedule.id}: ${NOT_RELEASED[out.reason]}`);
       } else {
         tally.alreadyClosed += 1;
         console.log(`schedule ${schedule.id} was already closed`);

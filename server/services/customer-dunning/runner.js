@@ -365,6 +365,7 @@ async function applyDecision(run, d) {
       // The current step's delivery evidence could not be read, so nothing was handed back: the step
       // stays due and is retried like any unreadable progress (held, revisited at the next run).
       if (closed?.reason === 'evidence_unreadable') return hold(run, 'progress_unreadable');
+      if (closed?.reason === 'outcome_unconfirmed') return hold(run, 'REMINDER_OUTCOME_UNCONFIRMED');
       // A close refused because the claim was lost (a pause, a resume, another run)
       // changed nothing: report it, alert nobody.
       if (closed && closed.closed === false) return outcome('stale');

@@ -121,18 +121,29 @@ describe('planRelease / executeRelease', () => {
     expect(logs.join('\n')).toMatch(/NOT RELEASABLE NOW/);
   });
 
+  test('the dry run flags a schedule whose current step has an unconfirmed outcome', async () => {
+    const database = fakeDatabase([schedule('s1')]);
+    mockSchedule.currentStepDelivery.mockResolvedValueOnce({ delivered: false, unconfirmed: true, final: false, named: new Set() });
+    mockSchedule.activeMemberRows.mockResolvedValue([{ id: 'q1', invoice_id: 'i1', step_index: 2 }]);
+    mockSchedule.memberLanding.mockReturnValueOnce({ kind: 'land', stepIndex: 3, nextAt: NOW });
+    const plans = await script.planRelease(database, { now: NOW, Schedule: mockSchedule });
+    script.printPlan(plans[0], (i) => `step${i}`);
+    expect(logs.join('\n')).toMatch(/NOT RELEASABLE NOW: a reminder for the current step may already have gone out \(outcome unconfirmed\)/);
+  });
+
   test('releases through Schedule.release as released_admin; tallies in-flight / already closed / failures without stopping', async () => {
     mockSchedule.release
       .mockResolvedValueOnce({ closed: true, landed: [{}, {}] })
       .mockResolvedValueOnce({ closed: false, landed: [], reason: 'in_flight' })
       .mockResolvedValueOnce({ closed: false, landed: [] })
       .mockRejectedValueOnce(new Error('deadlock detected'))
-      .mockResolvedValueOnce({ closed: false, landed: [], reason: 'evidence_unreadable' });
-    const tally = await script.executeRelease(['s1', 's2', 's3', 's4', 's5'].map((id) => ({ schedule: schedule(id) })), { now: NOW, Schedule: mockSchedule });
-    expect(tally).toEqual({ released: 1, inFlight: 1, alreadyClosed: 1, failed: 2 });
-    expect(mockSchedule.release.mock.calls.map((c) => [c[0].id, c[1], c[2]])).toEqual(
-      ['s1', 's2', 's3', 's4', 's5'].map((id) => [id, 'released_admin', NOW]),
-    );
+      .mockResolvedValueOnce({ closed: false, landed: [], reason: 'evidence_unreadable' })
+      .mockResolvedValueOnce({ closed: false, landed: [], reason: 'outcome_unconfirmed' });
+    const ids = ['s1', 's2', 's3', 's4', 's5', 's6'];
+    const tally = await script.executeRelease(ids.map((id) => ({ schedule: schedule(id) })), { now: NOW, Schedule: mockSchedule });
+    expect(tally).toEqual({ released: 1, inFlight: 1, alreadyClosed: 1, failed: 3 });
+    expect(mockSchedule.release.mock.calls.map((c) => [c[0].id, c[1], c[2]])).toEqual(ids.map((id) => [id, 'released_admin', NOW]));
+    expect(logs.join('\n')).toMatch(/NOT released schedule s6: a reminder for its current step may already have gone out \(outcome unconfirmed\)/);
     expect(logs.join('\n')).toMatch(/NOT released schedule s5: its current step's delivery could not be read/);
   });
 });

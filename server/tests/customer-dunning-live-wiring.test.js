@@ -541,6 +541,20 @@ describe('send-now and staff controls', () => {
     expect(await Wiring.controlCustomerSchedule(CUST, 'send-now', { now: NOW })).toMatchObject({ status: 409, body: { code: 'SCHEDULE_CHANGED' } });
   });
 
+  test('an admin release refused on an UNCONFIRMED current-step outcome is a 409 OUTCOME_UNCONFIRMED', async () => {
+    jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
+    mockDb.firsts.customer_dunning_schedules = openRow;
+    jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'outcome_unconfirmed' });
+    expect(await Wiring.controlCustomerSchedule(CUST, 'release', { now: NOW })).toEqual({
+      status: 409,
+      body: {
+        error: 'The current reminder may already have gone out (its delivery is unconfirmed), so its invoices were not handed back. Check it before releasing.',
+        code: 'OUTCOME_UNCONFIRMED',
+        scheduleId: 'sched-1',
+      },
+    });
+  });
+
   test('F1: an admin release whose delivery evidence cannot be read is a 409 that says so (nothing handed back)', async () => {
     jest.spyOn(Schedule, 'openScheduleFor').mockResolvedValue(openRow);
     mockDb.firsts.customer_dunning_schedules = openRow;

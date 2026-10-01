@@ -774,6 +774,13 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
       expect(await run()).toEqual({ outcome: 'held', reason: 'progress_unreadable' });
       expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'progress_unreadable', expect.anything());
     });
+
+    test('an unconfirmed current-step outcome is held as REMINDER_OUTCOME_UNCONFIRMED (the live run\'s own hold), never closed', async () => {
+      Schedule.close.mockResolvedValue({ closed: false, landed: [], reason: 'outcome_unconfirmed' });
+      Schedule.markHeld.mockResolvedValue(true);
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      expect(await run()).toEqual({ outcome: 'held', reason: 'REMINDER_OUTCOME_UNCONFIRMED' });
+    });
   });
 
   describe('F3: runner-internal closes carry the run\'s own claim', () => {

@@ -47,12 +47,19 @@ const EVIDENCE_UNREADABLE = Object.freeze({
   ok: false, reason: 'evidence_unreadable', message: 'Could not check whether the current reminder already went out. Try again in a minute.',
 });
 
+const OUTCOME_UNCONFIRMED = Object.freeze({
+  ok: false,
+  reason: 'outcome_unconfirmed',
+  message: 'The current reminder may already have gone out (its delivery is unconfirmed), so its invoices were not handed back. Check it before releasing.',
+});
+
 async function release(scheduleId, { now = new Date() } = {}) {
   const schedule = await openScheduleQuery(scheduleId).first();
   if (!schedule) return { ok: false, reason: 'not_open' };
   const out = await Schedule.release(schedule, 'released_admin', now);
   if (out.reason === 'in_flight') return { ...IN_FLIGHT };
   if (out.reason === 'evidence_unreadable') return { ...EVIDENCE_UNREADABLE };
+  if (out.reason === 'outcome_unconfirmed') return { ...OUTCOME_UNCONFIRMED };
   return { ok: out.closed, released: out.landed.length };
 }
 
