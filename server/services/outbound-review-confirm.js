@@ -888,7 +888,9 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // when the closeout was performed at the property (an incomplete / declined closeout carries none, and
     // the stamp also keeps the card funnel off in the hook). A hold the office confirmed whose hook then
     // failed stays on the retry rail. Fails closed.
-    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db)) {
+    // (Recognized by its card whatever its state: a hold the completion settled without approving — an
+    // incomplete / declined closeout — stays a non-activatable hold.)
+    if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })) {
       const approved = (row.status === 'completed' && !!row.field_confirmed_at)
         || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
       if (!approved) {

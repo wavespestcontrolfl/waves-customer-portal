@@ -17304,6 +17304,10 @@ const CallRecordingProcessor = {
                 const promoteArgs = { hold: reuseHold, callLogId: call.id, leadId, keepOpenForQuote: callQuotePromised, followUpPlan: callFollowUpPlan, extraction: v2ApprovedExtraction || extracted };
                 if (existing) {
                   reusedExistingSchedule = true;
+                  // Lock order for the hold lifecycle: the per-call triage lock BEFORE any visit row lock — the
+                  // technician-backfill UPDATE below locks the row, and promotion / the follow-up refresh then
+                  // need the triage lock (reopen / close take triage first, then the row).
+                  if (existing.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION) await lockTriageCall(trx, existing.source_call_log_id || call.id);
                   // An ATTACHED human booking resurfacing through the linked
                   // (source_call_log_id) lookup keeps its attach semantics on
                   // reprocess (Codex #2771 r5): no AI follow-up child on a

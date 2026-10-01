@@ -394,6 +394,7 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
 // FALSE here, never NULL (NOT NULL would drop it from the bulk resolve).
 const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
   AND COALESCE(triage_items.payload->>'street_level_address', '') = 'true'
+  AND COALESCE(triage_items.payload->>'closed_out', '') = ''
   AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
     WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
       AND hold_ss.customer_confirmed = false
@@ -401,7 +402,7 @@ const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_bookin
 async function streetLevelHoldStillPending(conn, item) {
   if (!item || item.reason_code !== 'outbound_booking_review') return false;
   const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
-  if (!payload?.street_level_address || !payload.scheduled_service_id) return false;
+  if (!payload?.street_level_address || !payload.scheduled_service_id || payload.closed_out) return false;
   const svc = await conn('scheduled_services').where({ id: payload.scheduled_service_id }).first('status', 'customer_confirmed');
   return !!svc && !svc.customer_confirmed && !['cancelled', 'skipped', 'rescheduled'].includes(String(svc.status || ''));
 }

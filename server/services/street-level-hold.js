@@ -18,14 +18,17 @@ const logger = require('./logger');
 // Builds the hold subquery on `q` (a knex builder, e.g. inside whereExists /
 // whereNotExists): a card for the outer visit `visitAlias` while that visit is
 // unconfirmed and not cancelled / skipped / rescheduled.
-function heldVisitSubquery(q, visitAlias = 'ss') {
-  return q.select(1)
+function heldVisitSubquery(q, visitAlias = 'ss', { includeClosedOut = false } = {}) {
+  const sub = q.select(1)
     .from('triage_items as hold_ti')
     .where('hold_ti.reason_code', 'outbound_booking_review')
     .whereRaw("COALESCE(hold_ti.payload->>'street_level_address', '') = 'true'")
     .whereRaw(`hold_ti.payload->>'scheduled_service_id' = ${visitAlias}.id::text`)
     .whereRaw(`${visitAlias}.customer_confirmed = false`)
     .whereRaw(`${visitAlias}.status NOT IN ('cancelled', 'skipped', 'rescheduled')`);
+  // A closeout that settled the hold without approving it (incomplete / declined) is not a live hold —
+  // except to the activation guard, which must still refuse to activate it (includeClosedOut).
+  return includeClosedOut ? sub : sub.whereRaw("COALESCE(hold_ti.payload->>'closed_out', '') = ''");
 }
 
 // THE live predicate: true while the visit is an unconfirmed street-level hold
@@ -34,12 +37,12 @@ function heldVisitSubquery(q, visitAlias = 'ss') {
 // question — "was this ever a hold", status-agnostic.) A lookup error answers
 // true ("still held"): the reminder path must hold on a blip, and the bell path
 // rings on a blip.
-async function isStreetLevelHoldVisit(scheduledServiceId, conn = db) {
+async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { includeClosedOut = false } = {}) {
   if (!scheduledServiceId) return false;
   try {
     const row = await conn('scheduled_services as ss')
       .where('ss.id', scheduledServiceId)
-      .whereExists(function () { heldVisitSubquery(this, 'ss'); })
+      .whereExists(function () { heldVisitSubquery(this, 'ss', { includeClosedOut }); })
       .first('ss.id');
     return !!row;
   } catch (err) {
@@ -75,7 +78,7 @@ async function findStreetLevelHoldCard(conn, { callLogId, visitId }) {
 // review_status, under the shared per-call lock. Gated on the card signal (only
 // a voice_agent-source visit with a street-level card is touched), idempotent,
 // best-effort — never throws.
-async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
+async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db, { note = null, closedOut = null } = {}) {
   try {
     const visit = await conn('scheduled_services').where({ id: visitId, source_action: 'voice_agent' }).first('id', 'source_call_log_id');
     if (!visit?.source_call_log_id) return false;
@@ -92,7 +95,13 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
       const resolved = await trx('triage_items')
         .where({ id: card.id })
         .whereIn('status', ['open', 'in_progress'])
-        .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date(), resolution_note: `Visit ${toStatus} — the address hold no longer applies.` });
+        .update({
+          status: 'resolved', resolved_at: new Date(), updated_at: new Date(),
+          resolution_note: note || `Visit ${toStatus} — the address hold no longer applies.`,
+          // An unsuccessful closeout settles the hold without approving the address: the card carries the
+          // marker the hold predicates read (a completed visit would otherwise still read as a live hold).
+          ...(closedOut ? { payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ closed_out: closedOut })]) } : {}),
+        });
       await syncCallReviewStatus(trx, visit.source_call_log_id);
       return resolved > 0;
     });

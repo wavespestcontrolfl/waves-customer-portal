@@ -361,4 +361,63 @@ describe('r22: one lock order for the hold lifecycle (per-call triage lock, then
     const refresh = hold.slice(hold.indexOf('async function refreshHoldFollowUpPlan'));
     expect(refresh.indexOf('lockTriageCall')).toBeGreaterThan(-1);
   });
+
+  test('the reuse branch takes the triage lock before the technician-backfill UPDATE locks the visit row', () => {
+    const proc = read('../services/call-recording-processor.js');
+    const lock = proc.indexOf('if (existing.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION) await lockTriageCall(trx, existing.source_call_log_id || call.id);');
+    expect(lock).toBeGreaterThan(0);
+    const update = proc.indexOf(".update({ technician_id: reuseTechId, route_order: null, updated_at: new Date() })", lock);
+    expect(update).toBeGreaterThan(lock);
+    expect(proc.indexOf('await promoteReusedRowToStreetLevelHold(trx, primaryRow, promoteArgs);', lock)).toBeGreaterThan(update);
+  });
+});
+
+describe('r22: an incomplete / declined closeout settles a hold like cancel / skip (card closed, address NOT approved)', () => {
+  const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+  const make = (card, liveStatus = 'completed') => {
+    const log = { updates: [], locked: 0 };
+    const conn = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, forUpdate() { return q; }, count() { q._count = true; return q; },
+        first: async () => {
+          if (table === 'scheduled_services' && q._fu === undefined) return { id: 'v1', source_call_log_id: 'c1' };
+          if (q._count) return { n: 0 };
+          return card;
+        },
+        update: async (u) => { log.updates.push({ table, u }); return 1; },
+      };
+      const f = q.forUpdate; q.forUpdate = () => { q._fu = true; const r = f(); q.first = async () => ({ status: liveStatus, customer_confirmed: false }); return r; };
+      return q;
+    };
+    conn.raw = (s, b) => { log.locked += 1; return { s, b }; };
+    conn.transaction = async (fn) => fn(conn);
+    return { conn, log };
+  };
+  const card = { id: 't1', status: 'open', summary: 'x', payload: { street_level_address: true, scheduled_service_id: 'v1' } };
+
+  for (const outcome of ['incomplete', 'customer_declined']) {
+    test(`${outcome}: the card resolves with the note and the closed_out marker, under the per-call lock, and review_status is recomputed`, async () => {
+      const { conn, log } = make(card);
+      expect(await closeHoldCardForEndedVisit('v1', 'completed', conn, { note: `Visit closed out ${outcome} — address not confirmed`, closedOut: outcome })).toBe(true);
+      const t = log.updates.find((u) => u.table === 'triage_items').u;
+      expect(t).toMatchObject({ status: 'resolved', resolution_note: `Visit closed out ${outcome} — address not confirmed` });
+      expect(t.payload.b[0]).toContain(`"closed_out":"${outcome}"`);
+      expect(log.updates.some((u) => u.table === 'call_log')).toBe(true);
+      // Nothing approves the address: no field stamp, no activation.
+      expect(log.updates.some((u) => u.table === 'scheduled_services')).toBe(false);
+      expect(log.locked).toBeGreaterThan(0);
+    });
+  }
+
+  test('the engine settles (and never releases) for those outcomes; the hold predicates read the marker; the lazy activation still refuses the closed-out hold', () => {
+    const c = read('../services/complete-scheduled-service.js');
+    expect(c.split(': await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);').length - 1).toBe(2);
+    expect(c).toContain('address not confirmed');
+    expect(read('../services/street-level-hold.js')).toContain("COALESCE(hold_ti.payload->>'closed_out', '') = ''");
+    const t = read('../routes/admin-triage.js');
+    expect(t).toContain("AND COALESCE(triage_items.payload->>'closed_out', '') = ''");
+    expect(t).toContain('payload.closed_out) return false;');
+    // The activation recognizes a hold by its card in ANY state (closed out stays non-activatable).
+    expect(read('../services/outbound-review-confirm.js')).toContain('await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })');
+  });
 });

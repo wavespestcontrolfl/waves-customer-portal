@@ -2461,6 +2461,18 @@ function shouldAutoInvoiceCompletion({
  * Returns an HTTP-independent { status, body } result; unexpected failures throw.
  * actor comes from authenticated staff middleware, never from the submitted body.
  */
+// An incomplete or customer-declined closeout of a street-level hold settles it exactly like cancel / skip
+// (owner ruling): the review card closes with a note, the address is NOT approved (no field stamp, no
+// office-confirm activation, no inspection credit). No-op for every other visit; best-effort, answers null.
+async function settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome) {
+  if (svc?.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+    await require('./street-level-hold').closeHoldCardForEndedVisit(svc.id, 'completed', undefined, {
+      note: `Visit closed out ${visitOutcome} — address not confirmed`, closedOut: String(visitOutcome),
+    });
+  }
+  return null;
+}
+
 async function completeScheduledService(completionInput, packetContext = null) {
   // Internal packet context is supplied separately from the HTTP body. All
   // member writes share its OUTER transaction; no member starts post-commit
@@ -5114,7 +5126,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // its address — released only now that the completion is durably committed (a rejected
       // completion never approves the address) and before any customer delivery below, so the
       // recap is no longer a held message. A no-op for every other visit; best-effort.
-      const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : null;
+      const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
       // A hold that could NOT be released leaves the recap a held message: keep the saved completion
       // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
       if (holdRelease === false) {
@@ -7496,7 +7508,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // its address — released only now that the completion is durably committed (a rejected
         // completion never approves the address) and before any customer delivery below, so the
         // recap is no longer a held message. A no-op for every other visit; best-effort.
-        const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : null;
+        const holdRelease = addressConfirmingOutcome ? await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor) : await settleHoldAfterUnsuccessfulCloseout(svc, visitOutcome);
         // A hold that could NOT be released leaves the recap a held message: keep the saved completion
         // resumable (retry re-runs the release, then delivers) instead of finalizing it as terminal.
         if (holdRelease === false) {
