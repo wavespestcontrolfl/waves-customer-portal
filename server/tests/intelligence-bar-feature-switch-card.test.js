@@ -80,3 +80,28 @@ describe('feature-switch cards show the live preview facts', () => {
     }
   });
 });
+
+// Codex r4 on #5514: the switches are undone by confirming the opposite
+// value, so "Cannot be undone" shows only when this tool could not restore
+// the prior state (a Railway gate that was unset or held another value).
+describe('feature-switch irreversibility is derived from the preview', () => {
+  const contractFor = (toolName, preview) => buildContract({
+    toolName, params: {}, displayParams: confirmationDisplayParams(toolName, {}, preview), preview, summary: 's',
+  });
+
+  test('a GrowthBook environment toggle is reversible', () => {
+    expect(contractFor('set_growthbook_feature_environment', gbPreview).irreversible).toBe(false);
+  });
+
+  test.each([
+    ['boolean', false],
+    ['unset', true],
+    ['non_boolean', true],
+  ])('a Railway gate whose prior was %s: irreversible=%s', (priorKind, irreversible) => {
+    expect(contractFor('set_railway_gate', { ...gatePreview, prior_kind: priorKind }).irreversible).toBe(irreversible);
+  });
+
+  test('other outside writes keep the irreversible badge', () => {
+    expect(contractFor('purge_cloudflare_cache', {}).irreversible).toBe(true);
+  });
+});

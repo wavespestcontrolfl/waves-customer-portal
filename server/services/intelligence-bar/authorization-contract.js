@@ -78,8 +78,11 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // comment are both public GitHub state, like submit_review_reply, once
   // posted only followed up, never unsent; a GSC sitemap submission has no
   // withdraw call. Pulling in the whole set (rather than hand-copying it)
-  // means a future outside-write tool inherits this by construction.
-  ...OUTSIDE_WRITE_TOOL_NAMES,
+  // means a future outside-write tool inherits this by construction. The
+  // feature switches are the exception (Codex r4 on #5514): the same tool
+  // flips them back, so their irreversibility is derived from the preview
+  // in buildContract instead.
+  ...[...OUTSIDE_WRITE_TOOL_NAMES].filter((name) => name !== 'set_railway_gate' && name !== 'set_growthbook_feature_environment'),
   // No un-cancel tool exists — once cancelled, that queued attempt is gone
   // for good (the original sender would need to queue a fresh one).
   'cancel_queued_message',
@@ -952,7 +955,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // removes (voiding the draft leaves the visit "already handled").
       || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))
       || preview?.financial_effects?.revertible_from_queue === false
-      || cancelsStripeCheckoutSession(preview),
+      || cancelsStripeCheckoutSession(preview)
+      // A GrowthBook environment toggle and a Railway gate that was plain
+      // 'true' / 'false' are undone by confirming the opposite value. A gate
+      // that was unset or held another value cannot be put back by this
+      // tool (it never deletes a variable or writes anything but true/false).
+      || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
     notifies_technician: cancelTechnicianNotice !== 'none',
     summary: summary || null,
