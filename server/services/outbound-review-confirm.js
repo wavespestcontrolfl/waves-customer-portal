@@ -993,7 +993,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * source, and a visit confirmed ON SITE by its technician (field stamp / performed completion: the tech
  * stood at the property) stamp exactly as before — the caller passes bindAddress for the office approvals.
  */
-async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt = new Date(), markActivationPending = false } = {}) {
+async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt = new Date(), markActivationPending = null } = {}) {
   const stamp = (conn) => conn('scheduled_services')
     .where({ id: svc.id, customer_confirmed: false })
     // A rejection that committed during the hook window wins: never stamp a
@@ -1013,7 +1013,7 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
     // transaction as the stamp, on the hold's review card, so a process exit before they finish is
     // recovered by resumePendingHoldActivations instead of stranding a stamped, half-activated visit.
     if (n > 0 && markActivationPending && locked?.source_call_log_id) {
-      await setHoldActivationPending(trx, locked.source_call_log_id, svc.id, true);
+      await setHoldActivationPending(trx, locked.source_call_log_id, svc.id, markActivationPending);
     }
     return n;
   });
@@ -1027,14 +1027,17 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
 }
 
 // The durable "legs still owed" marker of a stamp-first hold activation: payload.activation_pending on the
-// hold's latest review card (any status — the legs resolve it). Written with the stamp, cleared when the legs
-// are done (or the stamp is taken back).
+// hold's latest review card (any status — the legs resolve it), valued with the activation's MODE so a
+// resumed activation runs the legs exactly as the interrupted one would have: 'office' (the office-confirm
+// route: it also writes the call-level clearance stamp and may text the card-on-file ask) or 'lazy' (the
+// retry rail: the ask only on an existing clearance). Written with the stamp, cleared when the legs are done
+// (or the stamp is taken back). pending = false clears it.
 async function setHoldActivationPending(conn, callLogId, visitId, pending) {
   const card = await findStreetLevelHoldCard(conn, { callLogId, visitId });
   if (!card) return false;
   await conn('triage_items').where({ id: card.id }).update({
     payload: pending
-      ? conn.raw("COALESCE(payload, '{}'::jsonb) || '{\"activation_pending\": true}'::jsonb")
+      ? conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('activation_pending', ?::text)", [String(pending)])
       : conn.raw("COALESCE(payload, '{}'::jsonb) - 'activation_pending'"),
   });
   return true;
@@ -1072,8 +1075,9 @@ async function setHoldActivationPending(conn, callLogId, visitId, pending) {
  * @returns {Promise<boolean>} true when the legs ran and the visit is stamped; false otherwise.
  */
 async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
+  const mode = hookOpts.suppressCardAskWithoutClearance ? 'lazy' : 'office';
   const stampedAt = new Date();
-  const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: true });
+  const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: mode });
   if (!(stamped > 0)) {
     // Refused (address changed: the card is reopened inside), a rejection took the row, or another activator
     // stamped it first — then it is activated by that one (the legs are idempotent), as for the other rails.
@@ -1109,17 +1113,18 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
  * Recovery of stamp-first hold activations that a process exit interrupted: every hold card still marked
  * activation_pending whose visit is stamped has its hook legs re-run (all idempotent) and, once they report
  * success, the marker cleared. A visit a rejection took (cancelled / skipped / rescheduled) just drops the
- * marker. The lazy-activation rules apply to the card-on-file ask (clearance-gated, never a text without
- * the call-level clearance stamp). Run by the hourly stranded-activation sweep; bounded per run.
+ * marker. The legs run in the mode the interrupted activation recorded on the marker (office-confirm: the
+ * clearance stamp and card ask included; lazy: the ask only on an existing clearance). Run by the hourly
+ * stranded-activation sweep; bounded per run.
  */
 async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
   const rows = await dbh('triage_items as ti')
     .join('scheduled_services as ss', dbh.raw("ss.id::text = ti.payload->>'scheduled_service_id'"))
     .where('ti.reason_code', 'outbound_booking_review')
-    .whereRaw("ti.payload->>'activation_pending' = 'true'")
+    .whereIn(dbh.raw("ti.payload->>'activation_pending'"), ['office', 'lazy'])
     .where('ss.customer_confirmed', true)
     .limit(limit)
-    .select('ti.id as card_id', 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action');
+    .select(dbh.raw("ti.payload->>'activation_pending' as pending_mode"), 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action');
   let resumed = 0;
   for (const row of rows) {
     try {
@@ -1127,7 +1132,9 @@ async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
         await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
         continue;
       }
-      const ok = await runOutboundReviewConfirmHook(dbh, row, 'hold-activation-resume', { suppressCardAskWithoutClearance: true });
+      // Same legs, same semantics as the interrupted activation (its mode is on the marker).
+      const ok = await runOutboundReviewConfirmHook(dbh, row, 'hold-activation-resume',
+        row.pending_mode === 'lazy' ? { suppressCardAskWithoutClearance: true } : {});
       if (ok) {
         await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
         await reconcileStreetLevelHoldAfterStamp(dbh, row);

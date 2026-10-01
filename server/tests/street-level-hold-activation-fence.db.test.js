@@ -89,8 +89,8 @@ postgres('an office-approved street-level hold is activated behind its address w
   test('a process exit between the stamp and the legs leaves a durable marker, and the sweep resumes the legs', async () => {
     const { visitId, callId, svc } = await seedApprovedHold();
     // The stamp and its marker commit together; the legs never ran (the crash).
-    expect(await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: true })).toBe(1);
-    expect(await marker(callId)).toBe(true);
+    expect(await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'office' })).toBe(1);
+    expect(await marker(callId)).toBe('office');
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'open' });
     expect(reminders.registerAppointment).not.toHaveBeenCalled();
 
@@ -98,18 +98,30 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
     expect(reminders.registerAppointment).toHaveBeenCalledTimes(1);
     expect(await marker(callId)).toBeUndefined();
+    // An OFFICE-mode resume carries the call-level clearance stamp the card-on-file ask needs (a lazy one would not).
+    expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).not.toBeNull();
+    expect(cardRequest.requestCardForAppointment).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: visitId, trigger: 'outbound_review_confirm' }));
     // Nothing left to resume.
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 0, resumed: 0 });
+  });
+
+  test('a LAZY-mode marker resumes without the office clearance: no clearance stamp, the card ask runs delivery-less', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: 'lazy' });
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect((await knex('scheduled_services').where({ id: visitId }).first('call_sms_cleared_at')).call_sms_cleared_at).toBeNull();
+    expect(cardRequest.requestCardForAppointment).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: visitId, delivery: 'none' }));
+    expect(await marker(callId)).toBeUndefined();
   });
 
   test('a refused stamp writes no marker; a visit a rejection took just drops it', async () => {
     const refused = await seedApprovedHold();
     await knex('scheduled_services').where({ id: refused.visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
-    expect(await _test.stampCustomerConfirmed(knex, refused.svc, { bindAddress: true, markActivationPending: true })).toBe(0);
+    expect(await _test.stampCustomerConfirmed(knex, refused.svc, { bindAddress: true, markActivationPending: 'office' })).toBe(0);
     expect(await marker(refused.callId)).toBeUndefined();
 
     const cancelled = await seedApprovedHold();
-    await _test.stampCustomerConfirmed(knex, cancelled.svc, { bindAddress: true, markActivationPending: true });
+    await _test.stampCustomerConfirmed(knex, cancelled.svc, { bindAddress: true, markActivationPending: 'office' });
     await knex('scheduled_services').where({ id: cancelled.visitId }).update({ status: 'cancelled' });
     expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 0 });
     expect(await marker(cancelled.callId)).toBeUndefined();
