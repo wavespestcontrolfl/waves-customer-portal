@@ -104,12 +104,12 @@ describe("lead status 'handled'", () => {
     expect(require('../services/lead-statuses').handledStatusRefusal('contacted', undefined, 'handled')).toMatchObject({ code: 409 });
     // mark-lost: the same refusal, re-asserted in markLost's UPDATE (notIfStatusIn)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status, req\.body\.seen_updated_at, existing\.updated_at\);/);
-    expect(route).toMatch(/notIfStatusIn: seen === 'handled' \? \[\] : \['handled'\]/);
+    expect(route).toMatch(/onlyIf: unlessHandledSince\(seen, req\.body\.seen_updated_at\)/);
     // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status, req\.body\.seen_updated_at, lead\.updated_at\);/);
-    expect(route).toMatch(/\.\.\.\(seen === 'handled' \? \{\} : \{ onlyIfIdentity: \(q\) => q\.whereNot\('status', 'handled'\) \}\)/);
+    expect(route).toMatch(/onlyIfIdentity: unlessHandledSince\(seen, req\.body\.seen_updated_at\),/);
     const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
-    expect(la).toMatch(/\.whereNotIn\('status', notIfStatusIn\)\.update\(\{\s*status: 'lost',/);
+    expect(la).toMatch(/\.modify\(\(q\) => \{ if \(onlyIf\) q\.where\(onlyIf\); \}\)\.update\(\{\s*status: 'lost',/);
     const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
     expect(ui).toMatch(/body: \{ status, seen_status: seenStatus, seen_updated_at: seenUpdatedAt \}/);
     expect(ui).toMatch(/updateLeadStatus\(lead\.id, stage, lead\.status, lead\.updated_at\)/);

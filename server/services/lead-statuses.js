@@ -172,9 +172,23 @@ function handledStatusRefusal(requested, seen, now, seenAt = null, nowAt = null)
   return null;
 }
 
+// The same rule re-asserted inside a status write (a knex where-callback): the row is
+// not handled, or it is the very close the caller saw (handled, updated_at to the
+// millisecond the client got; codex #5477 r16). A close that lands between a route's
+// check and its UPDATE then makes the UPDATE match nothing.
+function unlessHandledSince(seen, seenAt) {
+  return (q) => q.where((w) => {
+    w.whereNot('status', 'handled');
+    if (seen === 'handled' && seenAt) {
+      w.orWhereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(seenAt).toISOString()]);
+    }
+  });
+}
+
 module.exports = {
   NON_ENGAGED_LEAD_STATUSES,
   handledStatusRefusal,
+  unlessHandledSince,
   OPEN_LEAD_STATUSES,
   applyOpenLeadPredicate,
   isOpenLeadRow,

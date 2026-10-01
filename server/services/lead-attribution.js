@@ -296,11 +296,11 @@ async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) 
 // ---------------------------------------------------------------------------
 // 3. markLost
 // ---------------------------------------------------------------------------
-// `notIfStatusIn`: statuses the write must not overwrite (re-asserted in the UPDATE,
-// so a close that landed after the caller's check wins). Returns whether it wrote.
-async function markLost(leadId, { reason, competitor, notes, notIfStatusIn = [] }) {
+// `onlyIf`: a where-callback the write must still satisfy (re-asserted in the UPDATE,
+// so a change that landed after the caller's check wins). Returns whether it wrote.
+async function markLost(leadId, { reason, competitor, notes, onlyIf = null }) {
   const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at')
-    .whereNotIn('status', notIfStatusIn).update({
+    .modify((q) => { if (onlyIf) q.where(onlyIf); }).update({
     status: 'lost',
     lost_reason: reason || null,
     lost_to_competitor: competitor || null,
@@ -308,7 +308,7 @@ async function markLost(leadId, { reason, competitor, notes, notIfStatusIn = [] 
     updated_at: new Date(),
   });
   if (!updatedRows) {
-    logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing, deleted or in ${notIfStatusIn.join('/') || 'no'} excluded status`);
+    logger.info(`[LeadAttribution] markLost skipped — lead ${leadId} missing, deleted or changed since the caller's check`);
     return false;
   }
 

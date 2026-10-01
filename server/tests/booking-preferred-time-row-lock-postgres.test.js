@@ -742,6 +742,20 @@ jest.setTimeout(60000);
       expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
     });
 
+    test('unlessHandledSince (codex #5477 r16): a write matches an open lead, or the very close the caller saw to the millisecond, never a later close', async () => {
+      const { unlessHandledSince } = require('../services/lead-statuses');
+      const [{ id, updated_at: closedAt }] = await database('leads').insert({ lead_type: 'book_preferred_time', status: 'handled', updated_at: database.raw("now() - interval '1 minute'") }).returning(['id', 'updated_at']);
+      const matches = (seen, seenAt) => database('leads').where({ id }).where(unlessHandledSince(seen, seenAt)).select('id');
+      const seenAt = new Date(closedAt).toISOString(); // what the client got (millisecond precision)
+      expect(await matches('handled', seenAt)).toHaveLength(1); // the close the caller saw
+      expect(await matches('new', seenAt)).toHaveLength(0); // the caller saw it open: a close since wins
+      expect(await matches(undefined, null)).toHaveLength(0);
+      await database('leads').where({ id }).update({ updated_at: database.fn.now() }); // reopened + closed again: a newer close
+      expect(await matches('handled', seenAt)).toHaveLength(0);
+      await database('leads').where({ id }).update({ status: 'new' });
+      expect(await matches(undefined, null)).toHaveLength(1); // not handled: any caller
+    });
+
     describe('a booking settles only the request for the same property (terminal Codex pass 3)', () => {
       const setupHomes = async ({ visitAddress, visitZip, visitUnit = null, requestUnit = null }) => {
         const cust = randomUUID();

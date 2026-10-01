@@ -153,7 +153,7 @@ const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate
 // `status=open` filter (the Pipeline table's default) to this set — shared
 // with the dashboard alerts service so action queues use the same
 // membership.
-const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal } = require('../services/lead-statuses');
+const { OPEN_LEAD_STATUSES, scopeToProspects, PROSPECT_SCOPE_SQL, handledStatusRefusal, unlessHandledSince } = require('../services/lead-statuses');
 
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
@@ -1301,9 +1301,10 @@ router.post('/:id/convert', async (req, res, next) => {
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
-      // Only 'handled' is excluded (any other status converts exactly as before): the
-      // claim's where() takes a callback, re-asserting it in the win's own UPDATE.
-      ...(seen === 'handled' ? {} : { onlyIfIdentity: (q) => q.whereNot('status', 'handled') }),
+      // Only 'handled' is excluded, unless it is the very close the page showed (any
+      // other status converts exactly as before): the claim's where() takes a callback,
+      // re-asserting it in the win's own UPDATE.
+      onlyIfIdentity: unlessHandledSince(seen, req.body.seen_updated_at),
     });
     if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
     const updatedLead = await db('leads').where('id', req.params.id).first();
@@ -1323,7 +1324,7 @@ router.post('/:id/lost', async (req, res, next) => {
     const seen = req.body.seen_status; // explicit only (see the PUT)
     const refusal = handledStatusRefusal('lost', seen, existing.status, req.body.seen_updated_at, existing.updated_at);
     if (refusal) return res.status(refusal.code).json({ error: refusal.error });
-    const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, notIfStatusIn: seen === 'handled' ? [] : ['handled'] });
+    const marked = await leadAttribution.markLost(req.params.id, { reason, competitor, notes, onlyIf: unlessHandledSince(seen, req.body.seen_updated_at) });
     if (marked === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online, or been deleted). Reload to see it.' });
     const lead = await db('leads').where('id', req.params.id).first();
     res.json({ lead });
