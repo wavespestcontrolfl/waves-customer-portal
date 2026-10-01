@@ -722,6 +722,11 @@ function isPreVisitAccess(sentence) {
 const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|would\s+not|can'?t|cannot|shouldn'?t|should\s+not)\s+(?:\w+\s+){0,2}?(?:affect|hurt|harm|matter|damage|ruin|undo|change|impact|wash|remove|rinse|dilute|bother|be\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b|\b(?:don'?t\s+worry|no\s+need\s+to\s+worry|nothing\s+to\s+worry|not\s+to\s+worry|(?:isn'?t|is\s+not|not)\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b/;
 // The facts one clause is judged on. `sched(clock)` is the positive-scheduling
 // shape check for this clause, with or without a clock time beside it.
+// "Pressure washing won't affect the treatment.", "Washing won't hurt it.", "Hosing it down is fine.": a wash-family verb beside the treatment (or "it" / "them" /
+// "this" / "that", or a treated surface) is a rain claim in other words.
+const WASH_VERB_OUT_RE = /\b(?:rins(?:e|es|ed|ing)|wash(?:es|ed|ing)?|(?:pressure|power)[-\s]?wash\w*|hos(?:e|es|ed|ing)|spray(?:s|ed|ing)?\s+down|wip(?:e|es|ed|ing)\s+(?:down|off)|mop(?:s|ped|ping)?)\b/;
+const WASH_OBJECT_OUT_RE = /\b(?:treatment|treatments|treated|spray|sprayed|application|applied|product|products|granules?|fertilizer|it|them|this|that|those|lawn|grass|yard|patio|deck|driveway|surfaces?)\b/;
+const washesTreatment = (text) => WASH_VERB_OUT_RE.test(text) && WASH_OBJECT_OUT_RE.test(text);
 function clauseFacts({ clause, staffCarry, sentence, question, replyContext, replyDryCondition }) {
   const being = BEING_RE.test(clause);
   // a results timeline ("7 to 10 days", "a couple of weeks") is no duration claim
@@ -732,8 +737,8 @@ function clauseFacts({ clause, staffCarry, sentence, question, replyContext, rep
     staffLed: (staffSubjectIn(clause) || staffCarry) && !being,
     duration,
     clock: hasClockTime(clause),
-    rain: RAIN_WORD_RE.test(clause) || MOISTURE_WORD_RE.test(clause),
-    rainSentence: RAIN_WORD_RE.test(sentence) || MOISTURE_WORD_RE.test(sentence),
+    rain: RAIN_WORD_RE.test(clause) || MOISTURE_WORD_RE.test(clause) || washesTreatment(clause),
+    rainSentence: RAIN_WORD_RE.test(sentence) || MOISTURE_WORD_RE.test(sentence) || washesTreatment(sentence),
     preVisit: isPreVisitAccess(sentence),
     sched: (clock) => isSchedulingClause(clause, { staffCarry, clock, sentence }),
   };
@@ -1111,8 +1116,13 @@ const OTHER_REENTRY_TOPIC_RE = new RegExp(BEING_RE.source + '|\\b(?:walk|walking
 // required (same as watering); with no treated surface ("can I wash my car tomorrow?") it asks no kind.
 const CLEANING_SURFACE_SRC = 'lawn|grass|yard|patio|deck|driveway|porch|lanai|walkway|sidewalk|pavers?|siding|fence|furniture|baseboards?|floors?|carpets?|cabinets?|counters?|countertops?|windows?|sills?|walls?|screens?|cage|pool\\s+deck|treated\\s+(?:areas?|surfaces?)|surfaces?|house|home';
 const CLEANING_RE = new RegExp(`\\b(?:rins(?:e|es|ed|ing)|wash(?:es|ed|ing)?|(?:pressure|power)[-\\s]?wash\\w*|hos(?:e|es|ed|ing)\\s+(?:off|down)|spray(?:s|ed|ing)?\\s+down|wip(?:e|es|ed|ing)\\s+(?:down|off)|mop(?:s|ped|ping)?|clean(?:s|ed|ing)?)\\b(?:\\s+[\\w'-]+){0,4}?\\s+(?:${CLEANING_SURFACE_SRC})\\b`);
+// A wash-family verb tied to the TREATMENT itself ("will pressure washing affect the treatment?", "will hosing affect the spray?", "can I pressure wash after the
+// application?") asks the rain kind whatever surface is named (or none): washing is what rain does to a treatment.
+const WASH_VERB_RE = /\b(?:rins(?:e|es|ed|ing)|wash(?:es|ed|ing)?|(?:pressure|power)[-\s]?wash\w*|hos(?:e|es|ed|ing)|spray(?:s|ed|ing)?\s+down|wip(?:e|es|ed|ing)\s+(?:down|off)|mop(?:s|ped|ping)?)\b/;
+const WASH_TREATMENT_RE = /\b(?:treatment|treatments|treated|spray|sprayed|spraying|application|applications|applied|product|products|granules?|fertilizer|fertilized|effect|affect|affected|affects)\b/;
 function cleaningKinds(text) {
-  return CLEANING_RE.test(text) && (WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text)) ? ['reentry', 'rain'] : null;
+  if (CLEANING_RE.test(text) && (WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text))) return ['reentry', 'rain'];
+  return WASH_VERB_RE.test(text) && WASH_TREATMENT_RE.test(text) ? ['rain'] : null;
 }
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return cleaningKinds(text);

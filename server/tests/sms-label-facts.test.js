@@ -1987,6 +1987,27 @@ describe('r28 (round 27 review): rinse / wash / wipe / mop of a treated surface;
   });
 });
 
+describe('r29 (round 28 review): washing tied to the treatment', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const claims = (reply) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(reply, ''));
+  test('inbound: a wash-family verb tied to the treatment / spray / application / product asks the rain kind, with no surface needed', () => {
+    for (const t of ['Will pressure washing affect the treatment?', 'Will hosing affect the treatment?', 'can I pressure wash after the spray?', 'will rinsing the product off matter?', 'Can I wash the dog after the treatment?', 'does power washing hurt the application?']) {
+      expect([t, asked(t).includes('rain')]).toEqual([t, true]);
+    }
+    for (const t of ['can I wash my car tomorrow?', 'do you wash windows?', 'I wash the dishes every night']) expect([t, asked(t)]).toEqual([t, []]);
+  });
+  test('outgoing: wash-family reassurance is a rain claim, held without the rainfast copy', () => {
+    const kinds = asked('Will pressure washing affect the treatment?');
+    for (const reply of ["Pressure washing won't affect the treatment.", "Washing won't hurt it.", 'Hosing it down is fine.', 'Rinsing it is ok.', 'Mopping them is fine.']) {
+      expect([reply, claims(reply)]).toEqual([reply, true]);
+      expect([reply, labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', kinds)]).toEqual([reply, true]);
+    }
+    // ...while plain service copy and a hand-off are not claims
+    for (const reply of ['We wash the windows too.', 'Our crew pressure washes driveways.', 'Thanks! Your technician will confirm the timing.']) expect([reply, claims(reply)]).toEqual([reply, false]);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('Thanks for asking! Your technician will confirm the timing.', '', kinds)).toBe(false);
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
@@ -2160,16 +2181,17 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     nonEnglishTimingWords: (t) => labelFactsLib.nonEnglishTimingWords(t),
   };
   // Machine-independent: a generous absolute ceiling per call (CI runners are several times slower than a laptop and noisy under parallel workers;
-  // a real ReDoS is seconds or worse) AND a scaling check on the same pattern: a 4x longer input may take at most ~12x as long (linear is 4x,
-  // quadratic 16x, exponential unbounded), each the best of three runs after a warm-up, with a floor on the short-input time so sub-millisecond
-  // jitter cannot fail it. PRINT_TIMINGS=1 prints each classifier's slowest case.
+  // a real ReDoS is seconds or worse) AND a scaling check on the same pattern: a 4x longer input must not take more than ~12x as long (linear is 4x,
+  // quadratic 16x, exponential unbounded). Each time is the MIN of five runs after a warm-up, and the ratio only fails when the long run is ALSO
+  // over 50 ms: a few-millisecond difference is GC / scheduler jitter (measured: "number words" is ~10x from 500 to 2,000 chars at 2 ms, and a
+  // CI runner once read 12.3x), while a real blow-up is far past 50 ms at 2,000 chars. PRINT_TIMINGS=1 prints each classifier's slowest case.
   const CEILING_MS = 500;
   const SCALE_FACTOR = 12;
-  const SHORT_FLOOR_MS = 0.5;
+  const SCALE_MIN_LONG_MS = 50;
   const SHORT_N = 500;
-  const bestOf3 = (fn, text) => {
+  const bestOf = (fn, text, runs = 5) => {
     fn(text); // warm-up (regex compilation, lazy lexicons)
-    return Math.min(...[0, 1, 2].map(() => { const t0 = process.hrtime.bigint(); fn(text); return Number(process.hrtime.bigint() - t0) / 1e6; }));
+    return Math.min(...Array.from({ length: runs }, () => { const t0 = process.hrtime.bigint(); fn(text); return Number(process.hrtime.bigint() - t0) / 1e6; }));
   };
   test('every exported classifier finishes an adversarial 2,000-character input under a generous ceiling and scales sub-quadratically (a long run of "twenty-one-" used to backtrack exponentially)', () => {
     const slow = [];
@@ -2177,14 +2199,16 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     for (const [name, fn] of Object.entries(CLASSIFIERS)) {
       for (const [label, text] of Object.entries(ADVERSARIAL)) {
         expect(text.length).toBe(N);
-        const long = bestOf3(fn, text);
-        const short = bestOf3(fn, text.slice(0, SHORT_N));
+        const long = bestOf(fn, text);
         if (!worst[name] || long > worst[name][1]) worst[name] = [label, long];
         if (long >= CEILING_MS) slow.push(`${name} on "${label}": ${long.toFixed(1)} ms (ceiling ${CEILING_MS})`);
-        else if (long > SCALE_FACTOR * Math.max(short, SHORT_FLOOR_MS)) slow.push(`${name} on "${label}": ${short.toFixed(2)} ms at ${SHORT_N} chars -> ${long.toFixed(2)} ms at ${N} (more than ${SCALE_FACTOR}x)`);
+        else if (long > SCALE_MIN_LONG_MS) {
+          const short = bestOf(fn, text.slice(0, SHORT_N));
+          if (long > SCALE_FACTOR * short) slow.push(`${name} on "${label}": ${short.toFixed(2)} ms at ${SHORT_N} chars -> ${long.toFixed(2)} ms at ${N} (more than ${SCALE_FACTOR}x)`);
+        }
       }
     }
-    if (process.env.PRINT_TIMINGS) console.log(Object.entries(worst).map(([n, [l, ms]]) => `${n}: ${ms.toFixed(2)} ms on "${l}"`).join('\n'));  
+    if (process.env.PRINT_TIMINGS) console.log(Object.entries(worst).map(([n, [l, ms]]) => `${n}: ${ms.toFixed(2)} ms on "${l}"`).join('\n'));
     expect(slow).toEqual([]);
   });
   test('send time and the async path are bounded too', async () => {
