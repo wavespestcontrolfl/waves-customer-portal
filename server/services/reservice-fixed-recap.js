@@ -24,6 +24,7 @@ const ActivityIndicators = require('./service-report/activity-indicators');
 const { isSprayApplicationMethod } = require('./service-report/service-line-configs');
 
 const MODE = 'reservice_fixed';
+const NOT_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
 // Registered as this text's template key (sms_log / notes); the message type
 // stays the completion family's so channel routing is the completion text's.
 const TEMPLATE_KEY = 'reservice_fixed_recap';
@@ -149,11 +150,16 @@ function buildReserviceFixedRecap({ address, areas, products, reportUrl } = {}) 
 // dark gates on (server side), and the visit is still a pest re-service by the
 // live completion profile. Anything else is NOT honored, and the caller then
 // sends no completion text at all (never falls back to another text).
-function reserviceFixedRecapHonored({ requestedMode, fastCompleteGate, recapGate, serviceKey }) {
+function reserviceFixedRecapHonored({ requestedMode, fastCompleteGate, recapGate, serviceKey, visitOutcome }) {
   return requestedMode === MODE
     && fastCompleteGate === true
     && recapGate === true
-    && serviceKey === 'pest_re_service';
+    && serviceKey === 'pest_re_service'
+    // "We treated …" is only true of a performed visit: an inspection,
+    // a decline or an incomplete visit gets no fixed text (the same
+    // not-performed set pest-recap.js uses).
+    && typeof visitOutcome === 'string' && visitOutcome !== ''
+    && !NOT_PERFORMED_OUTCOMES.has(visitOutcome);
 }
 
 // The body the provider is handed, and so the body audited and shown to the

@@ -128,7 +128,7 @@ describe('buildReserviceFixedRecap', () => {
 });
 
 describe('reserviceFixedRecapHonored', () => {
-  const on = { requestedMode: MODE, fastCompleteGate: true, recapGate: true, serviceKey: 'pest_re_service' };
+  const on = { requestedMode: MODE, fastCompleteGate: true, recapGate: true, serviceKey: 'pest_re_service', visitOutcome: 'completed' };
   test('honored only with the mode, both gates and a pest re-service', () => {
     expect(reserviceFixedRecapHonored(on)).toBe(true);
     expect(reserviceFixedRecapHonored({ ...on, requestedMode: undefined })).toBe(false);
@@ -206,7 +206,7 @@ describe('complete-scheduled-service wiring', () => {
   test('the mode is honored from the live profile and both gates; an unhonored request sends no completion text', () => {
     expect(src).toContain('customerRecapMode,');
     expect(src).toContain('sendCompletionSms: sendCompletionSmsRequested,');
-    expect(src).toMatch(/reserviceFixedRecapHonored\(\{\s*requestedMode: customerRecapMode,\s*fastCompleteGate: [^\n]*isEnabled\('reserviceFastComplete'\),\s*recapGate: [^\n]*isEnabled\('fastCompleteRecap'\),\s*serviceKey: completionProfile\?\.serviceKey,/);
+    expect(src).toMatch(/reserviceFixedRecapHonored\(\{\s*requestedMode: customerRecapMode,\s*fastCompleteGate: [^\n]*isEnabled\('reserviceFastComplete'\),\s*recapGate: [^\n]*isEnabled\('fastCompleteRecap'\),\s*serviceKey: completionProfile\?\.serviceKey,\s*visitOutcome,/);
     expect(src).toMatch(/const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap\s*\? false\s*: sendCompletionSmsRequested;/);
   });
 
@@ -453,5 +453,15 @@ describe('review fixes (#5363 r5)', () => {
   test('a held message with no recorded channel is channel-neutral', () => {
     expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X' })).toMatchObject({ queued: true, channel: null });
     expect(customerTextOutcome({ honored: true, status: 'deferred', body: 'X', channel: 'push' })).toMatchObject({ queued: true, channel: 'push' });
+  });
+});
+
+describe('review fixes (#5363 r6)', () => {
+  const on = { requestedMode: MODE, fastCompleteGate: true, recapGate: true, serviceKey: 'pest_re_service' };
+  test.each(['inspection_only', 'customer_declined', 'incomplete', undefined, ''])('outcome %p: no fixed text ("We treated" would be false)', (visitOutcome) => {
+    expect(reserviceFixedRecapHonored({ ...on, visitOutcome })).toBe(false);
+  });
+  test.each(['completed', 'follow_up_needed', 'customer_concern'])('performed outcome %p: honored', (visitOutcome) => {
+    expect(reserviceFixedRecapHonored({ ...on, visitOutcome })).toBe(true);
   });
 });

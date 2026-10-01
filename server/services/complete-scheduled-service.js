@@ -3092,6 +3092,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       fastCompleteGate: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       recapGate: require('../config/feature-gates').isEnabled('fastCompleteRecap'),
       serviceKey: completionProfile?.serviceKey,
+      visitOutcome,
     });
     const sendCompletionSms = reserviceFixedRecapRequested && !reserviceFixedRecap
       ? false
