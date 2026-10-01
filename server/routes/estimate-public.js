@@ -10002,6 +10002,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       paymentMethodPreference,
     });
     let cardHoldVerification = null;
+    // The fee/window the hold row was FROZEN with (recordCardHoldHeld's
+    // return): the post-commit consent snapshot carries these, never the
+    // live policy (local max-effort review on #5434 — a pending row minted
+    // before a pricing_config change keeps its own terms).
+    let heldHoldTerms = null;
 
     // ─────────────────────────────────────────────
     // REQUIRED ACCEPTANCE DEPOSIT (dark until ESTIMATE_DEPOSIT_REQUIRED).
@@ -12308,7 +12313,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (!customerId || !reservationCommitted || !heldAppointmentId) {
           throw estimateAcceptError('Could not hold your appointment — please pick a time and try again');
         }
-        await CardHolds.recordCardHoldHeld({
+        heldHoldTerms = await CardHolds.recordCardHoldHeld({
           estimateId: estimate.id,
           customerId,
           scheduledServiceId: heldAppointmentId,
@@ -13364,9 +13369,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void CardHolds.attachCardHoldPaymentMethod({
         customerId,
         paymentMethodId: cardHoldVerification.paymentMethodId,
-        // The fee/window this accept resolved — the hold disclosure the
-        // modal rendered is snapshotted with these numbers.
-        holdTerms: { noShowFeeAmount: cardHoldPolicy.noShowFeeAmount, cancelWindowHours: cardHoldPolicy.cancelWindowHours },
+        // The fee/window the hold row was FROZEN with (a captured card keeps
+        // its pending row's terms; a saved method the ones this accept
+        // resolved) — the hold disclosure the modal rendered is snapshotted
+        // with exactly these numbers, never the live policy.
+        holdTerms: heldHoldTerms?.noShowFeeAmount != null
+          ? { noShowFeeAmount: heldHoldTerms.noShowFeeAmount, cancelWindowHours: heldHoldTerms.cancelWindowHours }
+          : { noShowFeeAmount: cardHoldPolicy.noShowFeeAmount, cancelWindowHours: cardHoldPolicy.cancelWindowHours },
       }).catch(() => {});
       // Hold-confirmation email (owner 2026-07-13; GATED OFF until
       // GATE_CARD_ENROLLMENT_EMAILS): the customer's copy of the

@@ -540,14 +540,14 @@ describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec �
     await expect(recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved',
-    })).resolves.toBeUndefined();
+    })).resolves.toEqual({ noShowFeeAmount: 75, cancelWindowHours: 24 }); // live policy: no pending row, no frozenTerms
   });
   it('updates the existing SI-less held row on a retried accept (no duplicate holds)', async () => {
     stubDb([null, { id: 'hold-existing' }]); // visit lock → existing SI-less held row → update path
     await expect(recordCardHoldHeld({
       estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
       setupIntentId: null, paymentMethodId: 'pm_saved',
-    })).resolves.toBeUndefined();
+    })).resolves.toEqual({ noShowFeeAmount: 75, cancelWindowHours: 24 });
   });
 });
 
@@ -718,6 +718,45 @@ describe('recordCardHoldHeld — sticky disclosure rides the ACCEPT attestation 
       setupIntentId: 'si_1', paymentMethodId: 'pm_cap',
     });
     expect(merges2[0].sticky_window_disclosed).toBe(false);
+  });
+});
+
+describe('recordCardHoldHeld — returns the terms the hold was frozen with (local max-effort review on #5434)', () => {
+  // The accept's post-commit consent snapshot carries THESE, never the live
+  // policy: a pending row minted before a pricing_config change keeps the
+  // fee/window the customer was first shown.
+  it('a captured card: the pending row\'s frozen fee and window, not live config', async () => {
+    stubDb([null, { no_show_fee_amount: 61.25, cancel_window_hours: 36 }]);
+    const base = mockDbHandler;
+    mockDbHandler = (table) => {
+      const chain = base(table);
+      const origInsert = chain.insert;
+      chain.insert = (payload) => { origInsert(payload); return { onConflict: () => ({ merge: () => Promise.resolve(1) }) }; };
+      return chain;
+    };
+    const frozen = await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: 'si_1', paymentMethodId: 'pm_cap',
+      frozenTerms: { noShowFeeAmount: 75, cancelWindowHours: 24 },
+    });
+    expect(frozen).toEqual({ noShowFeeAmount: 61.25, cancelWindowHours: 36 });
+  });
+  it('a saved method (no pending row): the terms the accept resolved', async () => {
+    stubDb([null, null]);
+    const frozen = await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+      frozenTerms: { noShowFeeAmount: 49.5, cancelWindowHours: 48 },
+    });
+    expect(frozen).toEqual({ noShowFeeAmount: 49.5, cancelWindowHours: 48 });
+  });
+  it('the accept route snapshots the recorded hold\'s terms on the post-commit attach (source pattern)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    expect(src).toMatch(/heldHoldTerms = await CardHolds\.recordCardHoldHeld\(/);
+    const attach = src.slice(src.indexOf('CardHolds.attachCardHoldPaymentMethod({'));
+    const holdTermsLine = attach.slice(attach.indexOf('holdTerms:'), attach.indexOf('}).catch'));
+    expect(holdTermsLine).toMatch(/heldHoldTerms\?\.noShowFeeAmount != null/);
   });
 });
 

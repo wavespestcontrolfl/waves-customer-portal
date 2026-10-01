@@ -337,6 +337,12 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     }
   }
   logger.info('[estimate-card-holds] card hold recorded held', { estimateId });
+  // The terms this hold was FROZEN with — the pending row's for a captured
+  // card, the accept-resolved ones for a saved method. The post-commit
+  // consent snapshot must carry exactly these (local max-effort review on
+  // #5434): the accept's live policy can differ from the pending row when
+  // pricing_config changed between modal-open and accept.
+  return { noShowFeeAmount: noShowFee, cancelWindowHours: windowHours };
 }
 
 // Post-commit, best-effort: attach the captured PM to the customer + persist a
@@ -350,8 +356,10 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
 // revocation guard must not fire there) | 'self_heal' (pre-charge repair
 // of a missing local row — here customer=null means the pm was DETACHED
 // after having been attached, i.e. revoked, and must never re-attach).
-// `holdTerms` = the fee/window the hold was frozen with (the accept's
-// resolved policy, or the hold row's own columns on self-heal): the ledger
+// `holdTerms` = the fee/window the hold was frozen with (what
+// recordCardHoldHeld returned for this accept, or the hold row's own
+// columns on self-heal — never the accept's live policy, which can differ
+// from a pending row minted before a pricing_config change): the ledger
 // row snapshots the hold disclosure the CardHoldModal rendered with exactly
 // those numbers (codex #5434 r3 P1) — never the card authorization text the
 // modal does not show. Absent terms fall back to the current policy.
