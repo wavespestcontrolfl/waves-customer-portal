@@ -184,7 +184,7 @@ function checkTimeAndTech(dated, families, { firstDay, byId }) {
  *          scheduleSkippedFamilies: Set, scheduleOnHoldFamilies: Set, scheduleUnjudged: bool }
  * Returns null when the accept is not a multi-service recurring accept, or
  * every row of the plan was cancelled (no alert at all); else
- * { ok, deferred, frozen, heldFamilies, problems: [{ code, families, text }], labels }.
+ * { ok, deferred, heldFamilies, problems: [{ code, families, text }], labels }.
  */
 function evaluateCombinedBooking(ctx) {
   const {
@@ -206,8 +206,9 @@ function evaluateCombinedBooking(ctx) {
   // good: its findings are not kept.
   const heldFamilies = [...accepted].filter((family) => scheduleOnHoldFamilies.has(family));
   const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
-  // Every family on hold / stopped / kept on an older series: nothing to judge.
-  if (!families.size) return { ok: false, deferred: true, frozen: heldFamilies.length > 0, heldFamilies, problems: [], labels: [] };
+  // Every family on hold / stopped / kept on an older series: nothing to judge
+  // now. The runner keeps only the findings about families on hold.
+  if (!families.size) return { ok: false, deferred: true, heldFamilies, problems: [], labels: [] };
 
   // The booking's first day comes from ALL its plan visits, before families on
   // hold or cancelled rows are filtered out (the seasonal exemption is judged
@@ -219,11 +220,11 @@ function evaluateCombinedBooking(ctx) {
   // cancelled the plan. Nothing left to verify, so nothing to say.
   if (!rows.length && planRows.length && planRows.every((row) => CANCELLED.has(row.status))) {
     // The services still judged were cancelled; one on hold keeps the booking.
-    return heldFamilies.length ? { ok: false, deferred: true, frozen: true, heldFamilies, problems: [], labels: [] } : null;
+    return heldFamilies.length ? { ok: false, deferred: true, heldFamilies, problems: [], labels: [] } : null;
   }
   const labels = [...families].map(familyLabel);
   // No live rows: the schedule shape is the accepted-schedule alert's.
-  if (!rows.length) return { ok: false, deferred: true, frozen: false, heldFamilies, problems: [], labels };
+  if (!rows.length) return { ok: false, deferred: true, heldFamilies, problems: [], labels };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
     a.day.localeCompare(b.day) || String(a.id).localeCompare(String(b.id)));
@@ -231,7 +232,7 @@ function evaluateCombinedBooking(ctx) {
   const problems = checkTimeAndTech(dated, families, { firstDay, byId });
   // A schedule gap, or an estimate the classifier did not judge, is never OK.
   const deferred = scheduleGaps.length > 0 || scheduleUnjudged;
-  return { ok: !problems.length && !deferred, deferred, frozen: false, heldFamilies, problems, labels };
+  return { ok: !problems.length && !deferred, deferred, heldFamilies, problems, labels };
 }
 
 function shortName(customer) {
@@ -415,16 +416,16 @@ function heldProblems(verdict, standingProblems = []) {
 
 // What a sweep does with one verdict, given the standing bell's findings:
 //   skipped  — not a combined booking any more (the plan was cancelled): close
-//   frozen   — every accepted family is on hold / stopped: leave a bell as is
 //   problems — post / refresh the bell (current findings plus held ones)
 //   ok       — verified: close a standing bell as fixed
 //   deferred — nothing of this check's own to say: close
+// `onHold`: a service of this booking could not be judged for a plan hold.
 function outcomeOf(verdict, standingProblems = []) {
-  if (!verdict) return { outcome: 'skipped', problems: [] };
-  if (verdict.frozen) return { outcome: 'frozen', problems: [] };
+  if (!verdict) return { outcome: 'skipped', problems: [], onHold: false };
   const problems = [...verdict.problems, ...heldProblems(verdict, standingProblems)];
-  if (problems.length) return { outcome: 'problems', problems };
-  return { outcome: verdict.ok ? 'ok' : 'deferred', problems };
+  const onHold = verdict.heldFamilies.length > 0;
+  if (problems.length) return { outcome: 'problems', problems, onHold };
+  return { outcome: verdict.ok ? 'ok' : 'deferred', problems, onHold };
 }
 
 // The estimates the standing overflow bell still owes their own bell.
@@ -570,17 +571,13 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
         coverage: coverage.get(id),
       });
-      const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
-      if (outcome === 'frozen') {
-        // Every family on hold: nothing could be judged. A standing bell keeps
-        // the estimate a candidate; an owed booking stays owed.
-        result.deferred += 1;
-        if (owedBefore.has(id)) owe(estimate, 'every service is on hold; it is checked again when a hold ends');
-        continue;
-      }
+      const { outcome, problems, onHold } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome !== 'problems') {
         result[outcome] += 1;
         if (known) result.closed += await retireStanding(conn, [id], outcome === 'skipped' ? RESOLVED_GONE : RESOLVED_FIXED);
+        // A service on hold could not be judged: an owed booking stays owed
+        // until it is.
+        if (onHold && owedBefore.has(id)) owe(estimate, 'a service is on hold; it is checked again when the hold ends');
         continue;
       }
       result.checked += 1;

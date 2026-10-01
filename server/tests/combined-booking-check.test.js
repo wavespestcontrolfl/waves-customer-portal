@@ -131,15 +131,21 @@ describe('evaluateCombinedBooking', () => {
       { scheduleSkippedFamilies: new Set(['lawn_care']), scheduleOnHoldFamilies: new Set(['lawn_care']) });
     expect(held.heldFamilies).toEqual(['lawn_care']);
     expect(outcomeOf(held, [lawnOpen]).outcome).toBe('problems');
-    // Every series stopped and cancelled: a cancelled plan, not frozen.
+    // Every series stopped and cancelled: a cancelled plan (no verdict).
     const allCancelled = [...pestRows(), ...lawnRows()].map((row) => ({ ...row, status: 'cancelled' }));
     expect(run([PEST, LAWN], allCancelled, { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) })).toBeNull();
   });
 
-  test('every family on hold: frozen, nothing judged', () => {
+  test('every family skipped: nothing judged, and only on-hold findings survive (a stopped one\'s close)', () => {
     const both = new Set(['pest_control', 'lawn_care']);
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: both, scheduleOnHoldFamilies: both });
-    expect(verdict).toMatchObject({ frozen: true, problems: [] });
+    // Pest on hold, lawn stopped for good (its visits cancelled after one completed).
+    const lawnStopped = lawnRows().map((row, i) => ({ ...row, status: i === 0 ? 'completed' : 'cancelled' }));
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnStopped], { scheduleSkippedFamilies: both, scheduleOnHoldFamilies: new Set(['pest_control']) });
+    expect(verdict).toMatchObject({ deferred: true, heldFamilies: ['pest_control'], problems: [] });
+    const pestOpen = { code: 'missing_time_tech', families: ['pest_control'], text: '2 pest visits missing time/tech' };
+    const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
+    expect(outcomeOf(verdict, [pestOpen, lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...pestOpen, held: true }], onHold: true });
+    expect(outcomeOf(verdict, [lawnOpen])).toMatchObject({ outcome: 'deferred', onHold: true });
   });
 
   test('a seasonal mosquito series rolled past the first day is unslotted on purpose; same-day or monthly is still checked', () => {
@@ -213,15 +219,14 @@ describe('outcomeOf', () => {
   const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
   test('maps every verdict to what the sweep does', () => {
     expect(outcomeOf(null).outcome).toBe('skipped');
-    expect(outcomeOf({ frozen: true, problems: [] }).outcome).toBe('frozen');
-    expect(outcomeOf({ problems: [{ code: 'missing_time_tech', families: ['pest_control'] }] }).outcome).toBe('problems');
-    expect(outcomeOf({ ok: true, problems: [] }).outcome).toBe('ok');
-    expect(outcomeOf({ ok: false, deferred: true, problems: [] }).outcome).toBe('deferred');
+    expect(outcomeOf({ heldFamilies: [], problems: [{ code: 'missing_time_tech', families: ['pest_control'] }] }).outcome).toBe('problems');
+    expect(outcomeOf({ ok: true, heldFamilies: [], problems: [] }).outcome).toBe('ok');
+    expect(outcomeOf({ ok: false, deferred: true, heldFamilies: [], problems: [] }).outcome).toBe('deferred');
   });
 
   test('a finding about a service that went on hold stays on the bell, marked, instead of closing as fixed', () => {
     const clean = { ok: true, deferred: false, heldFamilies: ['lawn_care'], problems: [] };
-    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }] });
+    expect(outcomeOf(clean, [lawnOpen])).toEqual({ outcome: 'problems', problems: [{ ...lawnOpen, held: true }], onHold: true });
     // Not on hold: a clean verdict closes it.
     expect(outcomeOf({ ...clean, heldFamilies: [] }, [lawnOpen]).outcome).toBe('ok');
     const why = composeAdminAlert(composeAlert({ labels: ['Pest'], problems: [{ ...lawnOpen, held: true }] }, ALERT_IDS)).why;
