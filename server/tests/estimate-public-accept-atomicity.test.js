@@ -2695,6 +2695,15 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
     });
 
+    test('r6 audit: the timing attestation is judged even after the cohort marker is gone (sub-gate turned off): a payable invoice is refused', async () => {
+      resolverSpy.mockResolvedValue({ enforced: true, required: false, exemptReason: 'existing_plan_customer' });
+      conversion('ss-first');
+      const res = await putAccept(TOKEN, { afterVisitTimingShown: true });
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(storedEstimate().status).toBe('sent');
+    });
+
     test('r5 audit: the same timing attestation is honored when the invoice really is deferred (attached)', async () => {
       conversion('ss-first');
       const res = await putAccept(TOKEN, { ...AFTER_VISIT, afterVisitTimingShown: true });

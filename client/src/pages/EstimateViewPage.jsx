@@ -8413,7 +8413,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The payment-timing copy reads the SAME server answer as the capture text.
   const payAfterFirstVisitEffective = data?.recurringCardPolicy?.afterVisitExisting === true
     && afterVisitDeniedKey !== afterVisitSelectionKey;
-  afterVisitTimingShownRef.current = payAfterFirstVisitEffective && afterVisitInvoiceShape.hasFirstVisitInvoice;
+  afterVisitTimingShownRef.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'
+    && afterVisitInvoiceShape.hasFirstVisitInvoice;
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
     // The version of the text THIS BUNDLE renders (AFTER_VISIT_CARD_CONSENT_TEXT

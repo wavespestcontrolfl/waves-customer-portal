@@ -53,7 +53,7 @@ describe('EstimateViewPage accept consent attestation', () => {
   it('r5 audit: the payment-timing copy reads the same server answer as the capture text, is attested, and a PAYMENT_TIMING_REFRESH 409 records the answer for this selection', () => {
     expect(src).toMatch(/const payAfterFirstVisitEffective = data\?\.recurringCardPolicy\?\.afterVisitExisting === true\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
     expect(src.match(/payAfterFirstVisit=\{payAfterFirstVisitEffective\}\s*paymentTimingDenied=\{afterVisitDeniedKey === afterVisitSelectionKey\}/g)).toHaveLength(2);
-    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && afterVisitInvoiceShape\.hasFirstVisitInvoice;/);
+    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'\s*&& afterVisitInvoiceShape\.hasFirstVisitInvoice;/);
     expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
     expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{\s*(?:\/\/[^\n]*\n\s*)*setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
   });

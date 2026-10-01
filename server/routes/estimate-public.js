@@ -12839,10 +12839,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // (an existing customer whose series already exists gets an UNATTACHED
       // first invoice). Refused retryably with the real answer, which the page
       // then renders for this selection.
-      if (afterVisitTimingAttested && recurringCardPolicy.afterVisitCard === true && !annualPrepaySelected
-        && RecurringCards.standardInvoiceDelivery({
+      // Judged against the real invoice outcome whatever the LIVE cohort now
+      // says (a sub-gate turned off since the page loaded drops the marker),
+      // on every branch: a one-time or invoice-mode accept bills now too.
+      if (afterVisitTimingAttested && !annualPrepaySelected
+        && (treatAsOneTime || invoiceModeResult === true || RecurringCards.standardInvoiceDelivery({
           laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
-        }).collectsAtAccept) {
+        }).collectsAtAccept)) {
         if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
           await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
         }
