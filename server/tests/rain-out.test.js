@@ -1036,6 +1036,29 @@ describe('rain-out service', () => {
       expect(vars.new_option).toContain('11:00 AM - 1:00 PM');
     });
 
+    test('gate on: a sent Quick Move text closes the reminders of the partners carried WITH the anchor, not later ones', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [chain({ update: jest.fn().mockResolvedValue(1) }), chain({ update: jest.fn().mockResolvedValue(1) })],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00', visitId: 'v1', visitWindowStart: '13:00' }],
+        carriedVisitMembers: [
+          { id: 'pest-1', visitId: 'v1', forOccurrenceId: 'svc-1', date: '2026-06-12', windowStart: '13:00', windowEnd: '14:00' },
+          { id: 'pest-9', visitId: 'v9', forOccurrenceId: 'sib-9', date: '2026-09-12', windowStart: '13:00', windowEnd: '14:00' },
+        ],
+      });
+      const AppointmentReminders = require('../services/appointment-reminders');
+      AppointmentReminders.markRescheduleNoticeSent.mockResolvedValueOnce(2);
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      expect(AppointmentReminders.markRescheduleNoticeSent).toHaveBeenCalledWith(['svc-1', 'pest-1']);
+    });
+
     test('route scope: a partner the series shift carried is covered by its visit — never moved or texted again', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireDb({

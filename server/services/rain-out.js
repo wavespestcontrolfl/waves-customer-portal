@@ -2639,7 +2639,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             // notified_at NULL, the state the reconciler's close-only
             // branch finishes without re-sending (codex r16 P1).
             const AppointmentReminders = require('./appointment-reminders');
-            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id]);
+            // The text speaks for the STOP: partners the series carried
+            // WITH this occurrence (GATE_SERIES_MOVE_CARRIES_VISIT) close
+            // with it; later occurrences' partners stay armed (not covered).
+            const stopPartnerIds = (seriesResultForEffects?.carriedVisitMembers || [])
+              .filter((k) => String(k.forOccurrenceId) === String(job.id))
+              .map((k) => k.id);
+            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id, ...stopPartnerIds]);
             closeOwed = closed === null || closed === undefined;
           }
           if (closeOwed) {

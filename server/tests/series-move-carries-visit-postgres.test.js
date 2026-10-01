@@ -359,6 +359,22 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', memberId: f.pest[0].id });
   });
 
+  test('a legacy partner with no status is never left behind: the whole move refuses', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    const [legacy] = await db('scheduled_services').insert({
+      id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, status: 'pending', visit_id: f.visits[0].id,
+      service_type: 'Mosquito', scheduled_date: dateOnly(f.lawn[0].scheduled_date),
+      window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30,
+    }).returning('id');
+    const legacyId = legacy.id || legacy;
+    await db.raw('UPDATE scheduled_services SET status = NULL WHERE id = ?', [legacyId]);
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id), legacyId]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: legacyId });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

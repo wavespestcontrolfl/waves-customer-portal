@@ -1517,7 +1517,7 @@ describe('caller wiring (source)', () => {
     expect(reb).toContain("['property-preferences', String(service.customer_id)],");
     expect(read('../routes/property.js')).toContain("['property-preferences', String(req.customerId)],");
     expect(fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8')).toContain('&& firstOrigin === expectedById.get(id)) {');
-    expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id]);');
+    expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id, ...stopPartnerIds]);');
     expect(rainOut).toContain('result: { ...seriesResultForEffects, notifyRequested: false },');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
     expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");

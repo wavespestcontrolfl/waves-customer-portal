@@ -2727,7 +2727,9 @@ class SmartRebooker {
         const partners = await trx('scheduled_services')
           .whereIn('visit_id', visitIds)
           .whereNotIn('id', sweptIds)
-          .whereNotIn('status', TERMINAL_ROW_STATUSES)
+          // NULL-safe: a legacy member with no status is live and must ride
+          // (or refuse) with the stop, never stay behind attached to it.
+          .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_ROW_STATUSES))
           .orderBy('id')
           .select(...CARRY_PARTNER_COLUMNS);
         const byVisit = new Map();
