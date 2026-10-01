@@ -1561,17 +1561,10 @@ async function noticedRenewalAmountConflictFor(customerId, amount, { coverageSer
   return require('../services/rate-review-apply').noticedRenewalAmountConflict(trx || db, { customerId, amount, coverageServiceType, termStart, today: etDateString(), lock: !!trx });
 }
 
-// The 409 the in-transaction re-check throws (same shape as the pre-check's
-// response; the handlers' catch returns err.noticedRenewalAmount as 409).
+// The 409 both the pre-check and the in-transaction re-check return (the
+// handlers' catch returns err.noticedRenewalAmount as 409).
 function noticedRenewalAmountError(conflict) {
-  return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
-    noticedRenewalAmount: {
-      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
-      code: 'RENEWAL_AMOUNT_NOTICED',
-      noticedAmount: conflict.noticedAmount,
-      termId: conflict.termId,
-    },
-  });
+  return require('../services/rate-review-apply').noticedRenewalAmountError(conflict);
 }
 
 function parseAnnualPrepayAmount(value) {
@@ -5344,12 +5337,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
     const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart });
     if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json({
-        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
-        code: 'RENEWAL_AMOUNT_NOTICED',
-        noticedAmount: noticedConflict.noticedAmount,
-        termId: noticedConflict.termId,
-      });
+      return res.status(409).json(noticedRenewalAmountError(noticedConflict).noticedRenewalAmount);
     }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
@@ -5907,14 +5895,15 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // charges exactly that amount ("notified amount is the charged amount")
     // unless the operator confirms a different one deliberately
     // (acknowledgeNoticedAmount). Gate off = no read, byte-identical.
-    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart });
+    // `amount` here is the COLLECTED TOTAL with any setup inside it; the
+    // noticed renewal amount is coverage money, so compare the coverage
+    // share — the same figure the term records (collectedCoverage below).
+    const collectedCoverageAmount = collectedSetupFee > 0
+      ? Math.round((amount - collectedSetupFee) * 100) / 100
+      : amount;
+    const noticedConflict = await noticedRenewalAmountConflictFor(customer.id, collectedCoverageAmount, { coverageServiceType, termStart });
     if (noticedConflict && req.body?.acknowledgeNoticedAmount !== true) {
-      return res.status(409).json({
-        error: `This customer was noticed a renewal amount of $${noticedConflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
-        code: 'RENEWAL_AMOUNT_NOTICED',
-        noticedAmount: noticedConflict.noticedAmount,
-        termId: noticedConflict.termId,
-      });
+      return res.status(409).json(noticedRenewalAmountError(noticedConflict).noticedRenewalAmount);
     }
 
     const activeTermEnd = dateOnlyForApi(activeTerm?.term_end);
@@ -5957,7 +5946,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // Re-checked UNDER the lock, on the transaction (the pre-check above ran
       // on the global handle): the nightly rate review apply can commit a
       // noticed successor amount in between.
-      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, amount, { coverageServiceType, termStart, trx });
+      const noticedInTrx = await noticedRenewalAmountConflictFor(customer.id, collectedCoverageAmount, { coverageServiceType, termStart, trx });
       if (noticedInTrx && req.body?.acknowledgeNoticedAmount !== true) throw noticedRenewalAmountError(noticedInTrx);
       // Fee-free TOCTOU guard under the trx (same posture as the draft
       // mint, codex #3591 r48/r50): a claim restored or a waiving family
@@ -5974,9 +5963,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // The entered amount is the COLLECTED TOTAL (codex #3591 r51 P1):
       // the setup rides INSIDE it as its own line, never on top — coverage
       // is the remainder.
-      const collectedCoverage = collectedSetupFee > 0
-        ? Math.round((amount - collectedSetupFee) * 100) / 100
-        : amount;
+      const collectedCoverage = collectedCoverageAmount;
       if (!(collectedCoverage > 0)) {
         const coverageErr = new Error(`The collected total ($${amount.toFixed(2)}) must exceed the $${collectedSetupFee.toFixed(2)} bait-station setup it includes.`);
         coverageErr.switchConflict = true;

@@ -305,8 +305,13 @@ function createFakeDb(tables = {}) {
     }
     if (/SELECT s\.id, s\.scheduled_date, s\.status, s\.estimated_price, s\.primary_line_price, s\.is_callback/.test(sql)) {
       const [customerId] = bindings;
+      // Postgres three-valued logic: `status NOT IN (...)` is NULL for a
+      // NULL status, so a legacy NULL-status row passes only when the SQL
+      // names it (`s.status IS NULL OR ...`).
+      const nullStatusPasses = /s\.status IS NULL/.test(sql);
       const rows = db.store.scheduled_services
-        .filter((s) => same(s.customer_id, customerId) && !['completed', 'cancelled', 'canceled', 'skipped', 'no_show'].includes(s.status))
+        .filter((s) => same(s.customer_id, customerId)
+          && (s.status == null ? nullStatusPasses : !['completed', 'cancelled', 'canceled', 'skipped', 'no_show'].includes(s.status)))
         .sort((a, b) => compare(a.scheduled_date, b.scheduled_date) || compare(a.id, b.id))
         .map((s) => ({ id: s.id, scheduled_date: s.scheduled_date, status: s.status, estimated_price: s.estimated_price, primary_line_price: s.primary_line_price, is_callback: s.is_callback, is_recurring: s.is_recurring, recurring_parent_id: s.recurring_parent_id, line: s._line }));
       return { rows };

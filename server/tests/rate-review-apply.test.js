@@ -623,6 +623,13 @@ describe('applyDueRateChanges — per_application', () => {
     expect(out.applied).toBe(1);
     expect(customer1().per_application_fee).toBe('117.00');
     expect(mockDb.store.audit_log[0].metadata.feeUntouchedReason).toBe('fee_consumers_outside_scope');
+    // a legacy NULL-status unpriced visit is live (rate-review.js LIVE_STATUS_SQL) → still a consumer
+    book = sentBook();
+    book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(507), scheduled_date: '2026-12-08', status: null, estimated_price: null, is_recurring: false, recurring_parent_id: null });
+    out = await runApply(book);
+    expect(out.applied).toBe(1);
+    expect(customer1().per_application_fee).toBe('117.00');
+    expect(mockDb.store.audit_log[0].metadata.feeUntouchedReason).toBe('fee_consumers_outside_scope');
     // an unpriced CALLBACK bills nothing → not a consumer → the fee moves
     book = sentBook();
     book.scheduled_services.push({ ...book.scheduled_services[1], id: VISIT(506), scheduled_date: '2026-12-04', estimated_price: null, is_callback: true, is_recurring: false, recurring_parent_id: null });
@@ -861,6 +868,21 @@ describe('applyDueRateChanges — annual_prepay', () => {
     book3.annual_prepay_terms.push({ id: TERM(4), customer_id: CUSTOMER(1), status: 'active', prepay_amount: '468.00', coverage_service_type: 'Quarterly Pest Control', term_start: '2026-05-15', term_end: '2027-05-14', renewal_decision: null, next_term_prepay_amount: null, renewed_from_term_id: TERM(1) });
     expect((await runApply(book3)).holds.map((h) => h.reason)).toEqual(['successor_already_created']);
   });
+  test('a term whose dates moved after the notice (the renewal is no longer the one the letter named) holds — the old notice is never applied to a new window', async () => {
+    // shortened: renews Dec 21 instead of the noticed May 15
+    let out = await runApply(prepayBook({ term_end: '2026-12-20' }));
+    expect(out.holds.map((h) => h.reason)).toEqual(['renewal_window_changed']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+    expect(notices()[0].applied_at == null).toBe(true);
+    // extended past the noticed renewal
+    out = await runApply(prepayBook({ term_end: '2027-06-30' }));
+    expect(out.holds.map((h) => h.reason)).toEqual(['renewal_window_changed']);
+    expect(mockDb.store.annual_prepay_terms[0].next_term_prepay_amount).toBeNull();
+    // the hold copy obeys the admin-notification rule
+    const copy = apply.HOLD_COPY.renewal_window_changed;
+    expect(copy.length).toBeLessThanOrEqual(110);
+    expect(copy).not.toMatch(/_/);
+  });
   test('the termite program is never reached', async () => {
     const out = await runApply(prepayBook({ annual_plan_version: 'v3' }));
     expect(out.holds.map((h) => h.reason)).toEqual(['termite_program']);
@@ -1050,20 +1072,47 @@ describe('noticedRenewalAmountConflict — the admin renewal consumer of next_te
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
-    expect(src.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart \}\)/g)).toHaveLength(2);
-    expect(src.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart, trx \}\)/g)).toHaveLength(2);
+    // The draft-invoice route's `amount` is coverage (the setup rides on top);
+    // the collected route's `amount` is the collected TOTAL with the setup
+    // inside it, so it compares the coverage share (amount − setup), the
+    // same figure the term records.
+    const draftRoute = src.slice(src.indexOf("router.post('/:id/annual-prepay-invoice'"), src.indexOf("router.post('/:id/annual-prepay',"));
+    const collectedRoute = src.slice(src.indexOf("router.post('/:id/annual-prepay',"));
+    expect(draftRoute.match(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart(, trx)? \}\)/g)).toHaveLength(2);
+    expect(collectedRoute.match(/noticedRenewalAmountConflictFor\(customer\.id, collectedCoverageAmount, \{ coverageServiceType, termStart(, trx)? \}\)/g)).toHaveLength(2);
+    expect(collectedRoute).toMatch(/const collectedCoverageAmount = collectedSetupFee > 0\s*\? Math\.round\(\(amount - collectedSetupFee\) \* 100\) \/ 100\s*: amount;/);
+    expect(collectedRoute).toMatch(/const collectedCoverage = collectedCoverageAmount;/);
     expect(src).toMatch(/if \(!require\('\.\.\/config\/feature-gates'\)\.rateReviewLive\(\)\) return null;/);
     expect(src).toMatch(/noticedRenewalAmountConflict\(trx \|\| db, \{ customerId, amount, coverageServiceType, termStart, today: etDateString\(\), lock: !!trx \}\)/);
     expect(src.match(/acknowledgeNoticedAmount !== true/g)).toHaveLength(4);
     expect(src.match(/throw noticedRenewalAmountError\(noticedInTrx\)/g)).toHaveLength(2);
     expect(src.match(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/g)).toHaveLength(2);
     // the pre-check sits AFTER termStart is known; the re-check sits right after the customer's annual-prepay lock
-    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart \}\)/g)) {
+    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, (amount|collectedCoverageAmount), \{ coverageServiceType, termStart \}\)/g)) {
       expect(src.slice(Math.max(0, m.index - 1500), m.index)).toMatch(/const termStart = termStartInput\.date/);
     }
-    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, amount, \{ coverageServiceType, termStart, trx \}\)/g)) {
+    for (const m of src.matchAll(/noticedRenewalAmountConflictFor\(customer\.id, (amount|collectedCoverageAmount), \{ coverageServiceType, termStart, trx \}\)/g)) {
       expect(src.slice(Math.max(0, m.index - 600), m.index)).toMatch(/await lockAndAssertNoAnnualPrepayOverlap\(/);
     }
+  });
+  test('the invoice route that marks an invoice as annual prepay (POST /api/admin/invoices/:id/annual-prepay) is a renewal writer too: it consults the guard inside its transaction, under the annual-prepay lock, with the term amount, coverage and start, and 409s without the acknowledgement', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    const route = src.slice(src.indexOf("router.post('/:id/annual-prepay'"), src.indexOf("router.delete('/:id/annual-prepay'"));
+    const call = route.indexOf('.noticedRenewalAmountConflict(trx, { customerId: termCustomerId, amount: resolvedAmount, coverageServiceType: resolvedServiceType || null, termStart: start || null, today: etDateString(), lock: true })');
+    expect(call).toBeGreaterThan(0);
+    // after the per-customer annual-prepay advisory lock, before the term write
+    expect(route.indexOf('pg_advisory_xact_lock')).toBeLessThan(call);
+    expect(call).toBeLessThan(route.indexOf('AnnualPrepayRenewals.createTermForAnnualPrepay('));
+    expect(route.slice(Math.max(0, call - 400), call)).toMatch(/rateReviewLive\(\)/);
+    expect(route).toMatch(/req\.body\?\.acknowledgeNoticedAmount !== true\) throw RateReviewApply\.noticedRenewalAmountError\(noticed\)/);
+    expect(route).toMatch(/if \(err && err\.noticedRenewalAmount\) return res\.status\(409\)\.json\(err\.noticedRenewalAmount\);/);
+  });
+  test('noticedRenewalAmountError carries the 409 body both route modules return', () => {
+    const err = apply.noticedRenewalAmountError({ termId: TERM(1), termEnd: '2027-05-14', noticedAmount: 484 });
+    expect(err.noticedRenewalAmount).toMatchObject({ code: 'RENEWAL_AMOUNT_NOTICED', noticedAmount: 484, termId: TERM(1) });
+    expect(err.noticedRenewalAmount.error).toMatch(/\$484\.00/);
   });
 });
 

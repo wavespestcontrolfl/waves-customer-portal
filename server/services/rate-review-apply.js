@@ -159,6 +159,7 @@ const HOLD_COPY = Object.freeze({
   billing_lane_changed: 'The account moved to a different billing lane since the notice, so the rate was not applied.',
   renewal_in_progress: 'A renewal of this prepaid plan is being recorded right now, so the amount is retried tonight.',
   successor_already_created: 'The next prepaid term was already created, so the noticed amount was not written to the old one.',
+  renewal_window_changed: 'The prepaid term now renews on a different day than the notice named, so nothing was changed.',
   row_not_approved: 'The ranking row is no longer approved, so no notice was created.',
   apply_error: 'The nightly apply hit an error on this account and will retry tonight.',
 });
@@ -290,11 +291,12 @@ async function loadAccountPlanLineCount(dbh, { customerId, fromDate }) {
 // completion can still bill (pending, confirmed, a parked reschedule
 // request, en_route, on_site; the terminal set is
 // customer-lifecycle-guard.js TERMINAL_STATUSES plus the 'canceled'
-// spelling). These are the possible consumers of
+// spelling), and a legacy NULL-status row (rate-review.js LIVE_STATUS_SQL
+// counts it live; a bare NOT IN would drop it). These are the possible consumers of
 // customers.per_application_fee: billing-lane.js completionInvoiceAmount
 // bills a per-application visit at the fee whenever its own stamp is not a
 // price, whatever its family, cadence or date, one-off visits included.
-const UNFINISHED_VISIT_SQL = "s.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')";
+const UNFINISHED_VISIT_SQL = "(s.status IS NULL OR s.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show'))";
 async function loadCustomerOpenVisits(dbh, { customerId }) {
   const { LINE_SQL } = PLAN_LINE_SQL;
   const { rows } = await dbh.raw(`
@@ -872,6 +874,15 @@ async function applyPrepay(trx, ctx) {
   const term = found.term;
   if (term.annual_plan_version) throw hold('termite_program', { termId: term.id });
   if (term.renewal_decision) throw hold('term_not_live', { termId: term.id, decision: term.renewal_decision });
+  // The notice named a renewal day (the successor's start = term_end + 1,
+  // its effective_date) and recorded the term_end it was computed from. A
+  // term whose dates were edited since is a different renewal window — the
+  // old notice (and its 30-day lead) never carries over to it.
+  const renewalDay = addDaysYmd(ymd(term.term_end), 1);
+  if (renewalDay !== ymd(notice.effective_date)
+    || (metadata.term_end != null && ymd(metadata.term_end) !== ymd(term.term_end))) {
+    throw hold('renewal_window_changed', { termId: term.id, termEnd: ymd(term.term_end), noticedEffectiveDate: ymd(notice.effective_date) });
+  }
   // The notice carries the ANNUAL totals: the term's amount the customer
   // saw and the successor amount they were told — the renewal charges
   // exactly the latter.
@@ -1141,6 +1152,21 @@ async function noticedRenewalAmountConflict(dbh, { customerId, amount, coverageS
   return { termId: term.id, termEnd: ymd(term.term_end), noticedAmount: dollars(noticedCents) };
 }
 
+// The 409 every renewal writer returns when noticedRenewalAmountConflict
+// finds a different amount (admin-customers.js's two prepay routes and
+// admin-invoices.js's mark-as-annual-prepay route): thrown inside the write
+// transaction, the handler's catch returns err.noticedRenewalAmount.
+function noticedRenewalAmountError(conflict) {
+  return Object.assign(new Error('renewal amount noticed by the annual rate review'), {
+    noticedRenewalAmount: {
+      error: `This customer was noticed a renewal amount of $${conflict.noticedAmount.toFixed(2)} for this plan by the annual rate review. Charge that amount, or confirm the different amount deliberately.`,
+      code: 'RENEWAL_AMOUNT_NOTICED',
+      noticedAmount: conflict.noticedAmount,
+      termId: conflict.termId,
+    },
+  });
+}
+
 // Held rate-review notices (sent, not applied, with a recorded hold).
 async function listApplyHolds({ dbh = db } = {}) {
   const rows = await dbh('price_change_notices as n')
@@ -1181,6 +1207,7 @@ module.exports = {
   listApplyHolds,
   retireDraftNotices,
   noticedRenewalAmountConflict,
+  noticedRenewalAmountError,
   _private: {
     laneForRow, effectiveDateFor, nextBillingDayOnOrAfter, addDaysYmd, daysBetweenYmd, flatVisitRefusal, holdFromGuard, HoldError,
     loadLineOpenVisits, loadAccountPlanLineCount, loadCustomerOpenVisits, consumesPerApplicationFee, feeScopeRefusal, resolvePrepayTerm, successorTermExists, tryAnnualPrepayLock, resolveLiveLane, applyNotice, loadDueNotices, wasDelivered, cadenceLabelFor, termRenewalNoticed, moveMonthlySlice, scheduleRow,
