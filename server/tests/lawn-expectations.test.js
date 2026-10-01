@@ -873,3 +873,12 @@ describe('issue normalization (terminal review)', () => {
     expect(() => buildLawnExpectations({ applications: [], issues: [key] })).not.toThrow();
   });
 });
+
+describe('iron by-next-visit wording holds for short and long gaps (terminal review)', () => {
+  const { buildLawnExpectations } = require('../services/service-report/lawn-expectations');
+  test.each([5, 21])('a %i-day gap never claims color is unchanged', (gap) => {
+    const out = buildLawnExpectations({ applications: [{ name: 'LESCO Chelated Iron Plus' }], issues: [], visitDate: '2026-06-02', nextVisitGapDays: gap }, { includeUnapproved: true });
+    const lines = out.byNextVisit.map((b) => b.line).join(' ');
+    expect(lines).not.toMatch(/about like today/i);
+  });
+});

@@ -334,7 +334,9 @@ const PRODUCT_ROWS = {
     secondApp: null,
     byNextVisit: {
       too_early: 'Color often deepens within about 3 to 5 days, so your next visit is early for a read.',
-      visible: 'By your next visit, color should be about like today. The lift from this spray is short-lived.',
+      // Covers short and long gaps alike: deeper color inside the 3-5 day
+      // window, fading after it (terminal review).
+      visible: 'By your next visit, the color lift from this spray may still show or may be fading, since it is short-lived.',
     },
     contactTrigger: 'If there is no color change after about 7 days in clear photos, let us know.',
   },
