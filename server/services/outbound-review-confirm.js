@@ -795,6 +795,51 @@ async function hasRecordedOfficeConfirm(dbh, serviceId) {
 }
 
 /**
+ * Owner ruling 2026-10-01: COMPLETING a street-level hold's visit counts as confirming its
+ * address (the technician or admin is at the property). Called by the shared completion
+ * engine once the completion attempt is claimed: confirms the visit (pending -> confirmed,
+ * attributed to the completing user) and runs the same office-confirm activation the
+ * confirm route runs (card resolved, reminders armed, lead converted, disposition booked),
+ * so the visit is no longer a hold and its recap sends normally. The card-on-file request
+ * is skipped (the tech collects in person). No-op for every other visit; best-effort, never
+ * throws — a failed release leaves the hold (and its customer-message hold) in place.
+ * @returns {Promise<boolean>} true when THIS call released the hold
+ */
+async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = 'completion') {
+  try {
+    const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
+    if (!svc?.id || svc.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || svc.customer_confirmed === true) return false;
+    const dbh = require('../models/db');
+    if (!(await isStreetLevelHoldVisit(svc.id, dbh))) return false;
+    if (String(svc.status) === 'pending') {
+      const { transitionJobStatus } = require('./job-status');
+      await transitionJobStatus({
+        jobId: svc.id,
+        fromStatus: 'pending',
+        toStatus: 'confirmed',
+        transitionedBy: actor.technicianId || null,
+        notes: 'Confirmed by completing the visit (the address was confirmed on site)',
+        legacyOutboundActivation: 'caller',
+      });
+    }
+    const row = await dbh('scheduled_services').where({ id: svc.id }).first(
+      'id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'source_call_log_id', 'is_callback', 'estimated_price', 'status',
+    );
+    if (!row) return false;
+    const released = await runOfficeConfirmActivation(dbh, row, routeTag, { skipCardRequest: true });
+    if (released) {
+      // The caller's snapshot reflects the confirmed state from here on.
+      svc.customer_confirmed = true;
+      if (String(svc.status) === 'pending') svc.status = 'confirmed';
+    }
+    return released;
+  } catch (e) {
+    logger.warn(`[${routeTag}] street-level hold release failed for ${svc?.id}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
+/**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
  * OR a voice-agent booking, which is created with the same pending/
@@ -1034,6 +1079,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 }
 
 module.exports = {
+  releaseStreetLevelHoldForCompletion,
   fileOwedFollowUpForStreetLevelHold,
   reconcileStreetLevelHoldAfterStamp,
   stampBookedDispositionForStreetLevelHold,

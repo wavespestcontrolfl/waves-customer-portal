@@ -3927,6 +3927,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: 200, body: claim.payload });
     }
     completionAttempt = claim.attempt;
+    // Owner ruling 2026-10-01: completing a street-level address hold's visit counts as
+    // confirming its address — release the hold (office-confirm activation, attributed to the
+    // completing user) before completion proceeds, so its recap is no longer a held message.
+    // A no-op for every other visit.
+    await require('./outbound-review-confirm').releaseStreetLevelHoldForCompletion(svc, completionInput.actor);
     const resumingCommittedCompletion = claim.action === 'resume';
     // The prior run released the attempt itself (the SMS / token-mint /
     // mint-failure 503s) rather than dying mid-flight: none of its lanes is

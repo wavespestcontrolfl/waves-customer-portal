@@ -105,6 +105,24 @@ async function appointmentMoveHeld(input) {
   return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
+// Street-level address hold (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling
+// 2026-10-01): NO customer text, email or app message about a visit that is a live
+// unconfirmed street-level hold goes out until the office confirms the address. This is the
+// shared send step every visit-scoped customer message passes (appointmentId is the visit);
+// appointment-email.js enforces the same predicate for the email sender. Fail closed: a
+// lookup error holds the send (retryable — the hold clears when the office confirms).
+const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
+  code: 'STREET_LEVEL_HOLD',
+  reason: 'Visit is an address hold awaiting the office confirm',
+});
+async function streetLevelHoldBlocksSend(input) {
+  if (!input.appointmentId || input.audience !== 'customer') return false;
+  // Gate off (the default) is byte-identical: no lookup at all. Holds exist only while the
+  // street-level gate is on; confirm or cancel open holds before turning it off.
+  if (!require('../../config/feature-gates').callLeadFormAddressStreetLevelLive()) return false;
+  return require('../street-level-hold').isStreetLevelHoldVisit(input.appointmentId);
+}
+
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex
 // round 6 on PR #4807, structural). Rounds 2–5 keyed it on the visit
 // (appointmentId / metadata.scheduled_service_id / metadata.visit_id), and
@@ -770,6 +788,34 @@ async function sendCustomerMessageCore(input) {
       ...(blockedBy.retryable ? { retryable: true } : {}),
       ...(blockedBy.deferred ? { deferred: true } : {}),
       ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
+  // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
+  //      a held visit reaches the customer before the office confirms the address.
+  if (await streetLevelHoldBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] held: visit ${sendInput.appointmentId} is a street-level address hold (${sendInput.purpose})`);
+    const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['street_level_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,

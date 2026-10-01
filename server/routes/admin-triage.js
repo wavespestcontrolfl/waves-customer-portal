@@ -283,6 +283,33 @@ router.get('/', async (req, res) => {
       if (counts[r.status] !== undefined) counts[r.status] = parseInt(r.n, 10);
     }
 
+    // A street-level address hold's read-back dialog must show the visit's LIVE service address
+    // (corrections after booking change it), not only the address captured on the card. One batched
+    // read for the hold cards on this page, admin-only like the card's confirm action.
+    if (req.techRole === 'admin') {
+      const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
+      const holds = items.filter((i) => i.reason_code === 'outbound_booking_review')
+        .map((i) => ({ item: i, payload: parse(i.payload) }))
+        .filter((h) => h.payload?.street_level_address && h.payload.scheduled_service_id);
+      if (holds.length) {
+        try {
+          const rows = await db('scheduled_services')
+            .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
+            .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+          const byId = new Map(rows.map((r) => [String(r.id), r]));
+          for (const { item, payload } of holds) {
+            const r = byId.get(String(payload.scheduled_service_id));
+            if (!r) continue;
+            const line = [r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_state, r.service_address_zip]
+              .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
+            if (line) item.visit_address = line;
+          }
+        } catch (addrErr) {
+          logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);
+        }
+      }
+    }
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);

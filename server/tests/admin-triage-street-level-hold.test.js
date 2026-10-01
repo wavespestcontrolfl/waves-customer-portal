@@ -175,3 +175,17 @@ describe('syncCallReviewStatus (shared aggregate)', () => {
     expect(open.updates[0].u).toMatchObject({ review_status: 'open' });
   });
 });
+
+describe('the list carries the hold visit\'s LIVE address for the read-back dialog', () => {
+  const src = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+  test('admin-only, one batched read of the visits behind the hold cards, attached as item.visit_address', () => {
+    const at = src.indexOf("if (req.techRole === 'admin') {\n      const parse = ");
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, at + 1800);
+    expect(block).toContain("db('scheduled_services')\n            .whereIn('id',");
+    expect(block).toContain('service_address_line1');
+    expect(block).toContain('item.visit_address = line;');
+    expect(block).toContain("i.reason_code === 'outbound_booking_review'");
+    expect(at).toBeLessThan(src.indexOf('res.json({ items, counts });', at));
+  });
+});

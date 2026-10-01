@@ -532,4 +532,27 @@ describe('street-level address hold: office confirm', () => {
     expect(within(card).queryByRole('button', { name: /confirm address/i })).not.toBeInTheDocument();
     expect(within(card).getByText(/needs an admin/i)).toBeInTheDocument();
   });
+
+  it('the dialog shows the visit\'s LIVE address, labelled "Current visit address", when a correction made it differ', async () => {
+    const corrected = { ...hold, visit_address: '1240 Sample Newbuild Trl, Parrish, FL, 34219' };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [corrected], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('Current visit address')).toBeInTheDocument();
+    expect(screen.getByText('1240 Sample Newbuild Trl, Parrish, FL, 34219')).toBeInTheDocument();
+    expect(screen.queryByText('1234 Sample Newbuild Trl, Parrish, FL, 34219')).not.toBeInTheDocument();
+  });
+
+  it('an unchanged live address (formatting aside) shows once, with no "Current visit address" label', async () => {
+    const same = { ...hold, visit_address: '1234 sample newbuild trl, parrish, fl 34219' };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [same], counts: { open: 1, resolved: 0, dismissed: 0 } } : { success: true }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /confirm address/i }));
+    expect(await screen.findByText('1234 Sample Newbuild Trl, Parrish, FL, 34219', { selector: 'div' })).toBeInTheDocument();
+    expect(screen.queryByText('Current visit address')).not.toBeInTheDocument();
+  });
 });

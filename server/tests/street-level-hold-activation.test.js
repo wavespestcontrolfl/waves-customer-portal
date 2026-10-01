@@ -230,3 +230,62 @@ describe('office approval counts from any prior status (a moved hold is already 
     expect(wheres[0]).toEqual({ job_id: 'v1', to_status: 'confirmed' });
   });
 });
+
+describe('owner ruling 2026-10-01: completing the visit confirms the address (shared completion engine)', () => {
+  const { releaseStreetLevelHoldForCompletion } = require('../services/outbound-review-confirm');
+  const actor = { technicianId: 'tech-1', techRole: 'technician' };
+
+  test('a held visit is confirmed (pending -> confirmed, attributed to the completer) and the office-confirm activation runs', async () => {
+    const calls = { hold: 0, updates: [] };
+    const handle = makeHandle({ visit: baseVisit(), held: true, calls });
+    db.mockImplementation(handle);
+    db.transaction = handle.transaction; db.fn = handle.fn; db.raw = handle.raw;
+    const svc = baseVisit();
+    await releaseStreetLevelHoldForCompletion(svc, actor);
+    expect(calls.hold).toBe(1);
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'v1', fromStatus: 'pending', toStatus: 'confirmed', transitionedBy: 'tech-1', legacyOutboundActivation: 'caller',
+    }));
+  });
+
+  test('a moved hold already confirmed is not transitioned again; non-holds and activated rows are untouched', async () => {
+    const calls = { hold: 0, updates: [] };
+    const handle = makeHandle({ visit: baseVisit({ status: 'confirmed' }), held: true, calls });
+    db.mockImplementation(handle); db.transaction = handle.transaction; db.fn = handle.fn; db.raw = handle.raw;
+    await releaseStreetLevelHoldForCompletion(baseVisit({ status: 'confirmed' }), actor);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    jest.clearAllMocks();
+    const none = makeHandle({ visit: baseVisit(), held: false, calls });
+    db.mockImplementation(none);
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit(), actor)).toBe(false);
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ customer_confirmed: true }), actor)).toBe(false);
+    expect(await releaseStreetLevelHoldForCompletion(baseVisit({ source_action: 'ai_call_pipeline' }), actor)).toBe(false);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('never throws, and the engine calls it once the completion attempt is claimed (before the recap and billing work)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(releaseStreetLevelHoldForCompletion(baseVisit(), actor)).resolves.toBe(false);
+    const s = fs.readFileSync(require.resolve('../services/complete-scheduled-service.js'), 'utf8');
+    const claimAt = s.indexOf('completionAttempt = claim.attempt;');
+    const rel = s.indexOf('releaseStreetLevelHoldForCompletion(svc, completionInput.actor)', claimAt);
+    expect(rel).toBeGreaterThan(claimAt);
+    expect(rel - claimAt).toBeLessThan(800);
+    // Every completer goes through completeScheduledService (the route, the packets, the issued-invoice closeout).
+    for (const f of ['../routes/admin-dispatch.js', '../services/visit-completion-packets.js', '../services/invoice-issued-closeout.js']) {
+      expect(fs.readFileSync(require.resolve(f), 'utf8')).toContain('completeScheduledService(');
+    }
+  });
+});
+
+describe('the technician hears about a moved hold the office approves', () => {
+  test('both status routes key the new-visit card on pending -> confirmed OR a successful activation, after the activation runs', () => {
+    for (const [f, tag] of [['../routes/admin-dispatch.js', "'admin-dispatch'"], ['../routes/admin-schedule.js', "'admin-schedule'"]]) {
+      const s = fs.readFileSync(require.resolve(f), 'utf8');
+      const act = s.indexOf(`officeConfirmActivated = await runOfficeConfirmActivation(db, svc, ${tag}`);
+      const notify = s.indexOf("(fromStatus === 'pending' || officeConfirmActivated)");
+      expect(act).toBeGreaterThan(0);
+      expect(notify).toBeGreaterThan(act);
+    }
+  });
+});

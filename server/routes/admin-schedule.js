@@ -20901,13 +20901,7 @@ router.put('/:id/status', async (req, res, next) => {
     // name a technician the write-time guard then drops, leaving the real
     // holder with no card at all.
     const confirmedRow = transition?.adminPayload || null;
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
-      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
-      void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
-        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
-      });
-    }
+    let officeConfirmActivated = false;
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
@@ -20928,8 +20922,18 @@ router.put('/:id/status', async (req, res, next) => {
       // fire from a field status tap. Office confirms keep the full funnel.
       // (field_confirmed_at was stamped INSIDE the status transaction above —
       // atomic with the confirmation, never swallowed.)
-      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+      officeConfirmActivated = await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
+      });
+    }
+    // The tech's "new visit" card keys on a real approval — the pending -> confirmed flip OR a
+    // successful activation — so an office approval of a MOVED hold (confirmed -> confirmed)
+    // tells the technician too.
+    if (isOfficeReviewConfirm && (fromStatus === 'pending' || officeConfirmActivated) && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
 
