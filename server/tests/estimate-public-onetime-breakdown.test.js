@@ -4752,6 +4752,14 @@ describe('public estimate one-time breakdown', () => {
     const neutral = jest.fn();
     expect(renderPage('terms-cb-neutral', { ...recurring, noEstimateWideGuarantee: true }, data, undefined, { onRateReviewTermsRendered: neutral })).not.toContain('Rate reviewed once a year');
     expect(neutral).not.toHaveBeenCalled();
+    // A DECLINED page keeps the card but never prints (or reports) the rate
+    // item — the legacy GET's one-hop 303 depends on it (frozen rows never
+    // enter the re-render branch).
+    const declined = jest.fn();
+    const declinedHtml = renderPage('terms-cb-declined', { ...recurring, status: 'declined' }, data, undefined, { onRateReviewTermsRendered: declined });
+    expect(declinedHtml).toContain('Cancel anytime &mdash; no contract');
+    expect(declinedHtml).not.toContain('Rate reviewed once a year');
+    expect(declined).not.toHaveBeenCalled();
     // No billing card at all (quote required): no report.
     const quote = jest.fn();
     renderPage('terms-cb-quote', { ...recurring, status: 'quote_required', quoteRequired: true, monthlyTotal: 0, annualTotal: 0 }, { result: { recurring: { services: [] }, oneTime: { items: [], specItems: [] }, specItems: [], results: {} } }, undefined, { onRateReviewTermsRendered: quote });

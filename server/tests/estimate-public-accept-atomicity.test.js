@@ -1821,8 +1821,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     db.__state.onTable = null;
     expect(res.status).toBe(200);
     expect(estimateTouches).toBeGreaterThanOrEqual(3);
-    // The evidence UPDATE was issued but matched zero rows (frozen-status
-    // guards): the stored row carries no marker.
+    // The guarded evidence UPDATE was attempted (one raw stamp issued) but
+    // matched zero rows (frozen-status guards): the stored row carries no marker.
+    expect(db.__state.ops.filter((op) => op.type === 'raw' && String(op.sql).includes('rateReviewTermsServed'))).toHaveLength(1);
     expect(JSON.parse(storedEstimate().estimate_data).rateReviewTermsServed).toBeUndefined();
     // The renderer received the frozen row, not the open snapshot.
     const [renderedEstimate] = generate.mock.calls.at(-1);

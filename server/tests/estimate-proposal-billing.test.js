@@ -41,6 +41,7 @@ const {
   documentCarriesRateReviewTerms,
   rateReviewTermsServedIsCurrent,
   recordRateReviewTermsServed,
+  ensureRateReviewTermsEvidenceBeforeRender,
   proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -530,5 +531,58 @@ describe('served-disclosure evidence (estimate_data.rateReviewTermsServed)', () 
   test('a database failure is swallowed — the page or download never fails on the marker', async () => {
     stubEstimatesUpdate(jest.fn(async () => { throw new Error('db down'); }));
     await expect(recordRateReviewTermsServed({ id: 'e5', status: 'sent', price_locked_at: null, estimate_data: '{}' })).resolves.toBe(false);
+  });
+});
+
+describe('ensureRateReviewTermsEvidenceBeforeRender (the /pdf pre-render step)', () => {
+  const { RATE_REVIEW_TERMS_VERSION } = require('../../shared/estimate-copy-claims.cjs');
+  const openPlan = (extra = {}) => ({
+    id: 'e-open', status: 'sent', price_locked_at: null,
+    estimate_data: JSON.stringify({ lineItems: [{ displayName: 'Quarterly Pest Control', monthlyPrice: 55 }], ...extra }),
+  });
+  const billing = { billsPerApplication: false, livePricing: null };
+  function stubEstimates({ updateResult = 1, fresh = null, firstThrows = false } = {}) {
+    const update = jest.fn(async () => updateResult);
+    const first = jest.fn(async () => { if (firstThrows) throw new Error('db down'); return fresh; });
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), whereNotIn: jest.fn(() => chain), update, first };
+    mockDb.mockImplementation((table) => { if (table === 'estimates') return chain; throw new Error(`unexpected table ${table}`); });
+    mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+    return { update, first };
+  }
+  beforeEach(() => mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false));
+  afterEach(() => mockEstimateMakesNoGuaranteeClaim.mockReset());
+
+  test('an eligible open row is marked and returned as-is', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    const estimate = openPlan();
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toBe(estimate);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+  });
+
+  test('a zero-row write (the row froze) re-reads and returns the current row', async () => {
+    const frozen = { id: 'e-open', status: 'accepted', price_locked_at: '2026-10-01T06:00:00.000Z', estimate_data: '{}' };
+    const { update, first } = stubEstimates({ updateResult: 0, fresh: frozen });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(openPlan(), { billing })).resolves.toBe(frozen);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(first).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed re-read falls back to the row in hand (never throws)', async () => {
+    stubEstimates({ updateResult: 0, firstThrows: true });
+    const estimate = openPlan();
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing })).resolves.toBe(estimate);
+  });
+
+  test('already current: no write, no re-read; ineligible (frozen, or no line): passthrough without touching the database', async () => {
+    const { update, first } = stubEstimates({ updateResult: 1 });
+    const current = openPlan({ rateReviewTermsServed: RATE_REVIEW_TERMS_VERSION });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(current, { billing })).resolves.toBe(current);
+    const frozen = { ...openPlan(), status: 'accepted' };
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(frozen, { billing })).resolves.toBe(frozen);
+    const authored = openPlan({ proposal: { enabled: false, terms: 'Operator terms.', buildings: [{ name: 'Home', lineItems: [{ description: 'Quarterly Pest Control', unitPrice: 55, frequency: 'quarterly' }] }] } });
+    await expect(ensureRateReviewTermsEvidenceBeforeRender(authored, { billing })).resolves.toBe(authored);
+    expect(update).not.toHaveBeenCalled();
+    expect(first).not.toHaveBeenCalled();
   });
 });

@@ -3151,8 +3151,12 @@ pre-transaction snapshot — evidence persisted after that read is still
 honored. The other order — the accept lands first — turns the marker write
 into a zero-row no-op (the row is frozen): the `/pdf` download then renders
 the row as it is now (frozen, no line unless that accept stamped it) and the
-legacy page re-renders from the current row instead of sending HTML that
-shows a term the accept never recorded. Plan eligibility alone never stamps: an accept from a tab that rendered
+legacy page answers one `303` to its own URL (query preserved; cache headers
+set) and re-renders from the current row instead of sending HTML that shows
+a term the accept never recorded — bounded to one hop, because a frozen row
+never enters that branch: an accepted page has no plan-terms card and a
+declined page prints no rate review item at all (it keeps its cancel/refund
+card; "declined never acquires it" holds on the legacy page too). Plan eligibility alone never stamps: an accept from a tab that rendered
 no rate copy (a bundle that predates the line with the gate off, the
 terms-neutral annual prepay lane with nothing downloaded) leaves the frozen
 document without the line rather than claiming a disclosure that was never

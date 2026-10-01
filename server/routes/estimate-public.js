@@ -5713,7 +5713,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // (recordRateReviewTermsServed) — the accept's frozen-document stamp keys
   // on that marker, never on plan eligibility alone. Callback, not a return
   // value: renderPage stays a pure HTML builder for every other caller.
-  if (showBillingCard && !planTermsNeutral && typeof opts.onRateReviewTermsRendered === 'function') opts.onRateReviewTermsRendered();
+  // A declined page keeps its cancel/refund card but never acquires the
+  // rate review item (frozen-document contract; Sonnet fallback audit on
+  // #5434): nothing is being sold, and the served-evidence write is refused
+  // for a frozen row anyway.
+  const showRateReviewItem = showBillingCard && !planTermsNeutral && est.status !== 'declined';
+  if (showRateReviewItem && typeof opts.onRateReviewTermsRendered === 'function') opts.onRateReviewTermsRendered();
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
     <h2>${planTermsNeutral ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
@@ -5722,11 +5727,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
         <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
-      </li>
-      <li class="plan-terms-item">
+      </li>`}
+      ${showRateReviewItem ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Rate reviewed once a year</span>
         <span class="plan-terms-detail">Rates are reviewed once a year after your first 12 months, with at least 30 days&rsquo; written notice before any change.</span>
-      </li>`}
+      </li>` : ''}
       ${showMembershipFee && !membershipSetupWaivedForExistingCustomer ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Your ${fmtMoney(membershipFee)} setup is refundable</span>
         <span class="plan-terms-detail">Change your mind? Just ask and we&rsquo;ll refund the WaveGuard setup in full.</span>
@@ -9137,16 +9142,33 @@ async function handleEstimateView(req, res, next) {
       // Served-disclosure evidence (pre-push Codex on #5434's merge head):
       // the page about to be sent shows the customer the annual rate review
       // item, so persist it BEFORE the response (GH Codex r5 P1) —
-      // idempotent, never fatal. A zero-row write means the row froze
-      // (accepted / declined) between this handler's read and now (GH Codex
-      // r7 P1): the HTML in hand shows a term that accept never recorded, so
-      // re-render from the row as it is NOW instead of sending it (a frozen
-      // page has no plan-terms card, so this cannot loop).
+      // idempotent, never fatal. A zero-row write on a row THIS request read
+      // as open means it froze between that read and now (GH Codex r7 P1):
+      // the HTML in hand shows a term that accept never recorded, so answer
+      // ONE 303 to the same URL (query preserved) and re-render from the row
+      // as it is now. Bounded to one hop: the redirected request reads a
+      // frozen row, which never enters this branch (an accepted page has no
+      // plan-terms card; a declined page prints no rate item). The
+      // freshness read is best-effort — a failure falls through to the
+      // page, never a 500.
       const billingMod = require('../services/estimate-proposal-billing');
       const marked = await billingMod.recordRateReviewTermsServed(estimate);
-      if (!marked && !billingMod.rateReviewTermsServedIsCurrent(estimate.estimate_data)) {
-        const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'price_locked_at');
-        if (fresh && billingMod.estimateIsPriceLocked(fresh)) return res.redirect(303, req.originalUrl);
+      if (!marked && !billingMod.estimateIsPriceLocked(estimate)
+        && !billingMod.rateReviewTermsServedIsCurrent(estimate.estimate_data)) {
+        let frozeUnderUs = false;
+        try {
+          const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'price_locked_at');
+          frozeUnderUs = !!fresh && billingMod.estimateIsPriceLocked(fresh);
+        } catch (freshErr) {
+          logger.warn(`[estimate-view] served-evidence freshness read failed for estimate ${estimate.id}: ${freshErr.message}`);
+        }
+        if (frozeUnderUs) {
+          return res
+            .set('Cache-Control', 'no-cache, no-store, must-revalidate')
+            .set('Pragma', 'no-cache')
+            .set('Expires', '0')
+            .redirect(303, req.originalUrl);
+        }
       }
     }
     sendEstimatePageHtml(res, pageHtml);
@@ -26762,6 +26784,10 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // contradict the estimate the customer is looking at.
     const billing = await resolveProposalBillingContext(estimate);
     const documentEstimate = await ensureRateReviewTermsEvidenceBeforeRender(estimate, { billing });
+    // The pdfkit fallback prints by its billing context (livePricing picks
+    // OUTSTANDING vs FROZEN pricing): resolve it for the row it renders when
+    // that row moved under us (Sonnet fallback audit on #5434).
+    const documentBilling = documentEstimate === estimate ? billing : await resolveProposalBillingContext(documentEstimate);
     if (featureGates.isEnabled('estimateDocPdf')) {
       let browserDocument = null;
       try {
@@ -26786,7 +26812,7 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
     generateEstimateProposalPDF(documentEstimate, res, {
-      ...billing,
+      ...documentBilling,
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
       acceptance: await acceptanceRecordForEstimate(documentEstimate, { strict: true }),
