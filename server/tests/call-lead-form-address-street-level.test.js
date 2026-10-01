@@ -1,0 +1,902 @@
+// GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL (owner ruling 2026-09-30): a web-form
+// lead whose on-file address came from their own form, who does not repeat it
+// on the call, books to that form address even when Google confirms only the
+// STREET (a new-build street in Parrish / Lakewood Ranch). The visit itself holds
+// pending for the office's address confirmation, with one admin bell. Synthetic names and addresses only.
+const CallRecordingProcessor = require('../services/call-recording-processor');
+const { canAutoRoute } = require('../services/call-triage-flags');
+const { callLeadFormAddressStreetLevelLive } = require('../config/feature-gates');
+
+const {
+  summarizeKnownCaller,
+  failOpenKnownCustomer,
+  trustValidatedNewLeadAddress,
+  buildFailOpenRoutingContext,
+  onFileAddressIsFromWebForm,
+  streetLevelMatch,
+  buildStreetLevelHold,
+  buildStreetLevelHoldAlert,
+  streetLevelVisitLink,
+  streetLevelVisitWhen,
+  isStreetLevelHoldRow,
+} = CallRecordingProcessor._test;
+
+const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
+const ANI = '+19415550100';
+
+const lead = (extra = {}) => summarizeKnownCaller({
+  id: 'lead-1', first_name: 'Form', pipeline_stage: 'new_lead',
+  address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219', ...extra,
+});
+// What Google says for a house it has not indexed on a street it knows, in a
+// service county Google itself reports (owner ruling 2026-09-30: the only area proof).
+const routeLevel = (extra = {}) => ({
+  status: 'missing_component', granularity: 'ROUTE', inServiceArea: true, county: 'Manatee County',
+  hasReplaced: false, hasUnconfirmed: false,
+  normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219' },
+  ...extra,
+});
+const confirmed = (serviceAddress = {}) => ({
+  triage_flags: ['missing_service_address'],
+  confidence: { overall: 0.9 },
+  scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-05T13:00:00-04:00' },
+  consent: {},
+  property: { service_address: serviceAddress },
+});
+const yesForm = jest.fn(async () => true);
+const { parseRawAddress } = require('../utils/address-normalizer');
+// A lead row as the web form leaves it: the form endpoint's normalized address snapshot in extracted_data.
+const formRow = (address, zip) => {
+  const p = parseRawAddress(address);
+  return { first_contact_channel: 'form', address, zip, extracted_data: { stage: 'lead_webhook_received', address: { line1: p.line1, city: p.city, state: p.state || '', zip: p.zip || zip || '' } } };
+};
+
+let saved;
+beforeEach(() => { saved = process.env[GATE]; yesForm.mockClear(); });
+afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+const gateOn = () => { process.env[GATE] = 'true'; };
+
+describe('gate reader', () => {
+  test('strict === "true", off by default', () => {
+    delete process.env[GATE];
+    expect(callLeadFormAddressStreetLevelLive()).toBe(false);
+    for (const v of ['1', 'TRUE', 'yes', '']) { process.env[GATE] = v; expect(callLeadFormAddressStreetLevelLive()).toBe(false); }
+    process.env[GATE] = 'true';
+    expect(callLeadFormAddressStreetLevelLive()).toBe(true);
+  });
+});
+
+describe('gate off: nothing changes', () => {
+  test('a street-level answer earns no trust and the form lookup never runs', async () => {
+    delete process.env[GATE];
+    const out = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+    expect(out.onFileStreetLevel).toBeUndefined();
+    expect(out.onFileAddressVerdict).toEqual({
+      status: 'missing_component', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
+    });
+    expect(yesForm).not.toHaveBeenCalled();
+    expect(failOpenKnownCustomer(out)).toBeNull();
+  });
+
+  test('a persisted street-level verdict replays as untrusted', () => {
+    delete process.env[GATE];
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
+    };
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
+  });
+});
+
+describe('gate on: street-level match on a web-form address', () => {
+  test('books to the form address: trusted address-only, evidence persisted, routes on file, hold built', async () => {
+    gateOn();
+    const out = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
+    expect(yesForm).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({
+      addressTrusted: true, addressOnly: true, addressState: 'FL',
+      onFileStreetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219' },
+      onFileAddressVerdict: {
+        status: 'street_level_form_accept', inServiceArea: true,
+        address: { line1: '1234 sample newbuild trl', city: 'parrish', state: 'fl', zip: '34219' },
+        streetLevel: { granularity: 'ROUTE' },
+      },
+    });
+    const known = failOpenKnownCustomer(out);
+    expect(known).toMatchObject({ addressOnly: true, hasAddress: true, addressLine1: '1234 Sample Newbuild Trl', addressZip: '34219' });
+
+    // The routing gate books it to the on-file address (no address stated on the call).
+    const routing = canAutoRoute(confirmed(), { failOpen: true, callerAni: ANI, contactPhone: ANI, knownCustomer: known });
+    expect(routing.allowed).toBe(true);
+    expect(routing.usesOnFileAddress).toBe(true);
+
+    // ...and the booking is held: the visit itself is the hold.
+    const hold = buildStreetLevelHold({ knownCaller: out, routingResult: routing });
+    expect(hold).toMatchObject({ address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form' });
+    expect(buildStreetLevelHold({ knownCaller: out, routingResult: { allowed: true } })).toBeNull();
+    expect(buildStreetLevelHold({ knownCaller: lead(), routingResult: routing })).toBeNull();
+  });
+
+  test('the persisted verdict replays as trusted for the offline audits; a moved record does not', () => {
+    gateOn();
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
+    };
+    const ctx = (c, v = verdict) => buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: v } }, customer: c, contactPhone: ANI, failOpenEnabled: true });
+    expect(ctx(customer).options.knownCustomer).toMatchObject({ addressOnly: true, addressLine1: '1234 Sample Newbuild Trl' });
+    expect(ctx({ ...customer, address_line1: '99 Moved Ln' }).options.knownCustomer).toBeNull();
+    expect(ctx(customer, { ...verdict, streetLevel: undefined }).options.knownCustomer).toBeNull();
+    expect(ctx(customer, { ...verdict, inServiceArea: null }).options.knownCustomer).toBeNull();
+    expect(ctx(customer, { ...verdict, streetLevel: { granularity: 'ROUTE', route: 'x', zip: '34219' } }).options.knownCustomer).toBeNull();   // no recorded area basis
+  });
+
+  test('Google reporting the county in area is fine; a county out of area is not', async () => {
+    gateOn();
+    const inArea = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel({ inServiceArea: true, county: 'Manatee County' }), extraction: confirmed(), isFormAddress: yesForm });
+    expect(inArea.addressTrusted).toBe(true);
+    const out = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel({ inServiceArea: false, county: 'Lee County' }), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+  });
+});
+
+describe('gate on: every other case keeps its existing path', () => {
+  const run = (knownCaller, verdict, extraction = confirmed(), isFormAddress = yesForm) => trustValidatedNewLeadAddress(knownCaller, { validate: async () => verdict, extraction, isFormAddress });
+
+  test('a house-level match (validated_accept) is the unchanged path: no form lookup, no street-level evidence', async () => {
+    gateOn();
+    const out = await run(lead(), { status: 'validated_accept', inServiceArea: true });
+    expect(out).toMatchObject({ addressTrusted: true, addressOnly: true, onFileAddressVerdict: { status: 'validated_accept' } });
+    expect(out.onFileStreetLevel).toBeUndefined();
+    expect(yesForm).not.toHaveBeenCalled();
+    expect(buildStreetLevelHold({ knownCaller: out, routingResult: { usesOnFileAddress: true } })).toBeNull();
+  });
+
+  test('a caller who states a different address takes the normal validation path: no lookup at all', async () => {
+    gateOn();
+    const validate = jest.fn(async () => routeLevel());
+    const out = await trustValidatedNewLeadAddress(lead(), {
+      validate, isFormAddress: yesForm,
+      extraction: confirmed({ street_line_1: '99 Other Rd', city: 'Sarasota', postal_code: '34231' }),
+    });
+    expect(validate).not.toHaveBeenCalled();
+    expect(yesForm).not.toHaveBeenCalled();
+    expect(out.addressTrusted).toBe(false);
+  });
+
+  test('a lead whose address did not come from a web form is not trusted', async () => {
+    gateOn();
+    const out = await run(lead(), routeLevel(), confirmed(), jest.fn(async () => false));
+    expect(out.addressTrusted).toBe(false);
+    expect(out.onFileAddressVerdict.status).toBe('missing_component');
+  });
+
+  test('out of area: Google county out of area, or an out-of-area ZIP, never trusts', async () => {
+    gateOn();
+    expect((await run(lead(), routeLevel({ status: 'out_of_service_area', inServiceArea: false }))).addressTrusted).toBe(false);
+    expect((await run(lead({ zip: '34103', city: 'Naples' }), routeLevel({ inServiceArea: false, county: 'Collier County', normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Naples', state: 'FL', postal_code: '34103' } }))).addressTrusted).toBe(false);
+    expect((await run(lead({ state: 'GA' }), routeLevel())).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'GA', postal_code: '34219' } }))).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34203' } }))).addressTrusted).toBe(false);
+  });
+
+  test('a street Google does not know (not route-level) or a different street never trusts', async () => {
+    gateOn();
+    expect((await run(lead(), routeLevel({ granularity: 'OTHER' }))).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ granularity: null, normalized: { street_line_1: null, city: null, state: 'FL', postal_code: null } }))).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ normalized: { street_line_1: 'Other Street Boulevard', city: 'Parrish', state: 'FL', postal_code: '34219' } }))).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ status: 'confirm_needed' }))).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel({ status: 'ambiguous' }))).addressTrusted).toBe(false);
+    expect((await run(lead(), null)).addressTrusted).toBe(false);
+  });
+
+  test('a form address with no house number is never booked on a street match', async () => {
+    gateOn();
+    const out = await run(lead({ address_line1: 'Sample Newbuild Trl' }), routeLevel());
+    expect(out.addressTrusted).toBe(false);
+    expect(yesForm).not.toHaveBeenCalled();
+  });
+
+  test('a call that did not confirm a booking keeps its address review', async () => {
+    gateOn();
+    expect((await run(lead(), routeLevel(), { ...confirmed(), scheduling: { status: 'none' } })).addressTrusted).toBe(false);
+    expect((await run(lead(), routeLevel(), null)).addressTrusted).toBe(false);
+  });
+
+  test('an established customer is trusted as before and never asks Google or the form lookup', async () => {
+    gateOn();
+    const validate = jest.fn();
+    const won = await trustValidatedNewLeadAddress(summarizeKnownCaller({ id: 'c1', pipeline_stage: 'won', address_line1: '1 A St', zip: '34219' }), { validate, extraction: confirmed(), isFormAddress: yesForm });
+    expect(won).toMatchObject({ addressTrusted: true, addressOnly: false });
+    expect(validate).not.toHaveBeenCalled();
+    expect(yesForm).not.toHaveBeenCalled();
+  });
+});
+
+describe('streetLevelMatch (pure)', () => {
+  test('numbered streets compare exactly, suffix spelling does not matter', () => {
+    gateOn();
+    const known = lead({ address_line1: '4021 14th Ave E' });
+    const n = (street) => ({ street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Avenue East') }))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Ave E') }))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('14th Avenue West') }))).toBeNull();
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('4th Ave E') }))).toBeNull();
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('114th Ave E') }))).toBeNull();
+  });
+});
+
+describe('street type is part of the street (codex pre-push P1)', () => {
+  test('Dr / Drive are one street; Drive is not Court, Lane or Way', async () => {
+    gateOn();
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const n = (street) => ({ street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('Sample Palm Drive') }))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, routeLevel({ normalized: n('Sample Palm Dr') }))).toMatchObject({ granularity: 'ROUTE' });
+    for (const other of ['Sample Palm Court', 'Sample Palm Ct', 'Sample Palm Lane', 'Sample Palm Way', 'Sample Palm']) {
+      expect(streetLevelMatch(known, routeLevel({ normalized: n(other) }))).toBeNull();
+    }
+    const out = await trustValidatedNewLeadAddress(known, { validate: async () => routeLevel({ normalized: n('Sample Palm Court') }), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+    expect(yesForm).not.toHaveBeenCalled();
+  });
+
+  test('the form-provenance check keeps the street type too', async () => {
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [formRow(address, '34219')] });
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Drive, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Dr Parrish FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Court, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Ct Parrish FL 34219'))).toBe(false);
+  });
+
+  test('the WHOLE street must match: an extra directional or street word never hides as a city (codex pre-push r2 P1)', async () => {
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [formRow(address, null)] });
+    for (const typed of [
+      '1234 Sample Palm Drive East',
+      '1234 Sample Palm Drive East, Parrish, FL 34219',
+      '1234 Sample Palm Drive East Parrish FL 34219',
+      '1234 Sample Palm Drive Circle',
+      '1234 Sample Palm Drive Circle Parrish FL 34219',
+      '1234 Sample Palm Dr Bradenton FL 34219',
+    ]) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(false);
+    }
+    for (const typed of ['1234 Sample Palm Dr, Parrish, FL 34219', '1234 Sample Palm Drive, Parrish, FL']) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(true);
+    }
+    // No locality / no state on the snapshot (owner-directed r13): the street alone never qualifies.
+    for (const typed of ['1234 Sample Palm Dr', '1234 Sample Palm Drive, Parrish']) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(false);
+    }
+  });
+});
+
+describe('onFileAddressIsFromWebForm', () => {
+  const connWith = (rows, calls = []) => (table) => {
+    const q = {
+      where: (w) => { calls.push({ table, where: w }); return q; },
+      whereIn: (col, vals) => { calls.push({ col, vals }); return q; },
+      whereNull: (col) => { calls.push({ isNull: col }); return q; },
+      select: () => q,
+      orderBy: () => q,
+      limit: async () => rows.map((r) => formRow(r.address, r.zip)),
+    };
+    return q;
+  };
+
+  test('true only for a live form lead at the same house and street', async () => {
+    const known = lead();
+    const calls = [];
+    expect(await onFileAddressIsFromWebForm(known, connWith([{ address: '1234 Sample Newbuild Trail, Parrish, FL 34219', zip: '34219' }], calls))).toBe(true);
+    expect(calls).toEqual(expect.arrayContaining([
+      { table: 'leads', where: { customer_id: 'lead-1' } },
+      { isNull: 'deleted_at' },
+    ]));
+    // A different house, street or ZIP on the form is not the on-file address.
+    expect(await onFileAddressIsFromWebForm(known, connWith([{ address: '1299 Sample Newbuild Trail, Parrish, FL 34219', zip: '34219' }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, connWith([{ address: '1234 Other Street, Parrish, FL 34219', zip: '34219' }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, connWith([{ address: '1234 Sample Newbuild Trail', zip: '34203' }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, connWith([]))).toBe(false);
+  });
+
+  test('fails closed with no customer id, no house number, or a lookup error', async () => {
+    expect(await onFileAddressIsFromWebForm(lead({ id: null }), connWith([{ address: '1234 Sample Newbuild Trail' }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: 'Sample Newbuild Trl' }), connWith([{ address: 'Sample Newbuild Trail' }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead(), () => { throw new Error('db down'); })).toBe(false);
+  });
+});
+
+
+describe('area, house number and call-origin provenance', () => {
+  test('P1: Google must affirm the area itself with a service county (owner ruling 2026-09-30); its ZIP and state must agree', async () => {
+    gateOn();
+    const run = (verdict) => trustValidatedNewLeadAddress(lead(), { validate: async () => verdict, extraction: confirmed(), isFormAddress: yesForm });
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219', ...extra });
+    // No county: never trusted, even when Google echoes the on-file ZIP and state.
+    expect((await run(routeLevel({ inServiceArea: null, county: null }))).addressTrusted).toBe(false);
+    // County confirmed but Google's state / ZIP disagree or are missing.
+    expect((await run(routeLevel({ normalized: n({ state: null }) }))).addressTrusted).toBe(false);
+    expect((await run(routeLevel({ normalized: n({ postal_code: '34203' }) }))).addressTrusted).toBe(false);
+    // County confirmed, ZIP and state agree: trusted, and the basis is recorded.
+    const county = await run(routeLevel());
+    expect(county.addressTrusted).toBe(true);
+    expect(county.onFileAddressVerdict.streetLevel.areaBasis).toBe('google_county');
+    // The no-county verdict falls through to the ordinary (untrusted) verdict, so the call holds for review as today.
+    expect((await run(routeLevel({ inServiceArea: null, county: null }))).onFileAddressVerdict.status).toBe('missing_component');
+  });
+
+  test('P1: the whole house number counts, alphabetic suffix included', async () => {
+    const known = lead({ address_line1: '123A Sample Newbuild Trl' });
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [formRow(address, '34219')] });
+    expect(await onFileAddressIsFromWebForm(known, conn('123A Sample Newbuild Trail, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('123B Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn('123 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '123 Sample Newbuild Trl' }), conn('123A Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    // Google rewriting the house number is not the form's house.
+    gateOn();
+    const g = (street) => routeLevel({ normalized: { street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' } });
+    expect(streetLevelMatch(known, g('123A Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, g('123B Sample Newbuild Trail'))).toBeNull();
+    expect(streetLevelMatch(known, g('Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+  });
+
+  test('P2: a web form attached to a call-origin lead counts; a call-only lead does not', async () => {
+    const known = lead();
+    const conn = (rows) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => rows });
+    const formAddr = { line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    // Voicemail text-back / phone-match attach: channel stays 'call', the form's typed address is in extracted_data.
+    for (const stage of ['lead_webhook_received', 'property_lookup_started', 'quote_calculated']) {
+      expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '9 Call Spoken Ln', extracted_data: { stage, address: formAddr } }]))).toBe(true);
+    }
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', address: formAddr }) }]))).toBe(true);
+    // The form's typed address must be the on-file one.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', extracted_data: { stage: 'lead_webhook_received', address: { ...formAddr, line1: '1299 Sample Newbuild Trl' } } }]))).toBe(false);
+    // A call-origin lead with no form evidence (the call's own address lives in leads.address) never qualifies.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { source: 'voice_agent' } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: { stage: 'voicemail', address: formAddr } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: null }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'manual', address: '1234 Sample Newbuild Trl', zip: '34219' }]))).toBe(false);
+    // An addressless form later enriched by a call: leads.address is call-derived, the form snapshot is empty or absent.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'form', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { stage: 'lead_webhook_received', address: { line1: '', city: '', zip: '' } } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'form', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { stage: 'lead_webhook_received' } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'website_quote', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: null }]))).toBe(false);
+    // ...while the same form row WITH its snapshot on any channel qualifies.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'website_quote', extracted_data: { stage: 'quote_calculated', address: formAddr } }]))).toBe(true);
+  });
+
+});
+
+describe('units', () => {
+  test('P1: a unit-bearing address is outside the street-level lane, on either side', async () => {
+    gateOn();
+    const formAddr = { line1: '1234 Sample Newbuild Trl', line2: 'Apt 4', city: 'Parrish', state: 'FL', zip: '34219' };
+    const conn = (rows) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => rows });
+    // A form for Apt 4 never vouches for anything — not Apt 4, and not an on-file edit to Apt 5.
+    expect(await onFileAddressIsFromWebForm(lead(), conn([{ first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: formAddr } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line2: 'Apt 5' }), conn([{ first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: formAddr } }]))).toBe(false);
+    // An on-file unit alone (form without one) is excluded too, and a unit-free form row still works for a unit-free record.
+    const plain = { first_contact_channel: 'form', extracted_data: { stage: 'lead_webhook_received', address: { ...formAddr, line2: '' } } };
+    expect(await onFileAddressIsFromWebForm(lead({ address_line2: 'Apt 5' }), conn([plain]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead(), conn([plain]))).toBe(true);
+    // Google's street-level answer never books a unit, and the whole path stays untrusted.
+    expect(streetLevelMatch(lead({ address_line2: 'Apt 5' }), routeLevel())).toBeNull();
+    const out = await trustValidatedNewLeadAddress(lead({ address_line2: 'Apt 5' }), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
+    expect(out.addressTrusted).toBe(false);
+    expect(yesForm).not.toHaveBeenCalled();
+    // A persisted street-level verdict cannot be replayed onto a record that now carries a unit.
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: 'apt 5', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
+    };
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', address_line2: 'Apt 5', city: 'Parrish', state: 'FL', zip: '34219' };
+    expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
+  });
+});
+
+describe('county-confirmed and shared-ZIP area proof', () => {
+  test('P2: a county Google confirms on the routing allowlist (DeSoto) is the area proof; without a county nothing qualifies', () => {
+    gateOn();
+    const desoto = lead({ city: 'Arcadia', zip: '34266' });
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Arcadia', state: 'FL', postal_code: '34266', ...extra });
+    const withCounty = routeLevel({ inServiceArea: true, county: 'DeSoto County', normalized: n() });
+    expect(streetLevelMatch(desoto, withCounty)).toMatchObject({ granularity: 'ROUTE', areaBasis: 'google_county' });
+    // County-confirmed: Google's ZIP may be absent, but a conflicting one still rejects, and state must be FL.
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: null }) }))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: '34203' }) }))).toBeNull();
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ state: 'GA' }) }))).toBeNull();
+    // No county: refused even when Google echoes the ZIP.
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: null, normalized: n() }))).toBeNull();
+    // ...and an out-of-area county never qualifies, whatever the ZIP.
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: false }))).toBeNull();
+    // A Manatee ZIP with no county is refused too (no ZIP inference at all).
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: null, county: null }))).toBeNull();
+  });
+});
+
+describe('office-review pending path (owner ruling 2026-09-30)', () => {
+  const fs = require('fs');
+  const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
+  const sa = require('../services/call-booking-source-actions');
+  const src = () => read('../services/call-recording-processor.js');
+
+  test('books through the EXISTING pending path: the voice agent\'s source action, no new marker, no custom guards', () => {
+    const s = src();
+    expect(s).toContain("source_action: streetLevelPending ? VOICE_AGENT_BOOKING_SOURCE_ACTION : 'ai_call_pipeline',");
+    expect(s).toContain("status: streetLevelPending ? 'pending' : 'confirmed',");
+    expect(s).toContain('customer_confirmed: !streetLevelPending,');
+    expect(s).toContain('...(streetLevelPending ? {} : { confirmed_at: new Date() }),');
+    expect(s).toContain('const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;');
+    expect(sa.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).toContain(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION);
+    expect(sa.DISPATCH_OWNED_PENDING_SOURCE_ACTIONS).toContain(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION);
+    // Not the source action the legacy hourly sweep auto-activates.
+    expect(sa.VOICE_AGENT_BOOKING_SOURCE_ACTION).not.toBe(sa.CALL_OUTBOUND_REVIEW_SOURCE_ACTION);
+    // No custom marker or guard anywhere.
+    for (const gone of ['call_street_level_review', 'isStreetLevelAddressHold', 'STREET_LEVEL_ADDRESS_HOLD', 'street_level_address_hold']) {
+      for (const f of ['../services/call-recording-processor.js', '../services/call-booking-source-actions.js', '../services/job-status.js', '../services/rebooker.js', '../services/track-transitions.js', '../services/outbound-review-confirm.js']) {
+        expect(read(f)).not.toContain(gone);
+      }
+    }
+  });
+
+  test('the same outbound_booking_review card the voice agent files, with the originating lead id, in the booking transaction', () => {
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
+    expect(at).toBeGreaterThan(s.indexOf("const [created] = await trx('scheduled_services')"));
+    const block = s.slice(at, at + 3200);
+    expect(block).toContain('lead_id: leadId || null');
+    // Same origin as the voice agent's card: the confirm hook never guesses a lead when lead_id is null.
+    expect(block).toContain("origin: 'voice_agent',");
+    expect(block).not.toContain('call_street_level');
+    expect(block).toContain('scheduled_service_id: created.id');
+    expect(block).toContain("if (!card) throw new Error('a booking review card is already open for this call');");
+  });
+
+  test('a pending office-review row is not a closed deal: no lead conversion, no inspection-credit evidence, no reminders, no card funnel', () => {
+    const s = src();
+    expect(s).toContain('if (deferConversion) return false;');
+    // Deferred only for a street-level hold: the fresh insert, and reused rows by the durable card signal.
+    expect(s).toContain('deferConversion: streetLevelPending,');
+    expect(s).toContain('deferConversion: await isStreetLevelHoldRow(trx, primaryRow),');
+    expect(s).toContain('deferConversion: await isStreetLevelHoldRow(trx, existingByKey),');
+    expect(s).toMatch(/if \(!streetLevelPending\) \{\s*await require\('\.\/inspection-credit'\)\.markBookingForInspectionCredit/);
+    expect(s).toContain('PENDING — activated on office confirm');
+    expect(s.indexOf('if (pendingOfficeReview) {')).toBeLessThan(s.indexOf('} else if (!scheduleWasReused) {\n                logger.info(`[call-proc] Scheduled service created'));
+    expect(s).toContain('if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview && !v2SmsBlocked && !holdImpliedSmsLeg) {');
+    expect(s).toContain('} else if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview) {');
+  });
+
+  test('NO customer text or email at booking: the confirmation section skips both channels, exactly as the legacy outbound-review path did', () => {
+    const s = src();
+    const skipAt = s.indexOf('if (scheduledServiceId && pendingOfficeReview) {');
+    const sendAt = s.indexOf('} else if (scheduledServiceId) {', skipAt);
+    expect(skipAt).toBeGreaterThan(0);
+    const body = s.slice(skipAt, sendAt);
+    expect(body).toContain("smsBlockedReason: 'outbound_booking_review'");
+    expect(body).not.toMatch(/deliverConfirmationByChannel|smsAttempt/);
+    // The replay repair (which can email a confirmation) is behind the pending branch too.
+    expect(s.indexOf('if (pendingOfficeReview) {')).toBeLessThan(s.indexOf('Same-key REPLAY of this call\'s OWN still-live booking'));
+  });
+
+  test('the shared helper classifies the booking as pending review, so grouping, tech-track and reschedule rails treat it like the voice agent\'s', () => {
+    const row = { source_action: sa.VOICE_AGENT_BOOKING_SOURCE_ACTION, status: 'pending', customer_confirmed: false };
+    expect(sa.isPendingOutboundReviewBooking(row)).toBe(true);
+    expect(sa.isPendingOutboundReviewBooking({ ...row, status: 'confirmed' })).toBe(false);
+    expect(sa.isPendingOutboundReviewBooking({ ...row, source_action: 'ai_call_pipeline' })).toBe(false);
+  });
+
+  test('the one admin bell per visit: notifyAdmin, bell:true, deduped on the visit id, says what to do, links to the visit', () => {
+    const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form Lead' };
+    const a = buildStreetLevelHoldAlert({ hold, visitId: 'visit-9', callSid: 'CA1', scheduledDate: '2026-10-05T00:00:00.000Z', windowStart: '13:00:00' });
+    expect(a.category).toBe('schedule');
+    expect(a.title).toBe('Schedule — Confirm address before dispatch');
+    expect(a.title.length).toBeLessThanOrEqual(60);
+    expect(a.body.length).toBeLessThanOrEqual(110);
+    expect(a.body).toMatch(/; Google matched the street only\.$/);
+    expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, Mon Oct 5, 1 PM');
+    expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-9' });
+    expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-10' }).opts.dedupeKey).not.toBe(a.opts.dedupeKey);
+    expect(src()).toContain('raiseAdminAlert(alert.category, alert.spec, alert.opts)');
+    // The spec passes the admin-notification rule (headline <= 60, one-sentence why <= 110, no ISO dates).
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    expect(composeAdminAlert(a.spec)).toMatchObject({ headline: 'Schedule — Confirm address before dispatch', link: a.opts.link });
+    expect(a.spec).toMatchObject({ area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'visit-9' }, doneWhen: 'visit_confirmed', who: 'person' });
+  });
+});
+
+describe('r6 trust fixes', () => {
+  test('a hyphenated range keeps its separator: 12-14 is not 1214', async () => {
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [formRow(address, '34219')] });
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '12-14 Sample Newbuild Trl' }), conn('12-14 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '1214 Sample Newbuild Trl' }), conn('12-14 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '12-14 Sample Newbuild Trl' }), conn('1214 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    gateOn();
+    const g = (street) => routeLevel({ normalized: { street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' } });
+    expect(streetLevelMatch(lead({ address_line1: '12-14 Sample Newbuild Trl' }), g('12-14 Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(lead({ address_line1: '12-14 Sample Newbuild Trl' }), g('1214 Sample Newbuild Trail'))).toBeNull();
+  });
+
+  test('a county-confirmed route with no Google ZIP must match the on-file city', () => {
+    gateOn();
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: null, ...extra });
+    const county = (normalized) => routeLevel({ inServiceArea: true, county: 'Manatee County', normalized });
+    expect(streetLevelMatch(lead(), county(n()))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(lead(), county(n({ city: 'Sarasota' })))).toBeNull();     // same street name, other served city
+    expect(streetLevelMatch(lead(), county(n({ city: null })))).toBeNull();
+    expect(streetLevelMatch(lead({ city: null }), county(n()))).toBeNull();
+    // With Google's ZIP present it must still equal the on-file ZIP.
+    expect(streetLevelMatch(lead(), county(n({ postal_code: '34219', city: 'Somewhere Else' })))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(lead(), county(n({ postal_code: '34203' })))).toBeNull();
+  });
+});
+
+describe('Google\'s own county is required, no ZIP inference (owner ruling 2026-09-30)', () => {
+  const n = (zip, city = 'Boca Grande') => ({ street_line_1: 'Sample Newbuild Trail', city, state: 'FL', postal_code: zip });
+
+  test('33955 and 33921 (Charlotte / Lee) with no county now hold, and clear only with a served county', () => {
+    gateOn();
+    for (const zip of ['33955', '33921']) {
+      const k = lead({ city: 'Punta Gorda', zip });
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: null, county: null, normalized: n(zip) }))).toBeNull();
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: true, county: 'Charlotte County', normalized: n(zip) }))).toMatchObject({ areaBasis: 'google_county' });
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: false, county: 'Lee County', normalized: n(zip) }))).toBeNull();
+    }
+  });
+
+  test('even a wholly-served ZIP (34219 Parrish, 34292 Venice) needs the county; no ZIP-only basis exists', () => {
+    gateOn();
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: null, county: null }))).toBeNull();
+    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ inServiceArea: null, county: null, normalized: n('34292', 'Venice') }))).toBeNull();
+    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ normalized: n('34292', 'Venice') }))).toMatchObject({ areaBasis: 'google_county' });
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).not.toContain('google_zip');
+    expect(src).not.toContain('wholeCountyZip5');
+    // ai-property-lookup.js is untouched (its shared ZIP sets are no longer imported).
+    expect(src).not.toContain("require('./property-lookup/ai-property-lookup')");
+  });
+
+  test('a persisted verdict with a ZIP-only basis no longer replays as trusted', () => {
+    gateOn();
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+    };
+    const ctx = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer, contactPhone: ANI, failOpenEnabled: true });
+    expect(ctx.options.knownCustomer).toBeNull();
+  });
+});
+
+describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, form snapshot', () => {
+  const fs = require('fs');
+  const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
+  const src = () => read('../services/call-recording-processor.js');
+
+  test('the bell body stays within 110 characters and clips the address, never the tail', () => {
+    const hold = {
+      address_on_file: '123456 Sample Extremely Long Newbuild Boulevard Northwest, Lakewood Ranch, FL, 34202',
+      customer_name: 'Form Lead With A Rather Long Synthetic Name', google_street: null,
+    };
+    const a = buildStreetLevelHoldAlert({ hold, visitId: 'v1', scheduledDate: '2026-10-05', windowStart: '13:00:00' });
+    expect(a.body.length).toBeLessThanOrEqual(110);
+    expect(a.body).toContain('…');
+    expect(a.body).toMatch(/, Mon Oct 5, 1 PM; Google matched the street only\.$/);
+    expect(a.body.startsWith('Form Lead With A Rather Long Synthetic Name, 1234')).toBe(true);
+    // No visit time: still within budget.
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v1' }).body.length).toBeLessThanOrEqual(110);
+  });
+
+  test('the review card carries the durable street-level signal and the promised follow-up plan', () => {
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
+    expect(at).toBeGreaterThan(0);
+    const block = s.slice(at, at + 1800);
+    expect(block).toContain('street_level_address: true');
+    expect(block).toMatch(/follow_up_plan: \{ scheduled_date: callFollowUpPlan\.scheduledDate/);
+    expect(s).toContain('Book the promised follow-up visit');
+  });
+
+  test('isStreetLevelHoldRow: only a pending office-review row with the flagged card; fails closed on error', async () => {
+    const row = { id: 'v1', source_call_log_id: 'c1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false };
+    const conn = (found) => () => ({ where() { return this; }, whereRaw() { return this; }, orderBy() { return this; }, first: async () => (found ? { id: 't1', status: 'open', payload: {} } : undefined) });
+    expect(await isStreetLevelHoldRow(conn(true), row)).toBe(true);
+    expect(await isStreetLevelHoldRow(conn(false), row)).toBe(false);         // a plain voice-agent row
+    // Confirmed-but-unstamped (the office confirm commits status before the activation stamps) is still the hold.
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed' })).toBe(true);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed', customer_confirmed: true })).toBe(false);
+    for (const status of ['cancelled', 'skipped', 'rescheduled']) expect(await isStreetLevelHoldRow(conn(true), { ...row, status })).toBe(false);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, source_action: 'ai_call_pipeline' })).toBe(false);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, source_call_log_id: null })).toBe(false);
+    expect(await isStreetLevelHoldRow(() => { throw new Error('db down'); }, row)).toBe(true);
+  });
+
+  test('a pipeline reuse never activates a street-level hold, and no follow-up child is created off it', () => {
+    const s = src();
+    expect(s).toContain('if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {');
+    const fu = s.indexOf('const ensureCallFollowUpVisit = async (primaryRow) => {');
+    const guard = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) {', fu);
+    expect(guard).toBeGreaterThan(fu);
+    expect(guard - fu).toBeLessThan(1500);
+    // Before any child insert.
+    expect(guard).toBeLessThan(s.indexOf("source_action: 'ai_call_pipeline_followup'", fu));
+  });
+
+  test('AI triage keeps the web form snapshot (stage and address) when it replaces extracted_data', () => {
+    const w = read('../routes/lead-webhook.js');
+    const triage = w.slice(w.indexOf('if (triageResult.extractedData) {'));
+    const block = triage.slice(0, triage.indexOf('if (Object.keys(updates).length > 0)'));
+    expect(block).toContain("'stage', COALESCE(extracted_data, '{}'::jsonb)->'stage'");
+    expect(block).toContain("'address', COALESCE(extracted_data, '{}'::jsonb)->'address'");
+  });
+
+  test('gate off / any other pending row: the pending branches are scoped to street-level holds, so a reused legacy or voice-agent row keeps its exact prior behavior', () => {
+    const s = src();
+    expect(s).toContain('if (await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    expect(s).not.toMatch(/if \(isPendingOutboundReviewBooking\(svc\)\) \{\s*pendingOfficeReview = true;/);
+    // The confirm hook's own conversion is untouched (no deferConversion passed there).
+    expect(read('../services/outbound-review-confirm.js')).not.toContain('deferConversion');
+  });
+
+  test('the bell links to the dispatch schedule tab (?appointment opens the visit, ?date selects the day)', () => {
+    const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', customer_name: 'Form Lead' };
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v-1', scheduledDate: new Date('2026-10-05T00:00:00Z'), windowStart: '13:00:00' }).opts.link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v-1');
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v-1' }).opts.link).toBe('/admin/dispatch?tab=schedule&appointment=v-1');
+  });
+
+  test('a completed property-lookup form (stage property_lookup_complete) still counts as the lead\'s own form address', async () => {
+    const row = formRow('1234 Sample Newbuild Trail, Parrish, FL 34219', '34219');
+    const conn = (stage) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ ...row, extracted_data: { ...row.extracted_data, stage } }] });
+    expect(await onFileAddressIsFromWebForm(lead(), conn('property_lookup_complete'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead(), conn('lead_webhook_received'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead(), conn('voicemail_callback'))).toBe(false);
+    // The stage string is the one public-property-lookup.js actually writes.
+    expect(read('../routes/public-property-lookup.js')).toContain("stage: 'property_lookup_complete'");
+  });
+
+  test('r10: the review card carries the form address, the visit time and the same visit link as the bell', () => {
+    expect(streetLevelVisitLink('v-1', '2026-10-05')).toBe('/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v-1');
+    expect(streetLevelVisitWhen(new Date('2026-10-05T00:00:00Z'), '13:00:00')).toBe('2026-10-05 13:00');
+    const s = src();
+    const at = s.indexOf("flag: 'outbound_booking_review',\n                        extraction: cardExtraction,");
+    const block = s.slice(at, at + 3000);
+    expect(block).toContain('address_on_file: v2StreetLevelHold?.address_on_file || null,');
+    expect(block).toContain('visit_when: streetLevelVisitWhen(created.scheduled_date, created.window_start) || null,');
+    expect(block).toContain('visit_link: streetLevelVisitLink(created.id, dateOnlyISO(created.scheduled_date)),');
+    // The summary itself says what to do (the inbox renders it).
+    const summary = s.slice(s.indexOf('const cardWhen = streetLevelVisitWhen'), at);
+    expect(summary).toContain('Web-form address ');
+    expect(summary).toContain('confirm, correct, or cancel the visit');
+    expect(s).toContain('const link = streetLevelVisitLink(visitId, visitDate);');
+  });
+
+  test('r10/r12: an open street-level hold is call-level review state, raised only once the booking became the hold', () => {
+    const s = src();
+    // Not at decision time...
+    const decide = s.indexOf('v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });');
+    expect(decide).toBeGreaterThan(0);
+    expect(s.slice(decide, decide + 700)).not.toContain('street_level_address_review');
+    // ...but at booking time, inside the branch that sets pendingOfficeReview.
+    const branch = s.indexOf('if (await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    expect(branch).toBeGreaterThan(0);
+    const push = s.indexOf("bridgeNeedsConfirmation.push('street_level_address_review');", branch);
+    expect(push).toBeGreaterThan(branch);
+    expect(push - branch).toBeLessThan(900);
+    // No lead artifact is written with it before the booking: the only writer is that push, and the
+    // lead's ai_triage activity is refreshed by the existing late-hold path (a length comparison).
+    expect(s.split("'street_level_address_review'").length - 1).toBeLessThanOrEqual(6);
+    expect(push).toBeGreaterThan(s.indexOf('bridgeConfirmationsAtTriageWrite = [...bridgeNeedsConfirmation];'));
+    expect(push).toBeLessThan(s.indexOf('bridgeNeedsConfirmation.length > bridgeConfirmationsAtTriageWrite.length'));
+    // It reads as a plain instruction on the lead's activity.
+    expect(s).toMatch(/street_level_address_review: 'web-form address: Google matched only the street/);
+    // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so no hold exists.
+    expect(buildStreetLevelHold({ knownCaller: { addressLine1: '1 X St' }, routingResult: { usesOnFileAddress: true } })).toBeNull();
+  });
+
+  test('r12 recording replacement: the street-level review card survives the supersede sweep (both sites share one predicate); nothing re-files it', () => {
+    const gates = require('../services/call-routing-gates');
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toContain("reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true'");
+    // ...and the owed-follow-up card the confirm hook files for a hold (so a sweep never resolves the office's task).
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toContain("reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked'");
+    // Two-valued: a card with no payload keys still retires.
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL.startsWith('NOT (')).toBe(true);
+    for (const f of ['../routes/twilio-voice-webhook.js', '../routes/admin-call-recordings.js']) {
+      const s = read(f);
+      const at = s.indexOf('.whereNotIn(\'reason_code\', SUPERSEDE_KEPT_REASON_CODES)');
+      expect(at).toBeGreaterThan(0);
+      expect(s.slice(at, at + 200)).toContain('.whereRaw(SUPERSEDE_KEPT_CARD_SQL)');
+    }
+    const proc = src();
+    expect(proc).not.toContain('refileStreetLevelReviewCard');
+  });
+
+  test('r12 transcript-rejection cleanup keeps the hold card too (same predicate)', () => {
+    const proc = src();
+    const at = proc.indexOf("'Transcript rejected as an implausible hallucination.'");
+    expect(at).toBeGreaterThan(0);
+    const block = proc.slice(at - 700, at);
+    expect(block).toContain('.whereRaw(SUPERSEDE_KEPT_CARD_SQL)');
+    expect(proc).toMatch(/V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL \} = require\('\.\/call-routing-gates'\)/);
+  });
+
+  test('r12 the finalizer rechecks the hold under the per-call lock: a visit confirmed since the booking pass no longer reopens review_status', () => {
+    const proc = src();
+    const lock = proc.indexOf('const finalized = await db.transaction(async (trx) => {');
+    const recheck = proc.indexOf("isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx)", lock);
+    const write = proc.indexOf('...(reviewReasonCount || schedulingChangeHeld', lock);
+    expect(lock).toBeGreaterThan(0);
+    expect(recheck).toBeGreaterThan(proc.indexOf('await lockTriageCall(trx, call.id);', lock));
+    expect(write).toBeGreaterThan(recheck);
+    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;");
+    // Every other reason still opens review as before.
+    expect(proc).not.toContain('...(bridgeNeedsConfirmation.length || schedulingChangeHeld ||');
+  });
+
+  test('r13: the form snapshot must carry AND match a locality (city or ZIP) plus state; a street-line-only snapshot does not qualify', async () => {
+    const known = lead();
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ extracted_data: { stage: 'lead_webhook_received', address } }] });
+    const full = { line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    expect(await onFileAddressIsFromWebForm(known, conn(full))).toBe(true);
+    // Street line only: any town could own it.
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', state: 'FL' }))).toBe(false);
+    // Locality without a state does not qualify either; a city OR a ZIP alone (with state) does.
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', city: 'Parrish', zip: '34219' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL' }))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', zip: '34219', state: 'FL' }))).toBe(true);
+    // A present but different locality or state still fails.
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, city: 'Sarasota' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, zip: '34203' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, state: 'GA' }))).toBe(false);
+  });
+
+  test('r21: a corrected or unconfirmed route verdict is never trusted (deriveStatus labels it missing_component before those flags)', () => {
+    gateOn();
+    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_county' });
+    // Google corrected the submitted city but kept the ZIP and the normalized street.
+    expect(streetLevelMatch(lead(), routeLevel({ hasReplaced: true, normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Bradenton', state: 'FL', postal_code: '34219' } }))).toBeNull();
+    expect(streetLevelMatch(lead(), routeLevel({ hasReplaced: true }))).toBeNull();
+    expect(streetLevelMatch(lead(), routeLevel({ hasUnconfirmed: true }))).toBeNull();
+    // A verdict that does not carry the flags at all is not clean either.
+    const { hasReplaced, hasUnconfirmed, ...bare } = routeLevel();
+    void hasReplaced; void hasUnconfirmed;
+    expect(streetLevelMatch(lead(), bare)).toBeNull();
+  });
+});
+
+describe('r21: a reused pending voice booking this pass finds to be a street-level address is promoted to the durable hold', () => {
+  const fs = require('fs');
+  const { promoteReusedRowToStreetLevelHold, isStreetLevelHoldRow } = CallRecordingProcessor._test;
+  const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form' };
+  const row = (extra = {}) => ({ id: 'v1', source_call_log_id: 'call-1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false, scheduled_date: '2026-10-05', window_start: '13:00:00', ...extra });
+  const args = (extra = {}) => ({ hold, callLogId: 'call-1', leadId: 'lead-1', keepOpenForQuote: false, followUpPlan: { scheduledDate: '2026-10-19', windowStart: '09:00' }, extraction: {}, ...extra });
+  // A stateful fake: the relay's card (no street_level_address) and the writes made to it.
+  const world = ({ card = { id: 't1', payload: { origin: 'voice_agent', scheduled_service_id: 'v1', lead_id: null } }, existingHoldCard = null, live = { status: 'pending', customer_confirmed: false } } = {}) => {
+    const w = { updates: [], inserts: [], locked: 0, rowLocked: false };
+    const trx = (table) => {
+      const q = {
+        _statuses: null,
+        forUpdate() { if (table === 'scheduled_services') w.rowLocked = true; return q; },
+        where() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { q._count = true; return q; },
+        whereIn(c, v) { q._statuses = v; return q; },
+        first: async () => {
+          if (q._count) return { n: 1 };
+          if (table === 'scheduled_services') return live;
+          if (table === 'triage_items' && q._statuses === undefined) return existingHoldCard;
+          return table === 'triage_items' && q._statuses ? card : existingHoldCard;
+        },
+        update: async (u) => { w.updates.push({ table, u }); return 1; },
+        insert(r) { w.inserts.push(r); return q; }, onConflict() { return q; }, ignore: async () => [],
+      };
+      return q;
+    };
+    trx.raw = async () => { w.locked += 1; return { rows: [{}] }; };
+    return { w, trx };
+  };
+
+  test('the relay\'s card is stamped with the hold fields (and the plan, lead id, link) in place', async () => {
+    const { w, trx } = world();
+    expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(true);
+    const card = w.updates.find((u) => u.table === 'triage_items');
+    const payload = JSON.parse(card.u.payload);
+    expect(payload).toMatchObject({
+      origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'v1', lead_id: 'lead-1',
+      address_on_file: hold.address_on_file, visit_when: '2026-10-05 13:00',
+      visit_link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v1',
+      follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' },
+    });
+    expect(w.locked).toBeGreaterThan(0);
+    expect(w.rowLocked).toBe(true);   // the visit row is locked (the status routes lock it too)
+  });
+
+  test('a confirm that committed first (the row is no longer pending / unconfirmed under the lock) makes it ineligible: no promotion', async () => {
+    for (const live of [{ status: 'confirmed', customer_confirmed: false }, { status: 'pending', customer_confirmed: true }, null]) {
+      const { w, trx } = world({ live });
+      expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(false);
+      expect(w.updates).toHaveLength(0);
+      expect(w.rowLocked).toBe(true);
+    }
+  });
+
+  test('a failing promotion write rethrows code / name only: no address text in the error, the log line or the persisted scheduleError', async () => {
+    const { safeScheduleErrorText } = CallRecordingProcessor._test;
+    const leak = `update "triage_items" set "payload" = '{"address_on_file":"${hold.address_on_file}"}' - deadlock detected`;
+    for (const failOn of ['update', 'insert']) {
+      const { trx: base } = world({ card: failOn === 'update' ? undefined : null });
+      const trx = (table) => {
+        const q = base(table);
+        if (table === 'triage_items') {
+          const boom = () => Object.assign(new Error(leak), { code: '40P01', bindings: [hold.address_on_file], sql: 'update ...' });
+          q.update = async () => { throw boom(); };
+          const ins = q.insert; q.insert = (r) => { ins(r); q.onConflict = () => q; q.ignore = async () => { throw boom(); }; return q; };
+        }
+        return q;
+      };
+      trx.raw = base.raw;
+      let err;
+      try { await promoteReusedRowToStreetLevelHold(trx, row(), args()); } catch (e) { err = e; }
+      expect(err).toBeDefined();
+      expect(err.message).toBe('street_level_promotion_failed:40P01');
+      expect(err.code).toBe('street_level_promotion_failed');
+      expect(JSON.stringify([err.message, err.stack?.split('\n')[0], safeScheduleErrorText(err)])).not.toContain('Sample Newbuild');
+      expect(err.bindings).toBeUndefined();
+    }
+    // The scheduling catch persists / logs the sanitized text for driver errors, and keeps deliberate messages.
+    expect(safeScheduleErrorText(Object.assign(new Error(leak), { code: '40P01', name: 'error', routine: 'DeadLockReport' }))).toBe('error:40P01');
+    expect(safeScheduleErrorText(Object.assign(new Error(leak), { bindings: [1] }))).not.toContain('Sample Newbuild');
+    expect(safeScheduleErrorText(new Error('Slot taken'))).toBe('Slot taken');
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain('const schedErrText = safeScheduleErrorText(schedErr);');
+    expect(src).toContain('scheduleError: schedErrText, smsSent: false');
+    expect(src).not.toContain('Failed to create scheduled service: ${schedErr.message}');
+  });
+
+  test('no card at all: one is filed in the same shape', async () => {
+    const { w, trx } = world({ card: null });
+    expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(true);
+    expect(w.inserts[0].reason_code).toBe('outbound_booking_review');
+    expect(JSON.stringify(w.inserts[0].payload)).toContain('street_level_address');
+  });
+
+  test('no-ops: not a hold this pass, already a hold, not voice_agent, confirmed, or not pending', async () => {
+    const cases = [
+      [row(), args({ hold: null }), null],
+      [row(), args(), { id: 'old', status: 'open', payload: { street_level_address: true, scheduled_service_id: 'v1' } }],
+      [row({ source_action: 'ai_call_pipeline' }), args(), null],
+      [row({ customer_confirmed: true }), args(), null],
+      [row({ status: 'confirmed' }), args(), null],
+    ];
+    for (const [r, a, existingHoldCard] of cases) {
+      const { w, trx } = world({ existingHoldCard: existingHoldCard && { ...existingHoldCard, payload: JSON.stringify(existingHoldCard.payload) } });
+      expect(await promoteReusedRowToStreetLevelHold(trx, r, a)).toBe(false);
+      expect(w.updates).toHaveLength(0);
+    }
+  });
+
+  test('wired on BOTH reuse paths, before the lead converts and before the reuse activation', () => {
+    const s = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    const a = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, primaryRow, promoteArgs);');
+    // After the tech-day fences (lock order: fences, then the visit row).
+    expect(a).toBeGreaterThan(s.indexOf('lockTechDays', s.indexOf('const holdBinds')));
+    const b = s.indexOf('await promoteReusedRowToStreetLevelHold(trx, existingByKey, promoteArgs);');
+    expect(a).toBeGreaterThan(0);
+    expect(b).toBeGreaterThan(a);
+    expect(s.indexOf('deferConversion: await isStreetLevelHoldRow(trx, primaryRow)', a)).toBeGreaterThan(a);
+    expect(s.indexOf('deferConversion: await isStreetLevelHoldRow(trx, existingByKey)', b)).toBeGreaterThan(b);
+    expect(s.indexOf('!(await isStreetLevelHoldRow(db, svc))', b)).toBeGreaterThan(b);
+    // The proof must bind to THIS customer.
+    expect(s.slice(s.indexOf('const holdBinds'), s.indexOf('const holdBinds') + 400)).toContain('canonicalCustomerId: customerId');
+    expect(typeof isStreetLevelHoldRow).toBe('function');
+  });
+});

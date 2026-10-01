@@ -840,7 +840,9 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'message_drafts.customer_id', 'customers.id')
       .select('message_drafts.*', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.waveguard_tier', 'customers.pipeline_stage',
-        'customers.nearest_location_id', 'customers.city')
+        'customers.nearest_location_id', 'customers.city',
+        'customers.zip as customer_zip', 'customers.latitude as customer_latitude',
+        'customers.longitude as customer_longitude')
       .orderBy('message_drafts.created_at', 'desc')
       .orderBy('message_drafts.id', 'desc')
       .limit(50);
@@ -871,7 +873,10 @@ router.get('/', async (req, res, next) => {
     const smsLogs = smsLogIds.length ? await db('sms_log').whereIn('id', smsLogIds) : [];
     const smsLogById = new Map(smsLogs.map((row) => [String(row.id), row]));
     const resolved = await Promise.all(drafts.map(async (d) => {
-      const customer = d.customer_id ? { id: d.customer_id, phone: d.phone, city: d.city } : null;
+      const customer = d.customer_id ? {
+        id: d.customer_id, phone: d.phone, city: d.city,
+        zip: d.customer_zip, latitude: d.customer_latitude, longitude: d.customer_longitude,
+      } : null;
       const preloaded = { customer, ...(d.sms_log_id ? { smsLog: smsLogById.get(String(d.sms_log_id)) || null } : {}) };
       const r = await resolveDraftRecipient(d, preloaded).catch(() => null);
       const fromNumber = r?.fromNumber || await derivedOfficeNumber(d, r?.customerId, customer);

@@ -2691,10 +2691,11 @@ router.post('/recording-status', async (req, res) => {
         // and the email-review cards close only on a human verdict — never
         // because the audio changed; Codex #3764 r3 + r4 P1).
         if (n > 0 && attach.action === 'replace') {
-          const { SUPERSEDE_KEPT_REASON_CODES } = require('../services/call-routing-gates');
+          const { SUPERSEDE_KEPT_REASON_CODES, SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
           const retired = await trx('triage_items')
             .where({ call_log_id: baseline.id })
             .whereNotIn('reason_code', SUPERSEDE_KEPT_REASON_CODES)
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .whereIn('status', ['open', 'in_progress'])
             .update({ status: 'resolved', resolved_at: new Date(), resolution_note: `Superseded: recording ${baseline.recording_sid || 'none'} replaced by ${RecordingSid}` });
           // The review flag follows the cards (Codex #3736 r14 P2): with the

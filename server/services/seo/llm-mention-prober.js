@@ -6,8 +6,13 @@
  * among competitors, which of our pages get cited, and the sentiment.
  *
  * Coverage (hybrid, per owner decision 2026-05-30):
- *   - ChatGPT  → OpenAI search-grounded model (live web)        [OPENAI_API_KEY]
- *   - Gemini   → Google google_search grounding tool (live web) [GEMINI_API_KEY]
+ *   - ChatGPT  → the ChatGPT app via DataForSEO's LLM scraper   [DATAFORSEO_*]
+ *                (owner decision 2026-10-01; falls back to the OpenAI
+ *                search-grounded API when LLM_MENTIONS_APP_SCRAPER=false
+ *                or DataForSEO is not configured)               [OPENAI_API_KEY]
+ *   - Gemini   → the Gemini app via DataForSEO's LLM scraper    [DATAFORSEO_*]
+ *                (same switch; API fallback: Google google_search
+ *                grounding tool)                                [GEMINI_API_KEY]
  *   - Claude   → Anthropic web_search tool (live web)           [ANTHROPIC_API_KEY]
  *   - Google AI Overview → DataForSEO SERP AI overview          [DATAFORSEO_*]
  *   - Perplexity → Sonar search-grounded model (live web)       [PERPLEXITY_API_KEY]
@@ -20,6 +25,10 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const appScraper = require('./llm-app-scraper');
+const {
+  RANK_METHOD_KNOWN_LIST, WAVES_RE, URL_RE, COMPETITORS, knownCompetitorHits, rankFor, rivalsOf,
+} = require('./llm-mention-companies');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
 const benchmark = require('../../data/aeo-benchmark-v1.json');
@@ -40,18 +49,16 @@ let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
 
 // ── Detection constants ──────────────────────────────────────────────────────
-// A source URL alone is not a brand mention in the answer.
-const WAVES_RE = /\bwaves\s+(?:pest\s+control|lawn(?:\s+care)?)\b/i;
-
-const COMPETITORS = [
-  'turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen',
-  'hometeam', 'arrow environmental', 'nozzle nolen', 'massey services',
-];
-const URL_RE = /https?:\/\/[^\s)<>\]"']+/gi;
-
+// WAVES_RE, COMPETITORS and the all-companies ranking live in
+// llm-mention-companies.js.
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
-const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
-const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 200;
+// 300 = six platforms × the 40 benchmark questions (240, observed daily) plus
+// the ancillary reserve below (60, rotating).
+const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 300);
+const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 300;
+// A fifth of the ceiling is held for ancillary queries (custom, entity cohort)
+// so a benchmark that fills the ceiling can never starve them outright.
+const ANCILLARY_RESERVE_SHARE = 0.2;
 
 // The sentiment reply must be ONE allowlisted label, unambiguously: its first
 // word is a label and no other label appears anywhere in it. A substring
@@ -66,6 +73,16 @@ function parseSentimentLabel(text) {
   return labels.size === 1 ? words[0] : null;
 }
 
+// A row written before rank_method existed ranked Waves only against the
+// hard-coded COMPETITORS list.
+const rankMethodOf = row => row.rank_method || RANK_METHOD_KNOWN_LIST;
+
+// rankMethods labels which rank semantics a group's `recommended` (top-3) rate
+// mixes; the rates themselves are unchanged (no backfill of old rows).
+function rankMethodsOf(rows) {
+  return [...new Set(rows.map(rankMethodOf))].sort();
+}
+
 function observationGroups(rows, keyFor) {
   const groups = new Map();
   for (const row of rows) {
@@ -73,10 +90,31 @@ function observationGroups(rows, keyFor) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
-  return [...groups].map(([key, observations]) => ({ key, ...summarizeObservations(observations) }));
+  return [...groups].map(([key, observations]) => ({
+    key, ...summarizeObservations(observations), rankMethods: rankMethodsOf(observations),
+  }));
 }
 
-function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
+// Headline rows: for a platform that has a current surface (ChatGPT and Gemini
+// have two, the API probe and the consumer app), only that surface's newest
+// row per question counts, so the 30-day overlap after a switch never counts a
+// question twice or mixes surfaces in one rate. Other platforms keep every
+// model cohort, as before. `grid` is newest first, so the first row seen for a
+// (question, platform) is its newest.
+function headlineRows(grid, currentSurfaces) {
+  if (!currentSurfaces) return grid;
+  const seen = new Set();
+  return grid.filter(row => {
+    if (!currentSurfaces[row.llm_platform]) return true;
+    if (!appScraper.onCurrentSurface(row, currentSurfaces)) return false;
+    const key = `${row.query}::${row.llm_platform}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildDashboard(rows, queries, { configuredPlatforms = null, currentSurfaces = null } = {}) {
   const questionMap = new Map(benchmark.questions.map(q => [q.query, q]));
   const managed = new Map(queries.map(q => [q.query, q]));
   const latest = new Map();
@@ -88,6 +126,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   }
   const grid = [...latest.values()].map(row => ({
     ...row,
+    rank_method: rankMethodOf(row),
     waves_cited_urls: ownedCitations(row),
     measured: isMeasuredAnswer(row),
     benchmark_id: questionMap.get(row.query)?.id || null,
@@ -95,16 +134,18 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
     city: managed.get(row.query)?.city || questionMap.get(row.query)?.city || 'SWFL',
     intent: questionMap.get(row.query)?.intent || (isEntityQuestion(row.query) ? 'entity' : 'custom'),
   }));
-  const fixed = grid.filter(row => row.benchmark_id);
+  // `grid` keeps every model cohort (per-model breakdowns); `headline` is what
+  // the summary, benchmark and entity rates and the competitor counts read.
+  const headline = headlineRows(grid, currentSurfaces);
+  const fixed = headline.filter(row => row.benchmark_id);
+  const fixedAll = grid.filter(row => row.benchmark_id);
   const pageCites = new Map();
   const competitors = new Map();
   for (const row of rows) {
     for (const url of ownedCitations(row)) pageCites.set(url, (pageCites.get(url) || 0) + 1);
   }
-  for (const row of grid.filter(isMeasuredAnswer)) {
-    for (const competitor of asJsonArray(row.competitors_mentioned)) {
-      if (competitor?.name) competitors.set(competitor.name, (competitors.get(competitor.name) || 0) + 1);
-    }
+  for (const row of headline.filter(isMeasuredAnswer)) {
+    for (const name of rivalsOf(row)) competitors.set(name, (competitors.get(name) || 0) + 1);
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
   // Coverage: the expected active-question x configured-engine pairs, each
@@ -145,10 +186,11 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   const pairs = summarizeObservations([...newestByPair.values()]);
   return {
     summary: {
-      ...summarizeObservations(grid),
-      queriesTracked: new Set(grid.map(row => row.query)).size,
+      ...summarizeObservations(headline),
+      queriesTracked: new Set(headline.map(row => row.query)).size,
       platforms: observedEngines,
       configuredPlatforms: configuredEngines,
+      rankMethods: rankMethodsOf(headline),
     },
     benchmark: {
       version: benchmark.version,
@@ -156,6 +198,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
       activeQuestions: activeQuestionCount,
       observedQuestions: new Set(fixed.filter(isMeasuredAnswer).map(row => row.query)).size,
       ...summarizeObservations(fixed),
+      rankMethods: rankMethodsOf(fixed),
       expectedObservations,
       missing,
       coverage: {
@@ -166,13 +209,13 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
         unresolved: pairs.unresolved,
         missing,
       },
-      byPlatform: observationGroups(fixed, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
+      byPlatform: observationGroups(fixedAll, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
       byCity: observationGroups(fixed, row => row.city),
       byIntent: observationGroups(fixed, row => row.intent),
     },
     // What the engines say ABOUT Waves (owner-approved facts vs forbidden
     // claims). Separate cohort; never blended into the citation benchmark.
-    entity: buildEntityDashboard(grid, queries),
+    entity: buildEntityDashboard(headline, queries),
     byPlatform,
     trend: observationGroups(rows.filter(row => questionMap.has(row.query)), row => `${observationDate(row.check_date)} · ${row.llm_platform} · ${row.model_version || 'legacy'}`),
     grid,
@@ -259,6 +302,40 @@ class LLMMentionProber {
     }
   }
 
+  /**
+   * ChatGPT as the app shows it (DataForSEO LLM scraper, US-level location).
+   * null = nothing measured (gate off / unconfigured / request or task error):
+   * no row, retried next run. No per-request API fallback: a silent switch
+   * would mix two models under one platform row; flip the env to change engine.
+   */
+  async probeChatGPTApp(query) {
+    return this.probeAppScraper('chatgpt', appScraper.CHATGPT_PATH, appScraper.chatGPTRequestBody(query),
+      appScraper.parseChatGPTScraper, query);
+  }
+
+  async probeGeminiApp(query, queryRow = null) {
+    return this.probeAppScraper('gemini', appScraper.GEMINI_PATH, appScraper.geminiRequestBody(query, queryRow?.city),
+      appScraper.parseGeminiScraper, query);
+  }
+
+  async probeAppScraper(platform, path, body, parseResponse, query) {
+    try {
+      const data = await dataforseo.request(path, body);
+      if (data == null) return null;
+      const probe = parseResponse(data);
+      if (!probe) {
+        const task = data?.tasks?.[0];
+        logger.warn(`[llm-mentions] ${platform} app scraper task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      if (probe.costUsd > 0) logger.info(`[llm-mentions] ${platform} app scraper cost $${probe.costUsd} (${probe.model})`);
+      return probe;
+    } catch (err) {
+      logger.warn(`[llm-mentions] ${platform} app scraper failed: ${err.message}`);
+      return null;
+    }
+  }
+
   async probeClaude(query) {
     if (!process.env.ANTHROPIC_API_KEY || !Anthropic) return null;
     const model = process.env.MODEL_MENTIONS || MODELS.WORKHORSE;
@@ -320,22 +397,51 @@ class LLMMentionProber {
       // idempotency fires — otherwise the same paid miss re-runs every day,
       // blowing past MAX_PROBES_PER_RUN.
       const items = task?.result?.[0]?.items || [];
-      const aio = items.find(i => i.type === 'ai_overview');
-      if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
-      // Never scan a serialized result object as prose: source titles/URLs can
-      // name Waves even when the actual overview does not.
-      const text = aio.markdown || (aio.items || []).map(item => item.text || '').join('\n');
-      // Top-level references are pages that MAY have been used. Only links
-      // and references attached to a textual answer element prove usage.
-      const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
-      const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
-      const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
-      return { text, citedUrls, sourceUrls, citationsComplete: citedUrls.length > 0 || sourceUrls.length === 0,
-        model: 'dataforseo:ai_overview', grounded: true };
+      return this.googleAnswerProbe(items.find(i => i.type === 'ai_overview'), 'dataforseo:ai_overview');
     } catch (err) {
       logger.warn(`[llm-mentions] AI Overview probe failed: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Google AI Mode (a different Google surface from the AI Overview, kept as
+   * its own platform). The scraper answers with the same `ai_overview` item
+   * shape, so it reads through the same parser. No answer item is recorded as
+   * an empty observation (idempotency); a request or task error is not.
+   */
+  async probeGoogleAIMode(query, queryRow = null) {
+    try {
+      const data = await dataforseo.request(appScraper.AI_MODE_PATH, appScraper.aiModeRequestBody(query, queryRow?.city));
+      if (data == null) return null;
+      const task = data?.tasks?.[0];
+      if (task?.status_code !== 20000) {
+        logger.warn(`[llm-mentions] AI Mode task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      const probe = this.googleAnswerProbe(task?.result?.[0]?.items?.find(i => i.type === 'ai_overview'), 'dataforseo:google_ai_mode');
+      probe.costUsd = Number(task.cost) || 0;
+      if (probe.costUsd > 0) logger.info(`[llm-mentions] AI Mode cost $${probe.costUsd}`);
+      return probe;
+    } catch (err) {
+      logger.warn(`[llm-mentions] AI Mode probe failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The ai_overview item of a Google SERP / AI Mode response → probe shape.
+  googleAnswerProbe(aio, model) {
+    if (!aio) return { text: '', citedUrls: [], model, grounded: true };
+    // Never scan a serialized result object as prose: source titles/URLs can
+    // name Waves even when the actual overview does not.
+    const text = aio.markdown || (aio.items || []).map(item => item.text || '').join('\n');
+    // Top-level references are pages that MAY have been used. Only links
+    // and references attached to a textual answer element prove usage.
+    const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
+    const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
+    const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
+    return { text, citedUrls, sourceUrls, citationsComplete: citedUrls.length > 0 || sourceUrls.length === 0,
+      model, grounded: true };
   }
 
   async probePerplexity(query) {
@@ -399,11 +505,32 @@ class LLMMentionProber {
     return { citedUrls, complete };
   }
 
+  /**
+   * Which surface each two-surface platform is measured on right now (read
+   * with `providers`, from the same switch): the dashboard's headline rates
+   * count only that surface's rows.
+   */
+  get currentSurfaces() {
+    return appScraper.currentSurfaces(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured);
+  }
+
   /** Map platform key → probe fn. */
   get providers() {
     const providers = {};
-    if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
-    if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);
+    // ChatGPT and Gemini measure the consumer apps through DataForSEO by
+    // default (owner decision 2026-10-01); each keeps ONE row per question per
+    // day, so the scraper replaces the API probe rather than running beside it.
+    // The stored model_version tells the two kinds of row apart.
+    if (appScraper.appScraperEnabled(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured)) {
+      providers.chatgpt = q => this.probeChatGPTApp(q);
+      providers.gemini = (q, queryRow) => this.probeGeminiApp(q, queryRow);
+      // AI Mode has no API-probe equivalent, so it rides the same switch and
+      // simply disappears when the switch is off.
+      providers.google_ai_mode = (q, queryRow) => this.probeGoogleAIMode(q, queryRow);
+    } else {
+      if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
+      if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);
+    }
     if (process.env.ANTHROPIC_API_KEY && Anthropic) providers.claude = q => this.probeClaude(q);
     if (dataforseo.configured) providers.google_ai_overview = q => this.probeGoogleAIOverview(q);
     if (process.env.PERPLEXITY_API_KEY) providers.perplexity = q => this.probePerplexity(q);
@@ -423,26 +550,24 @@ class LLMMentionProber {
 
     const brandInText = WAVES_RE.test(prose);
     const wavesMentioned = brandInText;
-
-    // Brand ordering → rank position of first Waves reference among brands.
-    const positions = [];
     const wavesIdx = lower.search(WAVES_RE);
-    if (wavesIdx >= 0) positions.push({ name: 'waves', idx: wavesIdx });
-    const competitors = [];
-    for (const c of COMPETITORS) {
-      const idx = lower.indexOf(c);
-      if (idx >= 0) { competitors.push({ name: c, context: text.substring(idx, idx + 120) }); positions.push({ name: c, idx }); }
-    }
-    positions.sort((a, b) => a.idx - b.idx);
-    const rankPosition = brandInText
-      ? positions.findIndex(p => p.name === 'waves') + 1
-      : null;
+
+    // Every company the answer names, in order of first mention, with Waves at
+    // its position: rank_position is Waves' place in THAT list, not among the
+    // hard-coded rivals only. Provider brand entities lead when the scraper
+    // supplies them; known rivals are always added by text position.
+    const { companies: companiesNamed, rankMethod, rankPosition: allNamedRank } = rankFor(text, { entities: probe.entities });
+    const competitors = knownCompetitorHits(lower)
+      .map(({ key, idx }) => ({ name: key, context: text.substring(idx, idx + 120) }));
+    const rankPosition = brandInText ? allNamedRank : null;
 
     return {
       wavesMentioned,
       mentionContext: brandInText ? text.substring(Math.max(0, wavesIdx - 60), wavesIdx + 240) : null,
       competitors,
-      rankPosition: rankPosition && rankPosition > 0 ? rankPosition : null,
+      companiesNamed,
+      rankMethod,
+      rankPosition,
       citedUrls,
       wavesCitedUrls,
       sourceUrls: cleanUrls(probe.sourceUrls),
@@ -500,11 +625,26 @@ class LLMMentionProber {
     // Advance one attempt window each ET calendar day, including failed pairs.
     // Successful-observation timestamps cannot rotate failures: enough broken
     // pairs would remain perpetually oldest and monopolize the run ceiling.
+    // The fixed benchmark's pairs run first, every day, within the ceiling
+    // minus the ancillary reserve; ancillary queries (custom, entity cohort)
+    // rotate through the reserve plus anything the benchmark left unused, so
+    // neither cohort can push the other out of the ceiling.
+    const benchmarkQueries = new Set(benchmark.questions.map(q => q.query));
     const pairs = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })))
       .sort((a, b) => a.key.localeCompare(b.key));
     const dayOrdinal = Math.floor(Date.parse(`${checkDate}T00:00:00Z`) / 86400000);
-    const offset = pairs.length ? (dayOrdinal * MAX_PROBES_PER_RUN) % pairs.length : 0;
-    const pending = [...pairs.slice(offset), ...pairs.slice(0, offset)];
+    const rotate = (list, window) => {
+      const offset = list.length ? (dayOrdinal * window) % list.length : 0;
+      return [...list.slice(offset), ...list.slice(0, offset)];
+    };
+    const benchmarkPairs = pairs.filter(pair => benchmarkQueries.has(pair.qrow.query));
+    const ancillaryPairs = pairs.filter(pair => !benchmarkQueries.has(pair.qrow.query));
+    const ancillaryReserve = Math.min(ancillaryPairs.length, Math.floor(MAX_PROBES_PER_RUN * ANCILLARY_RESERVE_SHARE));
+    const benchmarkBudget = MAX_PROBES_PER_RUN - ancillaryReserve;
+    const pending = [
+      ...rotate(benchmarkPairs, benchmarkBudget).map(pair => ({ ...pair, benchmark: true })),
+      ...rotate(ancillaryPairs, MAX_PROBES_PER_RUN - Math.min(benchmarkPairs.length, benchmarkBudget)),
+    ];
 
     // Today's already-recorded (query, platform) pairs → idempotency set.
     const existing = await db('seo_llm_mentions')
@@ -512,18 +652,22 @@ class LLMMentionProber {
       .select('query', 'llm_platform');
     const done = new Set(existing.map(r => `${r.query}::${r.llm_platform}`));
 
-    let attempted = 0, probed = 0, inserted = 0, wavesHits = 0;
-    for (const { qrow, platform } of pending) {
+    let attempted = 0, benchmarkAttempted = 0, probed = 0, inserted = 0, wavesHits = 0, scraperCostUsd = 0;
+    for (const { qrow, platform, benchmark: isBenchmark } of pending) {
       if (attempted >= MAX_PROBES_PER_RUN) {
         logger.warn(`[llm-mentions] Hit MAX_PROBES_PER_RUN (${MAX_PROBES_PER_RUN}); stopping early`);
         break;
       }
       if (done.has(`${qrow.query}::${platform}`)) continue;
+      // Benchmark pairs stop at their budget; the reserve is ancillary-only.
+      if (isBenchmark && benchmarkAttempted >= benchmarkBudget) continue;
 
       attempted++; // a failed request may still have incurred provider cost
-      const probe = await providers[platform](qrow.query);
+      if (isBenchmark) benchmarkAttempted++;
+      const probe = await providers[platform](qrow.query, qrow);
       if (!probe) continue;
       probed++;
+      scraperCostUsd += probe.costUsd || 0;
 
       const parsed = this.parse(probe);
       const sentiment = parsed.wavesMentioned
@@ -549,6 +693,8 @@ class LLMMentionProber {
         mention_context: parsed.mentionContext,
         waves_mentioned: parsed.wavesMentioned,
         competitors_mentioned: JSON.stringify(parsed.competitors),
+        companies_named: JSON.stringify(parsed.companiesNamed),
+        rank_method: parsed.rankMethod,
         cited_urls: JSON.stringify(parsed.citedUrls),
         waves_cited_urls: JSON.stringify(parsed.wavesCitedUrls),
         source_urls: JSON.stringify(parsed.sourceUrls),
@@ -566,7 +712,8 @@ class LLMMentionProber {
       if (ins.rowCount !== 0) inserted++;
     }
 
-    logger.info(`[llm-mentions] batch ${batchId}: ${probed} probed, ${inserted} recorded, ${wavesHits} Waves hits`);
+    logger.info(`[llm-mentions] batch ${batchId}: ${probed} probed, ${inserted} recorded, ${wavesHits} Waves hits`
+      + (scraperCostUsd > 0 ? `, app scraper cost $${scraperCostUsd.toFixed(3)}` : ''));
     return { batchId, attempted, probed, inserted, wavesHits };
   }
 
@@ -583,6 +730,7 @@ class LLMMentionProber {
     const queries = await this.getQueries();
     return buildDashboard(rows.filter(row => queries.some(q => q.query === row.query)), queries, {
       configuredPlatforms: Object.keys(this.providers),
+      currentSurfaces: this.currentSurfaces,
     });
   }
 }
@@ -591,3 +739,4 @@ module.exports = new LLMMentionProber();
 module.exports.LLMMentionProber = LLMMentionProber;
 module.exports.buildDashboard = buildDashboard;
 module.exports.parseSentimentLabel = parseSentimentLabel;
+module.exports.COMPETITORS = COMPETITORS;

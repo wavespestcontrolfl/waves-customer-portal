@@ -7,6 +7,8 @@
  * arbitrary strings at capture time.
  */
 
+const { SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+
 // First name shown on an unauthenticated report. Derive a single name token
 // (letters + hyphen/apostrophe) rather than trusting a scrub — anything else
 // (digits, appended notes, extra words) is dropped, not published.
@@ -17,10 +19,12 @@ function safePublicFirstName(value) {
   return cleaned && /\p{L}/u.test(cleaned) ? cleaned : null;
 }
 
-// SWFL service-area cities/communities (Manatee / Sarasota / Charlotte). Public
-// reports greet a prospect with their city, so the field is allowlisted at
-// egress: a stored value like "Venice gate code BLUE" is not in the set and is
-// omitted entirely. Cosmetic-only — an unrecognized city simply doesn't render.
+// SWFL service-area cities/communities (Manatee / Sarasota / Charlotte, plus the
+// served south-Hillsborough towns from config/locations.js; DeSoto is not
+// served). Public reports greet a prospect with their city, so the field is
+// allowlisted at egress: a stored value like "Venice gate code BLUE" is not in
+// the set and is omitted entirely. Cosmetic-only — an unrecognized city simply
+// doesn't render.
 const PUBLIC_CITY_ALLOWLIST = new Set([
   // Manatee
   'bradenton', 'bradenton beach', 'west bradenton', 'anna maria', 'holmes beach',
@@ -37,6 +41,8 @@ const PUBLIC_CITY_ALLOWLIST = new Set([
   'punta gorda', 'port charlotte', 'charlotte harbor', 'rotonda', 'rotonda west',
   'cleveland', 'harbour heights', 'solana', 'grove city', 'placida', 'cape haze',
   'manasota key',
+  // South Hillsborough (served by the Parrish office)
+  ...SOUTH_HILLSBOROUGH_CITIES,
 ]);
 
 function safePublicCity(value) {

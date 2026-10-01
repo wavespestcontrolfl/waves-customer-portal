@@ -19,7 +19,7 @@ const scheduleRouter = require('../routes/schedule');
 
 function chain(rows) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'leftJoin', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
     c[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(c, c); return c; });
   }
   c.first = jest.fn(async () => rows[0]);

@@ -2860,9 +2860,11 @@ describe('local_gap representative query + label validation (Codex P1s on #3378)
   test('the brief builder falls back to representative_query for SERP + target_keyword', () => {
     const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
     expect(bb).toMatch(/const serpKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
-    // The fallback is named once (#5216: the photo slots resolve the SAME
-    // topic string) and the brief's target_keyword is that value.
-    expect(bb).toMatch(/const targetKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
+    // The fallback is named once, in briefTargetKeyword (#5216: the photo
+    // slots resolve the SAME topic string; #5447: so does the photo-subject
+    // confirmation), and the brief's target_keyword is that value.
+    expect(bb).toMatch(/return opportunity\?\.query \|\| opportunity\?\.signal_metadata\?\.representative_query \|\| null;/);
+    expect(bb).toMatch(/const targetKeyword = briefTargetKeyword\(opportunity\);/);
     expect(bb).toMatch(/target_keyword: targetKeyword,/);
   });
 });
@@ -3279,6 +3281,15 @@ describe('aeo_question_gap bucket', () => {
     expect(g.competitors_mentioned).toEqual(['Example Pest Co']);
   });
 
+  test('competitors_mentioned on a question gap lists every company the answers named (companies_named), canonicalised, Waves excluded', () => {
+    const q6 = q('Q6');
+    const rows = synthetic([q6]).map((r, i) => (i % 2 === 0
+      ? { ...r, companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Waves Pest Control' }, { name: 'Turner Pest Control' }]), competitors_mentioned: JSON.stringify([{ name: 'turner pest' }]) }
+      : { ...r, companies_named: null, competitors_mentioned: JSON.stringify([{ name: 'turner pest' }, { name: 'Example Pest Co' }]) }));
+    const [gap] = evaluateAeoQuestionGaps(rows, [q6], { minDays: 3, minEngines: 3 });
+    expect(gap.competitors_mentioned).toEqual(['Example Bug Control', 'Example Pest Co', 'Turner Pest Control']);
+  });
+
   test('a target cited by enough engines does not qualify; minEngines and minDays are both required', () => {
     const q6 = q('Q6');
     // Claude cites the target too → only 2 engines missing.
@@ -3632,6 +3643,67 @@ describe('aeo_question_gap bucket', () => {
       const miner = stubbed(synthetic([q('Q6')]), []);
       miner._liveHubRoutes.mockRejectedValue(new Error('fetch failed'));
       expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+    });
+  });
+
+  describe('mineAeoGaps rivals', () => {
+    const OLD = { ...process.env };
+    const dataforseo = require('../services/seo/dataforseo');
+    beforeEach(() => { jest.spyOn(dataforseo, 'configured', 'get').mockReturnValue(true); });
+    afterEach(() => { process.env = { ...OLD }; jest.restoreAllMocks(); });
+
+    test('the city x service gap counts every named rival, not only the known-list hits, so real local rivals strengthen it', async () => {
+      const db = require('../models/db');
+      const day = (n) => `2026-09-0${n}`;
+      const base = { query: 'best pest control in Bradenton, Florida', q_city: 'Bradenton', q_service: 'pest control', llm_platform: 'gemini',
+        model_version: 'dataforseo:gemini_app:m', measurement_version: 2, answer_available: true, citations_complete: true, waves_cited_urls: '[]' };
+      const rows = [1, 2, 3].map((n) => ({
+        ...base, check_date: day(n),
+        competitors_mentioned: JSON.stringify([{ name: 'orkin', context: '' }]),
+        companies_named: JSON.stringify([{ name: 'Example Bug Control' }, { name: 'Sample Pest Solutions' }, { name: 'Orkin' }]),
+      }));
+      const chain = { leftJoin: () => chain, where: () => chain, select: async () => rows };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_gscDemandByServiceCity').mockImplementation(async () => new Map([[ownPageKey('pest', 'Bradenton'), 100000]]));
+      const out = await miner.mineAeoGaps('2026-08-30');
+      expect(out).toHaveLength(1);
+      expect(out[0].signal_metadata.competitors_mentioned.sort()).toEqual(['Example Bug Control', 'Orkin', 'Sample Pest Solutions']);
+      expect(out[0].signal_metadata.gap_strength).toBe(1);
+    });
+
+    // Codex r3 on #5491: a retired API cohort in the lookback window must
+    // neither raise a gap nor suppress one once the app is the measured surface.
+    test('only the current ChatGPT/Gemini surface is gap evidence', async () => {
+      const db = require('../models/db');
+      const base = { query: 'best pest control in Bradenton, Florida', q_city: 'Bradenton', q_service: 'pest control', llm_platform: 'chatgpt',
+        measurement_version: 2, answer_available: true, citations_complete: true, waves_cited_urls: '[]', competitors_mentioned: '[]' };
+      const apiMisses = [1, 2, 3].map((n) => ({ ...base, check_date: `2026-09-0${n}`, model_version: 'gpt-5-search-api' }));
+      const chain = { leftJoin: () => chain, where: () => chain, select: async () => apiMisses };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_gscDemandByServiceCity').mockImplementation(async () => new Map([[ownPageKey('pest', 'Bradenton'), 100000]]));
+      expect(await miner.mineAeoGaps('2026-08-30')).toEqual([]);
+      process.env.LLM_MENTIONS_APP_SCRAPER = 'false';
+      expect(await miner.mineAeoGaps('2026-08-30')).toHaveLength(1);
+    });
+
+    test('question-gap observations drop the retired surface, keep single-surface engines', async () => {
+      const db = require('../models/db');
+      const rows = [
+        { query: 'q', llm_platform: 'chatgpt', model_version: 'gpt-5-search-api' },
+        { query: 'q', llm_platform: 'chatgpt', model_version: 'dataforseo:chatgpt_app:m' },
+        { query: 'q', llm_platform: 'gemini', model_version: 'gemini-2.5-flash' },
+        { query: 'q', llm_platform: 'claude', model_version: 'claude-x' },
+      ];
+      const chain = { join: () => chain, where: () => chain, whereIn: () => chain, select: async () => rows };
+      db.mockImplementation(() => chain);
+      const miner = new GscOpportunityMiner();
+      expect((await miner._loadAeoQuestionObservations('2026-08-30', ['q'])).map((r) => r.model_version))
+        .toEqual(['dataforseo:chatgpt_app:m', 'claude-x']);
+      process.env.LLM_MENTIONS_APP_SCRAPER = 'off';
+      expect((await miner._loadAeoQuestionObservations('2026-08-30', ['q'])).map((r) => r.model_version))
+        .toEqual(['gpt-5-search-api', 'gemini-2.5-flash', 'claude-x']);
     });
   });
 });

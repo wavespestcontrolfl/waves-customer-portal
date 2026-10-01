@@ -10,6 +10,7 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => false) })); // hold lookup: none of these fixtures is a hold
 // The dispute-hold read is not what this suite exercises (its db is a bare mock): no active hold.
 // The dunning senders' boundary hold has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({

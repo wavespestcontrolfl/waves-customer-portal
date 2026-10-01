@@ -1003,6 +1003,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Annual-prepay re-stamp backstop: a paid, active term whose activation
+  // stamp pass threw (the Stripe webhook only logs) keeps canonical visits
+  // unstamped, and a visit that completes in that state bills normally on
+  // top of the prepay. The daily renewal-reminder run also does this before
+  // its pending-window reconcile; hourly keeps the window to under an hour.
+  // Idempotent: a fully stamped (or price-held) term is never refreshed.
+  cron.schedule('42 * * * *', async () => {
+    try {
+      await runExclusive('annual-prepay-restamp-sweep', async () => {
+        await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+      });
+    } catch (err) {
+      logger.error(`[annual-prepay-restamp] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Voice-filed re-service tickets whose owner page never went out (process
   // exit between the ticket commit and the alert). The page is the owner-ruled
   // escape hatch from the ticket queue's documented black hole, so a missing
@@ -1618,6 +1634,36 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly turf variance digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:43am ET (owner 2026-10-01: "send
+  // me a weekly email" of the questions the knowledge base could not fully
+  // answer), then hourly at :43 until Tuesday 8:43pm as catch-up ticks: the
+  // once-per-week send stamp makes them no-ops after a successful send, so a
+  // failed send or a deploy over 8:43 still reports that week. Minute 43 on
+  // Mon/Tue 8am-8pm is shared only with the every-minute jobs — no other
+  // scheduled digest or sweep lands on it (#5490 r1: :41 met the autopay
+  // SMS digest at 9:41:30). Kill: KNOWLEDGE_GAPS_WEEKLY=off.
+  // =========================================================================
+  cron.schedule('43 8-20 * * 1,2', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
+        const { runKnowledgeGapsWeekly } = require('./knowledge/knowledge-gaps-weekly');
+        const result = await runKnowledgeGapsWeekly();
+        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
+        if (result?.error || ['query_failed', 'unconfigured', 'recipient'].includes(result?.skipped)) {
+          throw new Error(`knowledge-gaps weekly email did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('knowledge-gaps-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`knowledge-gaps weekly tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly knowledge-gaps email failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
