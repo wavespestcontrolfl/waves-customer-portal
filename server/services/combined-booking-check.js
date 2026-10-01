@@ -35,9 +35,13 @@
  * The accepted per-visit price comes from the same lines and rule the
  * converter's own split uses (acceptedRecurringBillingLines +
  * lineAnnualPerVisitAmount). When the lines do not reconcile to the accepted
- * annual total (manual discount, plan credit, cadence change) the exact dollar
- * comparison is skipped for that estimate rather than guessed; "priced $0"
- * and "no invoice" are still reported.
+ * annual total (manual discount, plan credit, cadence change) there is no
+ * price to compare against (the converter itself declines to split such a
+ * plan), so the estimate is never declared OK: "priced $0", "no invoice" and
+ * missing time/tech are still reported, and otherwise the check says nothing.
+ * A family the shared classifier did not judge (an active plan hold, a
+ * stopped series) is left out the same way the duplicate-series guard's
+ * retained family is, and an estimate it did not judge at all is never OK.
  *
  * ALERTS reuse the admin ops_digest seam (notifyAdmin + the row shape
  * services/ops-digest.js writes): a <=60 char headline, a <=110 char summary,
@@ -287,8 +291,9 @@ function checkStampedFirstDay(stamped, programs, invoices, facts) {
     return [{ code: 'first_invoice_split', text: `covered services are on ${invoiceIds.size} different invoices` }];
   }
   const invoice = invoices.get([...invoiceIds][0]);
-  if (!invoice || ['void', 'voided', 'cancelled', 'canceled'].includes(String(invoice.status || '').toLowerCase())) {
-    return [{ code: 'first_invoice_missing', text: 'first invoice is missing or void' }];
+  // A refunded invoice no longer collects the first applications either.
+  if (!invoice || ['void', 'voided', 'cancelled', 'canceled', 'refunded'].includes(String(invoice.status || '').toLowerCase())) {
+    return [{ code: 'first_invoice_missing', text: 'first invoice is missing, void or refunded' }];
   }
   const billed = firstApplicationAmount(invoice);
   if (billed == null) {
@@ -329,7 +334,8 @@ function checkUnstampedFirstDay(unstamped, programs, facts) {
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, invoices: Map(id -> invoice), technicians: Map(id -> name),
- *          customerName, excludedFamilies: Set }
+ *          customerName, excludedFamilies: Set, scheduleGaps, scheduleSkippedFamilies: Set,
+ *          scheduleUnjudged: bool }
  * Returns null when the accept is not a multi-service recurring accept (no
  * alert at all), else { ok, problems: [{ code, text }], facts }.
  */
@@ -337,7 +343,11 @@ function evaluateCombinedBooking(ctx) {
   const { estimate, invoices = new Map(), technicians = new Map(), excludedFamilies = new Set() } = ctx;
   const accepted = acceptedPrograms(estimate);
   if (!accepted) return null;
-  const programs = new Map([...accepted.programs].filter(([family]) => !excludedFamilies.has(family)));
+  // Families the shared classifier skipped (active plan hold, stopped series)
+  // have no schedule evidence behind them: they leave the check entirely.
+  const skipped = ctx.scheduleSkippedFamilies || new Set();
+  const programs = new Map([...accepted.programs]
+    .filter(([family]) => !excludedFamilies.has(family) && !skipped.has(family)));
   if (programs.size < 2) return null;
 
   const planRows = (ctx.rows || []).filter((row) => !row.is_callback && !row.followup_included
@@ -356,8 +366,12 @@ function evaluateCombinedBooking(ctx) {
   // classifier's call (ctx.scheduleGaps, from findAcceptedRecurringScheduleGaps
   // — the source of the watchdog's accepted-schedule alerts). A gap there, or
   // no live rows to inspect, means this check says nothing about the schedule
-  // shape and never declares the booking OK.
-  const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0;
+  // shape and never declares the booking OK. Neither does an estimate the
+  // classifier did not judge, nor one with no accepted per-visit price to
+  // compare against (its problems below are still reported).
+  const pricesUnverifiable = [...programs.values()].some((program) => program.perVisit == null);
+  const deferred = !rows.length || (ctx.scheduleGaps || []).length > 0 || ctx.scheduleUnjudged === true
+    || pricesUnverifiable;
   if (!rows.length) return { ok: false, deferred, problems: [], facts };
 
   const dated = rows.map((row) => ({ ...row, day: dateOnly(row.scheduled_date) })).sort((a, b) =>
@@ -490,8 +504,8 @@ async function loadContext(conn, estimate) {
   };
 }
 
-async function checkEstimate(conn, estimate, { scheduleGaps = [] } = {}) {
-  const ctx = { ...await loadContext(conn, estimate), scheduleGaps };
+async function checkEstimate(conn, estimate, { scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false } = {}) {
+  const ctx = { ...await loadContext(conn, estimate), scheduleGaps, scheduleSkippedFamilies, scheduleUnjudged };
   const verdict = evaluateCombinedBooking(ctx);
   return verdict ? { verdict, ctx } : null;
 }
@@ -635,9 +649,11 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, 
   if (!work.length) return result;
 
   // The shared accepted-plan classifier, with no 24h wait: the same findings
-  // the watchdog's accepted-schedule alerts are built from.
+  // the watchdog's accepted-schedule alerts are built from, plus which
+  // estimates it judged and which families it skipped on each.
+  const coverage = new Map();
   const gaps = await require('./recurring-schedule-audit')
-    .findAcceptedRecurringScheduleGaps({ now, settleMs: 0, estimateIds: work.map((estimate) => estimate.id) }, conn);
+    .findAcceptedRecurringScheduleGaps({ now, settleMs: 0, estimateIds: work.map((estimate) => estimate.id), coverage }, conn);
   const gapsByEstimate = new Map();
   for (const gap of gaps) gapsByEstimate.set(String(gap.estimateId), [...(gapsByEstimate.get(String(gap.estimateId)) || []), gap]);
 
@@ -647,7 +663,12 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, notifier, 
     const isNew = !standingProblems.has(key);
     if (isNew && posted >= maxNew) continue; // the rest post next run
     try {
-      const checked = await checkEstimate(conn, estimate, { scheduleGaps: gapsByEstimate.get(String(estimate.id)) || [] });
+      const judged = coverage.get(String(estimate.id));
+      const checked = await checkEstimate(conn, estimate, {
+        scheduleGaps: gapsByEstimate.get(String(estimate.id)) || [],
+        scheduleSkippedFamilies: judged || new Set(),
+        scheduleUnjudged: !judged,
+      });
       if (!checked) {
         result.skipped += 1;
         // A standing problem bell for a plan that has since been cancelled has

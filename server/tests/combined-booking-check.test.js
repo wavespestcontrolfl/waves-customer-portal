@@ -45,6 +45,7 @@ function run(lines, rows, extra = {}) {
     invoices: new Map([['inv-1', extra.invoice || goodInvoice()]]),
     technicians: new Map([[TECH, 'Casey Synthetic']]),
     customerName: 'J. Sample', excludedFamilies: extra.excludedFamilies, scheduleGaps: extra.scheduleGaps,
+    scheduleSkippedFamilies: extra.scheduleSkippedFamilies, scheduleUnjudged: extra.scheduleUnjudged,
   });
 }
 const codes = (verdict) => verdict.problems.map((problem) => problem.code);
@@ -147,9 +148,27 @@ describe('evaluateCombinedBooking', () => {
     expect(codes(verdict)).toEqual(['first_invoice_split']);
   });
 
-  test('a void first invoice is reported', () => {
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice([firstApp(250)], 'void') });
+  test.each(['void', 'refunded'])('a %s first invoice is reported', (status) => {
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { invoice: invoice([firstApp(150), firstApp(100)], status) });
     expect(codes(verdict)).toEqual(['first_invoice_missing']);
+    expect(verdict.ok).toBe(false);
+  });
+
+  test('a family the classifier skipped (plan hold, stopped series) is left out, never certified', () => {
+    const tree = treeRows({ invoiceId: null, parentOverrides: { estimated_price: 60 } });
+    const verdict = run([PEST, LAWN, TREE], [...pestRows(), ...lawnRows(), ...tree.map((row) => ({ ...row, technician_id: null }))],
+      { scheduleSkippedFamilies: new Set(['tree_shrub']) });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.facts.labels).toEqual(['Pest', 'Lawn']);
+    expect(run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['lawn_care']) })).toBeNull();
+  });
+
+  test('an estimate the classifier did not judge is never OK, but its own problems still report', () => {
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleUnjudged: true });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.deferred).toBe(true);
+    expect(verdict.problems).toEqual([]);
+    expect(codes(run([PEST, LAWN], [...pestRows(), ...lawnRows({ price: 0 })], { scheduleUnjudged: true }))).toEqual(['price_missing']);
   });
 
   test('the visit count is the shared accepted-plan classifier\'s call: a gap defers, never OK and never a second bell', () => {
@@ -219,14 +238,16 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict).toBeNull();
   });
 
-  test('when the lines do not add up to the accepted total, dollars are not compared but $0 still is', () => {
+  test('when the lines do not add up to the accepted total, nothing is certified but $0 still reports', () => {
     const lines = [PEST, LAWN];
     const off = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
       rows: [...pestRows(), ...lawnRows({ price: 90 })],
       invoices: new Map([['inv-1', invoice([firstApp(999)])]]), technicians: new Map(),
     });
-    expect(off.ok).toBe(true);
+    expect(off.ok).toBe(false);
+    expect(off.deferred).toBe(true);
+    expect(off.problems).toEqual([]);
     const zero = evaluateCombinedBooking({
       estimate: estimate(lines, { annual_total: 1000 }),
       rows: [...pestRows(), ...lawnRows({ price: 0 })],

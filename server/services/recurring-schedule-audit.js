@@ -353,7 +353,9 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
 // This check starts at ACCEPTANCE, including reservations that never acquired
 // is_recurring. It only reports evidence for staff review: a later manual
 // amendment can legitimately differ from the accepted snapshot.
-function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set() } = {}) {
+// `skippedFamilies` (optional Set) collects the families left unjudged here
+// (an active plan hold, every matching row on a stopped series).
+function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set(), skippedFamilies = null } = {}) {
   const converter = require('./estimate-converter');
   const seeder = require('./recurring-appointment-seeder');
   const { inferFrequencyKeyFromEstimateData } = require('./billing-cadence');
@@ -381,7 +383,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
   ];
   const findings = [];
   for (const { service, family } of units) {
-    if (heldFamilies.has(family)) continue;
+    if (heldFamilies.has(family)) { skippedFamilies?.add(family); continue; }
     const pattern = converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency);
     // Commercial, billing riders and contradictory custom terms already use
     // office scheduling. Do not invent a cadence for them from today's prices.
@@ -394,7 +396,10 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
         : converter.seedingFamilyKey({ service: identity, name: row.service_type }) === family;
       return matches && !row.is_callback && !row.followup_included && !isBoosterVisit(row);
     });
-    if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) continue;
+    if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) {
+      skippedFamilies?.add(family);
+      continue;
+    }
     const rows = matching.filter((row) => !stoppedRoots.has(row.recurring_parent_id || row.id));
     const finding = classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder });
     if (finding) findings.push(finding);
@@ -517,9 +522,11 @@ async function readStoppedRecurringRoots(conn, customerIds) {
 }
 
 // `settleMs` and `estimateIds` let the combined-booking check ask the SAME
-// classifier about specific just-accepted estimates without the 24h wait; the
-// watchdog's own call passes neither and is unchanged.
-async function findAcceptedRecurringScheduleGaps({ now = new Date(), settleMs = 24 * 60 * 60 * 1000, estimateIds = null } = {}, conn = db) {
+// classifier about specific just-accepted estimates without the 24h wait;
+// `coverage` (a Map) receives, per estimate id the classifier actually judged,
+// the Set of families it skipped. The watchdog's own call passes none of them
+// and is unchanged.
+async function findAcceptedRecurringScheduleGaps({ now = new Date(), settleMs = 24 * 60 * 60 * 1000, estimateIds = null, coverage = null } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
   const cutoff = new Date(now.getTime() - settleMs);
@@ -598,7 +605,9 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date(), settleMs = 
     const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
       .filter((row) => !isStandaloneReservation(row, reservations));
-    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
+    const skippedFamilies = new Set();
+    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds, skippedFamilies }));
+    coverage?.set(String(estimate.id), skippedFamilies);
   }
   return findings;
 }
