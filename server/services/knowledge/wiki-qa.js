@@ -10,6 +10,19 @@ const { isEnabled, kbSpeciesQaLive } = require('../../config/feature-gates');
 // customer-facing and never sees species tech notes.
 const STAFF_SOURCES = new Set(['tech_field', 'admin_manual']);
 const MAX_SPECIES = 3;
+
+// The answer model ends with one coverage line (stripped before anyone sees
+// the answer) so the weekly knowledge-gaps email can list what the
+// knowledge base could not answer. A missing or malformed line records NULL.
+const COVERAGE_RULE = ' After your answer, add one final line exactly "COVERAGE: full", "COVERAGE: partial" or "COVERAGE: none" — full when the articles fully answer the question, partial when they answer only part of it, none when they do not answer it.';
+const COVERAGE_LINE = /^[ \t]*[*_`]*COVERAGE:[ \t]*(full|partial|none)[*_`. \t]*$/gim;
+
+function splitCoverage(text) {
+  const raw = String(text || '');
+  let coverage = null;
+  for (const m of raw.matchAll(COVERAGE_LINE)) coverage = m[1].toLowerCase();
+  return { answer: raw.replace(COVERAGE_LINE, '').trimEnd(), coverage };
+}
 const CATALOG_FILE_BACK_REASON = 'Answer drew on the species catalog; it is not filed back into the knowledge base';
 
 // Structured-output contract for the routing step (llm/call.js jsonSchema).
@@ -111,7 +124,7 @@ ${liveIndex}`,
 
     if (paths.length === 0 && species.length === 0) {
       const answer = "I couldn't find relevant articles in the knowledge base for this question. The topic may not be documented yet.";
-      await this.logQuery(question, answer, [], context.source);
+      await this.logQuery(question, answer, [], context.source, 'none');
       return { answer, articlesUsed: [] };
     }
 
@@ -127,7 +140,7 @@ ${liveIndex}`,
     // two-leg miss throws like the SDK path did)
     const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
       laneId: 'wiki_qa',
-      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}`,
+      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}${COVERAGE_RULE}`,
       text: `Question: ${question}
 
 Wiki articles:
@@ -137,8 +150,8 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     });
     if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
-    const answer = answered.text;
-    await this.logQuery(question, answer, refs, context.source);
+    const { answer, coverage } = splitCoverage(answered.text);
+    await this.logQuery(question, answer, refs, context.source, coverage);
 
     return { answer, articlesUsed: refs, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };
   }
@@ -287,12 +300,13 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     return refs.some((ref) => String(ref).startsWith('species:'));
   }
 
-  async logQuery(query, answer, articlesReferenced, askedBy) {
+  async logQuery(query, answer, articlesReferenced, askedBy, coverage = null) {
     try {
       await db('knowledge_queries').insert({
         query, answer,
         articles_referenced: JSON.stringify(articlesReferenced),
         asked_by: askedBy || 'admin_manual',
+        ...(coverage ? { coverage } : {}),
       });
     } catch (err) {
       logger.error(`Log knowledge query failed: ${err.message}`);
@@ -318,3 +332,4 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
 
 module.exports = new WikiQA();
 module.exports.CATALOG_FILE_BACK_REASON = CATALOG_FILE_BACK_REASON;
+module.exports.splitCoverage = splitCoverage;

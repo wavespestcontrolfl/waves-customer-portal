@@ -1622,6 +1622,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:41am ET (owner 2026-10-01: "send
+  // me a weekly email" of the questions the knowledge base could not fully
+  // answer). Minute 41 is free in every schedule here, step patterns
+  // included. Kill: KNOWLEDGE_GAPS_WEEKLY=off.
+  // =========================================================================
+  cron.schedule('41 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
+        const { runKnowledgeGapsWeekly } = require('./knowledge/knowledge-gaps-weekly');
+        const result = await runKnowledgeGapsWeekly();
+        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
+        if (result?.error || ['query_failed', 'unconfigured', 'recipient'].includes(result?.skipped)) {
+          throw new Error(`knowledge-gaps weekly email did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('knowledge-gaps-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`knowledge-gaps weekly tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly knowledge-gaps email failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:13am ET (owner 2026-09-29: a
   // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
   // is on — sent count, top skips, or what needs a look). Minute 13 is free

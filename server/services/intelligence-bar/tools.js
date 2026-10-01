@@ -4182,6 +4182,12 @@ async function searchFieldIntelligence(input) {
     .slice(0, 6)
     .map((r) => ({ source: r.source, ref: r.sourceId, title: r.title, snippet: r.snippet }));
 
+  // Nothing anywhere: log the miss for the weekly knowledge-gaps email
+  // (services/knowledge/knowledge-gaps-weekly.js). logQuery never throws.
+  if (!wikiRows.length && !kbRows.length && !operationalKnowledge.length) {
+    await require('../knowledge/wiki-qa').logQuery(query, null, [], 'intelligence_bar', 'none');
+  }
+
   return {
     query,
     fieldIntelligence: wikiRows.map((w) => ({

@@ -230,6 +230,32 @@ describe('IB search_field_intelligence', () => {
     spy.mockRestore();
   });
 
+  test('a search that finds nothing is logged as a knowledge gap', async () => {
+    const state = useDb({});
+    const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({ claudeopedia: [], wiki: [], bridged: [] });
+
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    await executeTool('search_field_intelligence', { query: 'door sweeps' });
+
+    expect(state.inserts.knowledge_queries).toEqual([
+      expect.objectContaining({ query: 'door sweeps', asked_by: 'intelligence_bar', coverage: 'none' }),
+    ]);
+    spy.mockRestore();
+  });
+
+  test('a search with hits logs no gap', async () => {
+    const state = useDb({ knowledge_base: [{ id: 'kb1', content: 'x' }] });
+    const spy = jest.spyOn(KnowledgeBridge, 'unifiedSearch').mockResolvedValue({
+      claudeopedia: [{ id: 'kb1', slug: 'k-flow', title: 'K-Flow' }], wiki: [], bridged: [],
+    });
+
+    const { executeTool } = require('../services/intelligence-bar/tools');
+    await executeTool('search_field_intelligence', { query: 'k-flow' });
+
+    expect(state.inserts.knowledge_queries).toBeUndefined();
+    spy.mockRestore();
+  });
+
   test('requires a query', async () => {
     useDb({});
     const { executeTool } = require('../services/intelligence-bar/tools');
