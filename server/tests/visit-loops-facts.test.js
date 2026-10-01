@@ -186,7 +186,7 @@ describe('lateAlert', () => {
     customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow,
     conn: fakeConn({
       scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin') ? [todayRow({ status: 'en_route' })] : (kind === 'first' ? null : [])),
-      dispatch_alerts: () => alert,
+      dispatch_alerts: () => (alert ? [].concat(alert) : []),
     }),
   });
 
@@ -212,14 +212,24 @@ describe('lateAlert', () => {
         scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin')
           ? [todayRow(), todayRow({ id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]
           : (kind === 'first' ? null : [])),
-        dispatch_alerts: () => ({ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20 } }),
+        dispatch_alerts: () => [{ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20 } }],
       }),
     });
     expect(out.lateAlert).toMatchObject({ visitType: 'Lawn Care', minutesLate: 20 });
   });
 
+  test('an alert left over from before a same-day reschedule is not current lateness', async () => {
+    // the visit is now 09:00; the alert recorded the old 13:00 window (tech-late) or old promise (no-show)
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-10-01', window_start: '13:00:00' } })).lateAlert).toBeNull();
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-09-30', window_start: '09:00:00' } })).lateAlert).toBeNull();
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T17:00:00.000Z' } } })).lateAlert).toBeNull();
+    // matching occurrence: kept
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { delay_minutes: 30, scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert).toMatchObject({ minutesLate: 30 });
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: { evidence: 'missing_tracking', promised_window: { start_at: '2026-10-01T13:00:00.000Z' } } })).lateAlert).toMatchObject({ missingTracking: true });
+  });
+
   test('no minutes in the payload: minutesLate null; no open alert: null', async () => {
-    expect((await run({ type: 'tech_late', severity: 'info', payload: null })).lateAlert.minutesLate).toBeNull();
+    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: null })).lateAlert.minutesLate).toBeNull();
     expect((await run(null)).lateAlert).toBeNull();
   });
 
@@ -336,6 +346,18 @@ describe('missedVisit', () => {
     expect((await run({ noshow: { ...noshow, original_window: null } })).missedVisit).toMatchObject({ windowDisplay: null });
   });
 
+  test('a replacement at ANOTHER property does not resolve the miss', async () => {
+    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Pest Control', status: 'no_show' };
+    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin') && hasOp(c.ops, 'whereIn'));
+    // the query's modify() narrows to the logged row's property (and never the row itself)
+    const seen = [];
+    const stub = { where: (...a) => { seen.push(['where', ...a]); return stub; }, whereNot: (...a) => { seen.push(['whereNot', ...a]); return stub; } };
+    probe.ops.filter((o) => o.op === 'modify').forEach((o) => o.args[0](stub));
+    expect(seen).toEqual(expect.arrayContaining([['where', 'property_id', 'prop-A'], ['whereNot', 'id', 'v9']]));
+  });
+
   test('a rebooked newest no-show does not hide an older open one', async () => {
     const rebooked = { scheduled_service_id: 'v9', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', new_date: '2026-10-03', service_type: 'Pest Control', status: 'confirmed' };
     const open = { scheduled_service_id: 'v8', original_date: '2026-09-27', original_window: '09:00:00-10:00:00', new_date: null, service_type: 'Mosquito Control', status: 'no_show' };
@@ -399,7 +421,7 @@ describe('weOwe and customerWaiting', () => {
     const out = await run(ctxConn({}));
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves', limit: 50 }));
     // no resolved deadline: the spoken words, dated to the call
-    expect(out.weOwe).toEqual([{ id: 'c-1', kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow (said Wed, Sep 30)', source: 'call' }]);
+    expect(out.weOwe).toEqual([{ id: 'c-1', rev: expect.stringMatching(/^[0-9a-f]{12}$/), kind: 'send_estimate', description: 'Send the estimate', dueText: 'by tomorrow (said Wed, Sep 30)', source: 'call' }]);
     expect(out.customerWaiting).toEqual([]);
     expect(out.weOwe).toHaveLength(1);
   });
@@ -412,17 +434,33 @@ describe('weOwe and customerWaiting', () => {
     ]);
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
     // a resolved deadline wins over the spoken "later today"
-    expect(out.weOwe).toEqual([{ id: 's-1', kind: 'callback', description: 'Call back about ants', dueText: 'Thu, Oct 1, 5:00 PM', source: 'sms' }]);
-    expect(out.customerWaiting).toEqual([{ id: 's-2', kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
+    expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', dueText: 'Thu, Oct 1, 5:00 PM', source: 'sms' }]);
+    expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
     // no spoken due text: the due instant, formatted in ET
     const noText = await run(ctxConn({ 's-1': { basis: 'promise' } }));
     expect(noText.weOwe[0].dueText).toBe('Thu, Oct 1, 5:00 PM');
   });
 
   test('a passed deadline reads as overdue, never as a future time', async () => {
-    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', effective_due_at: '2026-09-28T21:00:00Z' })]);
+    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', due_at: '2026-09-28T21:00:00Z' })]);
     const out = await run(ctxConn({}));
     expect(out.weOwe[0].dueText).toBe('overdue since Mon, Sep 28, 5:00 PM');
+  });
+
+  test('a staff snooze (effective_due_at) never replaces the stated deadline', async () => {
+    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'by Monday', due_at: '2026-09-28T21:00:00Z', effective_due_at: '2026-10-02T21:00:00Z' })]);
+    expect((await run(ctxConn({}))).weOwe[0].dueText).toBe('overdue since Mon, Sep 28, 5:00 PM');
+    // no stated deadline: an inferred/snoozed effective one is not shown; the spoken words are
+    listOpenCommitments.mockResolvedValue([callRow({ due_text: 'soon', due_at: null, effective_due_at: '2026-10-02T21:00:00Z' })]);
+    expect((await run(ctxConn({}))).weOwe[0].dueText).toBe('soon (said Wed, Sep 30)');
+  });
+
+  test('the revision changes when staff edit the wording or the deadline', async () => {
+    const { commitmentRevision } = require('../services/visit-loops-facts');
+    const base = { kind: 'callback', description: 'Call back', due_at: '2026-10-01T21:00:00Z' };
+    expect(commitmentRevision(base)).toBe(commitmentRevision({ ...base, due_at: new Date('2026-10-01T21:00:00Z') }));
+    expect(commitmentRevision({ ...base, description: 'Call back after 3' })).not.toBe(commitmentRevision(base));
+    expect(commitmentRevision({ ...base, due_at: '2026-10-02T21:00:00Z' })).not.toBe(commitmentRevision(base));
   });
 
   test('email rows need their own gate; sms off + email on keeps only email rows', async () => {

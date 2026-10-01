@@ -302,48 +302,50 @@ async function reserviceBlock({ decision, outgoingBody }) {
   return reason ? `re-service promise unsendable (${reason})` : null;
 }
 
-// OPEN LOOPS (PR #5499 Codex r1 P2): a draft grounded on "WE OWE THEM" /
-// "THEY ARE WAITING ON US FOR" lines can sit in review while that promise is
-// fulfilled or dismissed elsewhere (a call, an email, an internal action). The
-// draft persisted the call_commitments ids it rendered; every one must still be
-// open at send time. Fails closed on a read error. No ids = nothing to check.
+// OPEN LOOPS (PR #5499): a draft grounded on "WE OWE THEM" / "THEY ARE WAITING ON
+// US FOR" lines can sit in review while that promise is fulfilled, dismissed,
+// superseded by a call reprocess, or edited by staff. The draft persisted each
+// rendered call_commitments row as "id:rev" (rev = visit-loops-facts
+// commitmentRevision of what it restated); every one must still be open, live and
+// unedited at send time.
 // VISIT STATUS (visit_loop_status): a draft that showed tech position, a flagged
 // delay, a passed window or a missed visit is held to the LIVE ETA freshness window
-// (15 min from facts_generated_at; missing = stale) — one rule for every
-// time-sensitive line instead of a recheck per fact — and a fresh position's stop
-// count is recounted on every send within it: a paraphrase ("two jobs ahead of
-// yours") can carry the count without any one keyword (pre-push audit + Codex r3).
+// (15 min from facts_generated_at; missing = expired) — one rule for every
+// time-sensitive line — and a fresh position's stop count is recounted on every
+// send within it (a paraphrase can carry the count without any keyword).
+// Fails closed on a read error. Returns null or a reason code.
 function visitStatusExpired(snapshot, nowMs) {
   const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
   const at = Date.parse(snapshot?.facts_generated_at || '');
   return !Number.isFinite(at) || nowMs - at > ETA_FRESHNESS_WINDOW_MS;
 }
-async function openLoopsBlockReason({ decision, outgoingBody = null, dbh, now = new Date() }) {
-  const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
-  const ids = Array.isArray(snapshot?.visit_loop_commitment_ids)
-    ? [...new Set(snapshot.visit_loop_commitment_ids.filter((id) => typeof id === 'string' && id))]
-    : [];
-  const status = snapshot?.visit_loop_status && typeof snapshot.visit_loop_status === 'object' ? snapshot.visit_loop_status : null;
+async function commitmentsChanged(conn, refs) {
+  const { staleAiRowSql } = require('./call-commitments');
+  const { commitmentRevision } = require('./visit-loops-facts');
+  const rows = await conn('call_commitments as cc').whereIn('cc.id', refs.map((r) => r.id))
+    // the canonical readers' liveness: an AI row superseded by a later processing
+    // generation stays status 'open' but is no longer live
+    .whereRaw(`NOT COALESCE(${staleAiRowSql('cc')}, false)`)
+    .select('cc.id', 'cc.status', 'cc.kind', 'cc.description', 'cc.due_at');
+  const live = new Map((rows || []).filter((r) => r.status === 'open').map((r) => [String(r.id), r]));
+  return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
+}
+const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
+async function openLoopsBlockReason({ decision, dbh, now = new Date() }) {
+  const snapshot = objectOrNull(parseInputSnapshot(decision?.input_snapshot)) || {};
+  const refs = [...new Set([].concat(snapshot.visit_loop_commitment_ids || []))]
+    .filter((ref) => typeof ref === 'string' && ref)
+    .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
+  const status = objectOrNull(snapshot.visit_loop_status);
   if (status && visitStatusExpired(snapshot, now.getTime())) return 'visit_status_expired';
-  const position = status && status.position && typeof status.position === 'object' ? status.position : null;
-  const recount = Boolean(position);
-  if (!ids.length && !recount) return null;
+  const position = objectOrNull(status?.position);
+  if (!refs.length && !position) return null;
   try {
     const conn = dbh || require('../models/db');
-    if (ids.length) {
-      // the canonical readers' liveness too: an AI call row superseded by a later
-      // processing generation stays status 'open' but is no longer live
-      const { staleAiRowSql } = require('./call-commitments');
-      const rows = await conn('call_commitments as cc').whereIn('cc.id', ids)
-        .whereRaw(`NOT COALESCE(${staleAiRowSql('cc')}, false)`)
-        .select('cc.id', 'cc.status');
-      const open = new Set((rows || []).filter((r) => r.status === 'open').map((r) => String(r.id)));
-      if (!ids.every((id) => open.has(id))) return 'commitment_closed';
-    }
-    if (recount) {
-      const { currentStopsAhead } = require('./visit-loops-facts');
-      const now = await currentStopsAhead({ conn, visitId: position.visitId, techId: position.techId });
-      if (now == null || Number(now) !== Number(position.stopsAhead)) return 'stop_count_stale';
+    if (refs.length && await commitmentsChanged(conn, refs)) return 'commitment_closed';
+    if (position) {
+      const count = await require('./visit-loops-facts').currentStopsAhead({ conn, visitId: position.visitId, techId: position.techId });
+      if (count == null || Number(count) !== Number(position.stopsAhead)) return 'stop_count_stale';
     }
     return null;
   } catch (err) {

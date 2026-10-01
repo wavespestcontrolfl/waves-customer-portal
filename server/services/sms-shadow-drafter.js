@@ -4491,7 +4491,8 @@ function visitLoopCommitmentIds(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return [];
   const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
   const ids = [...(Array.isArray(v.weOwe) ? v.weOwe.slice(0, 5) : []), ...(Array.isArray(v.customerWaiting) ? v.customerWaiting.slice(0, 5) : [])]
-    .map((i) => (i && i.id != null ? String(i.id) : '')).filter(Boolean);
+    // "id:rev" — the send boundary checks the row is still open AND unedited
+    .map((i) => (i && i.id != null ? (i.rev ? `${i.id}:${i.rev}` : String(i.id)) : '')).filter(Boolean);
   return [...new Set(ids)];
 }
 // The lines a reply must address even when the customer only said thanks (the

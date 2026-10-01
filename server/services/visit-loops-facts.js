@@ -230,19 +230,43 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow }) {
   };
 }
 
+// Does an alert's own record of the window (tech-late-detector: scheduled_date +
+// window_start; no-show-detector: promised_window.start_at) still describe the
+// visit's current occurrence? An alert that records none is taken as current.
+const ET_HHMM = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+function alertMatchesOccurrence(payload, visit) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  if (p.scheduled_date && calendarDay(p.scheduled_date) !== calendarDay(visit.scheduled_date)) return false;
+  const visitStart = hhmmToMinutes(visit.window_start);
+  if (p.window_start && hhmmToMinutes(p.window_start) !== visitStart) return false;
+  const promised = toDate(p.promised_window && p.promised_window.start_at);
+  if (promised) {
+    if (etDateString(promised) !== calendarDay(visit.scheduled_date)) return false;
+    if (hhmmToMinutes(promised.toLocaleTimeString('en-US', ET_HHMM)) !== visitStart) return false;
+  }
+  return true;
+}
+
 async function loadLateAlert(todayRows, { conn, deriveWindow }) {
   const ids = todayRows.map((r) => r.id);
   if (!ids.length) return null;
-  const alert = await conn('dispatch_alerts')
+  const alerts = await conn('dispatch_alerts')
     .whereIn('job_id', ids).whereIn('type', LATE_ALERT_TYPES).whereNull('resolved_at')
     .orderBy('created_at', 'desc')
-    .first('type', 'severity', 'payload', 'job_id');
+    .select('type', 'severity', 'payload', 'job_id');
+  // Bound to the visit AND the occurrence it was raised on: with two visits today a
+  // delay on the afternoon stop must not read as the morning one, and an alert left
+  // over from before a same-day reschedule (reschedules do not resolve it) must not
+  // read as the new window running late.
+  let visit = null;
+  let payload = null;
+  const alert = (alerts || []).find((a) => {
+    visit = todayRows.find((r) => String(r.id) === String(a.job_id)) || null;
+    payload = parseJson(a.payload);
+    return visit && alertMatchesOccurrence(payload, visit);
+  });
   if (!alert) return null;
-  // Bound to the visit it was raised on: with two visits today, a delay on the
-  // afternoon lawn stop must not read as the morning pest visit running late.
-  const visit = todayRows.find((r) => String(r.id) === String(alert.job_id)) || null;
-  const where = { visitType: visit?.service_type || null, windowDisplay: visit ? windowLabel(visit, deriveWindow) : null };
-  const payload = parseJson(alert.payload);
+  const where = { visitType: visit.service_type || null, windowDisplay: windowLabel(visit, deriveWindow) };
   // no-show-detector raises the same two types on missing tracking alone (stage 1
   // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
   if (payload?.evidence === 'missing_tracking') {
@@ -326,7 +350,7 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
     .orderBy('rl.original_date', 'desc')
     .limit(MISSED_SCAN_MAX)
-    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.service_type',
+    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.property_id', 'ss.service_type',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status');
   // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
   for (const noshow of noshows || []) {
@@ -342,7 +366,11 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
       ? await conn('scheduled_services')
         .where({ customer_id: customerId }).where('scheduled_date', '>=', date)
         .whereIn('status', liveOrDone)
-        .modify((b) => { if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id); })
+        .modify((b) => {
+          if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
+          // the same property: another address's visit does not resolve this miss
+          if (noshow.property_id) b.where('property_id', noshow.property_id);
+        })
         .select('service_type')
       : [];
     const followedUp = movedSelf || (later || []).some((r) => familyKey(r.service_type) === family);
@@ -365,6 +393,13 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
 }
 
 // ── open promises / asks ────────────────────────────────────────────────────
+// A short fingerprint of the commitment fields a draft can restate (kind, wording,
+// stated deadline): a staff edit that keeps the row open changes it.
+function commitmentRevision(r) {
+  const due = toDate(r && r.due_at);
+  const basis = [r && r.kind, r && r.description, due ? due.toISOString() : ''].map((v) => (v == null ? '' : String(v))).join('|');
+  return require('crypto').createHash('sha1').update(basis).digest('hex').slice(0, 12);
+}
 // Redact before clipping: a credential straddling the cap would lose the words
 // the redactor keys on (lazy require — the aggregator requires this module).
 const safeDescription = (value) => clip(require('./context-aggregator').redactAccessCodes(String(value == null ? '' : value)), DESCRIPTION_MAX);
@@ -418,11 +453,15 @@ async function loadCommitments({ conn, customerId, now }) {
   const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.party === 'waves' && r.sms_context?.basis !== 'request');
 
   const weOwe = unique.filter(isWeOwe).sort(byRecent).slice(0, LIST_MAX).map((r) => {
-    const dueAt = toDate(r.effective_due_at || r.due_at);
+    // The promise's own stated deadline (due_at). effective_due_at can be a staff
+    // snooze or an inferred operational deadline — never a customer-facing time.
+    const dueAt = toDate(r.due_at);
     const overdue = Boolean(dueAt) && dueAt.getTime() <= now.getTime();
     return {
-      // call_commitments.id — the send boundary re-checks it is still open.
+      // call_commitments.id + a revision of what is rendered — the send boundary
+      // re-checks it is still open and unedited.
       id: r.id == null ? null : String(r.id),
+      rev: commitmentRevision(r),
       kind: r.kind || null,
       description: safeDescription(r.description),
       // A passed deadline is said as overdue, never restated as a future time; a
@@ -437,7 +476,7 @@ async function loadCommitments({ conn, customerId, now }) {
   });
   const customerWaiting = unique.filter(isWaiting).sort(byRecent).slice(0, LIST_MAX).map((r) => {
     const at = rowSourceAt(r);
-    return { id: r.id == null ? null : String(r.id), kind: r.kind || null, description: safeDescription(r.description), since: at ? etDateString(at) : null };
+    return { id: r.id == null ? null : String(r.id), rev: commitmentRevision(r), kind: r.kind || null, description: safeDescription(r.description), since: at ? etDateString(at) : null };
   });
   return { weOwe, customerWaiting };
 }
@@ -474,4 +513,4 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   return out;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, currentStopsAhead };
+module.exports = { loadVisitLoops, emptyVisitLoops, familyKey, currentStopsAhead, commitmentRevision };

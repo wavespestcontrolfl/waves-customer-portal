@@ -464,6 +464,15 @@ describe('open-loop commitments recheck', () => {
     expect(seen).toMatch(/^NOT COALESCE\(\(cc\.human_state IS NULL AND cc\.source = 'ai'.*last_seen_generation/);
   });
 
+  test('a staff edit to a still-open commitment (wording or deadline) refuses; an unedited one passes', async () => {
+    const { commitmentRevision } = require('../services/visit-loops-facts');
+    const row = { id: 'cc-1', status: 'open', kind: 'callback', description: 'Call back about the quote', due_at: '2026-10-01T21:00:00Z' };
+    const ref = `cc-1:${commitmentRevision(row)}`;
+    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([row]) })).resolves.toBeNull();
+    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([{ ...row, description: 'Call back after 3' }]) })).resolves.toBe('commitment_closed');
+    await expect(openLoopsBlockReason({ decision: withIds([ref]), dbh: commitmentsDb([{ ...row, due_at: '2026-10-03T21:00:00Z' }]) })).resolves.toBe('commitment_closed');
+  });
+
   test('a read error fails closed', async () => {
     const broken = () => { throw new Error('db down'); };
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1']), dbh: broken })).resolves.toBe('open_loops_recheck_failed');

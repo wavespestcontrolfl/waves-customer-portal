@@ -221,6 +221,8 @@ describe('visitLoopCommitmentIds', () => {
     expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual([]);
     process.env[GATE] = 'true';
     expect(visitLoopCommitmentIds({ visitLoops: v })).toEqual(['w0', 'w1', 'w2', 'w3', 'w4', 'q1']);
+    // a revision rides along as "id:rev" so the send boundary can spot a staff edit
+    expect(visitLoopCommitmentIds({ visitLoops: { weOwe: [{ id: 'c9', rev: 'abc123def456' }] } })).toEqual(['c9:abc123def456']);
     expect(visitLoopCommitmentIds(null)).toEqual([]);
     expect(visitLoopCommitmentIds({})).toEqual([]);
   });
