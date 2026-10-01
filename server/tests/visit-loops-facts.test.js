@@ -225,14 +225,14 @@ describe('lateAlert', () => {
 
   test('an open alert carries type, severity and minutes from the payload (string or object)', async () => {
     const which = { visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' };
-    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35 }) })).lateAlert)
+    expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload: JSON.stringify({ delay_minutes: 35, scheduled_date: '2026-10-01', window_start: '09:00:00' }) })).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: 35, missingTracking: false, ...which });
-    expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12' } })).lateAlert)
+    expect((await run({ type: 'unassigned_overdue', severity: 'critical', job_id: 'visit-1', payload: { delay_minutes: '12', scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert)
       .toEqual({ type: 'unassigned_overdue', severity: 'critical', minutesLate: 12, missingTracking: false, ...which });
   });
 
   test('a no-show-detector missing-tracking alert is a tracking gap, not lateness', async () => {
-    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50 };
+    const payload = { source: 'no_show_detector', evidence: 'missing_tracking', stage: 1, delay_minutes: 50, promised_window: { start_at: '2026-10-01T13:00:00.000Z' } };
     expect((await run({ type: 'tech_late', severity: 'warn', job_id: 'visit-1', payload })).lateAlert)
       .toEqual({ type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true, visitId: 'visit-1', windowStart: '09:00:00', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM' });
   });
@@ -245,7 +245,7 @@ describe('lateAlert', () => {
         scheduled_services: (ops, kind) => (hasOp(ops, 'leftJoin')
           ? [todayRow(), todayRow({ id: 'visit-2', service_type: 'Lawn Care', window_start: '14:00:00' })]
           : (kind === 'first' ? null : [])),
-        dispatch_alerts: () => [{ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20 } }],
+        dispatch_alerts: () => [{ type: 'tech_late', severity: 'warn', job_id: 'visit-2', payload: { delay_minutes: 20, scheduled_date: '2026-10-01', window_start: '14:00:00' } }],
       }),
     });
     expect(out.lateAlert).toMatchObject({ visitType: 'Lawn Care', minutesLate: 20 });
@@ -262,7 +262,10 @@ describe('lateAlert', () => {
   });
 
   test('no minutes in the payload: minutesLate null; no open alert: null', async () => {
-    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: null })).lateAlert.minutesLate).toBeNull();
+    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: { scheduled_date: '2026-10-01', window_start: '09:00:00' } })).lateAlert.minutesLate).toBeNull();
+    // an unstamped alert (null or empty payload) cannot be shown to be about this occurrence
+    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: null })).lateAlert).toBeNull();
+    expect((await run({ type: 'tech_late', severity: 'info', job_id: 'visit-1', payload: { delay_minutes: 30 } })).lateAlert).toBeNull();
     expect((await run(null)).lateAlert).toBeNull();
   });
 
@@ -315,9 +318,9 @@ describe('pastWindow', () => {
     expect(out.pastWindow).toBeNull();
   });
 
-  test('no start time: falls back to window_end', async () => {
+  test('no start time: no promised cutoff (window_end is the internal job block, never an arrival window)', async () => {
     const out = await run({ status: 'pending', window_start: null, window_end: '11:30:00' });
-    expect(out.pastWindow).toMatchObject({ minutesPast: 30 });
+    expect(out.pastWindow).toBeNull();
   });
 
   test('no visit note is ever read into the facts', async () => {
@@ -453,7 +456,19 @@ describe('missedVisit', () => {
     expect(out.missedVisit).toMatchObject({ date: '2026-09-30', reason: 'customer_noshow' });
   });
 
+  test('a recurring child that already existed before the no-show was logged is not a follow-up', async () => {
+    const noshow = { scheduled_service_id: 'v9', property_id: 'prop-A', logged_at: '2026-09-30T15:00:00Z', original_date: '2026-09-30', original_window: '09:00:00-10:00:00', service_type: 'Pest Control', status: 'no_show' };
+    const conn = fakeConn({ scheduled_services: () => [], reschedule_log: () => [noshow] });
+    await loadVisitLoops({ customerId: 'c1', now: NOW, deriveWindow, conn });
+    const probe = conn.calls.find((c) => c.table === 'scheduled_services' && !isUnfinishedQuery(c.ops) && !hasOp(c.ops, 'leftJoin') && hasOp(c.ops, 'whereIn'));
+    const seen = [];
+    const stub = { where: (...a) => { seen.push(['where', ...a]); return stub; }, whereNot: (...a) => { seen.push(['whereNot', ...a]); return stub; } };
+    probe.ops.filter((o) => o.op === 'modify').forEach((o) => o.args[0](stub));
+    expect(seen).toContainEqual(['where', 'created_at', '>', '2026-09-30T15:00:00Z']);
+  });
+
   test('familyKey buckets', () => {
+    expect(familyKey('Tree & Shrub Fertilization')).toBe('tree_shrub');
     // word-bounded: "Plant Health Program" is not ants; "Pirate" is not rats
     expect(familyKey('Plant Health Program')).not.toBe('pest');
     expect(familyKey('Fire Ant Treatment')).toBe('pest');
@@ -502,6 +517,16 @@ describe('weOwe and customerWaiting', () => {
     const out = await run(ctxConn({ 's-1': { basis: 'promise', due_text: 'later today' }, 's-2': { basis: 'request' } }));
     expect(out.weOwe).toEqual([{ id: 's-1', rev: expect.any(String), kind: 'callback', description: 'Call back about ants', since: '2026-10-01', source: 'sms' }]);
     expect(out.customerWaiting).toEqual([{ id: 's-2', rev: expect.any(String), kind: 'send_report', description: 'Report requested', since: '2026-09-30' }]);
+  });
+
+  test('a human promise added later to an older call is dated (and sorted) by its own creation, like the canonical timing', async () => {
+    listOpenCommitments.mockResolvedValue([
+      callRow({ id: 'c-old', description: 'old ai promise', call_started_at: '2026-09-20T14:00:00Z' }),
+      callRow({ id: 'c-human', source: 'human', description: 'added today', call_started_at: '2026-09-20T14:00:00Z', created_at: '2026-10-01T13:00:00Z' }),
+    ]);
+    const out = await run(ctxConn({}));
+    expect(out.weOwe[0]).toMatchObject({ id: 'c-human', since: '2026-10-01' });
+    expect(out.weOwe[1]).toMatchObject({ id: 'c-old', since: '2026-09-20' });
   });
 
   test('no deadline is ever restated (stated, default reminder, floor, snooze or passed)', async () => {

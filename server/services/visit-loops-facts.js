@@ -98,23 +98,26 @@ const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 // the same buckets the customer would use, never a price or plan rule.
 function familyKey(serviceType) {
   const t = String(serviceType || '').toLowerCase();
+  // explicit tree/shrub tokens first: "Tree & Shrub Fertilization" is not lawn
+  if (/tree|shrub|ornamental/.test(t)) return 'tree_shrub';
   if (/lawn|turf|fertiliz|weed|sod/.test(t)) return 'lawn';
   if (/mosquito/.test(t)) return 'mosquito';
   if (/termite|wdo|wood.destroying/.test(t)) return 'termite';
   if (/rodent|\brats?\b|mice|mouse/.test(t)) return 'rodent';
-  if (/tree|shrub|ornamental/.test(t)) return 'tree_shrub';
   if (/pest|roach|\bants?\b|spider|perimeter|general|bug/.test(t)) return 'pest';
   return t.trim() || null;
 }
 
 // The customer-facing end of the arrival window, in ET minutes since midnight of
 // the visit day; a window that crosses midnight (23:00-01:00) ends past 1440.
+// Only from window_start's arrival range: window_end is the internal job block,
+// never a promised cutoff, so a row without a start has no cutoff at all.
 function customerWindowEndMinutes(row) {
   const start = hhmmToMinutes(row.window_start);
   const range = arrivalWindowRange(String(row.window_start || ''));
-  const end = range ? hhmmToMinutes(range.split('-')[1]) : hhmmToMinutes(row.window_end);
-  if (end == null) return null;
-  return start != null && end < start ? end + 1440 : end;
+  const end = range ? hhmmToMinutes(range.split('-')[1]) : null;
+  if (end == null || start == null) return null;
+  return end < start ? end + 1440 : end;
 }
 
 function windowLabel(row, deriveWindow) {
@@ -204,10 +207,12 @@ async function loadTechPosition(todayRows, { conn, now, deriveWindow, strict }) 
 
 // Does an alert's own record of the window (tech-late-detector: scheduled_date +
 // window_start; no-show-detector: promised_window.start_at) still describe the
-// visit's current occurrence? An alert that records none is taken as current.
+// visit's current occurrence? An alert that records NONE is rejected: reschedules
+// do not resolve alerts, so an unstamped one cannot be shown to be about today's slot.
 const ET_HHMM = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
 function alertMatchesOccurrence(payload, visit) {
   const p = payload && typeof payload === 'object' ? payload : {};
+  if (!p.scheduled_date && !p.window_start && !(p.promised_window && p.promised_window.start_at)) return false;
   if (p.scheduled_date && calendarDay(p.scheduled_date) !== calendarDay(visit.scheduled_date)) return false;
   const visitStart = hhmmToMinutes(visit.window_start);
   if (p.window_start && hhmmToMinutes(p.window_start) !== visitStart) return false;
@@ -324,7 +329,7 @@ async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since
     .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
     .orderBy('rl.original_date', 'desc')
     .limit(MISSED_SCAN_MAX)
-    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
+    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status');
   // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
   for (const noshow of noshows || []) {
@@ -353,6 +358,9 @@ async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since
           if (noshow.scheduled_service_id) b.whereNot('id', noshow.scheduled_service_id);
           // the same property: another address's visit does not resolve this miss
           b.where('property_id', noshow.property_id);
+          // booked in response: a recurring series pre-creates its future children,
+          // so a visit that already existed before the no-show was logged is not one
+          if (noshow.logged_at) b.where('created_at', '>', noshow.logged_at);
         })
         .select('service_type', 'scheduled_date', 'window_start')
       : [];
@@ -400,7 +408,10 @@ function commitmentRevision(r) {
 // Redact before clipping: a credential straddling the cap would lose the words
 // the redactor keys on (lazy require — the aggregator requires this module).
 const safeDescription = (value) => clip(require('./context-aggregator').redactAccessCodes(String(value == null ? '' : value)), DESCRIPTION_MAX);
-const rowSourceAt = (r) => toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
+// The canonical commitment timing (call-commitments implicitDueAt): a human entry
+// added later to an older call dates from its own row, not the call.
+const rowSourceAt = (r) => (r.source === 'human' ? toDate(r.created_at) : null)
+  || toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
 
 async function loadCommitments({ conn, customerId, now }) {
   const rows = [];
@@ -523,12 +534,17 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 // resolved alert or a moved route all show up here, with no recheck per fact.
 function visitStatusSignature(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
-  const tp = v.techPosition && v.techPosition.status !== 'stale' ? v.techPosition : null;
+  const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
+  const tp = v.techPosition;
   const parts = [
-    tp && `pos:${tp.visitId}@${tp.windowStart ?? ''}:${tp.visitType ?? ''}:${tp.techId}:${tp.status}:${tp.atThisVisit === true}:${tp.stopsAhead ?? ''}`,
-    v.lateAlert && `late:${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}:${v.lateAlert.visitType ?? ''}:${v.lateAlert.type}:${v.lateAlert.missingTracking === true}`,
-    v.pastWindow && `past:${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}:${v.pastWindow.type ?? ''}`,
-    v.missedVisit && `missed:${v.missedVisit.type}:${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}:${v.missedVisit.reason}`,
+    // a stale position still renders a line about this occurrence: its identity is
+    // durable (no location TTL), so a completion / cancel / move invalidates it too
+    tp && (tp.status === 'stale'
+      ? `stalepos:${key(`${tp.visitId}@${tp.windowStart ?? ''}`, tp.visitType, tp.techId)}`
+      : `pos:${key(`${tp.visitId}@${tp.windowStart ?? ''}`, tp.visitType, tp.techId, tp.status, tp.atThisVisit === true, tp.stopsAhead)}`),
+    v.lateAlert && `late:${key(`${v.lateAlert.visitId}@${v.lateAlert.windowStart ?? ''}`, v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
+    v.pastWindow && `past:${key(`${v.pastWindow.visitId}@${v.pastWindow.windowStart ?? ''}`, v.pastWindow.type)}`,
+    v.missedVisit && `missed:${key(v.missedVisit.type, `${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}`, v.missedVisit.reason)}`,
   ].filter(Boolean);
   return parts.length ? parts.join('|') : null;
 }

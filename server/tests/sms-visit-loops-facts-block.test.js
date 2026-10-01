@@ -275,7 +275,8 @@ describe('visitLoopStatus', () => {
     const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1', windowStart: '09:00:00', atThisVisit: false };
     expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull();
     expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, WITH)).toEqual({ signature: 'pos:v1@09:00:00::t1:en_route:false:2' });
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } }, WITH)).toBeNull();
+    // a stale position is still about this occurrence: durable identity, no location TTL
+    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } }, WITH)).toEqual({ signature: 'stalepos:v1@09:00:00::t1' });
     expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } } }, WITH))
       .toEqual({ signature: 'missed:Lawn:2026-09-30@09:00:00:not_completed' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
