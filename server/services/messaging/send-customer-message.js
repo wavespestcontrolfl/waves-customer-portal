@@ -179,12 +179,15 @@ const LINKED_VISIT_ENDED_BLOCK = Object.freeze({
   code: 'LINKED_VISIT_ENDED',
   reason: 'The visit this reschedule link points at is no longer reschedulable (cancelled, skipped or completed)',
 });
-async function endedLinkedVisitBlocksSend(input) {
+// `fresh`: re-resolve the body's visits (no memo) — the provider-boundary recheck reads their LIVE status.
+async function endedLinkedVisitBlocksSend(input, { fresh = false } = {}) {
   if (input.entryPoint !== 'scheduled_sms_cron' || input.metadata?.humanAuthored !== true) return false;
   if (['internal', 'admin', 'tech'].includes(input.audience) || typeof input.body !== 'string' || !input.body) return false;
   let linked;
   try {
-    linked = await visitsLinkedInBodyOf(input);
+    linked = fresh
+      ? await require('../composer-customer-links').visitsLinkedInBody(input.body)
+      : await visitsLinkedInBodyOf(input);
   } catch {
     return false;   // the hold step above already failed such a lookup closed
   }
@@ -1227,6 +1230,14 @@ async function sendCustomerMessageCore(input) {
       return rememberBoundaryBlock(
         { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
         'street_level_hold_boundary',
+      );
+    }
+    // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
+    // (the lookup there is memoized) must still end the scheduled operator text, on its LIVE status.
+    if (await endedLinkedVisitBlocksSend(sendInput, { fresh: true })) {
+      return rememberBoundaryBlock(
+        { ok: false, code: LINKED_VISIT_ENDED_BLOCK.code, reason: LINKED_VISIT_ENDED_BLOCK.reason },
+        'linked_visit_ended_boundary',
       );
     }
     // callback_number_needed boundary re-check (codex round-6 P1): step

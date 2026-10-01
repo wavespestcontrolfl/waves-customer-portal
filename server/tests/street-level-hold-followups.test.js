@@ -210,16 +210,18 @@ describe('finding 6: the office approval is bound to the address it was given fo
     test('an approved hold is activated lock + verify + STAMP first, then the legs; every other row keeps hook-first (Codex #5506 r3)', () => {
       const s = read('../services/outbound-review-confirm.js');
       // Both rails route an office-approved hold through the one fenced function.
-      expect(s).toContain("return activateHoldFencedByAddress(dbh, svc, routeTag, opts);");
-      expect(s).toContain('return await activateHoldFencedByAddress(db, row, routeTag, {');
+      expect(s).toContain("return activateHoldFencedByAddress(dbh, svc, routeTag, {});");
+      expect(s).toContain('return await activateHoldFencedByAddress(db, row, routeTag, { evidenceBookedAt: opts.evidenceBookedAt || null });');
       const fence = s.slice(s.indexOf('async function activateHoldFencedByAddress'), s.indexOf('async function runOfficeConfirmActivation'));
       // Order inside it: the locked, address-checked stamp, then the hook legs, then (on failure) the un-stamp.
-      expect(fence.indexOf('await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: mode })'))
-        .toBeLessThan(fence.indexOf('await runOutboundReviewConfirmHook(dbh, svc, routeTag, hookOpts)'));
+      expect(fence.indexOf('await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: true })'))
+        .toBeLessThan(fence.indexOf('await runOutboundReviewConfirmHook(dbh, svc, routeTag, { evidenceBookedAt })'));
       expect(fence.indexOf('await runOutboundReviewConfirmHook')).toBeLessThan(fence.indexOf('.update({ customer_confirmed: false, confirmed_at: null })'));
       const stampFn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function activateHoldFencedByAddress'));
       expect(stampFn.indexOf(".forUpdate().first('id', 'source_call_log_id')")).toBeGreaterThan(0);
       expect(stampFn.indexOf('approvedAddressStillCurrent(trx')).toBeGreaterThan(stampFn.indexOf('.forUpdate()'));
+      // No modes: nothing in the fenced activation or its marker is conditioned on a lazy / office distinction.
+      expect(fence).not.toMatch(/onlyIfMode|suppressCardAskWithoutClearance|const mode\b/);
       // A resumed activation hands the hook the same row shape the lazy rail does (callback / pricing / field-confirm).
       const resume = s.slice(s.indexOf('async function resumePendingHoldActivations'), s.indexOf('async function runOfficeConfirmActivation'));
       for (const col of ['ss.is_callback', 'ss.estimated_price', 'ss.field_confirmed_at', 'ss.customer_confirmed']) expect(resume).toContain(`'${col}'`);

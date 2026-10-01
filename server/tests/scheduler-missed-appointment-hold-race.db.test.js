@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null,
   gateEnvValue: () => false,
@@ -50,7 +51,7 @@ postgres('uncleared street-level holds vs the scan-then-act background scanners 
   beforeAll(async () => {
     fixture = await createLawnVisitDb(false);
     mockKnex = fixture.knex;
-    for (const table of ['reschedule_log', 'triage_items', 'call_log']) {
+    for (const table of ['reschedule_log', 'triage_items', 'call_log', 'dispatch_alerts']) {
       await fixture.knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [fixture.schema, table, table]);
     }
     // The real foreign key onSkip's insert takes a FOR KEY SHARE on the visit row through.
@@ -61,7 +62,7 @@ postgres('uncleared street-level holds vs the scan-then-act background scanners 
 
   beforeEach(async () => {
     jest.restoreAllMocks();
-    for (const table of ['reschedule_log', 'triage_items', 'scheduled_services', 'customers', 'call_log']) await fixture.knex(table).del();
+    for (const table of ['dispatch_alerts', 'reschedule_log', 'triage_items', 'scheduled_services', 'customers', 'call_log']) await fixture.knex(table).del();
   });
 
   async function seedVisit({ held = false } = {}) {
@@ -126,6 +127,21 @@ postgres('uncleared street-level holds vs the scan-then-act background scanners 
       await tight.destroy();
     }
     expect(await noshows(visitId)).toHaveLength(1);
+  });
+
+  test('late alerts raised before a visit became a hold are auto-resolved (system stamp) by the detector tick; other visits\' alerts stay open', async () => {
+    const held = await seedVisit();
+    const clear = await seedVisit();
+    const mkAlert = (jobId) => fixture.knex('dispatch_alerts').insert({ type: 'tech_late', severity: 'warn', job_id: jobId, payload: JSON.stringify({ delay_minutes: 30 }) });
+    await mkAlert(held.visitId);
+    await mkAlert(clear.visitId);
+    await held.card();   // the promotion lands after the alert was raised
+    await require('../services/tech-late-detector').resolveAlertsForHeldVisits();
+    const rows = await fixture.knex('dispatch_alerts').select('job_id', 'resolved_at', 'payload');
+    const byJob = Object.fromEntries(rows.map((r) => [r.job_id, r]));
+    expect(byJob[held.visitId].resolved_at).not.toBeNull();
+    expect(byJob[held.visitId].payload.superseded_at).toBeTruthy();   // auto-resolve, not a person's acknowledgement
+    expect(byJob[clear.visitId].resolved_at).toBeNull();
   });
 
   test('runUnlessLiveHold passes the action its own transaction', async () => {

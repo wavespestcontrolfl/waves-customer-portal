@@ -1,8 +1,15 @@
-jest.mock('../models/db', () => ({
-  raw: jest.fn(),
-}));
+// db is callable for the held-visit alert sweep (a chain that finds nothing) and carries raw for the scan.
+jest.mock('../models/db', () => {
+  const chain = {};
+  for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereExists']) chain[m] = jest.fn(() => chain);
+  chain.select = jest.fn(async () => []);
+  const db = jest.fn(() => chain);
+  db.raw = jest.fn();
+  return db;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
+  warn: jest.fn(),
   error: jest.fn(),
 }));
 jest.mock('../services/dispatch-alerts', () => ({

@@ -325,6 +325,16 @@ function bodyHasLink(body, url) {
   const frag = linkFragment(url);
   return !!frag && String(body || "").toLowerCase().includes(frag);
 }
+// The visit ids of the tracked reschedule / appointment links that are still IN the body. Judged at the
+// synchronous send boundary (the cleanup effects run after render): a link the operator deleted no longer
+// carries its visit id. The server also resolves the body itself; this is the additional input.
+export function trackedVisitIdsInBody(body, resched, customerLinks) {
+  const appointment = customerLinks?.appointment;
+  return [
+    resched && bodyHasLink(body, resched.url) ? resched.visitId : null,
+    appointment && bodyHasLink(body, appointment.url) ? appointment.visitId : null,
+  ].filter(Boolean);
+}
 function stripLinkLines(body, url) {
   const frag = linkFragment(url);
   if (!frag) return body;
@@ -1862,7 +1872,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSendResult({ ok: false, text: "An attachment has expired. Remove it and attach it again before sending." });
       return;
     }
-    const linkedVisitIds = [insertedResched?.visitId, insertedCustomerLinks.appointment?.visitId].filter(Boolean);
+    const linkedVisitIds = trackedVisitIdsInBody(msgBody, insertedResched, insertedCustomerLinks);
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);

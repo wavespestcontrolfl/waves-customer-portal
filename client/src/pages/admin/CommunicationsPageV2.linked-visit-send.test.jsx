@@ -7,7 +7,7 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { SmsTab } from "./CommunicationsPageV2";
+import { SmsTab, trackedVisitIdsInBody } from "./CommunicationsPageV2";
 
 vi.mock("react-router-dom", async (importOriginal) => {
   const actual = await importOriginal();
@@ -90,4 +90,39 @@ it("a harmless edit to an inserted reschedule link (hostname case) keeps its tra
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(requests("/admin/communications/sms")).toHaveLength(1));
   expect(bodyOf("/admin/communications/sms").linkedVisitIds).toEqual(["8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d"]);
+});
+
+it("a reschedule link the operator deleted from the text no longer carries its visit id on the send (checked at the send boundary)", async () => {
+  responses["/admin/communications/link-library"] = { links: [] };
+  responses["/admin/communications/reschedule-link"] = {
+    url: "wavespest.co/r/abc123",
+    line: "Pick a new time here: wavespest.co/r/abc123\n\n",
+    firstName: null,
+    appointment: { id: "8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d", scheduledDate: "2099-01-05", windowStart: "09:00", serviceType: "Pest Control", status: "confirmed" },
+  };
+  responses["/admin/communications/sms"] = { sent: true, providerMessageId: "SMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+
+  render(<SmsTab active onSent={vi.fn()} />, { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByRole("button", { name: "Quick Links" }));
+  fireEvent.click(await screen.findByRole("button", { name: /Reschedule link/i }));
+  await waitFor(() => expect(requests("/admin/communications/reschedule-link")).toHaveLength(1));
+  const box = screen.getByRole("textbox", { name: "Text message" });
+  await waitFor(() => expect(box.value).toContain("wavespest.co/r/abc123"));
+
+  // The operator deletes the link line and types a plain message, then sends straight away.
+  fireEvent.change(box, { target: { value: "Thanks, we will call you." } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Send from" }), { target: { value: "+19412975749" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(requests("/admin/communications/sms")).toHaveLength(1));
+  expect(bodyOf("/admin/communications/sms")).not.toHaveProperty("linkedVisitIds");
+});
+
+it("trackedVisitIdsInBody keeps only the ids whose link is still in the body (stale-closure guard at the send boundary)", () => {
+  const resched = { url: "wavespest.co/r/abc123", visitId: "visit-r" };
+  const links = { appointment: { url: "wavespest.co/a/xyz789", visitId: "visit-a" } };
+  expect(trackedVisitIdsInBody("Move it: wavespest.co/r/abc123 and https://WAVESPEST.co/a/xyz789", resched, links)).toEqual(["visit-r", "visit-a"]);
+  // Deleted link: its id is dropped; a case-changed host is still the same link.
+  expect(trackedVisitIdsInBody("Thanks. https://WavesPest.co/a/xyz789", resched, links)).toEqual(["visit-a"]);
+  expect(trackedVisitIdsInBody("Thanks, we will call you.", resched, links)).toEqual([]);
+  expect(trackedVisitIdsInBody("anything", null, {})).toEqual([]);
 });

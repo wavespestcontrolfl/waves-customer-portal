@@ -209,6 +209,25 @@ describe('a scheduled operator text whose reschedule link points at a visit that
     }
   });
 
+  test('the provider boundary re-reads the LIVE status: a visit cancelled after step 6.36 read it still ends the text, and nothing is sent', async () => {
+    mockTables.scheduled_services = [{ ...ENDED, status: 'confirmed' }];   // reschedulable when step 6.36 reads it
+    let dialed = false;
+    sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+      mockTables.scheduled_services = [{ ...ENDED, status: 'cancelled' }];   // cancelled during the provider's own awaits
+      const verdict = await hooks.preSendCheck();
+      if (!verdict.ok) return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+      dialed = true;
+      return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    const result = await replay();
+    expect(dialed).toBe(false);
+    expect(result.sent).toBe(false);
+    expect(result.code === 'LINKED_VISIT_ENDED' || result.deliveryOutcome === 'not_sent').toBe(true);
+    // Control: the same body with the visit still reschedulable at the boundary is sent.
+    mockTables.scheduled_services = [{ ...ENDED, status: 'confirmed' }];
+    expect((await replay()).sent).toBe(true);
+  });
+
   test('immediate operator sends and automated replays keep their prior behavior; a non-reschedule link to the visit does not end it', async () => {
     expect((await send(body, { entryPoint: 'admin_communications_manual_sms', metadata: { humanAuthored: true } })).sent).toBe(true);
     expect((await send(body, { entryPoint: 'scheduled_sms_cron' })).sent).toBe(true);
