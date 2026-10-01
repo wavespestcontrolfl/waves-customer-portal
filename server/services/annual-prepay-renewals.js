@@ -4237,8 +4237,6 @@ async function refreshTermSnapshot(termOrId, conn = db) {
 
   const termStart = dateOnly(term.term_start);
   const termEnd = dateOnly(term.term_end);
-  const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
-  const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
   // A late payment can SLIDE the coverage window (ensureCoverageRowsForTerm
   // persists the new term_end and reports it back). Every downstream step in
