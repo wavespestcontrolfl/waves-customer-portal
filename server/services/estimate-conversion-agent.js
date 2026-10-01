@@ -585,7 +585,12 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const drafter = require('./sms-shadow-drafter');
     const ContextAggregator = require('./context-aggregator');
     const { hasSchedulingIntent } = require('./sms-intent');
-    const context = await ContextAggregator.getContextForCustomer(customer);
+    // includeLiveEta (Codex round-2 P2, PR #5334): this Agent Review draft
+    // renders the SAME buildFactsBlock the shadow drafter does (via
+    // generateGroundedDraft below) — one of the two SMS drafting paths that
+    // actually surfaces the LIVE ETA fact — so it opts in explicitly rather
+    // than relying on getContextForCustomer's default (no LIVE ETA lookup).
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: gateEnvValue('GATE_SMS_REAL_ANSWERS') });
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -675,6 +680,12 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
+      // Independent review finding (PR #5334): same send-time freshness
+      // snapshot draftShadowReply persists — this lane shares the same
+      // agentDecisionSendBlockReason choke point at send time.
+      liveEtaSnapshot: drafter.buildLiveEtaSnapshot(context),
+      // Technician first name(s) independent of live entries (round-42 P2).
+      techNames: drafter.techNamesFromContext(context),
       reserviceLanesSnapshot,
       reserviceBookedSnapshot: drafter.reserviceBookedSnapshot(reserviceBooked),
     };
@@ -803,6 +814,9 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
           ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
+        // Independent review finding (PR #5334) — see generateLlmReviewDraft's comment above.
+        ...(llmDraft?.liveEtaSnapshot ? { live_eta_snapshot: llmDraft.liveEtaSnapshot } : {}),
+        ...(Array.isArray(llmDraft?.techNames) && llmDraft.techNames.length ? { tech_names: llmDraft.techNames } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
