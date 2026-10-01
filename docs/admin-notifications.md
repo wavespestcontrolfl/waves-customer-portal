@@ -142,3 +142,25 @@ rules it broke, and a warning is logged with the category and rule names only. U
 A why that quotes a customer's own words (a service request, a text) can trip the
 section 3 checks through no fault of the emitter. That is the fallback's job; do not
 rewrite what the customer said to get past it.
+
+## 8. For Claude specifically
+
+Read what is open in one call instead of reading alert text and guessing. Each item comes
+back in the shape of section 2: area, headline, why, severity, link, subject, done-when,
+who. Pick the ones a session may fix alone with `who=claude` (that returns `claude` and
+`either`; section 5 says what each may do), and never resolve a `person` item.
+
+- Route: `GET /api/admin/needs-me?who=&area=&limit=` (`server/routes/admin-needs-me.js`),
+  scoped to the caller's role like the bell list.
+- Intelligence Bar tool: `needs_me` (`server/services/intelligence-bar/needs-me-tools.js`).
+- CLI: `railway run --service Postgres node ops/agents/needs-me.js --who claude`
+  (`--json` for the full object).
+- All three are one reader, `listNeedsMe` in `server/services/needs-me.js`. It lists open
+  admin rows (not done, not Activity-only) and the dashboard's standing counts, which are
+  `needs-you`, `person`, done when the count is zero.
+
+An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
+the eight parts. Its area is inferred from the category, its severity is `broken` only for a
+`FIX` digest, its who is `person` (an engineering digest is `claude`), its subject is read
+from the ids in its metadata, and its done-when is unknown. Treat those as best guesses and
+read the record behind the link before acting.
