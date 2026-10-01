@@ -66,8 +66,10 @@ test.each([
   ['payment', 'Billing'], ['dispute', 'Billing'], ['appointment', 'Schedule'], ['service', 'Schedule'],
   ['customer_retention', 'Customers'], ['visit_prep_photos', 'Customers'], ['inventory', 'Inventory'],
   ['newsletter', 'Content'], ['review', 'Content'], ['token_alert', 'System'], ['alert', 'System'], ['job_application', 'System'],
-])('a legacy %s row is filed under %s, for a person, needing you', (category, area) => {
-  expect(mapAlertRow(row({ category }))).toMatchObject({ area, who: 'person', severity: 'needs-you', doneWhen: null, derived: true });
+])('a raw legacy %s row is filed under %s, for a person, unsorted (no guessed severity)', (category, area) => {
+  expect(mapAlertRow(row({ category }))).toMatchObject({ area, who: 'person', severity: null, unsorted: true, doneWhen: null, derived: true });
+  // The same row from the trigger registry is known work.
+  expect(mapAlertRow(row({ category, metadata: { triggerKey: 'sms_reply' } }))).toMatchObject({ area, severity: 'needs-you', unsorted: false });
 });
 
 test('a legacy row takes its subject from the ids its emitter wrote, the record first', () => {
@@ -99,7 +101,7 @@ test('an engineering digest that is Activity-only appears under who=claude, flag
 });
 
 test('an fyi digest is severity fyi and absent under every who', async () => {
-  mockRows = [row({ id: 'fyi-digest', category: 'ops_digest', metadata: { kind: 'FYI', audience: 'fyi', feed: 'activity' } }), row({ id: 'real' })];
+  mockRows = [row({ id: 'fyi-digest', category: 'ops_digest', metadata: { kind: 'FYI', audience: 'fyi', feed: 'activity' } }), row({ id: 'real', metadata: { triggerKey: 'sms_reply' } })];
   expect(mapAlertRow(mockRows[0]).severity).toBe('fyi');
   for (const who of [undefined, 'claude', 'person', 'either']) {
     expect((await listNeedsMe({ who })).items.map((i) => i.id)).not.toContain('fyi-digest');
@@ -176,8 +178,8 @@ test('a row whose invalid subject raiseAdminAlert dropped keeps its other fields
 
 test('who is exact: claude excludes either, either returns it; broken sorts first, then newest', async () => {
   mockRows = [
-    row({ id: 'old-person', created_at: '2026-09-01T00:00:00Z' }),
-    row({ id: 'new-person', created_at: '2026-09-29T00:00:00Z' }),
+    row({ id: 'old-person', created_at: '2026-09-01T00:00:00Z', metadata: { triggerKey: 'sms_reply' } }),
+    row({ id: 'new-person', created_at: '2026-09-29T00:00:00Z', metadata: { triggerKey: 'sms_reply' } }),
     row({ id: 'either', metadata: { area: 'Billing', severity: 'needs-you', who: 'either', doneWhen: 'invoice_sent', subject: { type: 'invoice', id: UUID } } }),
     row({ id: 'fix', category: 'ops_digest', created_at: '2026-08-01T00:00:00Z', metadata: { kind: 'FIX', audience: 'engineering' } }),
   ];
@@ -262,12 +264,13 @@ test('an ops digest with no stamped area takes its work page\'s area from its li
 });
 
 test('a cursor pages past the response cap: every open item exactly once, in one stable order', async () => {
-  mockRows = Array.from({ length: 23 }, (_, i) => row({ id: `n${String(i).padStart(2, '0')}`, created_at: `2026-09-${String(10 + (i % 5)).padStart(2, '0')}T00:00:00Z` }));
+  mockRows = Array.from({ length: 23 }, (_, i) => row({ id: `n${String(i).padStart(2, '0')}`, created_at: `2026-09-${String(10 + (i % 5)).padStart(2, '0')}T00:00:00Z`, metadata: i % 4 === 0 ? {} : { triggerKey: 'sms_reply' } }));
   const seen = [];
   let after = null;
   for (let pages = 0; pages < 10; pages += 1) {
     const out = await listNeedsMe({ limit: 5, after });
-    expect(out.total).toBe(23);
+    // Every fourth row is raw (unsorted): paged too, after the work, counted apart.
+    expect(out.total + out.unsortedTotal).toBe(23);
     seen.push(...out.items.map((i) => i.id));
     if (!out.next) break;
     after = decodeCursor(out.next);
@@ -275,6 +278,8 @@ test('a cursor pages past the response cap: every open item exactly once, in one
   }
   expect(seen).toHaveLength(23);
   expect(new Set(seen).size).toBe(23);
+  const firstUnsorted = seen.findIndex((id) => Number(id.slice(1)) % 4 === 0);
+  expect(seen.slice(firstUnsorted).every((id) => Number(id.slice(1)) % 4 === 0)).toBe(true);
   expect(decodeCursor('not-a-cursor')).toBeNull();
 });
 
@@ -307,7 +312,7 @@ describe('GET /api/admin/needs-me', () => {
 
 test('the bar tool trims item text and drops internals (members, dedupe keys, read state)', async () => {
   const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
-  mockRows = [row({ title: 'x'.repeat(200), body: 'y'.repeat(300), metadata: { dedupeKey: 'k' } })];
+  mockRows = [row({ title: 'x'.repeat(200), body: 'y'.repeat(300), metadata: { dedupeKey: 'k', triggerKey: 'sms_reply' } })];
   computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'a', severity: 'warn', count: 3, label: 'Three things', href: '/admin/leads', members: ['m1'] }] });
   const out = await executeNeedsMeTool('needs_me', { limit: 5 });
   expect(out).toMatchObject({ total_open: 2, returned: 2, warnings: [] });
@@ -386,4 +391,28 @@ test('the bar tool refuses an unknown who or area instead of answering "nothing 
   expect((await executeNeedsMeTool('needs_me', { who: 'Claude' })).error).toMatch(/who must be one of/);
   expect((await executeNeedsMeTool('needs_me', { area: 'billing' })).error).toMatch(/area must be one of/);
   expect((await executeNeedsMeTool('needs_me', { area: 'Billing' })).error).toBeUndefined();
+});
+
+test('a raw alert with no label is unsorted: listed after the work, no guessed severity, out of the totals', async () => {
+  // inspection-credit's "no action needed unless it repeats" note: raw notifyAdmin, metadata.reason only.
+  const raw = row({ id: 'raw1', category: 'system', title: 'Inspection credit recovery queued', metadata: { reason: 'stripe_timeout' }, created_at: '2026-09-30T13:00:00Z' });
+  const work = row({ id: 'w1', category: 'payment', metadata: { triggerKey: 'payment_failed' }, created_at: '2026-09-29T12:00:00Z' });
+  const composed = row({ id: 'c1', metadata: { area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'x', subject: { type: 'invoice', id: 'i1' } }, created_at: '2026-09-28T12:00:00Z' });
+  expect(mapAlertRow(raw)).toMatchObject({ unsorted: true, severity: null });
+  expect(mapAlertRow(work).unsorted).toBe(false);
+  expect(mapAlertRow(composed).unsorted).toBe(false);
+  mockRows = [raw, work, composed];
+  const out = await listNeedsMe({});
+  expect(out.items.map((i) => i.id)).toEqual(['w1', 'c1', 'raw1']);
+  expect(out.total).toBe(2);
+  expect(out.unsortedTotal).toBe(1);
+  expect(out.counts.bySeverity).toEqual({ 'needs-you': 2 });
+  // A composed row that only lacks a part is still sorted work.
+  expect(mapAlertRow(row({ metadata: { severity: 'broken' } })).unsorted).toBe(false);
+
+  const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+  const bar = await executeNeedsMeTool('needs_me', {});
+  expect(bar.items.map((i) => i.id)).toEqual(['w1', 'c1']);
+  expect(bar.unsorted.map((i) => i.id)).toEqual(['raw1']);
+  expect(bar).toMatchObject({ total_open: 2, unsorted_total: 1 });
 });

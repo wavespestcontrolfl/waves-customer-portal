@@ -59,12 +59,17 @@ const cell = (text, width) => {
   }
   const cols = [['area', 10], ['severity', 9], ['who', 8], ['headline', 52], ['why', 60], ['link', 48]];
   console.log(cols.map(([name, width]) => name.padEnd(width)).join(' | '));
+  let unsortedHeader = false;
   for (const item of result.items) {
-    const row = [item.area, item.severity, `${item.who}${item.derived ? '*' : ''}`, item.headline, item.why || (item.count != null ? `${item.count} open` : ''), item.link];
+    if (item.unsorted && !unsortedHeader) {
+      unsortedHeader = true;
+      console.log('\nUnsorted (older alerts with no work/FYI label; check the link):');
+    }
+    const row = [item.area, item.severity || '-', `${item.who}${item.derived ? '*' : ''}`, item.headline, item.why || (item.count != null ? `${item.count} open` : ''), item.link];
     console.log(row.map((text, i) => cell(text, cols[i][1])).join(' | ').trimEnd());
     if (process.argv.includes('--detail') && item.detail) console.log(item.detail.split('\n').map((l) => `    ${l}`).join('\n'));
   }
-  console.log(`\n${result.items.length} shown of ${result.total} open. * = inferred from an older alert.`);
+  console.log(`\n${result.items.length} shown: ${result.total} need you, ${result.unsortedTotal} unsorted. * = inferred from an older alert.`);
   if (result.next) console.log(`More: --after ${result.next}`);
   for (const w of result.warnings) console.error(`warning: ${w.source}${w.generator ? ` (${w.generator})` : ''} ${w.error}`);
 })().catch((err) => {

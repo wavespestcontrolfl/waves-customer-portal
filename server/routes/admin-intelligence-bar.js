@@ -2151,7 +2151,7 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 - Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
 - Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
 - Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
-- Open work: needs_me (everything open: unresolved admin alerts + the dashboard's standing counts, each with area, link, done-when and who may act). Read-only; never resolve a "person" item.
+- Open work: needs_me (everything open: unresolved admin alerts + the dashboard's standing counts, each with area, link, done-when and who may act; older unlabeled alerts come back separately as "unsorted" and are not counted as work). Read-only; never resolve a "person" item.
 - Internal crons: get_scheduled_job_health (the portal's OWN scheduled jobs — pricing sweeps, syncs, reminder crons — last run/success, failure streaks, stuck-mid-run). The internal counterpart to the external checks above.
 - SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
 - Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.

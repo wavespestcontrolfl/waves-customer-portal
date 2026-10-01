@@ -166,6 +166,13 @@ diagnosis may live only there); when the row has no body, `why` is the first sen
 A source that partly fails says so in `warnings`: a dashboard queue that threw is named
 (`{ source: 'dashboard_alerts', generator, error }`) instead of reading as empty.
 
+**Unsorted** (owner 2026-10-01): a raw `notifyAdmin` row with no stamped severity that is
+neither an `ops_digest` nor a registry event (`metadata.triggerKey`) carries no signal for work
+versus note. It is listed with `unsorted: true` and `severity: null`, after all known work, and
+is left out of `total` and `counts`; `unsortedTotal` counts it. The bar tool returns these in
+`unsorted`, the CLI under its own heading. A source leaves the pile by raising through
+`raiseAdminAlert` (or the trigger registry).
+
 An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
 the eight parts (a dashboard standing condition is not one of these: it is `derived: false`).
 Its area is inferred from the admin page its link opens, else from the category, its severity is `broken` only for a

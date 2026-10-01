@@ -73,10 +73,15 @@ async function needsMe(input = {}) {
       total_open: result.total,
       returned: result.items.length,
       counts: result.counts,
-      items: result.items.map(toBarItem),
+      // Known work, then (on the last pages) raw older alerts nothing classifies:
+      // they may or may not need anyone, so they are listed apart and never
+      // counted in total_open.
+      items: result.items.filter((item) => !item.unsorted).map(toBarItem),
+      unsorted: result.items.filter((item) => item.unsorted).map(toBarItem),
+      unsorted_total: result.unsortedTotal,
       warnings: result.warnings,
       next_cursor: result.next,
-      note: 'Never resolve a "person" item. A "claude" item may be fixed without asking, and the fix is reported afterward.',
+      note: 'Never resolve a "person" item. A "claude" item may be fixed without asking, and the fix is reported afterward. "unsorted" items are older alerts with no work/FYI label: read the link before calling one work.',
     };
   } catch (err) {
     logger.error(`[intelligence-bar:needs-me] needs_me failed (${err.code || err.name || 'error'})`);

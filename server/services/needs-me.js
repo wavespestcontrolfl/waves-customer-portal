@@ -142,6 +142,11 @@ function mapAlertRow(row) {
   // A pre-brevity digest kept its whole report in body (agent-activity reads it the
   // same way): that report is the detail, and why is its first sentence.
   const legacyDigestBody = row.category === 'ops_digest' && !row.detail && row.body;
+  // Unsorted: a raw notifyAdmin row with no stamped severity that is neither a
+  // digest (kind / title prefix) nor a registry event (triggerKey). Nothing says
+  // whether it is work or a note, so it is listed apart, after the known work,
+  // with no guessed severity, and kept out of the totals (owner 2026-10-01).
+  const unsorted = !has.severity && row.category !== 'ops_digest' && !TRIGGER_REGISTRY[meta.triggerKey];
   const detail = boundedDetail(legacyDigestBody ? row.body : row.detail);
   return {
     kind: 'alert',
@@ -151,7 +156,8 @@ function mapAlertRow(row) {
     headline: row.title,
     why: (!legacyDigestBody && row.body) || whyFromDetail(detail),
     detail,
-    severity: has.severity ? meta.severity : legacySeverity(row, meta),
+    severity: has.severity ? meta.severity : unsorted ? null : legacySeverity(row, meta),
+    unsorted,
     ...digestLinks(row),
     subject: has.subject ? { type: meta.subject.type, id: meta.subject.id } : legacySubject(row, meta),
     doneWhen: has.doneWhen ? meta.doneWhen : null,
@@ -224,7 +230,9 @@ const whoMatches = (filter, who) => !filter || filter === who;
 // newest, then id. A standing condition has no time; it sorts first within its
 // severity at a fixed point, so a cursor never moves under it.
 const STANDING_TS = Number.MAX_SAFE_INTEGER;
-const sortKey = (item) => [SEVERITY_RANK[item.severity] ?? 1,
+// Unsorted rows rank after every known severity: the work list first, then them.
+const UNSORTED_RANK = 9;
+const sortKey = (item) => [item.unsorted ? UNSORTED_RANK : (SEVERITY_RANK[item.severity] ?? 1),
   item.createdAt ? new Date(item.createdAt).getTime() : STANDING_TS, String(item.id)];
 function compareKeys(a, b) {
   return (a[0] - b[0]) || (b[1] - a[1]) || (a[2] < b[2] ? 1 : a[2] > b[2] ? -1 : 0);
@@ -275,14 +283,17 @@ async function listNeedsMe({ who, area, limit, role, after = null } = {}) {
   const matching = items
     .filter((item) => item.severity !== 'fyi' && whoMatches(who, item.who) && (!area || item.area === area))
     .sort(compareItems);
-  const tally = (key) => matching.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
+  const sorted = matching.filter((item) => !item.unsorted);
+  const tally = (key) => sorted.reduce((acc, item) => ({ ...acc, [item[key]]: (acc[item[key]] || 0) + 1 }), {});
   const max = Math.min(Math.max(parseInt(limit, 10) || DEFAULT_LIMIT, 1), ROW_CAP);
   // Keyset paging over the same total order: strictly after the cursor's item.
   const remaining = after ? matching.filter((item) => compareKeys(sortKey(item), after) > 0) : matching;
   const page = remaining.slice(0, max);
   return {
     generatedAt: generatedAt.toISOString(),
-    total: matching.length,
+    // total and counts are the known work; unsorted rows are counted on their own.
+    total: sorted.length,
+    unsortedTotal: matching.length - sorted.length,
     counts: { byArea: tally('area'), byWho: tally('who'), bySeverity: tally('severity') },
     items: page,
     next: remaining.length > page.length ? encodeCursor(sortKey(page[page.length - 1])) : null,
