@@ -1135,3 +1135,61 @@ describe('PR codex r19 (9a7979af4)', () => {
     expect(gate.classifyGeoScope('atlanta ga pest control').out_of_area).toContain('GA');
   });
 });
+
+// Owner 2026-10-01 blog prune (D1): merged-away posts 301 to a stronger page;
+// a new blog must not bring the retired URL or topic back.
+describe('retired topics', () => {
+  const codes = (r) => r.findings.map((f) => f.code);
+
+  test('a keyword, title or slug on a retired topic is refused before any corpus fetch, naming the page to refresh', () => {
+    for (const cand of [
+      { query: 'how to get rid of paper wasps in Sarasota' },
+      { title: 'Paper Wasps: Removal Guide for Bradenton' },
+      { slug: '/pest-control/paper-wasp-removal/' },
+    ]) {
+      const r = gate.evaluate(blog(cand), { requireCorpus: false });
+      expect(r.ok).toBe(false);
+      expect(codes(r)).toEqual([gate.CODES.RETIRED_TOPIC]);
+      expect(r.findings[0]).toMatchObject({ url: '/pest-control/get-rid-of-paper-wasps/', merged_into: '/pest-control/get-rid-of-wasps/' });
+    }
+  });
+
+  test('the retired URL itself is refused, by route or (leaf-only write) by leaf', () => {
+    expect(codes(gate.evaluate(blog({ slug: '/pest-control/get-rid-of-earwigs/', query: 'earwig facts' }), { requireCorpus: false }))).toContain(gate.CODES.RETIRED_TOPIC);
+    expect(codes(gate.evaluate(blog({ slug: '/get-rid-of-earwigs/', query: 'earwig facts', flatWrite: true }), { requireCorpus: false }))).toContain(gate.CODES.RETIRED_TOPIC);
+  });
+
+  test('a different topic in the same family still passes', () => {
+    for (const query of ['german cockroach identification', 'how to get rid of wasps', 'drywood termite frass', 'pest control sarasota']) {
+      expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
+    }
+  });
+
+  test('refreshes are exempt', () => {
+    expect(gate.evaluate({ actionType: 'refresh_existing_page', query: 'paper wasps' }, { requireCorpus: false }).ok).toBe(true);
+  });
+
+  test('the post-draft check reports it alongside a framing failure', () => {
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Paper Wasps in Florida', slug: '/pest-control/paper-wasps-florida/', primary_keyword: 'paper wasps' } }, { index: gate.indexCorpus(CORPUS) });
+    expect(r.stage).toBe('framing');
+    expect(r.findings.map((f) => f.code)).toEqual(expect.arrayContaining([gate.CODES.GEO_STATEWIDE, gate.CODES.RETIRED_TOPIC]));
+  });
+
+  test('data: every merge target is itself live (no redirect chains), and each retired URL appears once', () => {
+    const { RETIRED_POSTS } = gate._internals;
+    const urls = RETIRED_POSTS.map((p) => p.url);
+    expect(new Set(urls).size).toBe(urls.length);
+    for (const p of RETIRED_POSTS) {
+      expect(p.url).toMatch(/^\/[a-z-]+\/[a-z0-9-]+\/$/);
+      expect(p.merged_into).toMatch(/^\/[a-z0-9-]+\/(?:[a-z0-9-]+\/)?$/);
+      expect(urls).not.toContain(p.merged_into);
+    }
+  });
+
+  test('topicKey: singular, no cities, geo or framing words', () => {
+    const { topicKey } = gate._internals;
+    expect(topicKey('How to get rid of roof rats in Lakewood Ranch, FL')).toBe('rat roof');
+    expect(topicKey('dollar spot fungus')).toBe('dollar fungus spot');
+    expect(topicKey('flies')).toBe('fly');
+  });
+});

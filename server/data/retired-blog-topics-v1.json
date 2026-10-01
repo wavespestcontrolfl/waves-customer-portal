@@ -1,0 +1,210 @@
+{
+  "_comment": "Blog posts retired in the 2026-10-01 prune (owner approved D1, \"yes on all\"). Each 301s to merged_into on the hub. The topic-targeting gate refuses a NEW blog on a retired URL or topic; grow merged_into as a refresh instead. Add a row whenever a post is merged away.",
+  "retired_on": "2026-10-01",
+  "posts": [
+    {
+      "url": "/lawn-care/get-rid-of-lawn-pest/",
+      "merged_into": "/lawn-care/lawn-pests-in-venice-fl/"
+    },
+    {
+      "url": "/lawn-care/grass-care-tips/",
+      "merged_into": "/lawn-care/types-of-weeds-bradenton-fl/"
+    },
+    {
+      "url": "/lawn-care/healthy-soil/",
+      "merged_into": "/lawn-care/soil-test-parrish-fl/"
+    },
+    {
+      "url": "/lawn-care/kid-safe-lawn/",
+      "merged_into": "/lawn-care/types-of-weeds-bradenton-fl/"
+    },
+    {
+      "url": "/lawn-care/lawn-care-hacks/",
+      "merged_into": "/lawn-care/types-of-weeds-bradenton-fl/"
+    },
+    {
+      "url": "/lawn-care/lawn-watering-tips/",
+      "merged_into": "/lawn-care/new-sod-care/"
+    },
+    {
+      "url": "/lawn-care/st-augustine-lawn-care-bradenton-fl/",
+      "merged_into": "/lawn-care/st-augustine-grass-parrish-fl/"
+    },
+    {
+      "url": "/lawn-care/venice-dollar-spot-fungus-lawn-treatment/",
+      "merged_into": "/lawn-care/types-of-weeds-bradenton-fl/"
+    },
+    {
+      "url": "/lawn-care/water-grass-guide-sarasota-fl/",
+      "merged_into": "/lawn-care/types-of-weeds-bradenton-fl/"
+    },
+    {
+      "url": "/pest-control/bed-bug-treatment-bradenton/",
+      "merged_into": "/pest-control/can-bleach-kill-bed-bugs/"
+    },
+    {
+      "url": "/pest-control/bed-bug-treatment-cost/",
+      "merged_into": "/pest-control/can-bleach-kill-bed-bugs/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-bagworm-moths-bradenton/",
+      "merged_into": "/pest-control/plaster-bagworms-southwest-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-bagworms/",
+      "merged_into": "/pest-control/plaster-bagworms-southwest-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-black-ants/",
+      "merged_into": "/pest-control/get-rid-of-ants/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-boxelder-bugs/",
+      "merged_into": "/pest-control/get-rid-of-stink-bugs/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-carpenter-ants/",
+      "merged_into": "/pest-control/dangerous-ants-in-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-crazy-ants/",
+      "merged_into": "/pest-control/dangerous-ants-in-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-crickets-in-lakewood-ranch-fl/",
+      "merged_into": "/pest-control/eastern-lubber-grasshopper-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-earwigs/",
+      "merged_into": "/pest-control/silverfish-earwig-booklice-identification/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-fire-ants/",
+      "merged_into": "/pest-control/fire-ant-treatment-bradenton-fl/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-hornets/",
+      "merged_into": "/pest-control/get-rid-of-wasps/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-mole-crickets-sarasota-fl/",
+      "merged_into": "/lawn-care/mole-crickets-bahia-sarasota-fl/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-norway-rats/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-paper-wasps/",
+      "merged_into": "/pest-control/get-rid-of-wasps/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-pests/",
+      "merged_into": "/pest-control/local-pest-control-tips/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-pharaoh-ants/",
+      "merged_into": "/pest-control/tiny-ant-identification-florida/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-roaches/",
+      "merged_into": "/pest-control/can-cockroaches-play-dead/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-rodents-lakewood-ranch/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-spiders/",
+      "merged_into": "/pest-control/florida-spiders-identification-guide/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-sugar-ants/",
+      "merged_into": "/pest-control/how-do-i-get-rid-of-sugar-ants/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-wasp-nest/",
+      "merged_into": "/pest-control/get-rid-of-wasps/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-webworms/",
+      "merged_into": "/lawn-care/tropical-sod-webworms-sarasota-fl/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-white-footed-ants/",
+      "merged_into": "/pest-control/get-rid-of-ants/"
+    },
+    {
+      "url": "/pest-control/get-rid-of-yellow-jackets/",
+      "merged_into": "/pest-control/yellow-jacket-vs-wasp/"
+    },
+    {
+      "url": "/pest-control/gutter-pest-control/",
+      "merged_into": "/pest-control/local-pest-control-tips/"
+    },
+    {
+      "url": "/pest-control/hurricane-season-pest-control/",
+      "merged_into": "/pest-control/pest-prevention/"
+    },
+    {
+      "url": "/pest-control/midge-fly-parrish-fl/",
+      "merged_into": "/pest-control/get-rid-of-aquatic-midge-flies-sarasota-fl/"
+    },
+    {
+      "url": "/pest-control/pest-control-in-lakewood-ranch/",
+      "merged_into": "/pest-control/local-pest-control-tips/"
+    },
+    {
+      "url": "/pest-control/pest-transmitted-diseases/",
+      "merged_into": "/pest-control/can-rats-carry-rabies/"
+    },
+    {
+      "url": "/pest-control/rainy-season-pest-control/",
+      "merged_into": "/pest-control/pest-prevention/"
+    },
+    {
+      "url": "/pest-control/rodent-control-guide-lakewood-ranch-fl/",
+      "merged_into": "/pest-control/get-rid-of-roof-rats-lakewood-ranch/"
+    },
+    {
+      "url": "/pest-control/sarasota-active-pests-by-neighborhood/",
+      "merged_into": "/pest-control/local-pest-control-tips/"
+    },
+    {
+      "url": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/",
+      "merged_into": "/pest-control/local-pest-control-tips/"
+    },
+    {
+      "url": "/pest-control/what-do-exterminators-get-rid-of/",
+      "merged_into": "/pest-control/difference-between-pest-control-and-extermination/"
+    },
+    {
+      "url": "/pest-control/what-is-the-difference-between-pest-control-and-exterminator/",
+      "merged_into": "/pest-control/difference-between-pest-control-and-extermination/"
+    },
+    {
+      "url": "/seasonal/august-pest-invasion-in-bradenton/",
+      "merged_into": "/pest-control/pest-prevention/"
+    },
+    {
+      "url": "/termite/drywood-termites-in-palmetto-fl/",
+      "merged_into": "/termite/drywood-termites-bradenton-fl/"
+    },
+    {
+      "url": "/termite/termite-infestation-in-parrish/",
+      "merged_into": "/termite/termite-infestation-in-venice/"
+    },
+    {
+      "url": "/termite/termite-prevention-in-bradenton/",
+      "merged_into": "/termite/termite-infestation-lakewood-ranch/"
+    },
+    {
+      "url": "/termite/termite-trenching-in-bradenton-fl/",
+      "merged_into": "/termite/termite-liquid-treatment-venice-fl/"
+    },
+    {
+      "url": "/termite/the-cost-of-termite-damage-in-bradenton-homes/",
+      "merged_into": "/termite/termite-damage-sarasota-fl/"
+    }
+  ]
+}
