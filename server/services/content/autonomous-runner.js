@@ -849,7 +849,7 @@ class AutonomousRunner {
             if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
             topicIndex = topicGate.indexCorpus(corpus);
           }
-          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
         } catch (err) {
           topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
         }
@@ -3827,7 +3827,7 @@ class AutonomousRunner {
       try {
         const corpus = await this._loadBlogCorpus({ required: true });
         if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), targetSites: brief.target_sites || opp.signal_metadata?.target_sites || null, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
       } catch (err) {
         const e = new Error(`Topic-targeting gate could not re-validate the stored draft (${err.message}) — retry once the live blog corpus is reachable`);
         e.statusCode = 409;

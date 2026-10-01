@@ -1229,6 +1229,27 @@ describe('retired topics', () => {
     expect(f.merged_into).toBe('/pest-control/what-pest-control-is-safe-for-pets/');
   });
 
+  test('a legacy row still marked live at a retired URL is refused before the refresh exemption (codex r4)', async () => {
+    for (const row of [
+      { slug: 'get-rid-of-earwigs', status: 'published' },
+      { slug: 'pest-control/get-rid-of-earwigs', astro_status: 'merged' },
+      { slug: 'get-rid-of-earwigs', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-earwigs/' },
+    ]) {
+      const r = await gate.evaluateBlogPostRow(row, { loadIndex: async () => { throw new Error('corpus must not be needed'); } });
+      expect(r.ok).toBe(false);
+      expect(r.findings[0]).toMatchObject({ code: gate.CODES.RETIRED_TOPIC, merged_into: '/pest-control/silverfish-earwig-booklice-identification/' });
+    }
+    // A live row on a different URL is still a refresh, even on a retired topic.
+    expect((await gate.evaluateBlogPostRow({ slug: 'earwig-facts-sarasota', status: 'published', keyword: 'earwigs' })).skipped).toBe('already_live');
+  });
+
+  test('post-draft: the caller target sites keep a spoke draft out of hub retirements (codex r4)', () => {
+    const draft = { frontmatter: { title: 'Carpenter Ants in Sarasota Live Oaks', slug: '/pest-control/carpenter-ants-sarasota-coastal-live-oaks/', primary_keyword: 'carpenter ants Sarasota' } };
+    const codesFor = (opts) => gate.evaluateDraftTargeting(draft, { index: gate.indexCorpus(CORPUS), ...opts }).findings.map((f) => f.code);
+    expect(codesFor({ targetSites: ['sarasotaflpestcontrol.com'] })).not.toContain(gate.CODES.RETIRED_TOPIC);
+    expect(codesFor({})).toContain(gate.CODES.RETIRED_TOPIC);
+  });
+
   test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
     expect(gate._internals.RETIRED_POSTS).toHaveLength(46);
   });

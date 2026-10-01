@@ -602,13 +602,13 @@ function evaluateDraftFraming(draft = {}) {
 }
 
 /**
- * evaluateDraftTargeting(draft, { index, category, service }) — the full
+ * evaluateDraftTargeting(draft, { index, category, service, targetSites }) — the full
  * post-draft check: framing on the writer's own title/slug, THEN entity
  * ownership on the writer's own primary_keyword (emit_draft does not require
  * it to equal the brief keyword, so a clean brief can still emit an owned
  * entity). `stage` tells the caller which check failed.
  */
-function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null } = {}) {
+function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null, targetSites = null } = {}) {
   const framing = evaluateDraftFraming(draft);
   const fm = draft?.frontmatter || {};
   if (!framing.ok) {
@@ -618,7 +618,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
     let extra = [];
     try {
       const own = evaluate(
-        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targetSites: fm.domains, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targetSites: targetSites || fm.domains, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
         { index, requireCorpus: false, ownershipOnly: true }
       );
       extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE || f.code === CODES.RETIRED_TOPIC);
@@ -632,7 +632,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targetSites: fm.domains, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targetSites: targetSites || fm.domains, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -685,8 +685,17 @@ function isLiveRow(post = {}) {
  * BEFORE the corpus is loaded, so a corpus outage never blocks a refresh.
  */
 async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLiveIndex, category = null } = {}) {
-  if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
+  // A legacy row can still look live (status='published', astro_status
+  // 'merged', astro_live_url) after its post was retired: republishing it
+  // would recreate the deleted file at a URL that now 301s. The exact
+  // retired URL is refused before the refresh exemption.
+  if (slug && !spokeOnly(post.target_sites)) {
+    const leafWrite = normalizeSlug(slug).split('/').filter(Boolean).length === 1;
+    const retiredUrl = retiredTopicFindings({ slug, category, leafOnly: leafWrite, urlOnly: true });
+    if (retiredUrl.length) return { ok: false, applicable: true, findings: retiredUrl, skipped: null };
+  }
+  if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   // flatWrite: publishAstro commits src/content/blog/<leaf>.md for a
   // leaf-only slug whatever the category — the same-leaf collision applies.
   const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targetSites: post.target_sites, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
@@ -1182,14 +1191,14 @@ function retiredIndex() {
   return retiredIndexCache;
 }
 
-function retiredTopicFindings({ query = '', title = '', slug = '', category = null, leafOnly = false } = {}) {
+function retiredTopicFindings({ query = '', title = '', slug = '', category = null, leafOnly = false, urlOnly = false } = {}) {
   const idx = retiredIndex();
   const url = normalizeSlug(slug);
   const leaf = slugLeaf(url);
   const routes = [url, category && leaf ? `/${category}/${leaf}/` : ''].filter(Boolean);
   let hit = routes.map((r) => idx.byUrl.get(r)).find(Boolean) || (leafOnly && leaf ? idx.byLeaf.get(leaf) : null);
   let where = hit ? 'slug' : null;
-  if (!hit) {
+  if (!hit && !urlOnly) {
     for (const [label, text] of [['primary keyword', query], ['title', title], ['slug', slugWords(slug)]]) {
       const key = text ? topicKey(text) : '';
       if (key && idx.byTopic.has(key)) { hit = idx.byTopic.get(key); where = label; break; }
