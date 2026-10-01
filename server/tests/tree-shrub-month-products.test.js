@@ -1,5 +1,8 @@
 // Month -> suggested T&S products, resolved against synthetic catalog rows.
-const { MONTH_PRODUCTS, visitMonthET, resolveMonthProducts } = require('../services/tree-shrub-month-products');
+const {
+  PROTOCOL_PRODUCTS, NON_PRODUCT_LINE, primaryLines, visitMonthET, resolveMonthProducts,
+} = require('../services/tree-shrub-month-products');
+const protocols = require('../config/protocols.json');
 
 const row = (id, name, extra = {}) => ({ id, name, active: true, ...extra });
 
@@ -87,8 +90,33 @@ describe('resolveMonthProducts', () => {
     expect(resolveMonthProducts(null, CATALOG)).toEqual([]);
   });
 
-  test('the table covers all twelve months', () => {
-    expect(Object.keys(MONTH_PRODUCTS).map(Number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  test('suggestions follow the canonical protocol: an edited primary line changes them', () => {
+    const edited = { tree_shrub: { visits: [{ month: 'Jan', primary: 'Kontos: 1.7-3.4 fl oz/100 gal\nScout palms', secondary: 'Snapshot 2.5TG if needed' }] } };
+    // Secondary ("if needed") lines are never suggestions.
+    expect(resolveMonthProducts('2027-01-12', CATALOG, edited).map((e) => e.productId)).toEqual(['kontos']);
+  });
+
+  test('a non-product line naming a product (the December report) suggests nothing', () => {
+    const report = { tree_shrub: { visits: [{ month: 'Dec', primary: 'Annual health report with photos, IRAC/FRAC history, Snapshot history' }] } };
+    expect(resolveMonthProducts('2026-12-10', CATALOG, report)).toEqual([]);
+  });
+});
+
+describe('protocols.json tree_shrub drift guard', () => {
+  test('there is a visit for every month', () => {
+    expect(protocols.tree_shrub.visits.map((v) => v.month)).toEqual(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
+  });
+
+  test('every primary line names a product the sheet can place, or is a known non-product line', () => {
+    const unplaced = [];
+    for (const visit of protocols.tree_shrub.visits) {
+      for (const line of primaryLines(visit)) {
+        if (!NON_PRODUCT_LINE.test(line) && !PROTOCOL_PRODUCTS.some((p) => p.token.test(line))) unplaced.push(`${visit.month}: ${line}`);
+      }
+    }
+    // A new product in a month's primary text needs a PROTOCOL_PRODUCTS entry
+    // (token + exact catalog pattern) or it silently drops off the sheet.
+    expect(unplaced).toEqual([]);
   });
 });
 

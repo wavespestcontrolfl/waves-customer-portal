@@ -69,24 +69,21 @@ describe('treeShrubFastIneligibleReason', () => {
     expect(await treeShrubFastIneligibleReason(visit({ visit_id: 'v' }), TS_PROFILE, knex(undefined))).toBe('grouped_visit');
     expect(await treeShrubFastIneligibleReason(visit({ visit_id: 'v' }), TS_PROFILE, knex({ status: 'dissolved' }))).toBeNull();
   });
-  test.each(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete'])('terminal status %s is ineligible', async (status) => {
+  test.each(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled'])('terminal status %s is ineligible', async (status) => {
     expect(await treeShrubFastIneligibleReason(visit({ status }), TS_PROFILE, knex())).toBe('terminal_status');
   });
-  test.each(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])('live status %s is eligible', async (status) => {
+  test.each(['pending', 'confirmed', 'en_route', 'on_site'])('live status %s is eligible', async (status) => {
     expect(await treeShrubFastIneligibleReason(visit({ status }), TS_PROFILE, knex())).toBeNull();
   });
 });
 
 describe('treeShrubProductFlags', () => {
-  const ctx = { serviceDate: '2026-07-10', zones: ['manatee_parrish'] };
+  const ctx = { serviceDate: '2026-07-10', zone: 'manatee_parrish' };
   test('N/P fertilizer is blackout in summer for a blackout zone, never otherwise', () => {
     const fert = cat('f', 'LESCO 13-0-13 60% PolyPlus Landscape');
     expect(treeShrubProductFlags(fert, ctx).npBlackout).toBe(true);
     expect(treeShrubProductFlags(fert, { ...ctx, serviceDate: '2026-10-01' }).npBlackout).toBe(false);
-    expect(treeShrubProductFlags(fert, { ...ctx, zones: ['north_port'] }).npBlackout).toBe(false);
-    // Either zone in blackout blacks the product out (the property's, or the
-    // customer-city zone /complete still checks).
-    expect(treeShrubProductFlags(fert, { ...ctx, zones: ['north_port', 'manatee_parrish'] }).npBlackout).toBe(true);
+    expect(treeShrubProductFlags(fert, { ...ctx, zone: 'north_port' }).npBlackout).toBe(false);
     expect(treeShrubProductFlags(cat('k', 'Kontos Insecticide/Miticide'), ctx).npBlackout).toBe(false);
   });
   test('an N/P-free blend is not blackout', () => {
@@ -362,17 +359,19 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
   });
 
-  test('a visit at a Bradenton property for a North Port customer is blacked out in July', async () => {
-    const summerCatalog = [cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' })];
+  test.each([
+    ['a Bradenton property for a North Port customer', 'North Port', 'Bradenton'],
+    ['a North Port property for a Bradenton customer', 'Bradenton', 'North Port'],
+  ])('%s takes the full form (the server checks the customer-city zone)', async (_label, custCity, visitCity) => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({
-        scheduled_date: '2026-07-10', cust_city: 'North Port',
-        service_address_line1: '200 Sample Lane', service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34203',
+        scheduled_date: '2026-07-10', cust_city: custCity,
+        service_address_line1: '200 Sample Lane', service_address_city: visitCity, service_address_state: 'FL', service_address_zip: '34203',
       }),
-      products_catalog: summerCatalog,
+      products_catalog: catalog,
     }));
-    expect(ctx.service.address.city).toBe('Bradenton');
-    expect(ctx.products[0].tsFlags.npBlackout).toBe(true);
+    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'zone_mismatch', service: { address: { city: visitCity } } });
+    expect(ctx.products).toBeUndefined();
   });
 
   test('history: incomplete records feed amounts but never become the last visit', async () => {

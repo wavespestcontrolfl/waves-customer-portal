@@ -29,7 +29,9 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 const ROTATION_WINDOW_DAYS = 60;
 const PALM_FERTILIZER_SPACING_DAYS = 75;
 const HISTORY_RECORD_LIMIT = 12;
-const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete']);
+// 'rescheduled' is the phantom row a legacy customer reschedule leaves behind
+// (both schedule feeds hide it); /complete does not refuse it, so this does.
+const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled']);
 
 // Classifier inputs the shared catalog list does not carry.
 const CLASSIFIER_COLUMNS = ['irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary', 'analysis_n', 'analysis_p'];
@@ -43,12 +45,12 @@ const daysBetween = (laterDay, earlierDay) => Math.round(dayNumber(laterDay) - d
 // The server-computed flags the sheet needs per catalog product, from the SAME
 // classifiers /complete enforces (tree-shrub-closeout.js), so the sheet's
 // prompts can never disagree with the closeout's blocks.
-function treeShrubProductFlags(row, { serviceDate, zones }) {
+function treeShrubProductFlags(row, { serviceDate, zone }) {
   const ref = { catalog: row };
   return {
     insectFamily: isInsectFamilyProduct(ref),
     needsIracFrac: productNeedsIracFracLog(ref),
-    npBlackout: productHasNpFertilizer(ref) && zones.some((zone) => isSummerBlackoutForZone(serviceDate, zone)),
+    npBlackout: productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
     injection: isInjectionProduct(ref),
   };
 }
@@ -293,20 +295,20 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
   const visitDate = etCalendarDayOf(svc.scheduled_date);
-  // The property's own zone comes from the visit's resolved address. /complete's
-  // typed check still infers from the customer's city, so a product is shown as
-  // blacked out when EITHER zone is in its blackout: right for the property,
-  // and never a suggestion the server would then refuse.
-  const zones = [...new Set([
-    inferTreeShrubOrdinanceZone({ city: service.address?.city, address: service.address?.line1 }),
-    inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city }),
-  ])];
+  // /complete's typed check infers the ordinance zone from the customer's
+  // city, not the visit's stamped address. Where the two disagree (a
+  // multi-property customer) the sheet can't be both right for the property
+  // and consistent with the server, so the visit takes the full form.
+  const zone = inferTreeShrubOrdinanceZone({ city: service.address?.city, address: service.address?.line1 });
+  if (zone !== inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city })) {
+    return { ok: true, eligible: false, reason: 'zone_mismatch', service };
+  }
   const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS });
   // The shared loader turns a failed read into []. An empty catalog here would
   // let the sheet record a real application as "Inspection only" with none of
   // the product checks, so it sends the visit to the full form instead.
   if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
-  const products = catalog.map((row) => ({ ...row, tsFlags: treeShrubProductFlags(row, { serviceDate: visitDate, zones }) }));
+  const products = catalog.map((row) => ({ ...row, tsFlags: treeShrubProductFlags(row, { serviceDate: visitDate, zone }) }));
 
   let history = [];
   try {
