@@ -1223,8 +1223,14 @@ describe('retired topics', () => {
     expect(draft(undefined)).toBe(true);
   });
 
-  test('registry size is deliberate (47: 51 proposed minus 4 kept live)', () => {
-    expect(gate._internals.RETIRED_POSTS).toHaveLength(47);
+  test('a post deleted without a redirect says so, naming the closest page to refresh', () => {
+    const f = gate.evaluate(blog({ query: 'kid safe lawn' }), { requireCorpus: false }).findings.find((x) => x.code === gate.CODES.RETIRED_TOPIC);
+    expect(f.message).toMatch(/deleted with no redirect/);
+    expect(f.merged_into).toBe('/pest-control/what-pest-control-is-safe-for-pets/');
+  });
+
+  test('registry size is deliberate (46: 51 proposed minus 5 kept live)', () => {
+    expect(gate._internals.RETIRED_POSTS).toHaveLength(46);
   });
 
   test('a different topic in the same family still passes', () => {

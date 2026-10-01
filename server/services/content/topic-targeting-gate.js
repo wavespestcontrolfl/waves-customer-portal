@@ -1201,7 +1201,9 @@ function retiredTopicFindings({ query = '', title = '', slug = '', category = nu
     code: CODES.RETIRED_TOPIC,
     url: hit.url,
     merged_into: hit.merged_into,
-    message: `The ${where} matches the retired post ${hit.url}, merged into ${hit.merged_into} and redirected there. A new blog may not bring a retired topic back; grow ${hit.merged_into} as a refresh instead.`,
+    message: hit.redirected === false
+      ? `The ${where} matches the retired post ${hit.url}, deleted with no redirect (no page fit it). A new blog may not bring a retired topic back; if it is worth covering, grow the closest live page, ${hit.merged_into}, as a refresh.`
+      : `The ${where} matches the retired post ${hit.url}, merged into ${hit.merged_into} and redirected there. A new blog may not bring a retired topic back; grow ${hit.merged_into} as a refresh instead.`,
   }];
 }
 
