@@ -16,6 +16,12 @@ describe('product-name matcher: short collapsed pairs', () => {
     expect(containsProductName('Bifen I/T went on the shrubs.', BIFEN, opts)).toBe(true);
   });
 
+  test('a short collapse with a digit is still a product designation', () => {
+    const treeAge = [{ name: 'Arborjet Tree-Age G-4 Injectable Insecticide' }];
+    expect(containsProductName('We injected the oak with G4.', treeAge, opts)).toBe(true);
+    expect(containsProductName('We injected the oak with G-4.', treeAge, opts)).toBe(true);
+  });
+
   test('longer collapsed echoes are unchanged', () => {
     expect(containsProductName('We used TZone inside.', [{ name: 'T-Zone SE' }], opts)).toBe(true);
     expect(containsProductName('We applied BoraCare to the wood.', [{ name: 'Bora-Care' }], opts)).toBe(true);

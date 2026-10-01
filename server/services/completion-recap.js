@@ -255,10 +255,11 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
   const hayWords = wholeWord ? hay.split(/[^a-z0-9]+/).filter(Boolean) : null;
   const wordSet = wholeWord ? new Set(hayWords) : null;
   const normHay = wholeWord ? ` ${hayWords.join(' ')} ` : null;
-  // A collapsed echo shorter than four letters is an ordinary word, not a
-  // brand: "I/T" (Bifen I/T) collapsed to "it" and matched nearly every
-  // report. The spaced phrase (" i t ") and the long tokens still match.
-  const collapsedEcho = (word) => word.length >= 4 && wordSet.has(word);
+  // A short all-letter collapse is an ordinary word, not a brand: "I/T"
+  // (Bifen I/T) collapsed to "it" and matched nearly every report. A short
+  // collapse with a digit stays a designation ("G4" for Tree-Age G-4), and
+  // the spaced phrase (" i t ") and the long tokens still match.
+  const collapsedEcho = (word) => (word.length >= 4 || /\d/.test(word)) && wordSet.has(word);
   return safeProducts(products).some((p) => {
     const nameTokens = String(p.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const isGeneric = (token) => GENERIC_NAME_TOKENS.has(token)
