@@ -19,11 +19,14 @@ async function clickGate(reviewRequestId) {
 // The callback includes provider delivery and its durable delivery stamp.
 // Callers retain their recipient, consent, claim and outcome handling.
 //
-// allowAfterCustomerReply (immediate staff composer send only): the 72-hour
-// spacing block is skipped when the customer texted in strictly after the most
-// recent ask, so staff can answer "the link didn't work". The inbound read runs
-// in the same lock hold as the spacing read and fails closed like it.
-async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, allowAfterCustomerReply = false } = {}) {
+// skipSpacing (immediate staff composer send only): a person typing a review
+// link in Messages is never held by the 72-hour spacing, so the spacing history
+// reads and the REVIEW_ASK_SPACING block are skipped. The customer-required
+// check, the per-customer lock (it still serializes with the automatic sender),
+// the busy-lock refusal and the click gate are unchanged. The send itself still
+// lands in sms_log, where lastManualAskAt sees it, so automatic asks keep their
+// spacing around it.
+async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, skipSpacing = false } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
   const result = await runExclusive(`review-send:${customerId}`, async () => {
@@ -34,6 +37,7 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
       reason: require('./review-click-guard').REVIEW_LINK_CLICKED_REASON, httpStatus: 409 };
     if (click === 'unknown') return { sent: false, blocked: true, code: 'REVIEW_CLICK_STATE_UNAVAILABLE',
       reason: 'Could not confirm whether this customer already tapped their review link. Try again shortly.', httpStatus: 503 };
+    if (skipSpacing) return dispatch();
     let pipelineAt;
     let manualAt;
     try {
@@ -52,16 +56,7 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
     const lastAt = Math.max(pipelineAt?.getTime() || 0, manualAt?.getTime() || 0);
     const nextAt = new Date(lastAt + history.ASK_SPACING_MS);
     if (lastAt && nextAt.getTime() > Date.now()) {
-      let customerReplied = false;
-      if (allowAfterCustomerReply) {
-        try {
-          customerReplied = await history.hasInboundTextSince(customerId, new Date(lastAt));
-        } catch {
-          return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',
-            reason: 'Could not verify recent review requests. Try again after review history is available.', httpStatus: 503 };
-        }
-      }
-      if (!customerReplied) return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
+      return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
         reason: `A recent or unresolved review request is still inside the 72-hour window. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
     }
     return dispatch();

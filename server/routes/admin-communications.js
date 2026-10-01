@@ -1291,7 +1291,7 @@ router.post('/sms', async (req, res, next) => {
       };
       return reviewLooking
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, allowAfterCustomerReply: true })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, skipSpacing: true })
         : sendAndSettle();
     };
     const result = prepLinkSends

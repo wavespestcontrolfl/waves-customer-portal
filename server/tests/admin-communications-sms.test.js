@@ -141,7 +141,6 @@ jest.mock('../services/review-ask-history', () => ({
   ...jest.requireActual('../services/review-ask-history'),
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
-  hasInboundTextSince: jest.fn(async () => false),
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
@@ -2547,7 +2546,6 @@ describe('Communications review ask serialization', () => {
     mockGates.smsGratitudeReplies = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
-    history.hasInboundTextSince.mockReset().mockResolvedValue(false);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
       if (held.has(key)) return { skipped: true, reason: 'lease_held' };
       held.add(key);
@@ -2703,24 +2701,19 @@ describe('Communications review ask serialization', () => {
     expect(reservation.metadata.manual_send_reservation).toBe(true);
   });
 
-  test('a claimed-link ask refused by the spacing check BEFORE provider entry hands its lock-held reservation back (pre-push codex P1 on #4331)', async () => {
-    // The claimed-link seam reserves sms_log evidence under the first lock
-    // hold; dispatchReviewAsk then refuses (another ask is inside the
-    // 72-hour window) without ever running sendAndSettle. Nothing settled
-    // the reservation — it must be released, or the customer is blocked for
-    // 72 hours by a row with no provider attempt behind it.
+  test('a claimed-link ask inside the 72-hour window is not refused: staff composer sends skip spacing and keep their reservation', async () => {
     const reservations = wireReservationLedger();
     history.lastManualAskAt.mockResolvedValue(new Date());
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
-      const refused = await send(baseUrl, inline);
-      expect(refused.status).toBe(409);
-      expect((await refused.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect((await send(baseUrl, inline)).status).toBe(200);
     });
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(history.lastManualAskAt).not.toHaveBeenCalled();
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(true);
   });
 
-  test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
+  test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch concurrently', async () => {
     let entered, release;
     const providerEntered = new Promise(resolve => { entered = resolve; });
     const providerRelease = new Promise(resolve => { release = resolve; });
@@ -2743,10 +2736,10 @@ describe('Communications review ask serialization', () => {
         expect((await second.json()).code).toBe('REVIEW_SEND_BUSY');
       } finally { release(); }
       expect((await first).status).toBe(200);
+      // Staff composer sends are never held by spacing once the lock is free.
       const afterDelivery = await send(baseUrl);
-      expect(afterDelivery.status).toBe(409);
-      expect((await afterDelivery.json()).code).toBe('REVIEW_ASK_SPACING');
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(afterDelivery.status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
     });
   });
   test.each(['accepted', 'accepted throw', 'stamp failure', 'tracked stamp failure', 'tracked accepted throw'])('ask retains durable spacing when accepted evidence cannot settle: %s', async mode => {
@@ -2798,9 +2791,8 @@ describe('Communications review ask serialization', () => {
       expect((await send(baseUrl, tracked ? { reviewRequestId: 'rr-1', body: 'wavespest.co/l/abc123' } : {})).status).toBe(mode.includes('throw') ? 500 : 200);
       expect(reserved).toBe(true);
       expect(deleted).not.toHaveBeenCalled();
-      const retry = await send(baseUrl);
-      expect(retry.status).toBe(409);
-      expect((await retry.json()).code).toBe('REVIEW_ASK_SPACING');
+      // The automatic sequence's own spacing read still sees this ask.
+      expect(await history.lastManualAskAt('cust-A', {})).toBeInstanceOf(Date);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
@@ -2859,9 +2851,10 @@ describe('Communications review ask serialization', () => {
         if (retained) expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
         else expect(reviews.releaseInlineClaim).toHaveBeenCalled();
       }
-      const retry = await send(baseUrl);
-      expect(retry.status).toBe(retained ? 409 : 200);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(retained ? 1 : 2);
+      // The automatic sequence's spacing read still sees an uncertain ask
+      // (staff composer sends themselves skip spacing, so no retry is blocked).
+      expect(!!(await history.lastManualAskAt('cust-A', {}))).toBe(retained);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -2931,52 +2924,31 @@ describe('Communications review ask serialization', () => {
     });
   });
 
-  test('a preceding cadence delivery blocks the bare staff ask', async () => {
+  test('a composer review send is never held by the 72-hour spacing, and reads no spacing history', async () => {
     history.lastDeliveredAskAt.mockResolvedValue(new Date());
-    await withServer(async baseUrl => {
-      const response = await send(baseUrl);
-      expect(response.status).toBe(409);
-      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-  });
-  test('a customer text after the last ask lets staff resend the review link from the composer', async () => {
-    const lastAsk = new Date(Date.now() - 86400000);
-    history.lastDeliveredAskAt.mockResolvedValue(lastAsk);
-    history.hasInboundTextSince.mockResolvedValue(true);
+    history.lastManualAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
       const response = await send(baseUrl);
       expect(response.status).toBe(200);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
-    expect(history.hasInboundTextSince).toHaveBeenCalledWith('cust-A', lastAsk);
+    expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
+    expect(history.lastManualAskAt).not.toHaveBeenCalled();
   });
-  test('with no customer text after the last ask the composer resend is still blocked', async () => {
-    history.lastDeliveredAskAt.mockResolvedValue(new Date(Date.now() - 86400000));
-    history.hasInboundTextSince.mockResolvedValue(false);
+  test('an unavailable review history does not hold a composer review send', async () => {
+    history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+  test('a composer review send still refuses when another review send holds the customer lock', async () => {
+    held.add('review-send:cust-A');
     await withServer(async baseUrl => {
       const response = await send(baseUrl);
       expect(response.status).toBe(409);
-      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect((await response.json()).code).toBe('REVIEW_SEND_BUSY');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-  });
-  test('an unreadable customer-text lookup fails the composer resend closed with a 503', async () => {
-    history.lastDeliveredAskAt.mockResolvedValue(new Date(Date.now() - 86400000));
-    history.hasInboundTextSince.mockRejectedValue(new Error('db down'));
-    await withServer(async baseUrl => {
-      const response = await send(baseUrl);
-      expect(response.status).toBe(503);
-      expect((await response.json()).code).toBe('REVIEW_HISTORY_UNAVAILABLE');
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-  });
-  test('history failure releases the inline claim without sending', async () => {
-    history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
-    await withServer(async baseUrl => {
-      expect((await send(baseUrl, inline)).status).toBe(503);
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', true);
     });
   });
   test('inline stamping and the owed email stay inside the lock', async () => {

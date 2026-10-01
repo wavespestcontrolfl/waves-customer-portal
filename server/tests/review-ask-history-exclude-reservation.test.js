@@ -14,7 +14,7 @@
 
 jest.mock('../models/db', () => jest.fn());
 const db = require('../models/db');
-const { lastManualAskAt, hasInboundTextSince } = require('../services/review-ask-history');
+const { lastManualAskAt } = require('../services/review-ask-history');
 
 function makeSmsLogQuery(rows) {
   let filtered = rows.slice();
@@ -46,7 +46,6 @@ function makeSmsLogQuery(rows) {
       throw new Error(`fake whereRaw: unsupported SQL ${sql}`);
     },
     orderBy() { return q; },
-    first() { return Promise.resolve(filtered[0]); },
     select() { return Promise.resolve(filtered); },
   };
   return q;
@@ -104,20 +103,19 @@ describe('lastManualAskAt excludeReservationId — a caller does not self-block 
   });
 });
 
-describe('hasInboundTextSince', () => {
-  const since = new Date('2040-01-09T16:00:00Z');
-  const rows = [
-    { id: 'out-1', customer_id: 'cust-1', direction: 'outbound', created_at: '2040-01-09T18:00:00Z' },
-    { id: 'in-before', customer_id: 'cust-1', direction: 'inbound', created_at: '2040-01-09T15:00:00Z' },
-    { id: 'in-at', customer_id: 'cust-1', direction: 'inbound', created_at: '2040-01-09T16:00:00Z' },
-    { id: 'in-other', customer_id: 'cust-2', direction: 'inbound', created_at: '2040-01-09T20:00:00Z' },
-  ];
-  const wire = (extra = []) => db.mockImplementation(table => (table === 'sms_log' ? makeSmsLogQuery([...rows, ...extra]) : (() => { throw new Error(table); })()));
+describe('a composer-sent staff review ask stays spacing evidence for the automatic sequence', () => {
+  const now = new Date('2040-01-10T16:00:00Z');
+  beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
+  afterEach(() => { jest.useRealTimers(); });
 
-  test('only a same-customer inbound row strictly after the boundary counts', async () => {
-    wire();
-    expect(await hasInboundTextSince('cust-1', since)).toBe(false);
-    wire([{ id: 'in-after', customer_id: 'cust-1', direction: 'inbound', created_at: '2040-01-09T16:00:01Z' }]);
-    expect(await hasInboundTextSince('cust-1', since)).toBe(true);
+  test('lastManualAskAt sees a sent manual sms_log row carrying a review link', async () => {
+    const sentAt = new Date(now.getTime() - 60000);
+    db.mockImplementation((table) => (table === 'sms_log'
+      ? makeSmsLogQuery([{
+        id: 'composer-1', customer_id: 'cust-A', direction: 'outbound', status: 'sent', message_type: 'manual',
+        message_body: 'Here is the link: https://g.page/r/example/review', metadata: {}, created_at: sentAt,
+      }])
+      : { where: () => ({ whereNotNull: () => ({ select: async () => [] }) }) }));
+    expect(await lastManualAskAt('cust-A', { since: new Date(now.getTime() - 72 * 3600000) })).toEqual(sentAt);
   });
 });

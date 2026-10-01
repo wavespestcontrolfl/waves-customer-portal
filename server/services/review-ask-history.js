@@ -217,14 +217,4 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
   return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 
-// True when the customer texted in (sms_log direction 'inbound') strictly
-// after `since`. Throws on a read failure: dispatch callers fail closed.
-async function hasInboundTextSince(customerId, since) {
-  const row = await db('sms_log')
-    .where({ customer_id: customerId, direction: 'inbound' })
-    .where('created_at', '>', new Date(since))
-    .first('id');
-  return !!row;
-}
-
-module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, hasInboundTextSince };
+module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt };

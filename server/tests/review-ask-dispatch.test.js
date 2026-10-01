@@ -2,7 +2,6 @@ jest.mock('../services/review-ask-history', () => ({
   ASK_SPACING_MS: 72 * 3600000,
   lastDeliveredAskAt: jest.fn(async () => null),
   lastManualAskAt: jest.fn(async () => null),
-  hasInboundTextSince: jest.fn(async () => false),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/review-click-guard', () => ({
@@ -24,7 +23,6 @@ describe('review ask dispatch boundary', () => {
     jest.useFakeTimers().setSystemTime(now);
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
-    history.hasInboundTextSince.mockReset().mockResolvedValue(false);
     lock.runExclusive.mockReset().mockImplementation(async (_key, callback) => callback());
     guard.askIdSuppressedByClick.mockReset().mockResolvedValue(false);
   });
@@ -70,69 +68,49 @@ describe('review ask dispatch boundary', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
-  describe('allowAfterCustomerReply', () => {
-    const lastAskAt = () => new Date(now.getTime() - 86400000);
-    test('an inbound text after the last ask lets the staff ask run, judged in the same lock hold', async () => {
+  describe('skipSpacing', () => {
+    const recent = () => new Date(now.getTime() - 3600000);
+    test.each(['lastDeliveredAskAt', 'lastManualAskAt'])('a recent %s does not block, and no spacing history is read', async reader => {
+      history[reader].mockResolvedValue(recent());
+      const provider = jest.fn(async () => ({ sent: true }));
+      expect(await dispatchReviewAsk('customer', provider, { skipSpacing: true })).toEqual({ sent: true });
+      expect(provider).toHaveBeenCalledTimes(1);
+      expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
+      expect(history.lastManualAskAt).not.toHaveBeenCalled();
+    });
+
+    test('still runs under the per-customer lock, so it serializes with the automatic sender', async () => {
       let held = false;
       lock.runExclusive.mockImplementation(async (_key, callback) => {
         held = true;
         try { return await callback(); } finally { held = false; }
       });
-      history.lastDeliveredAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockImplementation(async () => { expect(held).toBe(true); return true; });
-      const provider = jest.fn(async () => ({ sent: true }));
-      expect(await dispatchReviewAsk('customer', provider, { allowAfterCustomerReply: true })).toEqual({ sent: true });
-      expect(history.hasInboundTextSince).toHaveBeenCalledWith('customer', lastAskAt());
-      expect(provider).toHaveBeenCalledTimes(1);
+      const provider = jest.fn(async () => { expect(held).toBe(true); return { sent: true }; });
+      await dispatchReviewAsk('customer', provider, { skipSpacing: true });
+      expect(lock.runExclusive).toHaveBeenCalledWith('review-send:customer', expect.any(Function), { recordHealth: false, waitForSlot: false });
     });
 
-    test('the inbound read is anchored to the most recent ask (staff delivery newer than the tracked ask)', async () => {
-      history.lastDeliveredAskAt.mockResolvedValue(new Date(now.getTime() - 2 * 86400000));
-      history.lastManualAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockResolvedValue(true);
-      await dispatchReviewAsk('customer', async () => ({ sent: true }), { allowAfterCustomerReply: true });
-      expect(history.hasInboundTextSince).toHaveBeenCalledWith('customer', lastAskAt());
-    });
-
-    test('no inbound text after the last ask (one only BEFORE it) still blocks', async () => {
-      history.lastDeliveredAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockResolvedValue(false);
+    test('a busy lock and a missing customer are still refused', async () => {
+      lock.runExclusive.mockResolvedValue({ skipped: true, reason: 'lease_held' });
       const provider = jest.fn();
-      expect(await dispatchReviewAsk('customer', provider, { allowAfterCustomerReply: true }))
-        .toMatchObject({ sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', httpStatus: 409 });
+      expect(await dispatchReviewAsk('customer', provider, { skipSpacing: true })).toMatchObject({ code: 'REVIEW_SEND_BUSY', httpStatus: 409 });
+      expect(await dispatchReviewAsk(null, provider, { skipSpacing: true })).toMatchObject({ code: 'REVIEW_CUSTOMER_REQUIRED' });
       expect(provider).not.toHaveBeenCalled();
     });
 
-    test('without the option an inbound text after the last ask changes nothing (other callers unchanged)', async () => {
-      history.lastDeliveredAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockResolvedValue(true);
-      const provider = jest.fn();
-      expect(await dispatchReviewAsk('customer', provider)).toMatchObject({ code: 'REVIEW_ASK_SPACING' });
-      expect(provider).not.toHaveBeenCalled();
-      expect(history.hasInboundTextSince).not.toHaveBeenCalled();
-    });
-
-    test('an unreadable inbound history fails closed like a history failure', async () => {
-      history.lastManualAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockRejectedValue(new Error('db down'));
-      const provider = jest.fn();
-      expect(await dispatchReviewAsk('customer', provider, { allowAfterCustomerReply: true }))
-        .toMatchObject({ sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
-      expect(provider).not.toHaveBeenCalled();
-    });
-
-    test('no prior ask: the inbound read is never made', async () => {
-      const provider = jest.fn(async () => ({ sent: true }));
-      expect(await dispatchReviewAsk('customer', provider, { allowAfterCustomerReply: true })).toEqual({ sent: true });
-      expect(history.hasInboundTextSince).not.toHaveBeenCalled();
-    });
-
-    test('a clicked link still blocks regardless of a customer reply', async () => {
+    test('the click gate still applies when a clickAskId is passed', async () => {
       guard.askIdSuppressedByClick.mockResolvedValue(true);
-      history.lastDeliveredAskAt.mockResolvedValue(lastAskAt());
-      history.hasInboundTextSince.mockResolvedValue(true);
-      expect(await dispatchReviewAsk('customer', jest.fn(), { clickAskId: 'rr-1', allowAfterCustomerReply: true }))
+      const provider = jest.fn();
+      expect(await dispatchReviewAsk('customer', provider, { clickAskId: 'rr-1', skipSpacing: true }))
         .toMatchObject({ code: 'REVIEW_LINK_CLICKED' });
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    test('without the option every other caller is still blocked inside the window', async () => {
+      history.lastDeliveredAskAt.mockResolvedValue(recent());
+      const provider = jest.fn();
+      expect(await dispatchReviewAsk('customer', provider)).toMatchObject({ code: 'REVIEW_ASK_SPACING', httpStatus: 409 });
+      expect(provider).not.toHaveBeenCalled();
     });
   });
 
