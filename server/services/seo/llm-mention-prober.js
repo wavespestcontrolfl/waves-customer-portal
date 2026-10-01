@@ -51,10 +51,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some 
 // ── Detection constants ──────────────────────────────────────────────────────
 // WAVES_RE, COMPETITORS and the all-companies ranking live in
 // llm-mention-companies.js.
-
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
-const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
-const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 200;
+// 240 = six platforms × the 40 benchmark questions, so every pair is observed daily.
+const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 240);
+const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 240;
 
 // The sentiment reply must be ONE allowlisted label, unambiguously: its first
 // word is a label and no other label appears anywhere in it. A substring

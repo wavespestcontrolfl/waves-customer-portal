@@ -45,7 +45,7 @@ Provider adapters retain their own models and do not fall back across engines: a
 - `google_ai_mode` is a new platform: Google AI Mode through `/serp/google/ai_mode/live/advanced` (city `location_name`; Parrish by coordinate, since DataForSEO has no named location for it), `model_version` `dataforseo:google_ai_mode`. It is a different Google feature from the AI Overview and is kept beside `google_ai_overview`; it reads links attached to answer elements as citations, like the Overview. It has no API equivalent, so it exists only while the switch is on.
 - The managed city is normalised before the location lookup (", FL" removed, case-folded, aliases such as "LWR"); an unknown non-empty city warns and falls back to the question text, then Sarasota.
 - With the switch off the ChatGPT and Gemini rows use the API probes again. The unique (query, platform, day) row means each platform runs one or the other, and `model_version` tells the rows apart, so API and app observations are separate cohorts. Do not compare them as before/after movement.
-- Each scrape costs about $0.004 and is logged. A request or task error writes no row and retries the next run. Six platforms times the 40 benchmark questions need a run ceiling (`LLM_MENTIONS_MAX_PROBES`) of at least 240; the default 200 rotates, so some pairs are observed every other day.
+- Each scrape costs about $0.004 and is logged. A request or task error writes no row and retries the next run. Six platforms times the 40 benchmark questions need a run ceiling (`LLM_MENTIONS_MAX_PROBES`) of at least 240, which is the default.
 
 `seo_llm_mentions.llm_platform` is a free string with no CHECK constraint or enum, so a new platform needs no migration.
 
