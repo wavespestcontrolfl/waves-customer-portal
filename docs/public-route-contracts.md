@@ -4353,14 +4353,19 @@ live-verify (purpose `autopay_setup_link` + request id) and the same
 save → consent → enroll tail under the same claim/lease; `select-plan`
 is not applicable to these rows. RENDERED CONSENT VERSION (2026-09-30, codex
 #5434 r1 P1, both kinds): the GET mints the SetupIntent for the page it
-serves, so the mint stamps the server's `CONSENT_VERSION` into the intent
-(`metadata.consent_text_version`) and salts the deterministic idempotency key
-with it — a page load after a copy change mints a fresh intent under the new
-text instead of replaying one stamped with the old. `/complete` carries
-`consentTextVersion`, the version the page rendered beside the capture
-checkbox, and is refused with `409 { error, code: 'CONSENT_VERSION_STALE' }`
-before the capture service runs when that is not the server's current version
-or is absent; and the shared completion tail — page POST and the
+serves, so the GET carries `?consentTextVersion=` — the `CONSENT_VERSION`
+the bundle renders beside the capture checkbox — and is refused with
+`409 { error, code: 'CONSENT_VERSION_STALE' }` before any mint when that is
+not the server's current version or is absent (an older bundle refetching
+after a copy change); the mint stamps that attested value into the intent
+(`metadata.consent_text_version`) and salts the deterministic idempotency
+key with it, so a page load after a copy change mints a fresh intent under
+the new text instead of replaying one stamped with the old, and a stored
+intent stamped with an older version is never replayed. `/replace-intent`
+("use a different payment method", a fresh mint) carries the same
+attestation in its body under the same refusal. `/complete` carries
+`consentTextVersion` too and is refused the same way before the capture
+service runs; and the shared completion tail — page POST and the
 `setup_intent.succeeded` backstop alike — re-reads the intent under its
 claim and refuses an intent whose stamp is stale or absent
 (`consent_version_stale`: nothing saved, recorded or enrolled, the claim

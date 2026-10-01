@@ -28,13 +28,18 @@ import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
 import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
-import { consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
+import { CONSENT_VERSION, consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE } from '../lib/paymentMethodConsentText';
 import {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
 } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// The page payload MINTS the SetupIntent this page will confirm, so the GET
+// attests the saved-payment-method consent text version this bundle renders
+// beside the capture checkbox (codex #5434 r1 P1); the server stamps it on
+// the intent and refuses a stale one with 409 CONSENT_VERSION_STALE.
+const PAGE_URL = (token) => `${API_BASE}/public/secure-card/${token}?consentTextVersion=${encodeURIComponent(CONSENT_VERSION)}`;
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const S = {
@@ -143,7 +148,7 @@ export default function SecureAppointmentPage() {
   // office edits the visit, a term appears). Server truth wins.
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      const res = await fetch(PAGE_URL(token));
       if (res.status === 404) { setState('notfound'); return; }
       if (!res.ok) throw new Error('load_failed');
       const payload = await res.json();
@@ -181,7 +186,7 @@ export default function SecureAppointmentPage() {
   // success the server has not; GH Codex #3726 r5 P2).
   const refreshOrSecured = useCallback(async (fallback = 'secured') => {
     try {
-      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      const res = await fetch(PAGE_URL(token));
       if (res.ok) {
         const payload = await res.json();
         setData(payload);
@@ -291,9 +296,15 @@ export default function SecureAppointmentPage() {
             setSearchParams(cleaned, { replace: true });
           }
         }
-        const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+        const res = await fetch(PAGE_URL(token));
         if (cancelled) return;
         if (res.status === 404) { setState('notfound'); return; }
+        if (res.status === 409) {
+          // The consent text changed under this bundle: a fresh load renders
+          // (and mints under) the current text.
+          const stale = await res.json().catch(() => ({}));
+          if (stale.code === CONSENT_VERSION_STALE_CODE) { setState('stale_bundle'); return; }
+        }
         if (!res.ok) throw new Error('load_failed');
         const payload = await res.json();
         if (cancelled) return;
@@ -326,10 +337,16 @@ export default function SecureAppointmentPage() {
       const res = await fetch(`${API_BASE}/public/secure-card/${token}/replace-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ setupIntentId }),
+        // The replacement is a fresh mint: attest the consent text version
+        // this bundle renders (codex #5434 r1 P1).
+        body: JSON.stringify({ setupIntentId, ...consentAttestation() }),
       });
       if (res.status === 404) { setState('notfound'); return false; }
       const body = await res.json().catch(() => ({}));
+      if (res.status === 409 && body.code === CONSENT_VERSION_STALE_CODE) {
+        setError(body.error || CONSENT_VERSION_STALE_MESSAGE);
+        return false;
+      }
       if (res.status === 409) {
         // request_closed / no_longer_needed: completed, closed, expired, or
         // the visit no longer needs a card under us (nothing was retired) —
@@ -519,6 +536,16 @@ export default function SecureAppointmentPage() {
       <Shell>
         <PublicStateCard state="error" title={<>We couldn&rsquo;t load that link</>} onRetry={retryLoad}>
           This looks temporary. Your link is still valid&mdash;try again in a moment.
+        </PublicStateCard>
+      </Shell>
+    );
+  }
+
+  if (state === 'stale_bundle') {
+    return (
+      <Shell>
+        <PublicStateCard state="error" title={<>Please refresh this page</>} onRetry={() => window.location.reload()}>
+          {CONSENT_VERSION_STALE_MESSAGE} Your link is still valid.
         </PublicStateCard>
       </Shell>
     );

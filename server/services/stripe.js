@@ -1293,9 +1293,14 @@ const StripeService = {
   // under the new text instead of replaying one stamped with the old, and
   // the completion tail records a consent only under a current stamp
   // (codex #5434 r1 P1).
-  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null }) {
+  // `consentTextVersion` is the version the requesting tab attested, which
+  // the public route validated equals this server's CONSENT_VERSION before
+  // any mint; the constant is only the fallback for direct callers. Stamping
+  // the attested value binds the intent to the bundle that rendered the text.
+  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null, consentTextVersion = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    const stampedVersion = String(consentTextVersion || CONSENT_VERSION);
     const salt = replacing
       ? `_after_${String(replacing)}`
       : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
@@ -1307,10 +1312,10 @@ const StripeService = {
         purpose: 'appointment_card_request',
         request_id: String(requestId),
         scheduled_service_id: String(scheduledServiceId),
-        [CONSENT_VERSION_METADATA_KEY]: CONSENT_VERSION,
+        [CONSENT_VERSION_METADATA_KEY]: stampedVersion,
         ...(replacing ? { replaces: String(replacing) } : {}),
       },
-    }, { idempotencyKey: `appointment_card_request_${requestId}_${CONSENT_VERSION}${salt}` });
+    }, { idempotencyKey: `appointment_card_request_${requestId}_${stampedVersion}${salt}` });
   },
 
   /**

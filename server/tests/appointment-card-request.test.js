@@ -2486,7 +2486,7 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
     const res = await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
     expect(res).toMatchObject({ ok: true, retired: true, intent: { clientSecret: 'cs_after', setupIntentId: 'seti_after', paymentMethodTypes: ['card'], capturedMethodType: null } });
     expect(order).toEqual(['mint', 'retire']);
-    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalledWith({ requestId: 'req-1', scheduledServiceId: 'svc-1', replacing: 'seti_1' });
+    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalledWith({ requestId: 'req-1', scheduledServiceId: 'svc-1', replacing: 'seti_1', consentTextVersion: null });
     expect(mockRetireSetupIntent).toHaveBeenCalledWith('seti_1', { replacedBy: 'seti_after' });
     // Row lock + the re-point on a still-pending row only.
     const chains = touches('appointment_card_requests').map((t) => t.chain);

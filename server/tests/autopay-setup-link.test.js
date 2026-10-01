@@ -598,6 +598,15 @@ describe('loadAutopaySetupPageData — state machine', () => {
     expect(mockCreateSetupIntent).toHaveBeenNthCalledWith(2, 'cust-1', 'card_or_bank', expect.objectContaining({ idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}_g1` }));
   });
 
+  it('the attested version the route validated is what the mint stamps and salts (the constant is only the direct-caller fallback)', async () => {
+    const d = await loadAutopaySetupPageData({ ...PENDING }, { consentTextVersion: CV });
+    expect(d.setupIntentId).toBe('seti_new');
+    expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
+      metadata: expect.objectContaining({ consent_text_version: CV }),
+      idempotencyKey: `autopay_setup_link_req-1_card_or_bank_${CV}`,
+    }));
+  });
+
   it('does NOT replay a bank-capable confirmable intent once bank is no longer offered — mints a card-only generation', async () => {
     gates.acceptAchCapture = false;
     mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method', payment_method_types: ['card', 'us_bank_account'], metadata: { purpose: 'autopay_setup_link', request_id: 'req-1', consent_text_version: CV } });

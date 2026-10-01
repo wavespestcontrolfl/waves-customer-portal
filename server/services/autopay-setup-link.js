@@ -502,14 +502,14 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
 // request row lock (replaceAutopaySetupIntent) — every read and the CAS
 // must ride that connection (a deadlock behind the held lock otherwise, and
 // a second pool connection per request either way).
-async function mintOrReplaySetupIntent(request, { database = db } = {}) {
+async function mintOrReplaySetupIntent(request, { database = db, consentTextVersion = null } = {}) {
   // Current policy FIRST (pre-push Codex P1): a replayed intent that still
   // allows bank must not expose the bank tab once the kill switch is off or
   // the customer's ACH state turned unhealthy — the tender-salted
   // idempotency key then mints a card-only generation instead.
   const tender = await resolveTender(request.customer_id, { database });
   const replayed = request.stripe_setup_intent_id ? await replayRowIntent(request, tender) : null;
-  return replayed || mintGenerationIntent(request, tender, { database });
+  return replayed || mintGenerationIntent(request, tender, { database, consentTextVersion });
 }
 
 const REPLAYABLE_STATUSES = ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing', 'succeeded'];
@@ -594,19 +594,21 @@ async function adoptRepointedIntent(request, tender, { database }) {
 // (pre-push Codex P1), and a canceled or retired replay walks the salt
 // forward. Returns the intent, { stale: true } when the row left pending
 // under us, or null (Stripe unreadable / every generation terminal).
-async function mintGenerationIntent(request, tender, { database }) {
+async function mintGenerationIntent(request, tender, { database, consentTextVersion = null }) {
   const StripeService = require('./stripe');
+  // Stamped with the consent text version the requesting tab attested — the
+  // public route validated it equals this server's CONSENT_VERSION before
+  // the mint (the constant is only the fallback for direct callers); the
+  // version salts the key so a page load after a copy change mints fresh
+  // under the new text, and the completion tail records a consent only
+  // under a current stamp (codex #5434 r1 P1).
+  const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+  const stampedVersion = String(consentTextVersion || CONSENT_VERSION);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    // Stamped with the consent text version the page renders (the GET mints
-    // on page load, so this server's version is that page's); the version
-    // salts the key so a page load after a copy change mints fresh under
-    // the new text, and the completion tail records a consent only under a
-    // current stamp (codex #5434 r1 P1).
-    const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
     const minted = await StripeService.createSetupIntent(request.customer_id, tender, {
-      metadata: { purpose: PURPOSE, request_id: String(request.id), [CONSENT_VERSION_METADATA_KEY]: CONSENT_VERSION },
+      metadata: { purpose: PURPOSE, request_id: String(request.id), [CONSENT_VERSION_METADATA_KEY]: stampedVersion },
       verificationMethod: 'instant',
-      idempotencyKey: `${PURPOSE}_${request.id}_${tender}_${CONSENT_VERSION}${generation > 0 ? `_g${generation}` : ''}`,
+      idempotencyKey: `${PURPOSE}_${request.id}_${tender}_${stampedVersion}${generation > 0 ? `_g${generation}` : ''}`,
       database,
     });
     if (minted.status === 'canceled') continue;
@@ -689,7 +691,8 @@ async function standaloneLinkStillOpen(request, { database = db } = {}) {
   return { ok: true };
 }
 
-async function replaceAutopaySetupIntent({ request, setupIntentId }) {
+async function replaceAutopaySetupIntent({ request, setupIntentId, consentTextVersion = null }) {
+  const stampedVersion = String(consentTextVersion || require('./payment-method-consent-text').CONSENT_VERSION);
   if (!request || request.kind !== KIND) return { ok: false, code: 'not_found' };
   if (!setupIntentId) return { ok: false, code: 'intent_mismatch' };
   const StripeService = require('./stripe');
@@ -717,7 +720,7 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
     }
     if (!open.ok) return open;
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
-      const intent = await mintOrReplaySetupIntent({ ...request, ...row }, { database: trx });
+      const intent = await mintOrReplaySetupIntent({ ...request, ...row }, { database: trx, consentTextVersion });
       return intent && !intent.stale ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };
     }
     let tender = 'card';
@@ -729,11 +732,11 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
     }
     let replacement = null;
     try {
-      const { CONSENT_VERSION, CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
+      const { CONSENT_VERSION_METADATA_KEY } = require('./payment-method-consent-text');
       const minted = await StripeService.createSetupIntent(request.customer_id, tender, {
-        metadata: { purpose: PURPOSE, request_id: String(request.id), replaces: String(current.id), [CONSENT_VERSION_METADATA_KEY]: CONSENT_VERSION },
+        metadata: { purpose: PURPOSE, request_id: String(request.id), replaces: String(current.id), [CONSENT_VERSION_METADATA_KEY]: stampedVersion },
         verificationMethod: 'instant',
-        idempotencyKey: `${PURPOSE}_${request.id}_${tender}_after_${current.id}_${CONSENT_VERSION}`,
+        idempotencyKey: `${PURPOSE}_${request.id}_${tender}_after_${current.id}_${stampedVersion}`,
         // The Stripe-customer link-up inside rides the held transaction
         // (GH Codex #4163 r5 P1) — no second pool connection under the lock.
         database: trx,
@@ -777,7 +780,7 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
 // GET /secure/:token payload for a kind='customer' row. Shares the visit
 // lane's state vocabulary (ready / secured / closed) so the page renders
 // with the same state machine; `kind` tells it which copy to use.
-async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
+async function loadAutopaySetupPageData(request, { reloaded = false, consentTextVersion = null } = {}) {
   const customer = request.customer_id
     ? await db('customers').where({ id: request.customer_id }).first()
     : null;
@@ -841,7 +844,7 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   }
   let intent = null;
   try {
-    intent = await mintOrReplaySetupIntent(request);
+    intent = await mintOrReplaySetupIntent(request, { consentTextVersion });
   } catch (err) {
     logger.error(`[autopay-setup-link] SetupIntent mint failed for request ${request.id}: ${err.message}`);
   }
@@ -851,7 +854,7 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
     // it) — render the row's true state, once.
     if (reloaded) return { state: 'unavailable', ...base };
     const fresh = await db('appointment_card_requests').where({ id: request.id }).first();
-    return fresh ? loadAutopaySetupPageData(fresh, { reloaded: true }) : { state: 'closed', ...base };
+    return fresh ? loadAutopaySetupPageData(fresh, { reloaded: true, consentTextVersion }) : { state: 'closed', ...base };
   }
   return {
     state: 'ready',

@@ -1477,13 +1477,14 @@ async function shapeSecureCaptureIntent(setupIntent) {
   };
 }
 
-async function createSecureCardSetupIntent(request, { database = db } = {}) {
+async function createSecureCardSetupIntent(request, { database = db, consentTextVersion = null } = {}) {
   const StripeService = require('./stripe');
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
     const created = await StripeService.createAppointmentCardSetupIntent({
       requestId: request.id,
       scheduledServiceId: request.scheduled_service_id,
       generation,
+      consentTextVersion,
     });
     if (!created) return null;
     let setupIntent;
@@ -1571,11 +1572,14 @@ async function adoptReplacedSecureCardIntent(request, observed, { database = db 
 // already-retired one has nothing to retire, so the ordinary mint is
 // returned (under the same lock and checks).
 // Returns { ok, intent, retired } or { ok: false, code }.
-async function replaceSecureCardIntent({ token, setupIntentId }) {
+// `consentTextVersion`: the saved-payment-method consent text version the
+// requesting tab attested (codex #5434 r1 P1) — the route validated it is
+// current before calling; every intent minted here is stamped with it.
+async function replaceSecureCardIntent({ token, setupIntentId, consentTextVersion = null }) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
   if (request.kind === 'customer') {
-    return require('./autopay-setup-link').replaceAutopaySetupIntent({ request, setupIntentId });
+    return require('./autopay-setup-link').replaceAutopaySetupIntent({ request, setupIntentId, consentTextVersion });
   }
   if (!setupIntentId) return { ok: false, code: 'intent_mismatch' };
   const StripeService = require('./stripe');
@@ -1632,7 +1636,7 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
       return { ok: false, code: 'plan_required' };
     }
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
-      const intent = await createSecureCardSetupIntent({ ...request, ...row }, { database: trx });
+      const intent = await createSecureCardSetupIntent({ ...request, ...row }, { database: trx, consentTextVersion });
       return intent ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };
     }
     let replacement = null;
@@ -1641,6 +1645,7 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
         requestId: request.id,
         scheduledServiceId: request.scheduled_service_id,
         replacing: current.id,
+        consentTextVersion,
       });
       replacement = created ? await readLiveSecureCardIntent(created.id) : null;
     } catch (err) {
@@ -2192,13 +2197,16 @@ function captureIntentFields(intent) {
   };
 }
 
-async function loadSecureCardPageData(token) {
+// `consentTextVersion`: the consent text version the requesting tab attested
+// (codex #5434 r1 P1) — validated current by the route before this runs, so
+// the intent minted for the page is stamped with the version it renders.
+async function loadSecureCardPageData(token, { consentTextVersion = null } = {}) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return null;
   // Standalone Auto Pay setup rows (kind='customer') have no visit to key
   // liveness/fees/plans on — their payload comes from the standalone module.
   if (request.kind === 'customer') {
-    return require('./autopay-setup-link').loadAutopaySetupPageData(request);
+    return require('./autopay-setup-link').loadAutopaySetupPageData(request, { consentTextVersion });
   }
 
   const visit = await db('scheduled_services')
@@ -2369,7 +2377,7 @@ async function loadSecureCardPageData(token) {
     logger.warn(`[appt-card-request] page coverage re-check failed — rendering the form: ${err.message}`);
   }
 
-  const intent = await createSecureCardSetupIntent(request);
+  const intent = await createSecureCardSetupIntent(request, { consentTextVersion });
   if (!intent) return { state: 'unavailable', ...base };
   // planContext is attached ONLY when the plan-choice gate is on and the
   // booked series yields sound pricing (deriveSecurePlanContext returns null
