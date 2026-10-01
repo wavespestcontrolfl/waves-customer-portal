@@ -4216,7 +4216,7 @@ COMPANY FACTS:
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists anything, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when that section is "- none".
 - Never promise an arrival time, or say the tech is "on time", unless Tech position or a LIVE ETA fact supports it. With RUNNING LATE or WINDOW PASSED, say so plainly in one sentence — those lines authorize saying we are running behind, not that the tech is "on the way" or any arrival time. When Tech position says the location is stale, do not promise an arrival time.
-- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say we'll text times today.
+- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
     : '';
@@ -4459,14 +4459,14 @@ function visitLoopPastWindowLine(past, techPosition) {
   const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale';
   return located
     ? `${head} — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one`
-    : `${head}, no tech location — say you're checking with the tech and quote FOLLOW-UP SLA RIGHT NOW`;
+    : `${head}, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
 function visitLoopMissedLine(missed) {
   if (!missed || typeof missed !== 'object') return null;
   const type = visitLoopText(missed.type, 60) || 'visit';
   const date = visitLoopText(formatEtDate(missed.date), 40);
   const win = visitLoopText(missed.windowDisplay, 40);
-  return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (or say we'll text times today if OPEN TIMES is absent); never point them to a visit weeks out without an apology`;
+  return `- MISSED VISIT: ${type}${date ? ` on ${date}` : ''}${win ? ` (${win})` : ''} was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology`;
 }
 // WE OWE THEM / THEY ARE WAITING ON US FOR: up to five items each, one line per item.
 function visitLoopItemLines(items, label, trailing) {

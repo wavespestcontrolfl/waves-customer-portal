@@ -45,7 +45,7 @@ describe('renderVisitLoopsSection', () => {
     // a fresh Tech position line is the answer: no "no tech location" hand-off
     expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — say plainly we're running behind and use Tech position for where the tech is; no arrival time unless a LIVE ETA fact gives one\n");
     expect(out).not.toContain('no tech location');
-    expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (or say we\'ll text times today if OPEN TIMES is absent); never point them to a visit weeks out without an apology\n');
+    expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology\n');
     expect(out).not.toContain('live note');
     expect(out).toContain('- WE OWE THEM: callback — Call back about the wasp nest quote (due today by 5 PM)\n');
     expect(out).toContain('- THEY ARE WAITING ON US FOR: question — Asked whether sprinklers need to be off (since Tuesday, Jun 9)\n');
@@ -71,7 +71,7 @@ describe('renderVisitLoopsSection', () => {
     const pastWindow = { type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 };
     for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30 }]) {
       expect(renderVisitLoopsSection({ pastWindow, techPosition }))
-        .toContain("has passed and the visit is not marked complete, no tech location — say you're checking with the tech and quote FOLLOW-UP SLA RIGHT NOW");
+        .toContain("has passed and the visit is not marked complete, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised");
     }
   });
 

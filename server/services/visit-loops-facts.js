@@ -214,10 +214,18 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
   };
 }
 
-function findPastWindow(todayRows, { now, deriveWindow }) {
+async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
   const nowMin = nowEtMinutes(now);
-  for (const row of todayRows) {
-    if (!NOT_STARTED_STATUSES.includes(row.status) || LIVE_TRACK_STATES.includes(row.track_state)) continue;
+  const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status)
+    && !LIVE_TRACK_STATES.includes(row.track_state)
+    // the same completion evidence loadMissedVisit honors: a tracker that reached
+    // 'complete' ahead of a lagging status, or a written service record
+    && row.track_state !== 'complete');
+  if (!candidates.length) return null;
+  const recorded = await conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id');
+  const done = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
+  for (const row of candidates) {
+    if (done.has(String(row.id))) continue;
     const endMin = customerWindowEndMinutes(row);
     if (endMin == null || endMin >= nowMin) continue;
     return { type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };

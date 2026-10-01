@@ -242,6 +242,15 @@ describe('pastWindow', () => {
     expect((await run({ status: 'pending', track_state: 'en_route' })).pastWindow).toBeNull();
   });
 
+  test('performed but not closed (tracker complete, or a service record) is never "passed"', async () => {
+    expect((await run({ status: 'confirmed', track_state: 'complete' })).pastWindow).toBeNull();
+    const conn = fakeConn({
+      scheduled_services: (ops, kind) => (hasOp(ops, 'whereIn') ? [todayRow({ status: 'pending' })] : (kind === 'first' ? null : [])),
+      service_records: () => [{ scheduled_service_id: 'visit-1' }],
+    });
+    expect((await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, deriveWindow, conn })).pastWindow).toBeNull();
+  });
+
   test('no start time: falls back to window_end', async () => {
     const out = await run({ status: 'pending', window_start: null, window_end: '11:30:00' });
     expect(out.pastWindow).toMatchObject({ minutesPast: 30 });
