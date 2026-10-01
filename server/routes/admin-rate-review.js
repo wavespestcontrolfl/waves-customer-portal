@@ -132,7 +132,12 @@ router.post('/batches/:key/digest', async (req, res) => {
   const key = validBatchKey(req, res);
   if (!key) return;
   try {
-    const locked = await runExclusive(BUILD_LOCK, () => rateReview.sendBatchEmail({ batchKey: key }), { recordHealth: false, waitForSlot: false });
+    const locked = await runExclusive(BUILD_LOCK, async () => {
+      // the one-email marker, read under the lock: a retried or double-clicked
+      // send after a success delivers nothing more; a rebuild clears it
+      if (await rateReview.batchEmailed(key)) return { sent: false, skipped: 'already_sent' };
+      return rateReview.sendBatchEmail({ batchKey: key });
+    }, { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(locked)) return lockBusy(res, locked);
     const sent = locked || {};
     if (sent.skipped === 'no_batch') return res.status(404).json({ error: 'No rate review batch has that key', reason: 'no_batch' });

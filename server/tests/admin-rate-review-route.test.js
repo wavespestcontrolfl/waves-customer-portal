@@ -30,6 +30,7 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 const mockSendBatchEmail = jest.fn();
+const mockBatchEmailed = jest.fn(async () => false);
 const mockRunExclusive = jest.fn(async (_name, fn) => fn());
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: (...args) => mockRunExclusive(...args),
@@ -41,6 +42,7 @@ jest.mock('../services/rate-review', () => ({
   buildBatch: (...args) => mockBuildBatch(...args),
   loadConfig: (...args) => mockLoadConfig(...args),
   sendBatchEmail: (...args) => mockSendBatchEmail(...args),
+  batchEmailed: (...args) => mockBatchEmailed(...args),
 }));
 
 const express = require('express');
@@ -178,6 +180,13 @@ describe('POST /batches/:key/build', () => {
       const skipped = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
       expect(skipped.status).toBe(200);
       expect(skipped.body).toMatchObject({ sent: false, skipped: 'recipient' });
+      // already delivered (the one-email marker, read under the lock) → nothing more is sent; a rebuild clears the marker
+      mockBatchEmailed.mockResolvedValueOnce(true);
+      const again = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest');
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ ok: true, sent: false, skipped: 'already_sent' });
+      expect(mockBatchEmailed).toHaveBeenLastCalledWith('2026-12');
+      expect(mockSendBatchEmail).toHaveBeenCalledTimes(3); // the three sends above, none for the retry
       // a held lock → 409; a provider failure → 502 with the status only (the provider body can carry addresses)
       mockRunExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
       expect((await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/digest')).status).toBe(409);

@@ -88,7 +88,7 @@ function scriptedDb(scenario) {
       case 'customer_plan_rates':
         return chain({ rows: () => scenario.ledger || [] });
       case 'cancellation_cases':
-        return chain({ count: (q) => ({ n: signalsFor(q.customerId).cancellationCases || 0 }) });
+        return chain({ rows: (q) => (signalsFor(q.customerId).cancellationCaseScopes || []).map((scope) => ({ scope })) });
       case 'retention_offers':
         return chain({ rows: (q) => (signalsFor(q.customerId).retentionOfferFamilies || []).map((family_key) => ({ family_key })) });
       case 'plan_holds':
@@ -124,7 +124,7 @@ const NOW = new Date('2026-11-01T11:20:00Z'); // 2026-11-01 06:20 ET — the cro
 function planLine(customerId, familyKey, cadence, medianPrice, extra = {}) {
   return {
     customer_id: customerId, family_key: familyKey, cadence, open_visits: 3, next_visit: '2026-12-10',
-    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, zero_priced_visits: 0, zero_with_base: false, prepay_linked: false, prepay_term_ids: [], catalog_vpy: null,
+    median_price: medianPrice, priced_visits: medianPrice ? 3 : 0, zero_priced_visits: 0, zero_with_base_visits: 0, prepay_linked: false, prepay_term_ids: [], catalog_vpy: null,
     source_estimate_ids: [], service_keys: [familyKey], account_lines: 1, ...extra,
   };
 }

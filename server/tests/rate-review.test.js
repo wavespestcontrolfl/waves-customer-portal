@@ -513,14 +513,21 @@ describe('current rate per billing lane', () => {
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application' }), planLine: perApp, liveTerms: [blankA, blankB] })).toMatchObject({ cents: 11700, source: 'visit_median', prepayTermAmbiguous: true, prepayTermMissing: false });
   });
   test('open visits all stamped $0 are a free line when the zero is authoritative — never a fee-fallback increase', () => {
-    const zeroWithBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: true });
+    const zeroWithBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 3 });
     const customer = fixture.customer(1, { per_application_fee: 117 });
     expect(P.resolveCurrentRate({ customer, planLine: zeroWithBase })).toMatchObject({ cents: 0, source: 'stamped_zero', stampedZeroFree: true });
     const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'per_application', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 0, currentRateSource: 'stamped_zero', stampedZeroFree: true, rateUnit: 'application', listRateCents: 11700, listRateSource: 'engine', facts: fixture.facts() });
     expect(row.status).toBe('skipped');
     expect(row.flags).toEqual(expect.arrayContaining(['stamped_zero_free', 'no_current_rate']));
     // a bare stamped 0 with no base and the stamped-zero gate off is indistinguishable from never priced → fee fallback (today's billing rule)
-    const bare = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base: false });
+    const bare = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 0 });
+    // the authority is counted PER VISIT: three $0 visits with one base are not a free line while the gate is off
+    const partialBase = fixture.planLine('c', 'pest_control', 'quarterly', null, { priced_visits: 0, zero_priced_visits: 3, zero_with_base_visits: 1 });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 117 }), planLine: partialBase })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
+    expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: null }), planLine: partialBase }).stampedZeroFree).toBeUndefined();
+    const src0 = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src0).toMatch(/count\(\*\) FILTER \(WHERE estimated_price = 0 AND primary_line_price > 0\)::int AS zero_with_base_visits/);
+    expect(src0).not.toMatch(/bool_or\(estimated_price = 0/);
     const prior = process.env.GATE_STAMPED_ZERO_FREE;
     process.env.GATE_STAMPED_ZERO_FREE = 'false';
     try {
@@ -532,12 +539,12 @@ describe('current rate per billing lane', () => {
     }
     // a priced median always wins over zero-stamped siblings
     // one discounted-to-zero visit beside NULL-priced ones is not a free line: the NULL-priced visits bill the per-application fee
-    const oneZero = fixture.planLine('c', 'pest_control', 'quarterly', null, { open_visits: 3, priced_visits: 0, zero_priced_visits: 1, zero_with_base: true });
+    const oneZero = fixture.planLine('c', 'pest_control', 'quarterly', null, { open_visits: 3, priced_visits: 0, zero_priced_visits: 1, zero_with_base_visits: 1 });
     expect(P.resolveCurrentRate({ customer: fixture.customer(1, { billing_mode: 'per_application', per_application_fee: 117 }), planLine: oneZero })).toMatchObject({ cents: 11700, source: 'per_application_fee' });
     const noFee = fixture.customer(1, { billing_mode: 'per_application', per_application_fee: null });
     expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero })).toMatchObject({ cents: 0, source: 'none' });
     expect(P.resolveCurrentRate({ customer: noFee, planLine: oneZero }).stampedZeroFree).toBeUndefined();
-    const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base: true });
+    const mixed = fixture.planLine('c', 'pest_control', 'quarterly', 117, { priced_visits: 2, zero_priced_visits: 1, zero_with_base_visits: 1 });
     expect(P.resolveCurrentRate({ customer, planLine: mixed })).toMatchObject({ cents: 11700, source: 'visit_median' });
   });
   test('per_visit and NULL lanes read the visit stamp (the exception rule flags lane_cleanup)', () => {
@@ -1178,7 +1185,16 @@ describe('engine replay guards', () => {
     expect(revenue).not.toMatch(/p\.invoice_id/);
     // settled monthly dues are net of refunds on BOTH rails — netting one alone would let the other's gross figure win GREATEST
     const dues = src.slice(src.indexOf('async function loadSettledDues'), src.indexOf('function duesPerVisitCents'));
-    expect(dues).toMatch(/sum\(amount - COALESCE\(refund_amount, 0\)\)/);
+    // a partial refund returns its surcharge share too (refunded_surcharge_cents) — only the BASE refund comes off revenue, on every rail
+    expect(P.REFUND_BASE_SQL).toBe('GREATEST(COALESCE(p.refund_amount, 0) - COALESCE(p.refunded_surcharge_cents, 0) / 100.0, 0)');
+    expect(dues).toMatch(/sum\(amount - COALESCE\(surcharge_amount_cents, 0\) \/ 100\.0 - GREATEST\(COALESCE\(refund_amount, 0\) - COALESCE\(refunded_surcharge_cents, 0\) \/ 100\.0, 0\)\)/);
+    expect(dues).toMatch(/\$\{REFUND_BASE_SQL\}/);
+    expect(revenue).toMatch(/SELECT sum\(\$\{REFUND_BASE_SQL\}\) FROM payments p/);
+    expect(src).not.toMatch(/sum\(COALESCE\(p\.refund_amount, 0\)\)/);
+    // an invoice linked only through its service record (invoice.js linkedScheduledServiceId) still pairs its revenue
+    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    expect(completed).toMatch(/SELECT DISTINCT ON \(scheduled_service_id\) scheduled_service_id, id AS service_record_id,/);
+    expect(revenue).toMatch(/OR \(i\.service_record_id IS NOT NULL AND i\.service_record_id = sr\.service_record_id\)/);
     expect(dues).toMatch(/sum\(i\.total\) - COALESCE\(sum\(\(/);
     expect(dues).toMatch(/GREATEST\(COALESCE\(inv\.amount, 0\), COALESCE\(pay\.amount, 0\)\)/);
   });
@@ -1265,6 +1281,55 @@ describe('engine replay guards', () => {
     const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'tree_shrub', cadence: 'bimonthly', visitsPerYear: 6, billingLane: 'monthly_membership', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 4250, rateUnit: 'month', listRateCents: null, listBundleIncomplete: true, facts: fixture.facts() });
     expect(row.status).toBe('exception');
     expect(row.flags).toContain('list_bundle_incomplete');
+  });
+  test('a downward-performance nudge (B → C on bottom-quartile $/hr) never proposes less than the pass-through', () => {
+    const lineRph = { q1: 8000, median: 9000, q3: 10000, n: 4 };
+    const unnudged = P.classifyBand({ currentCents: 11500, listCents: 11700, config: DEFAULT_CONFIG });
+    expect(unnudged).toMatchObject({ band: 'B', proposedCents: 11900, deltaCents: 400, noChange: false });
+    const nudged = P.classifyBand({ currentCents: 11500, listCents: 11700, rph: 7000, lineRph, usableVisits: 4, config: DEFAULT_CONFIG });
+    expect(nudged.flags).toContain('rph_bottom_quartile');
+    expect(nudged).toMatchObject({ band: 'C', proposedCents: 11900, deltaCents: 400, noChange: false }); // list ($117) sits under the pass-through — never no_change
+    // when list is the bigger ask, C still goes to list
+    const wideGap = P.classifyBand({ currentCents: 11000, listCents: 11500, rph: 7000, lineRph, usableVisits: 4, config: DEFAULT_CONFIG });
+    expect(wideGap).toMatchObject({ band: 'C', proposedCents: 11500 });
+  });
+  test('a no-estimate line backdates to member_since only when it was running at import; a program first seen later starts at its first visit', () => {
+    // the account reached the portal with a pest program (first visit Apr 5); lawn was first seen Aug 20
+    const pest = P.resolveAnniversary({ firstCompletedVisit: '2026-04-05', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(4) });
+    expect(pest).toMatchObject({ date: '2024-12-10', source: 'member_since', conflict: false });
+    const lawn = P.resolveAnniversary({ firstCompletedVisit: '2026-08-20', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(9) });
+    expect(lawn).toMatchObject({ date: '2026-08-20', source: 'first_visit', conflict: true }); // informational: member_since predates it
+    // a semiannual program's first visit may trail the account's by its own interval — still present at import
+    expect(P.presenceWindowFor(2)).toBe(213);
+    expect(P.resolveAnniversary({ firstCompletedVisit: '2026-10-01', acceptedAt: null, memberSince: '2024-12-10', accountFirstVisit: '2026-04-05', presenceWindowDays: P.presenceWindowFor(2) }).source).toBe('member_since');
+    expect(P.presenceWindowFor(4)).toBe(121);
+    expect(P.presenceWindowFor(null)).toBe(90);
+    // no account-level evidence keeps the old rule
+    expect(P.resolveAnniversary({ firstCompletedVisit: '2026-08-20', acceptedAt: null, memberSince: '2024-12-10' }).source).toBe('member_since');
+    // the batch passes the account's earliest visit and the line's cadence window
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
+  });
+  test('the sold-mix replay (hand-picked-tier evidence) keeps the stamped rodent posture; the current-list replay strips it', async () => {
+    const engine = { generateEstimate: jest.fn(() => ({ lineItems: [], waveGuard: { tier: 'bronze' } })) };
+    const estimate = { id: 'e-rodent', estimate_data: { engineInputs: { homeSqFt: 2000, rodentBaitLegacyReplay: { qualifies: false }, rodentWaveguardPostureReplay: { posture: 'legacy' }, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } } } };
+    await P.replayEstimate(estimate, { familyKey: null, cadence: null, activeFamilies: null, soldMix: true }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[0][0]).toMatchObject({ rodentBaitLegacyReplay: { qualifies: false }, rodentWaveguardPostureReplay: { posture: 'legacy' } });
+    await P.replayEstimate(estimate, { familyKey: 'pest_control', cadence: 'quarterly', activeFamilies: ['pest_control', 'rodent'] }, { pricingEngine: engine, engineSynced: true, translateV2CallToV1Input: null });
+    expect(engine.generateEstimate.mock.calls[1][0].rodentBaitLegacyReplay).toBeUndefined();
+    expect(engine.generateEstimate.mock.calls[1][0].rodentWaveguardPostureReplay).toBeUndefined();
+    expect(P.SOLD_POSTURE_KEYS).toEqual(['rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay']);
+  });
+  test('the whole-account dues fallback compares against every program the line carries', () => {
+    expect(P.engineKeysForLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toEqual(['tree_shrub', 'palm_injection']);
+    expect(P.engineKeysForLine('tree_shrub', ['palm_injection_semiannual'])).toEqual(['palm_injection']);
+    expect(P.engineKeysForLine('pest_control', ['pest_control_quarterly'])).toEqual(['pest_control']);
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+    expect(src).toMatch(/const bundledDues = monthly && \['ledger_slice', 'monthly_rate'\]\.includes\(current\.source\);/);
+    expect(src).toMatch(/riderAllow: current\.source === 'ledger_slice' && ledgerSlice \? ledgerSlice\.family_keys : engineKeysForLine\(familyKey, serviceKeys\)/);
+    // a $45 combined dues rate beside a bed-only replay is held, never a false no-change
+    const bedOnly = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 540, visitsPerYear: 6 }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(bedOnly, 'tree_shrub', 'bimonthly', { includeRiders: true, riderAllow: P.engineKeysForLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual']) })).toMatchObject({ bundleIncomplete: true, missingServices: ['palm_injection'] });
   });
   test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
     const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };
@@ -1816,6 +1881,33 @@ describe('runMonthlyRateReview', () => {
     expect(lawnOnly.flags).not.toContain('plan_hold_active');
     const own = await run({ [target]: { retentionOfferFamilies: ['pest_control'], holds: ['pest_control'] } });
     expect(own.flags).toEqual(expect.arrayContaining(['retention_offer_active', 'plan_hold_active']));
+    // a cancellation case holds the families it names (scope; [] = the whole account)
+    expect(P.cancellationCaseTouchesLine([['lawn_care']], 'pest_control')).toBe(false);
+    expect(P.cancellationCaseTouchesLine([['lawn_care'], []], 'pest_control')).toBe(true);
+    expect(P.cancellationCaseTouchesLine([['palm_injection']], 'tree_shrub')).toBe(true);
+    expect(P.cancellationCaseTouchesLine([], 'pest_control')).toBe(false);
+    expect(P.cancellationCaseTouchesLine('error', 'pest_control')).toBe(true);
+    const lawnCase = await run({ [target]: { cancellationCaseScopes: [['lawn_care']] } });
+    expect(lawnCase.signalsRead.cancellationCaseScopes).toEqual([['lawn_care']]);
+    expect(lawnCase.flags).not.toContain('cancellation_case_recent');
+    expect((await run({ [target]: { cancellationCaseScopes: [[]] } })).flags).toContain('cancellation_case_recent');
+    expect((await run({ [target]: { cancellationCaseScopes: [['pest_control']] } })).flags).toContain('cancellation_case_recent');
+  });
+  test('only ORDINARY lines are references — the cadence mode and the $/hr quartiles share one population', () => {
+    const ordinary = (n, rph = 9000) => ({ customer: fixture.customer(n, { billing_mode: 'per_application' }), serviceKeys: ['pest_control_quarterly'], familyKey: 'pest_control', cadence: 'quarterly', current: { cents: 11700 + n, unit: 'application', source: 'visit_median' }, stats: { revenuePerHourCents: rph }, planLine: { cadence_conflict: false }, multiProgram: false });
+    const book = [ordinary(1), ordinary(2), ordinary(3), ordinary(4),
+      { ...ordinary(5, 30000), multiProgram: true },                       // blended tree/shrub + palm median
+      { ...ordinary(6, 30000), planLine: { cadence_conflict: true } },     // two cadences open
+      { ...ordinary(7, 30000), current: { cents: 4000, unit: 'month', source: 'ledger_slice' } }, // dues, not a per-application price
+      { ...ordinary(8, 30000), current: { cents: 11700, unit: 'application', source: 'visit_median', prepayMidTerm: true } },
+      { ...ordinary(9, 30000), customer: fixture.customer(9, { billing_mode: 'per_application', waveguard_tier: 'Commercial' }) },
+    ];
+    expect(book.slice(4).map(P.isOrdinaryReference)).toEqual([false, false, false, false, false]);
+    const refs = P.computeLineReferences(book);
+    expect(refs.lineRphStats.get('pest_control')).toMatchObject({ n: 4, median: 9000 });
+    expect(refs.cadenceModes.get('pest_control|quarterly')).toBeDefined();
+    // the four ordinary accounts are the only samples: the 30000 $/hr held rows never set a quartile
+    expect(refs.lineRphStats.get('pest_control').q3).toBeLessThanOrEqual(9000);
   });
   test('a per-application tree/shrub line carrying both programs is held as multi_program_line, never a blended green', async () => {
     expect(P.isMultiProgramLine('tree_shrub', ['tree_shrub_program', 'palm_injection_semiannual'])).toBe(true);
