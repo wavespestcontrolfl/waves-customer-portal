@@ -829,6 +829,39 @@ describe('r21: a reused pending voice booking this pass finds to be a street-lev
     }
   });
 
+  test('a failing promotion write rethrows code / name only: no address text in the error, the log line or the persisted scheduleError', async () => {
+    const { safeScheduleErrorText } = CallRecordingProcessor._test;
+    const leak = `update "triage_items" set "payload" = '{"address_on_file":"${hold.address_on_file}"}' - deadlock detected`;
+    for (const failOn of ['update', 'insert']) {
+      const { trx: base } = world({ card: failOn === 'update' ? undefined : null });
+      const trx = (table) => {
+        const q = base(table);
+        if (table === 'triage_items') {
+          const boom = () => Object.assign(new Error(leak), { code: '40P01', bindings: [hold.address_on_file], sql: 'update ...' });
+          q.update = async () => { throw boom(); };
+          const ins = q.insert; q.insert = (r) => { ins(r); q.onConflict = () => q; q.ignore = async () => { throw boom(); }; return q; };
+        }
+        return q;
+      };
+      trx.raw = base.raw;
+      let err;
+      try { await promoteReusedRowToStreetLevelHold(trx, row(), args()); } catch (e) { err = e; }
+      expect(err).toBeDefined();
+      expect(err.message).toBe('street_level_promotion_failed:40P01');
+      expect(err.code).toBe('street_level_promotion_failed');
+      expect(JSON.stringify([err.message, err.stack?.split('\n')[0], safeScheduleErrorText(err)])).not.toContain('Sample Newbuild');
+      expect(err.bindings).toBeUndefined();
+    }
+    // The scheduling catch persists / logs the sanitized text for driver errors, and keeps deliberate messages.
+    expect(safeScheduleErrorText(Object.assign(new Error(leak), { code: '40P01', name: 'error', routine: 'DeadLockReport' }))).toBe('error:40P01');
+    expect(safeScheduleErrorText(Object.assign(new Error(leak), { bindings: [1] }))).not.toContain('Sample Newbuild');
+    expect(safeScheduleErrorText(new Error('Slot taken'))).toBe('Slot taken');
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain('const schedErrText = safeScheduleErrorText(schedErr);');
+    expect(src).toContain('scheduleError: schedErrText, smsSent: false');
+    expect(src).not.toContain('Failed to create scheduled service: ${schedErr.message}');
+  });
+
   test('no card at all: one is filed in the same shape', async () => {
     const { w, trx } = world({ card: null });
     expect(await promoteReusedRowToStreetLevelHold(trx, row(), args())).toBe(true);

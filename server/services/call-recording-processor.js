@@ -1879,6 +1879,13 @@ function streetLevelProofAddressChanged(snapshot, row) {
 // hold BEFORE lead conversion and the reuse activation, so every hold predicate applies. Same card
 // shape the fresh insert writes. No-op unless the row is an unconfirmed pending voice_agent visit that
 // is not already a hold. Runs on the booking transaction.
+// Error text safe to log / persist: a database or driver error (it carries sql / bindings, or the
+// driver's severity / routine fields) is reduced to name + code, since its message can echo bound values.
+function safeScheduleErrorText(err) {
+  if (err && (err.sql || err.bindings || err.severity || err.routine)) return `${err.name || 'Error'}:${err.code || 'unknown'}`;
+  return err?.message;
+}
+
 async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, leadId, keepOpenForQuote, followUpPlan, extraction }) {
   if (!hold || row?.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || row.customer_confirmed || row.status !== 'pending') return false;
   const callId = row.source_call_log_id || callLogId;
@@ -1897,6 +1904,7 @@ async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, le
     visit_link: streetLevelVisitLink(row.id, dateOnlyISO(row.scheduled_date)),
     ...(followUpPlan ? { follow_up_plan: { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null } } : {}),
   };
+  try {
   const card = await trx('triage_items')
     .where({ call_log_id: callId, reason_code: 'outbound_booking_review' })
     .whereIn('status', ['open', 'in_progress'])
@@ -1919,6 +1927,12 @@ async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, le
       .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
   }
   await syncCallReviewStatus(trx, callId);
+  } catch (err) {
+    // The card writes carry the street address in their bound payload, and a Knex / driver error can
+    // echo those bindings in its message: rethrow code / name only so the scheduling catch (which logs
+    // and persists the message) never sees address text.
+    throw Object.assign(new Error(`street_level_promotion_failed${err?.code ? `:${err.code}` : ''}`), { code: 'street_level_promotion_failed', cause: undefined });
+  }
   return true;
 }
 // Rings the one "confirm the address" admin bell for a held visit. Reads the visit
@@ -18937,8 +18951,11 @@ const CallRecordingProcessor = {
               appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false, skippedReason: 'unparseable_date' };
             }
           } catch (schedErr) {
-            logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
-            appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
+            // A database / driver error can echo its bound values (street address, phone) in its message:
+            // log and persist code / name only for those; deliberate application errors keep their text.
+            const schedErrText = safeScheduleErrorText(schedErr);
+            logger.error(`[call-proc] Failed to create scheduled service: ${schedErrText}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
+            appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErrText, smsSent: false };
             // A fenced geographic veto (Codex #5403 r7) is a HOLD, not a
             // failure: surface it exactly like the pre-fence veto — skip
             // reason, confirm reason, and in legacy/shadow routing the
@@ -22049,6 +22066,7 @@ CallRecordingProcessor._test = {
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
   promoteReusedRowToStreetLevelHold,
+  safeScheduleErrorText,
   streetLevelProofAddressChanged,
   ringStreetLevelHoldBell,
   summarizePriorCall,
