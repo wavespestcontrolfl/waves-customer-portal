@@ -254,12 +254,12 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   }
   const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today });
   if (!facts) return null;
-  return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate }) ? facts : null;
+  return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate, recordIds: facts.recordIds }) ? facts : null;
 }
 
 // After a read on a connection without snapshot isolation: is the facts' date still the newest performed date, and is there still no
 // visit today and no unrecorded later visit?
-async function isStillTheLastVisit({ customerId, conn, today, serviceDate }) {
+async function isStillTheLastVisit({ customerId, conn, today, serviceDate, recordIds = [] }) {
   const performed = () => conn('service_records')
     .where('service_records.customer_id', customerId)
     .where('service_records.status', 'completed')
@@ -268,13 +268,18 @@ async function isStillTheLastVisit({ customerId, conn, today, serviceDate }) {
       NON_PERFORMED_VISIT_OUTCOMES,
     );
   // ORDER (Codex #5416 r33): on READ COMMITTED each statement sees every commit made before it starts, so the newest-date read
-  // goes LAST. A visit that commits while the guards run is then seen by it (a newer date refuses); a visit that commits after it
+  // goes LAST. A visit that commits while the guards run is then seen by it (a newer date or a new record refuses); one that commits after it
   // lands after this final read, at the send itself. Read first, a visit committing between it and the guards would pass both.
   if (await hasVisitToday(conn, customerId, today)) return false;
   if (await hasMultipleProperties(conn, customerId)) return false;
   if (await hasUnrecordedVisitSince(conn, customerId, serviceDate, today)) return false;
-  const newest = await performed().max('service_records.service_date as service_date').first();
-  return dateOnlyString(newest && newest.service_date) === serviceDate;
+  // ONE final statement (Codex #5416 r34): every performed record on or after the visit date. Any later date, or any record on
+  // the same date beyond the ones the facts were read from (a second visit landing that day), refuses.
+  const since = await performed()
+    .where('service_records.service_date', '>=', serviceDate)
+    .select('service_records.id', 'service_records.service_date');
+  if (!Array.isArray(since) || since.some((r) => dateOnlyString(r.service_date) !== serviceDate)) return false;
+  return JSON.stringify(since.map((r) => String(r.id)).sort()) === JSON.stringify([...recordIds].map(String).sort());
 }
 
 // A customer with more than one active property (a home and a rental, say) cannot be answered from "the latest visit": the

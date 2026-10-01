@@ -261,6 +261,7 @@ describe('label row selection (mock knex)', () => {
         resolve() {
           if (table === 'scheduled_services') return scheduledToday;
           if (table === 'customer_properties') return []; // one property (r32 multi-property guard)
+          if (this.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.service_date' && o[2] === '>=')) return newest ? visits.map((v) => ({ id: v.id, service_date: newest })) : []; // r34 final re-check
           if (table === 'service_products as sp') return rows;
           if (this.ops.some((o) => o[0] === 'where' && ((o[1] && typeof o[1] === 'object' && 'service_date' in o[1]) || o[1] === 'service_date'))) return recordsToday;
           return visits;
@@ -1565,7 +1566,7 @@ describe('r23: past-qualified weekdays, additive timing in the visit aggregate, 
         for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'leftJoin', 'orderBy', 'max']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
         const visits = [{ id: 'r2', structured_notes: null, service_data: { reportIdentitySnapshot: { version: 1, productFacts: facts } } }];
         q.first = () => Promise.resolve(q.ops.some((o) => o[0] === 'max') ? { service_date: '2026-06-05' } : null);
-        q.select = () => Promise.resolve(table === 'scheduled_services' || table === 'customer_properties' ? [] : (table === 'service_products as sp' ? rows : (q.ops.some((o) => o[0] === 'where' && o[1] && typeof o[1] === 'object' && 'service_date' in o[1]) ? [] : visits)));
+        q.select = () => Promise.resolve(q.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.service_date' && o[2] === '>=') ? [{ id: 'r2', service_date: '2026-06-05' }] : table === 'scheduled_services' || table === 'customer_properties' ? [] : (table === 'service_products as sp' ? rows : (q.ops.some((o) => o[0] === 'where' && o[1] && typeof o[1] === 'object' && 'service_date' in o[1]) ? [] : visits)));
         return q;
       };
       return make;
@@ -1718,6 +1719,7 @@ describe('r25: rendered-thread visit references, structural re-entry topic, kind
             const eq = eqDate('scheduled_date');
             return Promise.resolve(scheduled.filter((r) => !skip.includes(r.status) && (eq ? r.scheduled_date === eq : (r.scheduled_date >= b['>='] && r.scheduled_date <= b['<=']))));
           }
+          if (q.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.service_date' && o[2] === '>=')) return Promise.resolve([{ id: 'r2', service_date: '2026-06-05' }]);
           if (table === 'customer_properties') return Promise.resolve([]);
           if (table === 'service_products as sp') return Promise.resolve([{ id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide' }]);
           const eq = eqDate('service_date');
@@ -2467,6 +2469,8 @@ describe('r34: deictic indoor stay; one consistent read of the last visit; the i
         for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'max']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
         q.first = () => Promise.resolve({ service_date: newestDates[Math.min(counters.max++, newestDates.length - 1)] });
         q.select = () => {
+          // r34: the re-check's final statement (every performed record on or after the visit date)
+          if (q.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.service_date' && o[2] === '>=')) return Promise.resolve([{ id: 'r2', service_date: newestDates[Math.min(counters.max++, newestDates.length - 1)] }]);
           if (table === 'scheduled_services') return Promise.resolve(scheduledByCall[Math.min(counters.sched++, scheduledByCall.length - 1)] || []);
           if (table === 'customer_properties') return Promise.resolve([]);
           if (table === 'service_products as sp') return Promise.resolve([{ id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide' }]);
@@ -2558,11 +2562,22 @@ describe('r34: deictic indoor stay; one consistent read of the last visit; the i
       };
       conn.counters = base.counters;
       expect((await read(conn)).serviceDate).toBe('2026-06-05');
-      const recheck = order.slice(order.lastIndexOf('service_records:first', order.length - 2) + 1);
-      expect(order[order.length - 1]).toBe('service_records:first');
-      expect(recheck.length).toBeGreaterThan(0);
+      expect(order[order.length - 1]).toBe('service_records:select');
       // a newer visit that lands during the guards: the final newest-date read sees it
       expect(await read(makeConn({ newestDates: ['2026-06-05', '2026-06-09'] }))).toBeNull();
+    });
+    test('r34: a second record landing on the SAME date during the re-check refuses (the final statement compares the record set)', async () => {
+      const base = makeConn({ newestDates: ['2026-06-05'] });
+      const conn = (table) => {
+        const q = base(table);
+        const select = q.select;
+        q.select = (...a) => (q.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.service_date' && o[2] === '>=')
+          ? Promise.resolve([{ id: 'r2', service_date: '2026-06-05' }, { id: 'r9', service_date: '2026-06-05' }])
+          : select(...a));
+        return q;
+      };
+      conn.counters = base.counters;
+      expect(await read(conn)).toBeNull();
     });
     test('fetchLabelFacts keeps its time limit and fails safe when the transaction never settles', async () => {
       const conn = { transaction: () => new Promise(() => {}) };
