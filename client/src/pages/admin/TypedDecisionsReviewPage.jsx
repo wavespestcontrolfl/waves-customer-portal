@@ -262,6 +262,12 @@ export default function TypedDecisionsReviewPage({ embedded = false } = {}) {
     }
   }, [buildUrl, cursor]);
 
+  // Labeling the whole loaded page empties the list while older rows remain:
+  // fetch the next page from the same cursor so the queue never dead-ends.
+  useEffect(() => {
+    if (!loading && !loadingMore && !error && hasMore && reviews.length === 0) loadOlder();
+  }, [loading, loadingMore, error, hasMore, reviews.length, loadOlder]);
+
   // After a label: drop the row when it no longer belongs to the current
   // filter, otherwise update it in place (keeping the loaded subject text).
   const handleLabeled = useCallback((id, updated) => {

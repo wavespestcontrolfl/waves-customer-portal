@@ -159,3 +159,20 @@ it('on 409 answer_changed shows the notice and reloads the list without a replac
   expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
   expect(lists).toBe(2);
 });
+
+it('labeling the whole loaded page fetches the next page instead of dead-ending', async () => {
+  const page = Array.from({ length: 50 }, (_, i) => yesNoRow({ id: `p${i}`, question: `Question ${i}` }));
+  adminFetch.mockImplementation(async (url, options) => {
+    if (options?.method === 'POST') return { review: { labelStatus: 'confirmed_correct' } };
+    if (url.includes('before_id=p49')) return { reviews: [yesNoRow({ id: 'next1', question: 'Next page question' })], count: 1 };
+    return { reviews: page, count: 50 };
+  });
+  render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
+  await screen.findByText('Question 0');
+  for (let i = 0; i < 50; i += 1) {
+    fireEvent.click(screen.getAllByRole('button', { name: 'Jev right' })[0]);
+    await waitFor(() => expect(screen.queryByText(`Question ${i}`)).toBeNull());
+  }
+  expect(await screen.findByText('Next page question')).toBeInTheDocument();
+  expect(adminFetch.mock.calls.at(-1)[0]).toContain('before_id=p49');
+}, 30000);
