@@ -17,10 +17,20 @@
  *        before the send, and what a rebuild of a scheduled batch needs first
  *   GET  /api/admin/rate-review/apply-holds         rate-review notices the nightly
  *        apply refused, with the reason
+ *   GET  /api/admin/rate-review/batches/:key/send-preview  who would get a letter,
+ *        on which channels, every suppression with its reason, and the digest
+ *        the send must match (services/rate-review-comms.js) — reads only
+ *   GET  /api/admin/rate-review/batches/:key/rows/:rowId/letter-preview  the
+ *        rendered letter for that row's customer ({ subject, html }); 404 until
+ *        the row has a scheduled notice — sends nothing
+ *   POST /api/admin/rate-review/batches/:key/send   send the batch's letters
+ *        (email + SMS pointer) against { expectedDigest } from the preview;
+ *        409 when the list or the cost block changed since, or no cost block
  *
- * No sends and no approval parsing here — approval is the admin screen's
- * POST (UI PR), the notices are sent by the comms PR, and the nightly apply
- * lives in services/rate-review-apply.js (scheduler 3:10 AM ET).
+ * Approval and send happen ONLY here, from the authenticated Rate review
+ * screen — never by email reply (CLAUDE.md rule 14: email approval is never
+ * extended to customer comms or money). The nightly apply lives in
+ * services/rate-review-apply.js (scheduler 3:10 AM ET).
  */
 const express = require('express');
 const router = express.Router();
@@ -31,6 +41,7 @@ const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const logger = require('../services/logger');
 const rateReview = require('../services/rate-review');
 const rateReviewApply = require('../services/rate-review-apply');
+const rateReviewComms = require('../services/rate-review-comms');
 
 // The same advisory lock the monthly tick holds (scheduler.js
 // runExclusive('rate-review-monthly')): a build and its digest never
@@ -210,6 +221,61 @@ router.post('/batches/:key/digest', async (req, res) => {
     const status = Number.isInteger(err && err.status) ? err.status : 'network';
     logger.error(`[admin-rate-review] digest for ${key} could not be sent (status ${status})`);
     return res.status(502).json({ error: 'The rate review digest could not be delivered — try again.', reason: 'digest_delivery_failed', digestStatus: status });
+  }
+});
+
+// ── comms: preview, letter, send (services/rate-review-comms.js) ─────────
+
+router.get('/batches/:key/send-preview', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  try {
+    const preview = await rateReviewComms.sendPreview(key);
+    if (!preview.ok) return res.status(404).json({ error: 'Rate review is not enabled', reason: preview.reason });
+    return res.json(preview);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] send preview failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not build the send preview' });
+  }
+});
+
+router.get('/batches/:key/rows/:rowId/letter-preview', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const rowId = String(req.params.rowId || '');
+  if (!/^[0-9a-f-]{36}$/i.test(rowId)) return res.status(400).json({ error: 'row id must be a uuid' });
+  try {
+    const letter = await rateReviewComms.letterPreview(key, rowId);
+    if (!letter.ok) return res.status(404).json({ error: 'Rate review is not enabled', reason: letter.reason });
+    return res.json({ subject: letter.subject, html: letter.html, costBlockReady: letter.costBlockReady, suppressed: letter.suppressed });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] letter preview failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not render the letter' });
+  }
+});
+
+const SEND_REFUSALS = {
+  cost_block_missing: 'Write the cost block before sending — the letter prints it.',
+  list_changed: 'The send list or the cost block changed since the preview — review it again.',
+  nothing_to_send: 'Nothing in this batch can be sent right now.',
+};
+
+router.post('/batches/:key/send', async (req, res) => {
+  const key = validBatchKey(req, res);
+  if (!key) return;
+  const expectedDigest = req.body && typeof req.body.expectedDigest === 'string' ? req.body.expectedDigest : '';
+  if (!/^[0-9a-f]{64}$/.test(expectedDigest)) return res.status(400).json({ error: 'expectedDigest from the send preview is required' });
+  try {
+    const result = await rateReviewComms.sendBatch(key, { expectedDigest, actorId: req.technicianId || null });
+    if (!result.ok && SEND_REFUSALS[result.reason]) return res.status(409).json({ error: SEND_REFUSALS[result.reason], reason: result.reason });
+    if (!result.ok && result.reason === 'gate_off') return res.status(404).json({ error: 'Rate review is not enabled', reason: result.reason });
+    return res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[admin-rate-review] send failed for ${key}: ${err.message}`);
+    return res.status(500).json({ error: 'Could not send the rate review letters' });
   }
 });
 

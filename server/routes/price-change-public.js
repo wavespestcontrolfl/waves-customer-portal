@@ -5,6 +5,14 @@
  * guide page). Payload is deliberately minimal: first name, the price
  * change itself, and support contact — a forwarded/leaked link never yields
  * usable PII. Views are counted for the delivery record.
+ *
+ * Annual rate review notices (rate_review_row_id set) also carry `review`:
+ * the letter as it was SENT (frozen on the notice by
+ * services/rate-review-comms.js — service, old/new rate per application or
+ * per prepaid year, effective date, the reason, the owner's cost block).
+ * Only a delivered rate-review notice renders: an undelivered one is 404
+ * and is neither counted nor flipped to viewed (its letter is not
+ * customer-facing yet, and 'viewed' must never stand in for delivery).
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -14,6 +22,7 @@ const logger = require('../services/logger');
 const { formatMoney } = require('../services/price-change-notices');
 const { formatDisplayDate } = require('../utils/date-only');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { publicReview } = require('../services/rate-review-comms');
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -43,6 +52,8 @@ router.get('/:token', async (req, res) => {
   try {
     const notice = await db('price_change_notices').where({ notice_token: token }).first();
     if (!notice) return res.status(404).json({ error: 'Not found' });
+    const review = publicReview(notice);
+    if (review && review.unavailable) return res.status(404).json({ error: 'Not found' });
 
     const customer = await db('customers').where({ id: notice.customer_id }).first('first_name');
     const firstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
@@ -61,6 +72,7 @@ router.get('/:token', async (req, res) => {
       cadenceLabel: notice.cadence_label || 'month',
       effectiveDate: formatDisplayDate(notice.effective_date, { fallback: '' }),
       supportPhone: WAVES_SUPPORT_PHONE_DISPLAY,
+      ...(review ? { review } : {}),
     });
   } catch (err) {
     logger.error(`[price-change-public] error for token: ${err.message}`);

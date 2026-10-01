@@ -2008,7 +2008,12 @@ Content-Disposition; no view-analytics writes on this route),
 32-hex token format gate, 60 req/min rate limit, privacy headers
 `no-store`/`noindex`/`no-referrer`, generic 404; payload is first name +
 the price change only — no address/email/PII; view counted for the
-delivery record),
+delivery record; an annual rate review notice adds `review` — the
+letter frozen at send: service line name, old/new rate per application
+or per prepaid year, effective date, the per-line reason from stored
+ranking facts and the owner's cost block, still no address/email/PII —
+and an UNDELIVERED rate-review notice is a generic 404, never counted
+or flipped to viewed),
 `/api/public/products` (read-only export; returns only active +
 customer_visibility=public + content_status=approved_for_public products;
 excludes pricing, vendor, SKU, dilution, MOA, inventory fields),

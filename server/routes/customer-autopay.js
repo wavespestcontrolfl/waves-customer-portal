@@ -184,6 +184,17 @@ router.get('/', async (req, res, next) => {
 
     const recentEvents = cancelledRead ? [] : await getRecent(req.customerId, 10);
 
+    // Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-
+    // applied rate change shows on the billing card as the upcoming rate
+    // and the next charge at it. Gate off or nothing pending = no field
+    // (byte-identical payload); a read failure omits it, never the card.
+    let rateChanges = [];
+    try {
+      rateChanges = await require('../services/rate-review-comms').upcomingRateChanges(req.customerId);
+    } catch (rateErr) {
+      logger.warn(`[customer-autopay] upcoming rate changes read failed: ${rateErr.message}`);
+    }
+
     res.json({
       state,
       autopay_enabled: customerAutopayEnabled,
@@ -207,6 +218,7 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
+      ...(rateChanges.length ? { rate_changes: rateChanges } : {}),
     });
   } catch (err) { next(err); }
 });

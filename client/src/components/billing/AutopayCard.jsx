@@ -548,6 +548,27 @@ export default function AutopayCard({
         </div>
       </div>
 
+      {/* Annual rate review (dark, GATE_RATE_REVIEW): a delivered rate
+          change the nightly apply has not written yet — the upcoming rate
+          and the next charge at it, with the notice it came from. The
+          server omits rate_changes when there is none. */}
+      {Array.isArray(data.rate_changes) && data.rate_changes.length > 0 && (
+        <div data-testid="rate-review-upcoming" data-glass="soft" style={{ margin: '12px 0', padding: '12px 14px', borderRadius: 10, border: `1px solid ${PORTAL_BILLING.borderStrong}`, background: PORTAL_BILLING.surface }}>
+          <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: PORTAL_BILLING.muted, marginBottom: 6 }}>Upcoming rate</div>
+          {data.rate_changes.map((change) => (
+            <div key={change.noticePath} style={{ padding: '4px 0' }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
+                {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
+              </div>
+              <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
+                Now {change.current} per {change.unit}. Next charge at the new rate: {change.next} on {formatDate(change.effectiveDate)}.{' '}
+                <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {!modal && errorBanner}
 
       {!modal && bankPending && (

@@ -201,7 +201,7 @@ function validateEffectiveDate(effectiveDate) {
 // a corrected address can — and because the idempotency key includes the
 // resolved recipient, a corrected address mints a fresh key and sends,
 // while same-address retries keep deduping against the prior attempt.
-async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
+async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'] }) {
   let attempted = false;
   try {
     const EmailTemplateLibrary = require('./email-template-library');
@@ -213,7 +213,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
     const recipientHash = crypto.createHash('sha256').update(to.toLowerCase()).digest('hex').slice(0, 10);
     const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'billing.price_change_notice',
+      templateKey,
       to,
       recipientType: 'customer',
       recipientId: customer.id,
@@ -222,7 +222,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
       // -stream suppression must not block a customer's advance notice
       // (global bounce suppression still blocks, correctly).
       suppressionGroupKey: 'transactional_required',
-      categories: ['billing', 'price_change_notice'],
+      categories,
       idempotencyKey: `${idempotencyKeyBase}:${recipientHash}`,
       suppressProviderErrorLog: true,
       payload: {
@@ -467,4 +467,8 @@ module.exports = {
   createAndSendBatch,
   formatMoney,
   MIN_NOTICE_DAYS,
+  // The rate review letter (services/rate-review-comms.js) sends through
+  // the same two legs — its own email template, this SMS pointer.
+  sendNoticeEmail,
+  sendNoticeSms,
 };
