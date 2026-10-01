@@ -27,7 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -235,6 +235,10 @@ function approvedReportProductFacts(catalog = {}) {
     // rewrites what an old visit told the customer. Internal only: it is NOT
     // copied onto applications[].product (the public payload).
     wateringRule: resolveWateringRule(catalog),
+    // Label mow hold in days (integer 1..14, or null = the label says nothing),
+    // frozen the same way and equally internal-only. Old frozen facts have no
+    // key: that is no claim, never a live catalog fallback.
+    mowHoldDays: normalizeMowHoldDays(catalog.mow_hold_days),
   };
 }
 
@@ -382,6 +386,7 @@ async function attachApprovedReportProductFactsBase(knex, products = [], { froze
         'formulation',
         'application_method',
         'post_application_watering',
+        'mow_hold_days',
       );
   } catch {
     // Signal the failure instead of silently returning bare rows (codex P2
@@ -2580,7 +2585,10 @@ async function lawnWateringRuleStamp(service, knex) {
     const revisionOf = new Map(revisions.map((r) => [String(r.id), r.updated_at ? new Date(r.updated_at).toISOString() : '']));
     const pairs = (products || []).map((p) => {
       const id = canonicalProductId(p.product_id);
-      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
+      // A label mow hold re-keys the render when it changes; no value adds
+      // nothing, so visits without one keep their existing stamp.
+      const mow = normalizeMowHoldDays(p.approved_report_product_facts?.mowHoldDays);
+      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}${mow != null ? `|mow=${mow}` : ''}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
     }).sort();
     return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
   } catch {
@@ -3605,6 +3613,7 @@ async function buildReportWateringInstruction({ products, service, completionTim
     rules: (Array.isArray(products) ? products : []).map((p) => ({
       name: p?.product_name || null,
       rule: p?.approved_report_product_facts?.wateringRule || null,
+      mowHoldDays: p?.approved_report_product_facts?.mowHoldDays ?? null,
     })),
     completedAt: completionTime,
     runtime,
@@ -3616,15 +3625,18 @@ async function buildReportWateringInstruction({ products, service, completionTim
 // lawnReportV2.wateringInstruction location is still read). Later reads replay it, so
 // a sprinkler-head or run-minutes edit after the visit never rewrites the
 // minutes an old report told the customer. Shape-checked; anything else is
-// ignored and the instruction is regenerated.
+// ignored and the instruction is regenerated. A state-null instruction is a
+// snapshot only when it carries a label mow hold (the mow line is independent of
+// the watering state and freezes with the rest of the record).
 const FROZEN_INSTRUCTION_STATES = ['hold', 'water_in', 'hold_then_water_in', 'none'];
 function readFrozenWateringInstruction(structured) {
   const frozen = structured?.lawnWateringFreeze?.wateringInstruction || structured?.lawnReportV2?.wateringInstruction;
   if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
   const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
   const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
-  // A state-null instruction is a no-claim, never a snapshot: it is regenerated.
-  return frozen.state !== null && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+  // A state-null instruction with no mow hold is a no-claim, never a snapshot:
+  // it is regenerated.
+  return (frozen.state !== null || isValidMowHold(frozen.mowHold)) && stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
 }
 
 // Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
@@ -3645,8 +3657,19 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 // the completion text all read. expiresAt is when the instruction lapses.
 // The plan-dependent sentence is composed here, from the weekly plan present on
 // THIS render (composeBannerLines); the frozen instruction never carries it.
+// A label mow hold rides beside the watering lines as banner.mowHold (its own
+// last line on the page); it never enters `lines`, which other readers take as
+// watering text. A visit with a mow hold and no watering claim still gets a
+// banner (state null, no lines).
 function buildWateringBanner(instruction, weekPlan = null) {
-  if (!instruction || !instruction.state || !instruction.lines.length) return null;
+  if (!instruction) return null;
+  const mowHold = isValidMowHold(instruction.mowHold) ? instruction.mowHold : null;
+  const hasWatering = !!instruction.state && Array.isArray(instruction.lines) && instruction.lines.length > 0;
+  if (!hasWatering) {
+    return mowHold
+      ? { state: null, lines: [], holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: instruction.ruleSource || null, mowHold }
+      : null;
+  }
   const planPresent = !!weekPlan?.title && weekPlan.visitInPlanWeek !== false;
   const runDepth = weekPlan?.depthInches;
   return {
@@ -3662,6 +3685,7 @@ function buildWateringBanner(instruction, weekPlan = null) {
     // the clock time.
     expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
     ruleSource: instruction.ruleSource,
+    ...(mowHold ? { mowHold } : {}),
   };
 }
 

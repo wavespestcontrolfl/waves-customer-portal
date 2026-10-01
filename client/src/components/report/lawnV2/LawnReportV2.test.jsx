@@ -431,6 +431,43 @@ describe('LawnWateringBanner', () => {
     expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent('No watering change');
   });
 
+  const MOW = { days: 2, untilDate: '2026-10-03', untilLabel: 'Sat', line: 'Mowing: hold off until Sat, 2 days after today\'s treatment.' };
+
+  it('a label mow hold is its own last line, after the watering lines', () => {
+    renderBanner({ ...BANNERS.hold, mowHold: MOW });
+    const banner = screen.getByTestId('lawn-watering-banner');
+    const mow = screen.getByTestId('lawn-watering-banner-mow');
+    expect(mow).toHaveTextContent(MOW.line);
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(BANNERS.hold.lines[0]);
+    expect(banner.lastElementChild).toBe(mow);
+  });
+
+  it('no mow hold, no mow line', () => {
+    renderBanner(BANNERS.hold);
+    expect(screen.queryByTestId('lawn-watering-banner-mow')).toBeNull();
+    expect(screen.getByTestId('lawn-watering-banner')).not.toHaveTextContent('Mowing');
+  });
+
+  it('a mow hold with no watering claim still renders, headed as mowing', () => {
+    renderBanner({ state: null, lines: [], expiresAt: null, mowHold: MOW });
+    const banner = screen.getByTestId('lawn-watering-banner');
+    expect(banner).toHaveTextContent('Mowing after today’s visit');
+    expect(banner).not.toHaveTextContent('Watering after');
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(MOW.line);
+    expect(screen.queryByTestId('lawn-watering-banner-mow')).toBeNull();
+  });
+
+  it('the mow line stays after the watering note has ended (the report is a record)', () => {
+    renderBanner({ ...BANNERS.hold, expiresAt: PAST, mowHold: MOW });
+    expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    expect(screen.getByTestId('lawn-watering-banner-mow')).toHaveTextContent(MOW.line);
+  });
+
+  it('print keeps the mow line too', () => {
+    renderBanner({ ...BANNERS.hold, mowHold: MOW }, { print: true });
+    expect(screen.getByTestId('lawn-watering-banner-mow')).toHaveTextContent(MOW.line);
+  });
+
   it('null or empty banner renders nothing', () => {
     for (const banner of [null, undefined, { state: 'hold', lines: [] }]) {
       const { unmount } = renderBanner(banner);
