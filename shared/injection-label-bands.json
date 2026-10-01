@@ -1,0 +1,151 @@
+[
+  {
+    "product": "IMA-jet Systemic Insecticide",
+    "source": "IMA-jet label, EPA 74578-1 (arborjet.com IMA-jet_WebsiteLabel_2020-1.pdf): 2.0-4.0 mL per inch DBH for adelgids, aphids, gall wasps, lacebugs, leafhoppers, leaf miners, mealybugs, psyllids, soft scales, thrips, whiteflies; 4.0-8.0 mL for borers, beetles, royal palm bug, sawfly larvae, spotted lanternfly and the same sap feeders at the higher rate. Under 12 in use the lower rate; over 24 in always the highest; severe infestation, the highest.",
+    "match": "\\bima[\\s-]*jet\\b(?![\\s-]*10\\b)",
+    "basis": "inch",
+    "pick": "Target pest",
+    "note": "Label: under 12 in use the lower rate, 12 to 24 in the range, over 24 in the highest; a severe infestation takes the highest rate at any size.",
+    "bands": [
+      {
+        "key": "sap_feeders",
+        "label": "Aphids, scales, whiteflies and other sap feeders",
+        "low": 2,
+        "high": 4,
+        "sizes": [
+          {
+            "below": 12,
+            "low": 2,
+            "high": 2
+          },
+          {
+            "from": 12,
+            "through": 24,
+            "low": 2,
+            "high": 4
+          },
+          {
+            "above": 24,
+            "low": 4,
+            "high": 4
+          }
+        ]
+      },
+      {
+        "key": "sap_feeders_severe",
+        "label": "Sap feeders, severe infestation",
+        "low": 4,
+        "high": 4
+      },
+      {
+        "key": "borers",
+        "label": "Borers, beetles, lanternfly, royal palm bug, sawfly",
+        "low": 4,
+        "high": 8,
+        "sizes": [
+          {
+            "below": 12,
+            "low": 4,
+            "high": 4
+          },
+          {
+            "from": 12,
+            "through": 24,
+            "low": 4,
+            "high": 8
+          },
+          {
+            "above": 24,
+            "low": 8,
+            "high": 8
+          }
+        ]
+      },
+      {
+        "key": "borers_severe",
+        "label": "Borers or beetles, severe infestation",
+        "low": 8,
+        "high": 8
+      }
+    ]
+  },
+  {
+    "product": "PHOSPHO-jet",
+    "source": "PHOSPHO-jet label, EPA 74578-3 (arborjet.com PHOSPHO-jet_websitelabel_8.5x11_1072020.pdf): 3.5 mL per inch DBH in trees less than 12 in; 3.5 to 5.0 for trees 12 to 24 in; 5.0 to 7.0 in trees greater than 24 in.",
+    "match": "\\bphospho[\\s-]*jet\\b",
+    "basis": "inch",
+    "bands": [
+      {
+        "key": "under_12",
+        "label": "Under 12 in",
+        "below": 12,
+        "low": 3.5,
+        "high": 3.5
+      },
+      {
+        "key": "12_to_24",
+        "label": "12 to 24 in",
+        "from": 12,
+        "through": 24,
+        "low": 3.5,
+        "high": 5
+      },
+      {
+        "key": "over_24",
+        "label": "Over 24 in",
+        "above": 24,
+        "low": 5,
+        "high": 7
+      }
+    ]
+  },
+  {
+    "product": "Mn-jet Fe",
+    "source": "Mn-jet Fe insert rev 8.2017 (arborjet.com): Low Rate 5 mL/inch DBH (early summer to maturity, through the growing season); High Rate 10-15 mL/inch DBH (late summer or fall).",
+    "match": "\\bmn[\\s-]*jet\\b",
+    "basis": "inch",
+    "pick": "Season",
+    "bands": [
+      {
+        "key": "low",
+        "label": "Growing season (low rate)",
+        "low": 5,
+        "high": 5
+      },
+      {
+        "key": "late_season",
+        "label": "Late summer or fall (high rate)",
+        "low": 10,
+        "high": 15
+      }
+    ]
+  },
+  {
+    "product": "PALM-jet Mg",
+    "source": "PALM-jet Mg label (arborjet.com PALM-jet-Mg_Website_Label.pdf): Small 6-12 ft spread = 5-10 mL/palm; Medium 12-24 ft = 10-20 mL/palm; Large 24-48 ft = 20-30 mL/palm.",
+    "match": "\\bpalm[\\s-]*jet\\b",
+    "basis": "palm",
+    "pick": "Palm size",
+    "bands": [
+      {
+        "key": "small",
+        "label": "Small palm (6 to 12 ft spread)",
+        "low": 5,
+        "high": 10
+      },
+      {
+        "key": "medium",
+        "label": "Medium palm (12 to 24 ft spread)",
+        "low": 10,
+        "high": 20
+      },
+      {
+        "key": "large",
+        "label": "Large palm (24 to 48 ft spread)",
+        "low": 20,
+        "high": 30
+      }
+    ],
+    "note": "Label: palm size is the canopy spread, measured across the fronds."
+  }
+]

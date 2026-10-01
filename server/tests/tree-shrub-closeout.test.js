@@ -241,14 +241,24 @@ describe('Tree/Shrub closeout validation', () => {
   });
 });
 
-describe('injection record product id', () => {
-  it('keeps the catalog id the form recorded for the injection product', () => {
-    expect(normalizeTreeShrubCloseout({ injectionRecord: { product: 'Arborjet PHOSPHO-Jet', productId: 'pj-1' } }).injectionRecord.productId).toBe('pj-1');
-    expect(normalizeTreeShrubCloseout({ injectionRecord: { product: 'Tree-age' } }).injectionRecord.productId).toBeNull();
+describe('injection label band', () => {
+  it('keeps the band the dose was worked out from with the record', () => {
+    const normalized = normalizeTreeShrubCloseout({
+      injectionRecord: { product: 'Arborjet Ima-Jet 10', labelBand: { product: 'Arborjet Ima-Jet 10', key: 'low' } },
+    });
+    expect(normalized.injectionRecord.labelBand).toEqual({ product: 'Arborjet Ima-Jet 10', key: 'low' });
+  });
+
+  it('reads anything else as no band', () => {
+    for (const labelBand of [undefined, null, 'low', { key: '' }, { key: 'Low Rate!' }, { key: 'x'.repeat(41) }]) {
+      expect(normalizeTreeShrubCloseout({ injectionRecord: { labelBand } }).injectionRecord.labelBand).toBeNull();
+    }
   });
 });
 
 describe('injection record against the product label', () => {
+  const IMA_JET = { id: 'ij-1', name: 'Arborjet Ima-Jet Systemic Insecticide', category: 'insecticide', default_rate: '2-8', default_unit: 'ml/inch dbh', application_method: 'trunk_injection' };
+  const IMA_JET_10 = { id: 'ij-10', name: 'Arborjet Ima-Jet 10', category: 'insecticide', default_rate: '1-6', default_unit: 'ml/inch dbh', application_method: 'trunk_injection' };
   const PHOSPHO = { id: 'pj-1', name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', category: 'fungicide', default_rate: '3.5-7', default_unit: 'ml/inch dbh', application_method: 'trunk_injection' };
   const injectionCodes = (row, record) => validate({
     products: [{ productId: row.id, name: row.name, totalAmount: 2, amountUnit: 'tsp' }],
@@ -261,14 +271,28 @@ describe('injection record against the product label', () => {
     },
   }).blocks.map((block) => block.code).filter((code) => code.startsWith('tree_shrub_injection'));
 
-  test('matches the label by the catalog id the form recorded, even after a rename', () => {
-    expect(injectionCodes(PHOSPHO, { product: 'PHOSPHO old name', productId: PHOSPHO.id, sizeClassOrDbh: '30 cm DBH' })).toEqual(['tree_shrub_injection_dbh_inches']);
+  test('a label split by the tech pick needs the band, picked for this product', () => {
+    expect(injectionCodes(IMA_JET, {})).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET, { labelBand: { product: 'Other', key: 'sap_feeders' } })).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'low' } })).toEqual(['tree_shrub_injection_band_required']);
+    expect(injectionCodes(IMA_JET, { labelBand: { product: IMA_JET.name, key: 'sap_feeders' } })).toEqual([]);
+    // Trunk size settles PHOSPHO-jet's band: nothing to pick.
+    expect(injectionCodes(PHOSPHO, {})).toEqual([]);
+    // A label not read in full (IMA-jet 10) has no band table to pick from.
+    expect(injectionCodes(IMA_JET_10, {})).toEqual([]);
   });
 
-  test('a catalog rate the client cannot read is not checked against', () => {
-    for (const default_rate of ['', 'see label']) {
-      expect(injectionCodes({ ...PHOSPHO, default_rate }, { sizeClassOrDbh: 'Large' })).toEqual([]);
+  test('a catalog rate the client cannot read asks for no band (the form shows no picker)', () => {
+    for (const default_rate of ['', 'see label', '0-4']) {
+      expect(injectionCodes({ ...IMA_JET, default_rate }, {})).toEqual([]);
     }
+  });
+
+  test('a palm label band is the recorded palm size', () => {
+    const PALM_JET = { id: 'pm-1', name: 'Arborjet Palm-Jet Palm Nutrition', category: 'fertilizer', default_rate: '5-30', default_unit: 'ml/palm', application_method: 'trunk_injection' };
+    const band = { product: PALM_JET.name, key: 'small' };
+    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' })).toEqual([]);
+    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['tree_shrub_injection_palm_size_mismatch']);
   });
 
   test('a per-inch label needs the trunk in inches above zero', () => {
