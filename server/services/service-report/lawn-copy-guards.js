@@ -341,7 +341,11 @@ function extractNumericTokens(text) {
     const unit = m[1] ? unitKey(m[1]) : (m[2] ? unitKey(m[2]) : null);
     if (/^overnight$/.test(full)) tokens.push({ key: 'overnight', kind: 'vague', unit: 'night', values: [], match: full });
     else if (/^within/.test(full)) tokens.push({ key: `within:${unit}`, kind: 'vague', unit, values: [], match: full });
-    else if (TIME_UNITS.has(unit)) tokens.push({ key: `next:${unit}`, kind: 'vague', unit, values: [], match: full });
+    // The whole relative phrase is the key: "the coming weeks" (plural, open
+    // span) never licenses "next week" (singular), and the word itself
+    // (next / coming / following, plus any few / couple of / several) is kept
+    // (codex pre-push P1).
+    else if (TIME_UNITS.has(unit)) tokens.push({ key: `rel:${full.replace(/\s+/g, ' ').trim()}`, kind: 'vague', unit, values: [], match: full });
     else continue;
     mask(m.index, m.index + full.length);
   }

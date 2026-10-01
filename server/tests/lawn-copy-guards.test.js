@@ -818,3 +818,18 @@ describe('fraction-of phrases are never read as their trailing article', () => {
     expect(checkLawnModelCopy('Expect a change in a week.', { allowedText: ['1 week'] }).ok).toBe(true);
   });
 });
+
+describe('relative timing phrases keep their exact wording', () => {
+  const { checkLawnModelCopy } = require('../services/service-report/lawn-copy-guards');
+  test.each([
+    ['Expect a change in the coming weeks.', 'next week'],
+    ['Expect a change over the next few weeks.', 'next week'],
+    ['Expect a change over the following week.', 'next week'],
+    ['Expect a change next week.', 'the coming weeks'],
+  ])('%s is not licensed by %s', (line, allowed) => {
+    expect(checkLawnModelCopy(line, { allowedText: [allowed] }).ok).toBe(false);
+  });
+  test('the same phrase still matches itself', () => {
+    expect(checkLawnModelCopy('Expect a change over the next few weeks.', { allowedText: ['Color can shift over the next few weeks.'] }).ok).toBe(true);
+  });
+});
