@@ -310,8 +310,10 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
 
   test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+    // PR #5499: the open-loop recheck is composed at the same boundary
+    expect(src).toContain('openLoopsDecisionProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
   });
 });
 
@@ -523,5 +525,16 @@ describe('open-loop commitments recheck', () => {
       await expect(check({ dbi: routeDb({ visit: visit(), ahead: 1 }) }))
         .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (stop_count_stale)' });
     });
+  });
+
+  test('decision-row boundary form (composer / scheduled replay): reads through the handoff connection', async () => {
+    const { openLoopsDecisionProviderPreSendCheck } = require('../services/agent-decision-send-checks');
+    const check = openLoopsDecisionProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'ok' });
+    expect(check.afterMarker).toBe(check);
+    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'open' }]) })).resolves.toEqual({ ok: true });
+    await expect(check({ dbi: commitmentsDb([{ id: 'cc-1', status: 'fulfilled' }]) }))
+      .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_STALE_AT_BOUNDARY', reason: 'open-loop facts stale (commitment_closed)' });
+    await expect(check({ dbi: () => { throw new Error('down'); } }))
+      .resolves.toMatchObject({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', retryable: true });
   });
 });

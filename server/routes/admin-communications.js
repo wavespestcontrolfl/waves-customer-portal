@@ -1095,9 +1095,16 @@ router.post('/sms', async (req, res, next) => {
       // check ran in verifyAgentDraftDecision, before this route's many link / claim /
       // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
       // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      // Open-loop facts (PR #5499) ride the same boundary: a promise can close, or the
+      // visit-status window lapse, during those awaits too.
       ...(verifiedAgentDecision?.id ? {
-        providerPreSendCheck: require('../services/agent-decision-send-checks')
-          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+        providerPreSendCheck: (() => {
+          const checks = require('../services/agent-decision-send-checks');
+          return checks.composeProviderPreSendChecks(
+            checks.etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+            checks.openLoopsDecisionProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+          );
+        })(),
       } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the

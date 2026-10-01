@@ -222,6 +222,35 @@ function openLoopsProviderPreSendCheck({ commitmentIds, status = null, factsGene
   return markRepeatable(check);
 }
 
+// The decision-row form (reviewer composer send, scheduled replay): reads the
+// decision through the handoff's connection, then the same verdicts. Like the
+// LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
+// (the earlier send-time check already failed closed on it); a read error refuses
+// retryably.
+function openLoopsDecisionProviderPreSendCheck({ decisionId, getBody }) {
+  const check = async ({ dbi } = {}) => {
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot');
+      reason = await openLoopsBlockReason({ decision: row || {}, outgoingBody, dbh: conn });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] open-loop boundary recheck failed for decision ${decisionId}: ${err.message}; blocking send`);
+      reason = 'open_loops_recheck_failed';
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'open_loops_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY' : 'OPEN_LOOPS_STALE_AT_BOUNDARY',
+      reason: `open-loop facts stale (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
 // Run several provider-boundary predicates in order; the first refusal wins.
 // undefined entries are skipped; returns undefined when there is nothing to run.
 function composeProviderPreSendChecks(...checks) {
@@ -373,4 +402,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, parseInputSnapshot, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks, markRepeatable };
