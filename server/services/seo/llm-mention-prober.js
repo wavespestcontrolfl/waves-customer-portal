@@ -6,8 +6,13 @@
  * among competitors, which of our pages get cited, and the sentiment.
  *
  * Coverage (hybrid, per owner decision 2026-05-30):
- *   - ChatGPT  → OpenAI search-grounded model (live web)        [OPENAI_API_KEY]
- *   - Gemini   → Google google_search grounding tool (live web) [GEMINI_API_KEY]
+ *   - ChatGPT  → the ChatGPT app via DataForSEO's LLM scraper   [DATAFORSEO_*]
+ *                (owner decision 2026-10-01; falls back to the OpenAI
+ *                search-grounded API when LLM_MENTIONS_APP_SCRAPER=false
+ *                or DataForSEO is not configured)               [OPENAI_API_KEY]
+ *   - Gemini   → the Gemini app via DataForSEO's LLM scraper    [DATAFORSEO_*]
+ *                (same switch; API fallback: Google google_search
+ *                grounding tool)                                [GEMINI_API_KEY]
  *   - Claude   → Anthropic web_search tool (live web)           [ANTHROPIC_API_KEY]
  *   - Google AI Overview → DataForSEO SERP AI overview          [DATAFORSEO_*]
  *   - Perplexity → Sonar search-grounded model (live web)       [PERPLEXITY_API_KEY]
@@ -20,6 +25,11 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
+const appScraper = require('./llm-app-scraper');
+const {
+  RANK_METHOD_ALL_NAMED, RANK_METHOD_KNOWN_LIST, WAVES_RE, URL_RE, COMPETITORS,
+  knownCompetitorHits, canonicalCompany, buildCompaniesNamed, rankAmong, WAVES_NAME,
+} = require('./llm-mention-companies');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
 const benchmark = require('../../data/aeo-benchmark-v1.json');
@@ -40,14 +50,8 @@ let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
 
 // ── Detection constants ──────────────────────────────────────────────────────
-// A source URL alone is not a brand mention in the answer.
-const WAVES_RE = /\bwaves\s+(?:pest\s+control|lawn(?:\s+care)?)\b/i;
-
-const COMPETITORS = [
-  'turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen',
-  'hometeam', 'arrow environmental', 'nozzle nolen', 'massey services',
-];
-const URL_RE = /https?:\/\/[^\s)<>\]"']+/gi;
+// WAVES_RE, COMPETITORS and the all-companies ranking live in
+// llm-mention-companies.js.
 
 // Cost guard — hard ceiling on probes per run regardless of query × platform math.
 const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
@@ -66,6 +70,16 @@ function parseSentimentLabel(text) {
   return labels.size === 1 ? words[0] : null;
 }
 
+// A row written before rank_method existed ranked Waves only against the
+// hard-coded COMPETITORS list.
+const rankMethodOf = row => row.rank_method || RANK_METHOD_KNOWN_LIST;
+
+// rankMethods labels which rank semantics a group's `recommended` (top-3) rate
+// mixes; the rates themselves are unchanged (no backfill of old rows).
+function rankMethodsOf(rows) {
+  return [...new Set(rows.map(rankMethodOf))].sort();
+}
+
 function observationGroups(rows, keyFor) {
   const groups = new Map();
   for (const row of rows) {
@@ -73,7 +87,21 @@ function observationGroups(rows, keyFor) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
-  return [...groups].map(([key, observations]) => ({ key, ...summarizeObservations(observations) }));
+  return [...groups].map(([key, observations]) => ({
+    key, ...summarizeObservations(observations), rankMethods: rankMethodsOf(observations),
+  }));
+}
+
+// Names of the other companies an observation says it named. New rows carry
+// the full ordered list (companies_named); rows from before fall back to the
+// known-list hits (competitors_mentioned). Both pass through canonicalCompany
+// so "turner pest" (old rows) and "Turner Pest Control" (new) count as one.
+function rivalsOf(row) {
+  const named = row.companies_named == null ? null : asJsonArray(row.companies_named);
+  const names = named
+    ? named.map(c => c?.name)
+    : asJsonArray(row.competitors_mentioned).map(c => c?.name);
+  return [...new Set(names.map(canonicalCompany).filter(name => name && name !== WAVES_NAME))];
 }
 
 function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
@@ -88,6 +116,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   }
   const grid = [...latest.values()].map(row => ({
     ...row,
+    rank_method: rankMethodOf(row),
     waves_cited_urls: ownedCitations(row),
     measured: isMeasuredAnswer(row),
     benchmark_id: questionMap.get(row.query)?.id || null,
@@ -102,9 +131,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
     for (const url of ownedCitations(row)) pageCites.set(url, (pageCites.get(url) || 0) + 1);
   }
   for (const row of grid.filter(isMeasuredAnswer)) {
-    for (const competitor of asJsonArray(row.competitors_mentioned)) {
-      if (competitor?.name) competitors.set(competitor.name, (competitors.get(competitor.name) || 0) + 1);
-    }
+    for (const name of rivalsOf(row)) competitors.set(name, (competitors.get(name) || 0) + 1);
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
   // Coverage: the expected active-question x configured-engine pairs, each
@@ -149,6 +176,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
       queriesTracked: new Set(grid.map(row => row.query)).size,
       platforms: observedEngines,
       configuredPlatforms: configuredEngines,
+      rankMethods: rankMethodsOf(grid),
     },
     benchmark: {
       version: benchmark.version,
@@ -156,6 +184,7 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
       activeQuestions: activeQuestionCount,
       observedQuestions: new Set(fixed.filter(isMeasuredAnswer).map(row => row.query)).size,
       ...summarizeObservations(fixed),
+      rankMethods: rankMethodsOf(fixed),
       expectedObservations,
       missing,
       coverage: {
@@ -255,6 +284,40 @@ class LLMMentionProber {
       return { text, citedUrls, sourceUrls, citationsComplete: complete, model: data.modelVersion || model, grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] Gemini probe failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * ChatGPT as the app shows it (DataForSEO LLM scraper, US-level location).
+   * null = nothing measured (gate off / unconfigured / request or task error):
+   * no row, retried next run. No per-request API fallback: a silent switch
+   * would mix two models under one platform row; flip the env to change engine.
+   */
+  async probeChatGPTApp(query) {
+    return this.probeAppScraper('chatgpt', appScraper.CHATGPT_PATH, appScraper.chatGPTRequestBody(query),
+      appScraper.parseChatGPTScraper, query);
+  }
+
+  async probeGeminiApp(query, queryRow = null) {
+    return this.probeAppScraper('gemini', appScraper.GEMINI_PATH, appScraper.geminiRequestBody(query, queryRow?.city),
+      appScraper.parseGeminiScraper, query);
+  }
+
+  async probeAppScraper(platform, path, body, parseResponse, query) {
+    try {
+      const data = await dataforseo.request(path, body);
+      if (data == null) return null;
+      const probe = parseResponse(data);
+      if (!probe) {
+        const task = data?.tasks?.[0];
+        logger.warn(`[llm-mentions] ${platform} app scraper task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      if (probe.costUsd > 0) logger.info(`[llm-mentions] ${platform} app scraper cost $${probe.costUsd} (${probe.model})`);
+      return probe;
+    } catch (err) {
+      logger.warn(`[llm-mentions] ${platform} app scraper failed: ${err.message}`);
       return null;
     }
   }
@@ -402,8 +465,17 @@ class LLMMentionProber {
   /** Map platform key → probe fn. */
   get providers() {
     const providers = {};
-    if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
-    if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);
+    // ChatGPT and Gemini measure the consumer apps through DataForSEO by
+    // default (owner decision 2026-10-01); each keeps ONE row per question per
+    // day, so the scraper replaces the API probe rather than running beside it.
+    // The stored model_version tells the two kinds of row apart.
+    if (appScraper.appScraperEnabled(process.env.LLM_MENTIONS_APP_SCRAPER, dataforseo.configured)) {
+      providers.chatgpt = q => this.probeChatGPTApp(q);
+      providers.gemini = (q, queryRow) => this.probeGeminiApp(q, queryRow);
+    } else {
+      if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
+      if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);
+    }
     if (process.env.ANTHROPIC_API_KEY && Anthropic) providers.claude = q => this.probeClaude(q);
     if (dataforseo.configured) providers.google_ai_overview = q => this.probeGoogleAIOverview(q);
     if (process.env.PERPLEXITY_API_KEY) providers.perplexity = q => this.probePerplexity(q);
@@ -423,26 +495,24 @@ class LLMMentionProber {
 
     const brandInText = WAVES_RE.test(prose);
     const wavesMentioned = brandInText;
-
-    // Brand ordering → rank position of first Waves reference among brands.
-    const positions = [];
     const wavesIdx = lower.search(WAVES_RE);
-    if (wavesIdx >= 0) positions.push({ name: 'waves', idx: wavesIdx });
-    const competitors = [];
-    for (const c of COMPETITORS) {
-      const idx = lower.indexOf(c);
-      if (idx >= 0) { competitors.push({ name: c, context: text.substring(idx, idx + 120) }); positions.push({ name: c, idx }); }
-    }
-    positions.sort((a, b) => a.idx - b.idx);
-    const rankPosition = brandInText
-      ? positions.findIndex(p => p.name === 'waves') + 1
-      : null;
+
+    // Every company the answer names, in order of first mention, with Waves at
+    // its position: rank_position is Waves' place in THAT list, not among the
+    // hard-coded rivals only. Provider brand entities lead when the scraper
+    // supplies them; known rivals are always added by text position.
+    const companiesNamed = buildCompaniesNamed(text, { entities: probe.entities });
+    const competitors = knownCompetitorHits(lower)
+      .map(({ key, idx }) => ({ name: key, context: text.substring(idx, idx + 120) }));
+    const rankPosition = brandInText ? rankAmong(companiesNamed) : null;
 
     return {
       wavesMentioned,
       mentionContext: brandInText ? text.substring(Math.max(0, wavesIdx - 60), wavesIdx + 240) : null,
       competitors,
-      rankPosition: rankPosition && rankPosition > 0 ? rankPosition : null,
+      companiesNamed,
+      rankMethod: RANK_METHOD_ALL_NAMED,
+      rankPosition,
       citedUrls,
       wavesCitedUrls,
       sourceUrls: cleanUrls(probe.sourceUrls),
@@ -512,7 +582,7 @@ class LLMMentionProber {
       .select('query', 'llm_platform');
     const done = new Set(existing.map(r => `${r.query}::${r.llm_platform}`));
 
-    let attempted = 0, probed = 0, inserted = 0, wavesHits = 0;
+    let attempted = 0, probed = 0, inserted = 0, wavesHits = 0, scraperCostUsd = 0;
     for (const { qrow, platform } of pending) {
       if (attempted >= MAX_PROBES_PER_RUN) {
         logger.warn(`[llm-mentions] Hit MAX_PROBES_PER_RUN (${MAX_PROBES_PER_RUN}); stopping early`);
@@ -521,9 +591,10 @@ class LLMMentionProber {
       if (done.has(`${qrow.query}::${platform}`)) continue;
 
       attempted++; // a failed request may still have incurred provider cost
-      const probe = await providers[platform](qrow.query);
+      const probe = await providers[platform](qrow.query, qrow);
       if (!probe) continue;
       probed++;
+      scraperCostUsd += probe.costUsd || 0;
 
       const parsed = this.parse(probe);
       const sentiment = parsed.wavesMentioned
@@ -549,6 +620,8 @@ class LLMMentionProber {
         mention_context: parsed.mentionContext,
         waves_mentioned: parsed.wavesMentioned,
         competitors_mentioned: JSON.stringify(parsed.competitors),
+        companies_named: JSON.stringify(parsed.companiesNamed),
+        rank_method: parsed.rankMethod,
         cited_urls: JSON.stringify(parsed.citedUrls),
         waves_cited_urls: JSON.stringify(parsed.wavesCitedUrls),
         source_urls: JSON.stringify(parsed.sourceUrls),
@@ -566,7 +639,8 @@ class LLMMentionProber {
       if (ins.rowCount !== 0) inserted++;
     }
 
-    logger.info(`[llm-mentions] batch ${batchId}: ${probed} probed, ${inserted} recorded, ${wavesHits} Waves hits`);
+    logger.info(`[llm-mentions] batch ${batchId}: ${probed} probed, ${inserted} recorded, ${wavesHits} Waves hits`
+      + (scraperCostUsd > 0 ? `, app scraper cost $${scraperCostUsd.toFixed(3)}` : ''));
     return { batchId, attempted, probed, inserted, wavesHits };
   }
 
@@ -591,3 +665,4 @@ module.exports = new LLMMentionProber();
 module.exports.LLMMentionProber = LLMMentionProber;
 module.exports.buildDashboard = buildDashboard;
 module.exports.parseSentimentLabel = parseSentimentLabel;
+module.exports.COMPETITORS = COMPETITORS;
