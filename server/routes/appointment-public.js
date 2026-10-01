@@ -58,6 +58,7 @@ const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-ser
 const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -105,16 +106,14 @@ const UPCOMING_STATUSES = new Set(['pending', 'confirmed']);
 // rows) stay office-owned until reviewed — the customer must not be able to
 // self-confirm them from this token page any more than from the logged-in
 // portal. Shared invariant with routes/schedule.js.
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned } = require('../services/call-booking-source-actions');
 
 // A call-created booking the office hasn't reviewed: still 'pending',
 // dispatch-owned, and never customer-confirmed. Shared by the confirmable
 // flag and the rescheduleToken suppression so the page can neither confirm
 // nor reschedule a visit the authenticated routes hide (codex #3429 r3 P2).
 function dispatchOwnedUnreviewed(svc) {
-  return DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-    && String(svc.status || '').toLowerCase() === 'pending'
-    && !svc.customer_confirmed;
+  return isUnreviewedDispatchOwned(svc);
 }
 
 function gateOpen() {
@@ -692,6 +691,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'appointment', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online

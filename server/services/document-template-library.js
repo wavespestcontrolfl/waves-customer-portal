@@ -109,6 +109,42 @@ function assertTemplateSignatureMode(template = {}) {
   throw err;
 }
 
+/**
+ * Lock the template row for the rest of `trx` and refuse when the version
+ * the caller rendered from is no longer the active one.
+ *
+ * Every issuer (the admin issue route, the bulk guide send) resolves
+ * active_version_id with an UNLOCKED read, renders the body, and only then
+ * opens the transaction that inserts the contract snapshot. A publish, the
+ * version editor, or a content migration — each takes this row FOR UPDATE
+ * before repointing active_version_id — can commit in that gap, so an
+ * insert that trusts the pre-transaction read puts a just-deactivated
+ * version's wording in front of the customer: a contract issued after a
+ * disclosure rollout without the disclosure (Codex #5463 P1). FOR UPDATE
+ * on the template row parks the issuer behind that writer; the fresh read
+ * then either still matches (proceed) or the pointer/status moved (409 —
+ * the operator reloads and reissues from the now-active version).
+ *
+ * Lock order: AFTER any customer-scoped lock the caller holds (the comms
+ * fence, the termite advisory lock, the customers row) and immediately
+ * before the contract insert — the order every program-agreement writer
+ * holds, so a template-row waiter never sits on a customer row another
+ * issuer needs. Every writer that repoints the pointer takes ONLY this row.
+ */
+async function lockActiveVersionForIssue(trx, { template = {}, activeVersion = {} } = {}) {
+  const live = await trx('document_templates')
+    .where({ id: template.id })
+    .forUpdate()
+    .first('active_version_id', 'status');
+  if (!live || live.status !== 'active' || live.active_version_id !== activeVersion.id) {
+    const err = new Error('Document template changed while issuing — reload and try again.');
+    err.status = 409;
+    err.code = 'DOCUMENT_TEMPLATE_CHANGED';
+    throw err;
+  }
+  return live;
+}
+
 function validateTemplatePayload(body = {}, { partial = false } = {}) {
   const payload = {};
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'templateKey') || Object.prototype.hasOwnProperty.call(body, 'template_key')) {
@@ -341,6 +377,7 @@ module.exports = {
   cleanNumberArray,
   DEFAULT_REMINDER_SCHEDULE_DAYS,
   jsonb,
+  lockActiveVersionForIssue,
   normalizeDeliveryChannel,
   normalizeExpireAfterDays,
   normalizeStatus,

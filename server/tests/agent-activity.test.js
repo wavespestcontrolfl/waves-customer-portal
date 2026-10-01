@@ -246,7 +246,7 @@ describe('buildActivity digests', () => {
     expect(items.map((i) => [i.id, i.status, i.title, i.agent])).toEqual([
       ['digest:n1', 'awaiting_review', '3 promised quotes never went out — oldest 4d', 'Waves Ops'],
       ['digest:n2', 'failed', 'lead-to-cash invariants — 2 violations', 'Waves Ops'],
-      ['digest:n3', 'completed', 'brain review — 1 blocked', 'Waves Ops'],
+      ['digest:n3', 'awaiting_review', 'brain review — 1 blocked', 'Waves Ops'], // read is not done
       ['digest:n4', 'completed', 'autopay charge on a card hold', 'Waves Ops'],
       ['digest:n5', 'awaiting_review', 'Price-match draft ready — 3 opportunities for Mark', 'Waves Ops'],
     ]);
@@ -258,6 +258,49 @@ describe('buildActivity digests', () => {
     // never truncated — in-app mode this is the only copy of the digest
     const long = 'x'.repeat(5000);
     expect(buildActivity({ digests: [{ id: 'n5', title: 'ACT: long', body: long, created_at: '2026-09-02T05:00:00Z' }] }).items[0].detail).toHaveLength(5000);
+  });
+
+  it('read is not done: an opened ACT/REVIEW digest stays pending until done_at or a resolution closes it', () => {
+    const base = { body: 'x', created_at: '2026-09-02T06:00:00Z', read_at: '2026-09-02T09:00:00Z' };
+    const { items, summary } = buildActivity({
+      digests: [
+        { ...base, id: 'read-act', title: 'Read ACT', metadata: { kind: 'ACT', opsKey: 'a' } },
+        { ...base, id: 'read-review', title: 'Read review', metadata: { kind: 'REVIEW', opsKey: 'b' } },
+        { ...base, id: 'done-act', title: 'Done ACT', metadata: { kind: 'ACT', opsKey: 'c' }, done_at: '2026-09-02T10:00:00Z', done_by: '7' },
+        { ...base, id: 'resolved-act', title: 'Resolved ACT', metadata: { kind: 'ACT', opsKey: 'd', resolved: true, resolvedAt: '2026-09-02T11:00:00Z' } },
+        { ...base, id: 'read-fyi', title: 'Read FYI', metadata: { kind: 'FYI', opsKey: 'e' } },
+      ],
+    });
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    for (const id of ['digest:read-act', 'digest:read-review']) {
+      expect(byId[id]).toMatchObject({ status: 'awaiting_review', finishedAt: null, stepsDone: 0, doneAt: null });
+      expect(byId[id].subtitle).toMatch(/needs you$/);
+    }
+    expect(byId['digest:done-act']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T10:00:00.000Z', stepsDone: 1 });
+    expect(byId['digest:resolved-act']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T11:00:00.000Z' });
+    // FYI has nothing to act on: reading it finishes it.
+    expect(byId['digest:read-fyi']).toMatchObject({ status: 'completed', finishedAt: '2026-09-02T09:00:00.000Z' });
+    expect(summary).toMatchObject({ awaiting_review: 2, completed: 3 });
+  });
+
+  it('exposes the content version (the Done fence) only on a digest that can still be marked done', () => {
+    const v = 'a'.repeat(32);
+    const base = { body: 'x', created_at: '2026-09-02T06:00:00Z', read_at: null, version: v };
+    const { items } = buildActivity({
+      digests: [
+        { ...base, id: 'pending-act', title: 'Pending ACT', metadata: { kind: 'ACT', opsKey: 'a', feed: 'activity' } },
+        { ...base, id: 'pending-fix', title: 'Pending FIX', metadata: { kind: 'FIX', opsKey: 'b' } },
+        { ...base, id: 'done-act', title: 'Done ACT', metadata: { kind: 'ACT', opsKey: 'c' }, done_at: '2026-09-02T10:00:00Z' },
+        { ...base, id: 'resolved-act', title: 'Resolved ACT', metadata: { kind: 'ACT', opsKey: 'd', resolved: true } },
+        { ...base, id: 'no-version', title: 'Legacy fake', metadata: { kind: 'ACT', opsKey: 'e' }, version: undefined },
+      ],
+    });
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    expect(byId['digest:pending-act'].version).toBe(v);
+    expect(byId['digest:pending-fix'].version).toBe(v);
+    expect(byId['digest:done-act'].version).toBeNull();
+    expect(byId['digest:resolved-act'].version).toBeNull();
+    expect(byId['digest:no-version'].version).toBeNull();
   });
 
   it('a resolved finding (fall-off rule) reads as completed · cleared, even a FIX', () => {
@@ -273,6 +316,30 @@ describe('buildActivity digests', () => {
     ]);
     expect(items[0].finishedAt).toBe('2026-09-14T11:26:00.000Z');
     expect(items[1].finishedAt).toBe('2026-09-12T11:26:00.000Z');
+  });
+
+  it('a digest closed today sits in the timeline at its close, above a newer open one', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'open', title: 'Newer open', body: 'x', metadata: { kind: 'ACT', opsKey: 'a' }, created_at: '2026-09-29T10:00:00Z' },
+        { id: 'old', title: 'Old, done today', body: 'x', metadata: { kind: 'FIX', opsKey: 'b' },
+          done_at: '2026-09-30T15:00:00Z', done_by: '7', created_at: '2026-07-01T10:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => i.title)).toEqual(['Old, done today', 'Newer open']);
+    expect(items[0]).toMatchObject({ eventAt: '2026-09-30T15:00:00.000Z', startedAt: '2026-07-01T10:00:00.000Z' });
+    expect(items[1].eventAt).toBe('2026-09-29T10:00:00.000Z');
+  });
+
+  it('a digest marked done by hand reads Done: completed (even a FIX), finished at done_at, with its resolution', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'd1', title: 'Schedule — price the series', body: 'x', metadata: { kind: 'FIX', opsKey: 'k' }, read_at: '2026-09-12T10:00:00Z',
+          done_at: '2026-09-13T09:00:00Z', done_by: '7', resolution: 'Priced by phone', created_at: '2026-09-01T10:00:00Z' },
+      ],
+    });
+    expect(items[0]).toMatchObject({ status: 'completed', finishedAt: '2026-09-13T09:00:00.000Z', doneAt: '2026-09-13T09:00:00.000Z', resolution: 'Priced by phone' });
+    expect(items[0].subtitle).toBe('k · done');
   });
 
   it('admin-alerts-brevity scope: status comes from metadata.kind (no title prefix any more), and `detail` is preferred over `body`', () => {

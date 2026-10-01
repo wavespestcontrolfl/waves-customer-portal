@@ -54,7 +54,8 @@
  *     later retry deferral, which only ever advances send_at itself — the
  *     fixed anchor a retry's own 24h give-up measures against)
  *   { status: 'sent', lead_id, send_at, sent_at, ... }        — texted
- *   { status: 'skipped', reason, send_at, dispatched_at }     — was pending, blocked at send time
+ *   { status: 'skipped', reason, send_at, decided_at, failed? } — was pending, blocked at send time
+ *     (failed: true when delivery itself failed, not a policy block)
  * A cron tick (scheduler.js, every 5 min, mirroring reschedule-link-promises)
  * calls sweep(): stage() evaluates newly-extracted calls once, dispatch()
  * claims and sends whatever is due. Every terminal send-time decision (sent
@@ -287,8 +288,15 @@ const WANTS_ONSITE_INTENTS = new Set([
 // no_sms_consent_captured deliberately excluded: OWNER RULING 2026-09-28 —
 // this transactional follow-up may go to a caller who never explicitly
 // opted in, as long as it rides the consented destination (consentedDestination's
-// ANI/dialed-number path, implied consent); explicit refusals (do_not_contact,
-// sms_consent_given === false) and destination_not_consented still block it.
+// ANI/dialed-number path, implied consent); explicit refusals still block it,
+// through do_not_contact_requested above, STOP suppression at send, the
+// dedicated consent.sms_declined / sms_refusal_unrecorded check in
+// STAGING_CHECKS (schema 1.19.0) — sms_declined is a raw consent field, not
+// a triage_flags enum value, so it is never one of the flags excluded here —
+// and, codex P1 on #5292, a decline spoken on an EARLIER call for the same
+// phone (smsDeclinedOnEarlierCall, in DISPATCH_CHECKS and
+// NEVER_SEND_RECHECK_STEPS — this call's own extraction is never the only
+// evidence consulted). destination_not_consented still blocks it too.
 const EXCLUDED_TRIAGE_FLAGS = new Set([
   'out_of_service_area', 'hoa_common_area_requires_approval', 'commercial_requires_quote',
   'caller_not_authorized', 'do_not_contact_requested',
@@ -703,7 +711,27 @@ const STAGING_CHECKS = [
     return (disposition === 'booked' || disposition === 'no_action_needed') ? `disposition_${disposition}` : null;
   },
   (call, extraction) => (extraction.consent?.do_not_contact_request === true ? 'do_not_contact' : null),
-  (call, extraction) => (extraction.consent?.sms_consent_given === false ? 'sms_consent_refused' : null),
+  // No sms_consent_given === false check (dry run 2026-09-28): the field is a
+  // required boolean the prompt sets true ONLY on an explicit yes, so false
+  // means "never asked", not "refused" — it blocked 151 of 159 real new-lead
+  // calls, the exact opt-in requirement the owner ruling removed. Refusals
+  // still block, but through the dedicated field below (and STOP suppression
+  // at send) rather than sms_consent_given, which cannot tell "never asked"
+  // from "said no".
+  // sms_declined (schema 1.19.0, codex P1 on #5292): sms_consent_given=false
+  // ALSO covers an explicit "no" to "may I text you?" — the dry-run removal
+  // above stopped catching that refusal along with the "never asked"
+  // majority it was meant to unblock. sms_declined is the model's
+  // separately-judged field, true ONLY on an explicit decline. It is
+  // additive/optional in both schemas (AGENTS.md: extraction schema changes
+  // never add to `required`), so a pre-1.19 extraction — or any row the
+  // field is simply absent or null on — fails CLOSED here rather than
+  // assume no refusal was made.
+  (call, extraction) => {
+    const declined = extraction.consent?.sms_declined;
+    if (typeof declined !== 'boolean') return 'sms_refusal_unrecorded';
+    return declined === true ? 'sms_declined' : null;
+  },
   // Owner rule: never text someone who said the number isn't theirs (codex
   // pre-push P1). Read straight off the extraction: callback_number_needed
   // is derived into the processor's final flags, and the canonical sender
@@ -977,7 +1005,15 @@ async function claimForDispatch(conn, callId) {
 }
 
 async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
-  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, entry), updated_at: new Date() });
+  // decided_at: when a call reached its final outcome, so the weekly check
+  // reports it in that week rather than the week of the call. staged_at is
+  // carried through every rewrite (retries, sends, dispatch skips replace the
+  // whole entry), so the week a call was checked in never changes after
+  // staging (codex #5358 r6 P2).
+  const stagedAt = entry.staged_at || parseMetadata(call)[METADATA_KEY]?.staged_at;
+  const kept = stagedAt ? { ...entry, staged_at: stagedAt } : entry;
+  const stamped = entry.status === 'pending' ? kept : { ...kept, decided_at: new Date().toISOString() };
+  await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, stamped), updated_at: new Date() });
   if (!logActivity) return;
   const sent = entry.status === 'sent';
   await conn('activity_log').insert({
@@ -1032,6 +1068,68 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
     .whereNotIn('scheduled_services.status', ['cancelled'])
     .first('scheduled_services.id');
   return !!row;
+}
+
+// codex P1 on #5292 (thread PRRT_kwDOR3YQi86m6KVg, line 729): the dedicated
+// consent.sms_declined check above (STAGING_CHECKS) judges only THIS call's
+// own extraction. A caller who explicitly declined texts on an EARLIER
+// call, then makes a LATER eligible call where texting is never discussed
+// again, extracts sms_declined: false ("never asked" on that one call) and
+// would read as clear — the cross-call hold in auto-text-holds.js only
+// searches do_not_contact_request, never sms_declined. So any call for this
+// phone, at or before `asOf`, whose extraction recorded an explicit decline
+// blocks this lane.
+//
+// OWNER RULING 2026-09-29: any past "no texts" blocks this text for good —
+// a later opt-in never clears it. Letting a later opt-in supersede drew a
+// fresh Codex P1 each round (the opt-in must be bound to the same number,
+// then to the same consent scope, ...); this lane sends ~1–3 texts a month,
+// so never re-texting a past decliner costs next to nothing and closes that
+// class outright.
+//
+// Only a VALID V2 extraction counts — auto-text-holds.js's own do-not-
+// contact probe deliberately also reads legacy/invalid rows for that flag,
+// but a nuanced "did the caller actually decline or opt in" judgment is
+// model work this lane trusts only from a schema-validated row, matching
+// the dedicated sms_declined check's own valid-only posture. auto-text-
+// holds.js's own callsWith is NOT reused here (CLAUDE.md rule 15 caveat):
+// it takes no `asOf` bound, and this probe must never see a call that, from
+// the point of view of the call under judgment, has not happened yet — the
+// SAME nanpStoredPhoneClause matcher and non-sandbox modifier it uses are
+// reused instead. originCallId is included the same way callsWith includes
+// it: the call under judgment itself may carry the decisive statement even
+// when its own from/to columns do not literally match `phone` (e.g. a
+// spoken alternate number).
+async function smsDeclinedOnEarlierCall(conn, phone, { originCallId, asOf } = {}) {
+  const phoneKey = phoneIdentityKey(phone);
+  if (!phoneKey || phoneKey.length !== 10) return false;
+  const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+  const row = await conn('call_log')
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q))
+    .where((q) => q.whereRaw(nanpStoredPhoneClause('from_phone'), [phoneKey])
+      .orWhereRaw(nanpStoredPhoneClause('to_phone'), [phoneKey])
+      // codex r5 P1: a decline can be about the number the caller SPOKE
+      // ("call me at B, don't text it") — the same caller.phone_e164 that
+      // consentedDestination uses for alternate destinations.
+      .orWhereRaw(nanpStoredPhoneClause("(ai_extraction_enriched->'caller'->>'phone_e164')"), [phoneKey])
+      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
+    .where('v2_extraction_status', 'valid')
+    .where('created_at', '<=', asOf)
+    // An earlier call with no boolean sms_declined (absent before schema
+    // 1.19.0, or a JSON null — ->> is SQL NULL for both): an explicit "no"
+    // on it was recorded only as sms_consent_given false, indistinguishable
+    // from never asked. Fail closed — such a call
+    // counts as a possible decline (owner ruling 2026-09-29: any past "no"
+    // blocks; this lane sends ~1–3 texts a month). The call under judgment
+    // itself is exempt; its own missing field is sms_refusal_unrecorded at
+    // staging.
+    .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
+      .orWhere((legacy) => legacy.whereRaw("(ai_extraction_enriched->'consent'->>'sms_declined') IS NULL")
+        .modify((l) => { if (originCallId) l.whereNot('id', originCallId); })))
+    .first('ai_extraction_enriched');
+  if (!row) return false;
+  const declined = extractionOf(row)?.consent?.sms_declined;
+  return declined === true || typeof declined !== 'boolean';
 }
 
 // A short_codes row only proves a consultation link was MINTED — not sent.
@@ -1208,6 +1306,11 @@ const DISPATCH_CHECKS = [
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart, lead.phone)) ? 'booked_since_call' : null;
   },
+  // codex P1 on #5292: a decline spoken on ANY earlier call for this same
+  // phone (owner ruling 2026-09-29: never cleared). See smsDeclinedOnEarlierCall's
+  // own doc comment.
+  async ({ conn, call, lead, now }) => (
+    (await smsDeclinedOnEarlierCall(conn, lead.phone, { originCallId: call.id, asOf: now })) ? 'sms_declined_earlier_call' : null),
   async ({ conn, leadId, now }) => ((await linkSentRecently(conn, leadId, now)) ? 'link_sent_recently' : null),
   // Re-run the full stage-time predicate against the row as it stands now —
   // covers a re-extraction, a status edit, or anything else that changed
@@ -1421,10 +1524,9 @@ const NEVER_SEND_RECHECK_STEPS = [
   // earlier entry above judged (codex #5018 r14 P1): a reprocess can
   // correct the spoken alternate number, or withdraw its explicit
   // sms_consent_given, between that earlier check and this hook's own
-  // reload — stagingIneligibleReason's own sms_consent_refused entry
-  // only catches an EXPLICIT false for the call's general eligibility,
-  // never this narrower "is THIS destination number itself consented"
-  // question. Sending on stale consent evidence would violate the
+  // reload — stagingIneligibleReason judges the call's general
+  // eligibility, never this narrower "is THIS destination number itself
+  // consented" question. Sending on stale consent evidence would violate the
   // TCPA-consent-before-SMS invariant.
   (ctx) => (!consentedDestination(ctx.freshCall, extractionOf(ctx.freshCall), ctx.destinationPhone) ? { code: 'destination_not_consented' } : null),
   // Re-verified against the FRESH row (codex #5018 r15 P1):
@@ -1450,6 +1552,16 @@ const NEVER_SEND_RECHECK_STEPS = [
     const callStart = callStartedAt(ctx.call) || new Date(ctx.call.created_at);
     return (await bookedSinceCall(ctx.dbi, ctx.lead.customer_id, callStart, ctx.lead.phone)) ? { code: 'booked_since_call' } : null;
   },
+  // codex P1 on #5292: the send-time twin of the DISPATCH_CHECKS entry
+  // above, on ctx.dbi under the held lock, so a refusal spoken on a call
+  // that lands between dispatch and this actual provider request is still
+  // seen. Checked against the ACTUAL send destination (ctx.destinationPhone),
+  // not the lead's on-file phone dispatchIneligibleReason judged moments
+  // earlier — the same "the real send target, not a stale record" standard
+  // phone_changed_before_send and consentedDestination already apply here.
+  async (ctx) => (
+    (await smsDeclinedOnEarlierCall(ctx.dbi, ctx.destinationPhone, { originCallId: ctx.call.id, asOf: new Date() }))
+      ? { code: 'sms_declined_earlier_call' } : null),
   async (ctx) => ((await linkSentRecently(ctx.dbi, ctx.leadId, new Date())) ? { code: 'link_sent_recently' } : null),
 ];
 
@@ -1538,8 +1650,8 @@ async function deleteConsultationLinkAttempt(attemptId) {
 async function dispatchClaimedCall(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
   const leadId = entry.lead_id;
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   // The processor's own ownership fence, re-checked at send time (codex
@@ -1593,7 +1705,7 @@ async function dispatchClaimedCall(conn, call, now) {
   // dispatch time. Judging the deadline only after a send attempt means a
   // provider that happens to succeed on that overdue attempt would still
   // text a stale follow-up and record it as a normal send.
-  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout');
+  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout', { failed: true });
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);
@@ -1952,7 +2064,7 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   // terminal skip, not a reason to leave the marker rows as if it sent.
   if (pastRetryDeadline(entry, now)) {
     await clearDispatchMarkers(call);
-    return skip(result.code || result.reason || 'send_retry_timeout');
+    return skip(result.code || result.reason || 'send_retry_timeout', { failed: true });
   }
   await clearDispatchMarkers(call);
   const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
@@ -1965,14 +2077,43 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
 }
 
+// The refusals a working lane is EXPECTED to hit: the person opted out, is
+// suppressed or on do-not-call, has no consent, the number cannot take a
+// text, or a customer hold applies. Any other outcome that reaches the
+// blocked branch — a provider rejection, or a blocked result from the
+// pipeline itself (CONTRACT_VIOLATION, UNKNOWN_POLICY, a failed lookup) —
+// is a lane failure the weekly check must surface (codex #5358 r3 P1).
+// Listing the healthy codes, not the broken ones, means a new pipeline code
+// fails loud instead of reading as a normal skip.
+const EXPECTED_REFUSAL_CODES = new Set([
+  'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'SUPPRESSED_OPT_OUT', 'SUPPRESSED_WRONG_NUMBER',
+  'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_OTHER', 'DNC_SUPPRESSED',
+  'DELIVERY_SUPPRESSED', 'NON_MOBILE_SMS_RECIPIENT', 'NO_CONSENT_RECORD', 'NO_MARKETING_CONSENT',
+  'REASSIGNED_NUMBER_RISK', 'IDENTITY_TRUST_TOO_LOW', 'CHANNEL_EMAIL_ONLY', 'MOVE_HOLD',
+  'CALLBACK_NUMBER_HOLD', 'QUIET_HOURS_HOLD',
+]);
+
+// Twilio's own recipient-side rejections (unsubscribed 21610, non-mobile
+// 21614, invalid or unroutable number) come back as a provider failure with
+// providerErrorCode and no `blocked`; they are about the number, not the
+// lane (codex #5358 r5 P2).
+function isRecipientProviderRefusal(result) {
+  const { RECIPIENT_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+  return result.providerErrorCode != null && (RECIPIENT_TERMINAL_TWILIO_CODES || []).includes(String(result.providerErrorCode));
+}
+
+function isExpectedRefusal(result) {
+  return (result.blocked === true && EXPECTED_REFUSAL_CODES.has(result.code)) || isRecipientProviderRefusal(result);
+}
+
 function blockedOutcomeReason(result) {
   if (result.blocked) return result.code || result.reason || 'policy_block';
   return result.code || result.reason || 'provider_failed';
 }
 
 async function recordSendOutcome(conn, call, entry, leadId, now, result) {
-  const skip = async (reason) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+  const skip = async (reason, extra = {}) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
     return { sent: false, skipped: reason };
   };
   const kind = classifySendOutcomeKind(result);
@@ -1985,7 +2126,10 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   // Twilio terminal rejection, not merely a pre-dispatch policy refusal) —
   // see clearDispatchMarkers' own doc comment for why this is unconditional.
   await clearDispatchMarkers(call);
-  return skip(blockedOutcomeReason(result));
+  // An expected refusal (opt-out, suppression, no consent) is a correct
+  // skip; anything else is a failure. `failed` lets the weekly check tell
+  // the two apart without knowing every code.
+  return skip(blockedOutcomeReason(result), isExpectedRefusal(result) ? {} : { failed: true });
 }
 
 // A 'claimed' row a whole sweep tick failed to bring to a terminal status
@@ -2265,5 +2409,7 @@ module.exports = {
   // dispatchClaimedCall alone (its own pre-send deadline check already
   // gates the identical (entry, now) pair) — a direct reach-in test-only
   // export, same convention as the rest of this bag.
-  _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision },
+  _private: { isExpectedRefusal, recordDecision,
+    leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision, smsDeclinedOnEarlierCall,
+  },
 };

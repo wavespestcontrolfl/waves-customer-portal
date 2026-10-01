@@ -35,6 +35,7 @@ const {
 } = require('./pest-pressure/store');
 const { buildPestPressureCustomerView } = require('./pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('./pest-pressure/one-time-exclusion');
+const { isComparable } = require('./pest-pressure/score-scale');
 const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 // Best-effort: the tree/shrub module also carries vision plumbing — a load
 // failure degrades that component to raw overall_score, never the endpoint.
@@ -194,6 +195,9 @@ async function pestComponent(customerId, knex, activeLines) {
         // raw displayed_score would leak rows the customer can't see.)
         let previousScore = null;
         for (let j = i + 1; j < rows.length; j += 1) {
+          // #4741: never diff a score against one recorded on the other scale
+          // (technician tap vs. pre-09-24 blended) - that is not a change.
+          if (!isComparable(rows[i].pressure_scale, rows[j].pressure_scale)) continue;
           const olderView = await viewFor(rows[j]).catch(() => null);
           if (olderView && olderView.score != null) {
             previousScore = pressureToHealth(olderView.score);
@@ -454,5 +458,5 @@ async function buildPropertyScore(customerId, knex = db) {
 module.exports = {
   buildPropertyScore,
   // exported for tests
-  _test: { composeOverall, pressureToHealth, movementReason, loadActiveLineSet },
+  _test: { composeOverall, pressureToHealth, movementReason, loadActiveLineSet, pestComponent },
 };

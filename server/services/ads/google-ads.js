@@ -14,15 +14,9 @@ let _customer = null;
 /**
  * Returns true when all required env vars are present.
  */
-function isConfigured() {
-  return !!(
-    process.env.GOOGLE_ADS_DEVELOPER_TOKEN &&
-    process.env.GOOGLE_ADS_CLIENT_ID &&
-    process.env.GOOGLE_ADS_CLIENT_SECRET &&
-    process.env.GOOGLE_ADS_REFRESH_TOKEN &&
-    process.env.GOOGLE_ADS_CUSTOMER_ID
-  );
-}
+// Env-only check lives in a dependency-free module so callers that only need
+// "is Google configured?" (admin sync-status) don't load the SDK.
+const { isConfigured } = require('./google-ads-config');
 
 /**
  * Lazy-initialise the API client + customer handle.
@@ -71,7 +65,10 @@ function mapStatus(googleStatus) {
 // ---------------------------------------------------------------------------
 // syncCampaigns — pull all campaigns, upsert into ad_campaigns
 // ---------------------------------------------------------------------------
-async function syncCampaigns() {
+// Every sync* below takes `{ throwOnError }`: the scheduler opts in so a failed
+// sync rethrows into runExclusive (job_health 'failed' → ops-queue alert);
+// default callers (admin /sync route, tests) keep the "[] on failure" contract.
+async function syncCampaigns({ throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -168,10 +165,42 @@ async function syncCampaigns() {
       });
     }
 
+    // The GAQL above filters REMOVED campaigns out, so a campaign removed in
+    // Google Ads never comes back to be flipped by the upsert and would stay
+    // 'active'/'paused' locally (the dashboard filters status != 'removed' and
+    // the budget loop would keep acting on it). After the successful fetch,
+    // mark anything we hold that Google did not return as removed — with the
+    // same freshness fence as the upsert: a row a local writer touched after
+    // this fetch began is left for tomorrow's sync. Rows with a NULL
+    // platform_campaign_id are untouched (explicit whereNotNull: knex compiles an
+    // empty NOT IN list to always-true).
+    //
+    // The metrics query above is NOT a complete identity list: Google omits
+    // rows whose selected metrics are all zero, so a quiet live campaign can be
+    // missing from it. Reconcile against a metric-free identity query instead;
+    // if that query fails, the catch below skips the reconcile entirely.
+    const identityRows = await customer.query(`
+      SELECT campaign.id
+      FROM campaign
+      WHERE campaign.status != 'REMOVED'
+    `);
+    const liveIds = identityRows.map((row) => String(row.campaign?.id)).filter((id) => id && id !== 'undefined');
+    const removed = await db('ad_campaigns')
+      .where({ platform: 'google_ads' })
+      .whereNotNull('platform_campaign_id')
+      .whereNotIn('platform_campaign_id', liveIds)
+      .whereNot('status', 'removed')
+      .where('updated_at', '<', fetchStartedAt)
+      .update({ status: 'removed', updated_at: new Date() });
+    if (Number(removed) > 0) {
+      logger.info(`[google-ads] Marked ${removed} campaign(s) removed (no longer returned by Google Ads)`);
+    }
+
     logger.info(`[google-ads] Synced ${results.length} campaigns`);
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncCampaigns failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
@@ -189,7 +218,7 @@ function gaqlDateRange(days, now = new Date()) {
   return { since: fmt(since), until: fmt(now) };
 }
 
-async function syncDailyPerformance(days = 7) {
+async function syncDailyPerformance(days = 7, { throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -267,6 +296,7 @@ async function syncDailyPerformance(days = 7) {
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncDailyPerformance failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
@@ -274,7 +304,7 @@ async function syncDailyPerformance(days = 7) {
 // ---------------------------------------------------------------------------
 // syncSearchTerms — pull search term report for last N days
 // ---------------------------------------------------------------------------
-async function syncSearchTerms(days = 30) {
+async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
   const customer = getCustomer();
   if (!customer) return [];
 
@@ -342,6 +372,7 @@ async function syncSearchTerms(days = 30) {
     return results;
   } catch (err) {
     logger.error(`[google-ads] syncSearchTerms failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }

@@ -65,8 +65,9 @@ const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/in
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
-  FULL_ACCESS_TWO_STEP_TOOL_NAMES,
+  FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES, PREVIEW_ONLY_WRITE_TOOL_NAMES,
 } = require('../services/intelligence-bar/write-gates');
+const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
 const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -766,6 +767,28 @@ const PINNED_DISPLAY_BUILDERS = {
       message: preview.body_preview,
     }
     : null),
+  // Feature switches (Codex r1 on #5489): the card must show the live facts
+  // the preview read — current → new, what it means, the target and the
+  // restart — not just the raw gate name / value the model sent.
+  set_railway_gate: (params, preview) => (preview?.preview === true && preview.gate
+    ? {
+      gate: preview.gate,
+      change: `${preview.current_value} → ${preview.new_value}`,
+      meaning: preview.meaning,
+      controls: preview.controls,
+      target: `${preview.target?.service || 'portal'} (${preview.target?.environment || 'production'})`,
+      restart: preview.redeploy_notice,
+    }
+    : null),
+  set_growthbook_feature_environment: (params, preview) => (preview?.preview === true && preview.feature
+    ? {
+      feature: preview.feature,
+      change: `${preview.current_state} → ${preview.new_state}`,
+      default_value: preview.default_value ?? 'none set',
+      targeting_rules: preview.rule_count,
+      effect: preview.effect_note,
+    }
+    : null),
 };
 
 // Where a fingerprint-verified preview's `_version` rides to the executor,
@@ -984,6 +1007,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // card; the model relays the existing match to the operator.
     if (toolUse.name === 'create_customer' && preview?.already_exists) {
       return { failed: true, modelResult: preview };
+    }
+    // A feature switch already in the requested state is a plain answer, not
+    // a failure and not a card (Codex r3 on #5489): no is_error result, no
+    // Tool Health failure, nothing to confirm.
+    if (preview?.already_set === true) {
+      return { modelResult: preview };
     }
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
@@ -1611,8 +1640,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     modelResult: {
       ...preview,
       ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
-      pending_confirmation: true,
-      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
+      ...(PREVIEW_ONLY_WRITE_TOOL_NAMES.has(toolUse.name) ? {
+        preview_only: true,
+        note: 'Preview shown on a card that CANNOT be confirmed — applying this from the bar is not available yet. Do NOT retry this tool and do NOT say it will run; tell the operator the preview is on the card and the change has to be made in its own dashboard for now.',
+      } : {
+        pending_confirmation: true,
+        note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
+      }),
     },
     clientPayload: {
       id: row.id,
@@ -1891,6 +1925,7 @@ PESTICIDE / FERTILIZER / RODENTICIDE / IGR / ADJUVANT APPLICATION RATES (HARD RU
 EPA pesticide labels are legally enforceable — using a product inconsistently with labeling violates federal law. Apply these rules to every rate question:
 - Return rates ONLY from the label-backed product knowledge base. Never infer a rate from general training-data memory.
 - When you give a rate, include: product name, target pest/site, rate (with the rate basis e.g. "per 1000 sq ft" or "per gallon"), and EPA Reg. No. when available.
+- Never state a rate or amount in mL (owner rule), and never convert an mL figure yourself. A label rate the catalog keeps in mL comes back from get_product_info without a rate: say "Check the current label before applying." Say the same when a knowledge-base passage gives a rate only in mL. A container size (e.g. "250 ml") is how the product is sold and may be quoted as-is.
 - State PPE / re-entry interval (REI) / watering-in ONLY from the product's \`safety\` block returned by get_product_info — never from memory. If a safety field is absent there, say "check the product label" rather than supplying a default.
 - If label data is missing, stale, ambiguous, or you can't confirm the rate from the knowledge base, say: "Check the current label before applying." Do NOT guess, interpolate, or recall a number.
 - Never describe an off-label use, off-label site, or off-label combination — even if the tech asks.
@@ -2127,17 +2162,17 @@ RESPONSE STYLE:
 // context (getToolsForContext), so this block is appended for every admin
 // request rather than living inside one context prompt. Tech and non-admin
 // requests never load the tools, so their prompts must not describe them.
-const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only preview actions listed below):
+const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only confirmation-card actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card, and each is preview-only for now (the card cannot yet be confirmed — say so plainly if the operator tries). Never claim any of this for anyone else, and never claim any of these cards can be confirmed yet — point the operator to the relevant dashboard for everything else.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a card (owner-only, preview-only).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a card (owner-only, preview-only).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a card (owner-only, preview-only).
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card; the write happens only when the operator confirms the card, and it acts on exactly the target the card named. Two more switch actions — set_railway_gate (set a known GATE_* variable to 'true' or 'false' on the portal's production service) and set_growthbook_feature_environment (enable or disable a GrowthBook feature in one environment — the environment switch, not the value it serves) — prepare a card for the owner's login too, but they are PREVIEW-ONLY for now: the card cannot yet be confirmed, so never say it will run on Confirm; say the preview is shown and applying it is not available yet. For a gate, Railway restarts the portal briefly when a variable changes. If a confirmed action reports the outside service's token needs write access, say so plainly. Never claim any of this for anyone else — point the operator to the relevant dashboard for everything else.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a confirmation card (owner-only). set_railway_gate prepares a preview card setting one known GATE_* variable to the literal value 'true' or 'false' (owner-only, preview-only); only gates the portal already knows are accepted. The value is the raw variable value, not "on/off": some gates are inverted (a name ending in _OFF or _DISABLED — e.g. GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker OFF), so map what the operator wants to happen through the gate's meaning, and if that is unclear ask which value they want.
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a confirmation card (owner-only).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a confirmation card (owner-only).
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a card (owner-only, preview-only); request_codex_review always posts the exact text "@codex review".
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit). rerun_failed_github_checks / add_github_pr_label / request_codex_review prepare a confirmation card (owner-only); request_codex_review always posts the exact text "@codex review".
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads. set_growthbook_feature_environment prepares a card to enable or disable a feature in one environment (owner-only, preview-only). Enabled is NOT "serving true": an enabled feature serves its default value and rules, and a disabled environment makes callers fall back to their code default. Changing a flag's served value or rules happens in the GrowthBook UI.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
 - Meta Ads: get_meta_ads_delivery_status (effective_status = what is ACTUALLY delivering), get_meta_ads_issues (WITH_ISSUES/disapproved ads). Same rules as Google Ads.
 - Truck (Bouncie): get_truck_status (live location/running/fuel/tracker freshness), get_truck_trips (a day's trips + mileage — the live view of the tax mileage ledger's source).
@@ -2153,7 +2188,7 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- Beyond the short owner-only preview list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
+- Beyond the short owner-only list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
 
 
 // Default-off capability gates applied to EVERY context's list in one place
@@ -2641,7 +2676,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 - NEVER claim the action is done. Say it is awaiting their confirmation on the card below your message.
 - The card shows the exact effect set the operator is approving; a different target, amount, recipient, or effect is a NEW proposal — never assume an earlier approval carries over.
 - Re-query current records when asked about a confirmed write. Never infer execution from earlier assistant prose.
-- EXCEPTION — preview-only outside-service actions (Sentry, Cloudflare, Railway, GitHub, Search Console): their card CANNOT be confirmed yet. Never say they will run on Confirm; say the preview is shown and executing it is not available yet.`;
+- EXCEPTION — the preview-only switch actions (set_railway_gate, set_growthbook_feature_environment): their card CANNOT be confirmed yet. Never say they will run on Confirm; say the preview is shown and applying it is not available yet.`;
     }
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
@@ -3360,6 +3395,15 @@ router.post('/confirm-action', async (req, res, next) => {
       return res.status(409).json(result);
     }
 
+    // Preview-only switches (Codex r1 on #5489): their card shows no Confirm
+    // and their executors cannot commit yet, so a forged or stale confirm is
+    // refused here, before any dispatch.
+    if (PREVIEW_ONLY_WRITE_TOOL_NAMES.has(action.tool_name)) {
+      const result = { error: 'This is a preview only — applying it from the bar is not available yet.', code: 'preview_only' };
+      await PendingActions.recordResult(action.id, result);
+      return res.status(409).json(result);
+    }
+
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
       await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
       return res.status(404).json({ error: 'Agent Estimate is not enabled' });
@@ -3606,6 +3650,13 @@ router.post('/confirm-action', async (req, res, next) => {
           if (livePreview.rows_matched !== undefined) {
             execParams._verified_rows_matched = livePreview.rows_matched;
           }
+        }
+        // Outside-service writes (Sentry/Cloudflare/Railway/GitHub/GSC): the
+        // fingerprint-verified preview's resolved identifiers ARE the approved
+        // target — hand them to the executor as the only thing it acts on.
+        if (OUTSIDE_WRITE_TOOL_NAMES.has(action.tool_name)) {
+          for (const key of Object.keys(execParams)) if (key.startsWith('_verified_')) delete execParams[key];
+          Object.assign(execParams, outsideWritePins(action.tool_name, livePreview));
         }
         // Bind every inventory write to the exact resolved product and
         // full-precision preview, then recheck that version under domain locks.

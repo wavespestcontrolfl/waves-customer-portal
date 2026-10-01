@@ -25,8 +25,24 @@ jest.mock('../services/sms-suggest-mode', () => ({
   ignoreParkedSuggestions: jest.fn(async () => 1),
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
+  reserviceBookedReferenceBlock: jest.fn(async () => null),
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
   openTimesStillOffered: jest.fn(async () => ({ ok: true })),
+  // LIVE ETA send-time recheck (PR #5334) runs on every dispatchClaimedSend
+  // call — an empty claims list here means "this reply never claims an
+  // ETA", so it never reaches the DB/track-transitions leg. See
+  // sms-eta-freshness.test.js for that check's own coverage.
+  findEtaMinutesClaims: jest.fn(() => []),
+  bodyMentionsArrival: jest.fn(() => false),
+  // Round-41: with GATE_SMS_REAL_ANSWERS on, the send-time check classifies status wording
+  // even without a snapshot, so it now reads this too — "never claims" here as well.
+  bodyMentionsVisitStatus: jest.fn(() => false),
+  bodyHasTimedArrivalPhrase: jest.fn(() => false),
+  bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
+  // Structural default-deny (Codex round-7 P2): sms-eta-freshness.js unions
+  // this in whenever there's a snapshot/track link — empty here for the
+  // same "never claims an ETA" reason as findEtaMinutesClaims above.
+  findGroundedMinutesFigures: jest.fn(() => []),
 }));
 jest.mock('../services/sms-graduation', () => ({ evaluateAutoSendEligibility: jest.fn(async () => ({ eligible: true })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
@@ -44,6 +60,7 @@ function chain(overrides = {}) {
   q.first = jest.fn(async () => null);
   q.returning = jest.fn(async () => [{ id: 'claim-1' }]);
   q.update = jest.fn(async () => 1);
+  q.del = jest.fn(async () => 1);
   return Object.assign(q, overrides);
 }
 
@@ -99,6 +116,25 @@ test('a quoted slot that is STILL open sends normally', async () => {
     quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
   });
   expect(sendCustomerMessage).toHaveBeenCalled();
+});
+
+test('a scheduler-minted snapshot forwards scheduledServiceId to the recheck (GATE_SMS_OFFERS_SCHEDULER)', async () => {
+  drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
+  const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, scheduledServiceId: 'ss-1', source: 'scheduler' } };
+  await expect(attempt({ openTimesSnapshot: snap })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'ss-1' }));
+});
+
+test('a /book or estimate snapshot forwards its source (+ serviceKey) so the recheck asks the same picker (GATE_SMS_OFFERS_SCHEDULER)', async () => {
+  drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
+  const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, source: 'book', serviceKey: 'lawn_care' } };
+  await expect(attempt({ openTimesSnapshot: snap })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'book', serviceKey: 'lawn_care' }));
+  drafter.openTimesStillOffered.mockClear();
+  const est = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, estimateId: 'est-1', source: 'estimate' } };
+  await expect(attempt({ openTimesSnapshot: est })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'estimate', estimateId: 'est-1' }));
+  expect(drafter.openTimesStillOffered.mock.calls[0][0]).not.toHaveProperty('serviceKey');
 });
 
 test('the snapshot\'s serviceType is forwarded to the recheck when present (Codex r3 audit P1)', async () => {
@@ -172,5 +208,135 @@ describe('auto-send refuses an unowned follow-up promise', () => {
 
   test('no SLA phrase → unaffected', async () => {
     await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: true });
+  });
+});
+
+// Codex round-41 P2 (PR #5334): the auto-send executor's ETA check also runs at the TRUE
+// provider boundary, from the claim's in-memory snapshot.
+describe('auto-send supplies the live-ETA provider-boundary check', () => {
+  const sentArgs = () => sendCustomerMessage.mock.calls[0][0];
+
+  test('the provider request carries a providerPreSendCheck that passes for a reply with nothing to recheck', async () => {
+    await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: true });
+    const { providerPreSendCheck } = sentArgs();
+    expect(typeof providerPreSendCheck).toBe('function');
+    await expect(providerPreSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+  });
+
+  test('...and refuses (terminal) when the ETA claim is no longer backed by the snapshot at the boundary', async () => {
+    await attempt({ reply: 'Sounds good, thanks!' });
+    const { providerPreSendCheck } = sentArgs();
+    // The claim is now an ETA with no snapshot behind it: the shared check fails closed.
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    try {
+      await expect(providerPreSendCheck({ channel: 'sms' })).resolves.toMatchObject({
+        ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_snapshot)',
+      });
+    } finally {
+      drafter.findEtaMinutesClaims.mockReturnValue([]);
+    }
+  });
+});
+
+// Codex round-42 P2 (PR #5334): the draft's technician first name(s) are persisted with the
+// decision itself (input_snapshot.tech_names), independent of live entries.
+describe('auto-send persists the draft\'s technician names with the claimed decision', () => {
+  const insertedSnapshot = () => {
+    const row = decisions.insert.mock.calls[0][0];
+    return typeof row.input_snapshot === 'string' ? JSON.parse(row.input_snapshot) : row.input_snapshot;
+  };
+  test('tech_names rides in input_snapshot (names only) and in the claim used for the send-time check', async () => {
+    await expect(attempt({ reply: 'Sounds good, thanks!', techNames: ['Sam'] })).resolves.toMatchObject({ sent: true });
+    expect(insertedSnapshot().tech_names).toEqual(['Sam']);
+  });
+  test('no names -> the field is absent (older-decision shape)', async () => {
+    await attempt({ reply: 'Sounds good, thanks!' });
+    expect('tech_names' in insertedSnapshot()).toBe(false);
+  });
+});
+
+// Codex round-44 P2 (PR #5334): an unreadable live-ETA recheck is NON-terminal at the auto-send
+// executor — the claim is released (never failed), the reservation settled, parked cards reopen.
+describe('auto-send: an unreadable ETA recheck releases the claim instead of failing it', () => {
+  const SNAP = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  afterEach(() => { drafter.findEtaMinutesClaims.mockReturnValue([]); });
+
+  test('infrastructure failure -> sent:false, retryable, claim row released (deleted), NOT marked auto_send_failed, nothing sent', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    // freshness reads scheduled_services through the same mocked db; an unusable handle makes the read throw
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    expect(r).toMatchObject({ sent: false, reason: 'eta_claim_recheck_failed', retryable: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '33333333-3333-4333-8333-333333333333' });
+  });
+
+  test('a real verdict (no snapshot behind an ETA claim) still FAILS the claim as before', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    const r = await attempt({ reply: 'The tech is 9 minutes away.' });
+    expect(r).toMatchObject({ sent: false, reason: 'eta_claim_no_snapshot' });
+    expect(r.retryable).toBeUndefined();
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+});
+
+// Codex round-46 P2 (PR #5334): a retryable provider-boundary refusal (LIVE_ETA_CHECK_FAILED_AT_BOUNDARY) is released,
+// not failed — for BOTH invocations the sender makes (the pre-marker run and the post-marker `afterMarker` re-run).
+describe('auto-send: a retryable ETA refusal at the provider boundary releases the claim', () => {
+  const SNAP = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  afterEach(() => { drafter.findEtaMinutesClaims.mockReset().mockReturnValue([]); });
+
+  // Mimics twilio.js: turns a predicate verdict into the not-sent result sendCustomerMessage returns.
+  const refusalFrom = (verdict) => ({ sent: false, success: false, deliveryOutcome: 'not_sent', preSendBlocked: true, code: verdict.code, reason: verdict.reason, retryable: verdict.retryable === true });
+  const released = async (r) => {
+    expect(r).toMatchObject({ sent: false, reason: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '33333333-3333-4333-8333-333333333333' });
+  };
+
+  test('pre-marker invocation: the predicate cannot read the state -> released (not auto_send_failed)', async () => {
+    // executor's own check passes (no claim), the boundary predicate then sees a claim it cannot verify (db read throws)
+    drafter.findEtaMinutesClaims.mockReturnValueOnce([]).mockReturnValue([{ minutes: 9, index: 0 }]);
+    sendCustomerMessage.mockImplementationOnce(async (input) => refusalFrom(await input.providerPreSendCheck({ channel: 'sms' })));
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    await released(r);
+  });
+
+  test('post-marker invocation (afterMarker re-run): the same refusal is released the same way', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValueOnce([]).mockReturnValueOnce([]).mockReturnValue([{ minutes: 9, index: 0 }]);
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      const first = await input.providerPreSendCheck({ channel: 'sms' });
+      expect(first).toEqual({ ok: true }); // passes before the marker
+      expect(typeof input.providerPreSendCheck.afterMarker).toBe('function');
+      return refusalFrom(await input.providerPreSendCheck.afterMarker({ channel: 'sms' })); // fails after it
+    });
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    await released(r);
+  });
+
+  test('a TERMINAL boundary refusal (real stale verdict) still fails the claim', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_longer_en_route)', retryable: false }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+
+  test('other retryable refusals (consent lookup, quiet hours) are NOT released by this path — only the ETA boundary code', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, deliveryOutcome: 'not_sent', code: 'QUIET_HOURS_HOLD', retryable: true }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'QUIET_HOURS_HOLD' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+
+  test('a refusal that may have reached the provider is never released', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, deliveryOutcome: 'uncertain', code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(r.reason).not.toBe('LIVE_ETA_CHECK_FAILED_AT_BOUNDARY');
   });
 });

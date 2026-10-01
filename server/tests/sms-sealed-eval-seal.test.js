@@ -62,6 +62,22 @@ const cand = (id, intent, createdAt) => ({
   inbound_at: createdAt,
 });
 
+// COMPANY FACTS is matched by the EXACT rendered section before the first
+// BILLING: line (Codex #5392 r3 P2), not a header LIKE, so its clause binds
+// the delimiter + exact suffixes; SLA and FREE RE-SERVICE stay LIKE markers.
+const {
+  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
+} = require('../services/sms-company-facts');
+const EXACT = exactSuffix_();
+// FREE RE-SERVICE is matched at its rendered position too (round-24 P2): delimiter + company suffix + pattern.
+const { RESERVICE_SECTION_RE } = require('../services/sms-sealed-eval');
+const RS_BINDINGS = [D_, D_, EXACT.length, EXACT, D_, D_, EXACT.length, D_, RESERVICE_SECTION_RE.source];
+const CONTRACT_BINDINGS = [
+  '%FOLLOW-UP SLA RIGHT NOW:%',
+  D_, D_, EXACT.length, EXACT,
+  ...RS_BINDINGS,
+];
+
 describe('sealEvalItems — selection contract', () => {
   test('pool already at target → no candidate query side effects, sealed: 0', async () => {
     const dbi = makeFakeDb({ activeCount: 100 });
@@ -228,14 +244,14 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // +c: every category fact is required, none forbidden
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // _cf+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -251,7 +267,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!NOT )LIKE \?/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^md\.facts_block NOT LIKE/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
@@ -278,7 +294,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
-        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+        expect(args[1]).toEqual(CONTRACT_BINDINGS);
       }
       // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
@@ -321,7 +337,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
       expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\) NOT LIKE \?/.test(String(args[0]))
-        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']))).toBe(true);
+        && JSON.stringify(args[1]) === JSON.stringify(CONTRACT_BINDINGS))).toBe(true);
       expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
@@ -330,7 +346,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c: the compatibility SQL requires the SLA line AND forbids the FREE RE-SERVICE line', async () => {
+test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -346,8 +362,9 @@ test('v12 without +c: the compatibility SQL requires the SLA line AND forbids th
     dbi.raw = (sql) => sql;
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
-    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
-    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+    // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
+    expect(compat[1][0]).toMatch(/^COALESCE\(facts_block, ''\) LIKE \? AND NOT \(position\(\?::text in .*split_part\(.*\) AND NOT \(position\(\?::text in .*CASE WHEN right\(split_part\(.*~ \?::text\)$/);
+    expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
   } finally {
     spy.mockRestore();
   }

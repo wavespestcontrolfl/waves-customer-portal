@@ -93,6 +93,7 @@ function makeConn(cfg = {}) {
       orWhereNot: () => qb,
       orWhereNotIn: () => qb,
       whereNull: () => qb,
+      whereExists: (sub) => { calls.push({ table, op: 'whereExists', arg: sub }); return qb; },
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
       forUpdate: () => { calls.push({ table, op: 'forUpdate' }); return qb; },
@@ -318,6 +319,51 @@ describe('propagateCustomerEmailChange', () => {
     expect(rotationIdx).toBeLessThan(delIdx);
     const rotationScope = conn.__calls.find((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where');
     expect(rotationScope.arg).toEqual({ subscriber_id: 739 });
+  });
+
+  test('newsletter merge: delivery history is re-pointed at the surviving subscriber BEFORE the old row is deleted', async () => {
+    // newsletter_send_deliveries.subscriber_id is ON DELETE SET NULL — without
+    // this the person's send history is orphaned and drops off the timeline.
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739 },
+          { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1', status: 'active' },
+          { id: 900, email: 'chriswsample@example.com', customer_id: 'cust-1', status: 'active' },
+        ],
+      },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const dUpdates = conn.__updates('newsletter_send_deliveries');
+    const repoint = dUpdates.find((c) => c.arg.subscriber_id === 900);
+    expect(repoint).toBeDefined();
+    const repointIdx = conn.__calls.indexOf(repoint);
+    const delIdx = conn.__calls.findIndex((c) => c.table === 'newsletter_subscribers' && c.op === 'del');
+    expect(repointIdx).toBeGreaterThan(-1);
+    expect(repointIdx).toBeLessThan(delIdx);
+    // scoped to the old subscriber, and skipping issues the survivor already has a delivery for
+    // (UNIQUE (send_id, subscriber_id)) so a collision can never abort the edit
+    const scopes = conn.__calls.filter((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where').map((c) => c.arg);
+    expect(scopes).toEqual(expect.arrayContaining([{ subscriber_id: 739 }, { subscriber_id: 900 }]));
+    expect(conn.__calls.some((c) => c.table === 'newsletter_send_deliveries' && c.op === 'whereNotIn' && c.arg.col === 'send_id')).toBe(true);
+    // ...and only onto a survivor owned by THIS customer (a row linked to another customer never inherits the history)
+    expect(conn.__calls.some((c) => c.table === 'newsletter_send_deliveries' && c.op === 'whereExists')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'where'
+      && c.arg && c.arg.id === 900 && c.arg.customer_id === 'cust-1')).toBe(true);
+  });
+
+  test('newsletter merge: an unsubscribed old row is not deleted, so its deliveries are not re-pointed', async () => {
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739 },
+          { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1', status: 'unsubscribed' },
+          { id: 900, email: 'chriswsample@example.com', customer_id: 'cust-1', status: 'active' },
+        ],
+      },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(conn.__updates('newsletter_send_deliveries').some((c) => c.arg.subscriber_id === 900)).toBe(false);
   });
 
   test('newsletter: an UNLINKED row on the corrected spelling is adopted before the misspelled row is deleted', async () => {
@@ -938,7 +984,12 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
-    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }));
+    // B13: the send shares the caller's transaction (vetoes + provider handoff
+    // on one connection), never a second pooled one.
+    expect(sendConfirmationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }),
+      { dbh: conn },
+    );
     expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
   });
 
@@ -1026,6 +1077,20 @@ describe('resendPendingConfirmation', () => {
     expect(nsUpdates).toHaveLength(2);
     expect(nsUpdates[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
     expect(nsUpdates[1].arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('B13: an AMBIGUOUS provider failure (timeout after dispatch) keeps the pre-stamp and re-pends neutral, never arming the forced resend', async () => {
+    sendConfirmationEmail.mockRejectedValueOnce(Object.assign(new Error('timeout'), { name: 'TimeoutError', deliveryAmbiguous: true }));
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    const nsUpdates = conn.__updates('newsletter_subscribers');
+    expect(nsUpdates).toHaveLength(1); // the pre-stamp only; NOT cleared
+    expect(nsUpdates[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'doi_delivery_ambiguous' });
+    expect(holdUpdates.some((u) => u.arg.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
   });
 
   test('the expiry stamp lands before the send — a post-send failure cannot leave a permanent token', async () => {

@@ -156,6 +156,11 @@ function parseMessage(msg) {
     from_address: fromAddress,
     from_name: fromName,
     to_address: getHeader('To'),
+    // Cc / Bcc: '' when the header is absent, never null — NULL in the
+    // column then means "synced before capture existed" (customer linkage
+    // refuses a SENT row whose recipients were never captured).
+    cc_address: getHeader('Cc'),
+    bcc_address: getHeader('Bcc'),
     subject: getHeader('Subject'),
     body_text: body.text,
     body_html: body.html,

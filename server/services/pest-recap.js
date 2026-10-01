@@ -494,6 +494,8 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
+  // True when THIS submit moved the visit to completed (a performed completion).
+  let completedHere = false;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -601,6 +603,7 @@ async function submitRecap({
         transitionedBy,
         trx,
       });
+      completedHere = true;
     }
     // 1b. A grouped row completing through this legacy path dissolves its
     //     open packet-less visit IN THIS TRANSACTION (codex #3590 r13):
@@ -651,6 +654,14 @@ async function submitRecap({
         client_pest_rating: clientPestRating,
         ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
         ...(serviceRecordCols.client_pest_rating_at ? { client_pest_rating_at: new Date() } : {}),
+        // Owner ruling 2026-09-29: a rating submitted through Recap is
+        // always an explicit staff/tech action — this form has no
+        // first-visit-default concept — so it always clears (or never
+        // sets) the completion form's default flag. Without this a recap
+        // that replaces a completion's untouched first-visit 5 with the
+        // tech's own chosen rating would leave the row wrongly excluded
+        // from email-division's activity averages.
+        ...(serviceRecordCols.client_pest_rating_defaulted ? { client_pest_rating_defaulted: false } : {}),
       }
       : {};
     const existing = await trx('service_records')
@@ -1366,6 +1377,15 @@ async function submitRecap({
     }
   }
 
+  // A recap is a PERFORMED completion: when it completed a street-level address hold's visit, the shared
+  // transition stamped the field confirmation, and the hold is released here (before the recap text, so
+  // the recap is no longer a held message). A no-op for every other visit; best-effort — an unreleased hold
+  // keeps the recap held (its claim is released below) and the lazy activation / sweep retry the release.
+  if (completedHere) {
+    const holdReleased = await require('./outbound-review-confirm').releaseStreetLevelHoldForPerformedCompletion(serviceId, { technicianId: transitionedBy }, 'pest-recap');
+    if (holdReleased === false) logger.warn(`[pest-recap] street-level hold for ${serviceId} was not released; the recap text stays held`);
+  }
+
   // 4. Customer-facing track_state -> complete (best-effort, post-trx).
   let trackCompleted = false;
   try {
@@ -1441,7 +1461,8 @@ async function submitRecap({
         purpose: 'service_completion',
         customerId: svc.customer_id,
         identityTrustLevel: 'admin_operator',
-        metadata: { original_message_type: 'pest_recap', service_record_id: recordId },
+        // scheduled_service_id lets the shared send step hold the recap while an address hold is live.
+        metadata: { original_message_type: 'pest_recap', service_record_id: recordId, scheduled_service_id: serviceId },
       });
       smsSent = !(msg?.blocked || msg?.sent === false);
       if (!smsSent) smsError = msg?.code || msg?.reason || 'blocked';

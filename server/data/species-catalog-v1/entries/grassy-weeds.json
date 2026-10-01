@@ -983,5 +983,130 @@
       "common_problems": [],
       "frond_pattern_note": null
     }
+  },
+  {
+    "kind": "weed",
+    "aka": [
+      "Poa annua",
+      "Winter Grass"
+    ],
+    "stages": [],
+    "sign_of": [],
+    "subgroup": null,
+    "site_category": "Lawn weeds",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "weed"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "role": "weed",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [
+      {
+        "claim": "Leaf-tip and seed-head description",
+        "note": "General botany, not stated in the EP141 lawn weed guide. Confirm against a UF/IFAS page at review."
+      }
+    ],
+    "slug": "annual-bluegrass",
+    "common_name": "Annual Bluegrass",
+    "aliases": [
+      "annual bluegrass",
+      "poa annua",
+      "winter grass"
+    ],
+    "scientific_name": "Poa annua",
+    "rank": "species",
+    "group": "grassy-weeds",
+    "traits": [
+      "Light green, soft-bladed clumps that stand out against darker turf",
+      "White to pale seed heads showing up in winter, even on very short growth",
+      "Boat-shaped leaf tips, with blades often crinkled across the blade",
+      "Most common in compacted or continuously wet soil"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crabgrass",
+        "difference": "Annual bluegrass is a light green winter clump with pale seed heads; crabgrass is a warm-season sprawler with finger-like seed branches.",
+        "next_photo": "A close-up of the seed head and a note of the month the photo was taken.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "goosegrass",
+        "difference": "Goosegrass is a warm-season weed with a flattened, silvery-white base; annual bluegrass is a cool-season, light green tuft with pale seed heads.",
+        "next_photo": "A close-up of the base of the plant and a note of the month.",
+        "photo_can_confirm": true
+      }
+    ],
+    "active_months": [
+      11,
+      12,
+      1,
+      2,
+      3
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "copy": {
+      "what_it_means": "A light green winter grass that forms soft clumps with pale seed heads in bermudagrass and zoysia while those lawns are dormant or slow. A technician checks soil moisture, compaction, the season and coverage before recommending an approach.",
+      "fact": "Annual bluegrass is a winter annual: it sprouts in fall, sets seed through winter, and is gone by spring, but the seed stays behind for next year.",
+      "blurb": "A light green winter grass with pale seed heads, most common in wet or compacted soil."
+    },
+    "tech_notes": "Winter annual grass; UF/IFAS advises a pre-emergent when night temperatures drop to 55-60 F for several days, late October to early November in central and south Florida. Compaction and constant moisture favor it. Per label if herbicide is used.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/ep141"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). EP141 confirms the winter-annual life cycle, the wet or compacted soil preference and the late-October pre-emergent window. Owner brief listed bermuda and zoysia as the affected lawns; EP141 says it is a problem in multiple Florida turf types."
+    },
+    "plant": {
+      "type": "grassy",
+      "life_cycle": "annual_cool",
+      "spreads_by": [
+        "seed"
+      ],
+      "id_cues": [
+        "Light green, soft-bladed clumps",
+        "White to pale seed heads in winter",
+        "Boat-shaped leaf tips",
+        "Common in compacted or wet soil"
+      ],
+      "common_problems": [],
+      "frond_pattern_note": null
+    }
   }
 ]

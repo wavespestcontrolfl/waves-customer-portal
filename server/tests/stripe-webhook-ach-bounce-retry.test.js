@@ -99,6 +99,7 @@ function mockMakeBuilder(table, sink) {
   };
   ['where', 'andWhere', 'orWhere', 'whereNot', 'whereIn', 'whereNotIn',
     'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'select'].forEach(chain);
+  b.modify = (fn) => { fn(b); return b; };
   b.count = () => { b._counted = true; return b; };
   b.columnInfo = async () => ({ stripe_event_id: {} });
   b.first = async () => {
@@ -274,6 +275,19 @@ describe('async monthly-autopay bounce arming', () => {
     expect(arms[0].patch.retry_count).toBe(2);
   });
 
+  test('a never-attempted collections-hold placeholder does not count toward the ladder position', async () => {
+    const hold = require('../services/collections/collection-hold');
+    const spy = jest.spyOn(hold, 'excludeNeverAttemptedHoldDeferrals');
+    try {
+      mockState.priorFailedCount = 0;
+      await armMonthlyAutopayRetryForAsyncFailure(achBouncePI(), processingRow());
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(armUpdates()[0].patch.retry_count).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('3 prior attempts = ladder exhausted (mirrors the sweep\'s retry_count < 3 bound) — no re-arm', async () => {
     mockState.priorFailedCount = 3;
     await armMonthlyAutopayRetryForAsyncFailure(achBouncePI(), processingRow());
@@ -360,5 +374,19 @@ describe('payment_failed durable notification enqueue', () => {
       attemptId: 'ch_1',
       customerInitiated: true,
     }));
+  });
+
+  test('the failure email is handed the failed intent and Stripe\'s event time (card label + attempt date, GATE_BILLING_EMAIL_DETAILS)', async () => {
+    const lifecycleEmail = require('../services/payment-lifecycle-email');
+    const cardFailure = achBouncePI({ metadata: {}, last_payment_error: {
+      message: 'declined', code: 'card_declined', payment_method: { type: 'card', card: { brand: 'visa', last4: '4242' } },
+    } });
+    await handlePaymentIntentFailed(cardFailure, 'evt_card', 1790000000);
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenLastCalledWith(expect.objectContaining({
+      paymentIntent: cardFailure,
+      failedAt: new Date(1790000000 * 1000),
+    }));
+    await handlePaymentIntentFailed(cardFailure, 'evt_card_no_time');
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenLastCalledWith(expect.objectContaining({ failedAt: null }));
   });
 });

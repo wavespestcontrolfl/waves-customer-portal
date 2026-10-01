@@ -25,6 +25,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE, withAccountPrimaryContact } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -49,13 +50,10 @@ function fullName(customer = {}) {
     || 'Waves customer';
 }
 
+// The Property row is the booked street address; profile_label is only a
+// nickname ("Primary") and shows only when no address exists.
 function propertyLabel(customer = {}) {
-  const label = clean(customer.profile_label);
-  if (label) return label;
-  // Full address incl. state + zip (owner call 07-06).
-  const cityStateZip = [customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  const address = [customer.address_line1, cityStateZip].filter(Boolean).join(', ');
-  return address || 'Service property';
+  return propertyDisplayLabel(customer);
 }
 
 function portalTabUrl(tab = 'visits') {
@@ -94,6 +92,7 @@ async function loadCustomer(customerId) {
       'email',
       'phone',
       'address_line1',
+      'address_line2',
       'city',
       'state',
       'zip',
@@ -271,6 +270,13 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
 }
 
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+  // Street-level address hold (owner ruling 2026-10-01): no email about a visit that is a live
+  // unconfirmed hold until the office confirms. Same predicate as the SMS send step; fails closed.
+  const holdVisitId = scheduledServiceId || moveHoldServiceId;
+  if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) {
+    logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held: street-level address hold awaiting the office confirm`);
+    return { ok: false, held: true, reason: 'street_level_hold' };
+  }
   metadata = withPromisedSlot(metadata, { renderedSlotMs, scheduledServiceId });
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -332,6 +338,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
       return { ok: false, held: true, reason: 'move_hold' };
     }
+    let abortedBy = null;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey,
@@ -349,14 +356,20 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // that gap must still abort. onQueued resolving false aborts
         // PRE-dispatch; moveHoldLive fails closed internally, so a read
         // error holds rather than sends.
-        ...(moveHoldServiceId ? { onQueued: async () => !(await moveHoldLive(moveHoldServiceId, renderedSlotMs)) } : {}),
+        // Street-level address hold boundary re-check (owner ruling 2026-10-01): a promotion that commits
+        // during the library's own awaits still holds the send; the predicate fails closed.
+        onQueued: async () => {
+          if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
+          if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
+          return true;
+        },
       });
       // An onQueued abort is a HELD outcome, not a delivery failure: stop
       // the fan-out (the hold covers the visit) and let the caller defer.
-      if (moveHoldServiceId && result?.aborted) {
-        logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the dispatch boundary — grouped move in progress`);
-        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
-        return { ok: false, held: true, reason: 'move_hold' };
+      if (result?.aborted && abortedBy) {
+        logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held at the dispatch boundary — ${abortedBy}`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: abortedBy, metadata });
+        return { ok: false, held: true, reason: abortedBy };
       }
       outcomes.push(result);
       if (!result.deduped) {
@@ -587,11 +600,18 @@ async function sendAppointmentNoShowEmail({
   // 'review' = the charge attempt hit an ambiguous Stripe error and was
   // parked for reconciliation — the fee may still have been accepted, so
   // neither "was charged" nor "no charge" is safe to claim.
+  // 'held' = a collections dispute hold refused the fee before Stripe was
+  // contacted, but the fee stays collectible later (the office decides after
+  // the dispute). The owner has not ruled it waived, so the copy makes NO
+  // claim about a charge either way: the line is omitted entirely (charge_line
+  // is an optional template field) — never "no charge", never a fee/receipt.
   const chargeLine = feeOutcome === 'charged'
     ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
     : feeOutcome === 'review'
       ? 'If a missed-visit fee applies under your booking terms, it will appear on an emailed receipt.'
-      : 'There’s no charge for the attempted visit.';
+      : feeOutcome === 'held'
+        ? ''
+        : 'There’s no charge for the attempted visit.';
   return sendTemplate({
     customerId,
     scheduledServiceId,

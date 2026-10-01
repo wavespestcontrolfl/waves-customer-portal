@@ -84,8 +84,18 @@ function excludeGloballySuppressed(query) {
     this.select(db.raw('1'))
       .from('email_suppressions as es')
       .where('es.status', 'active')
-      .whereRaw('LOWER(es.email) = LOWER(newsletter_subscribers.email)')
-      .whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES);
+      // Any spelling of the same Gmail inbox counts (owner decision 2026-09-29).
+      .whereRaw(require('../utils/email-equivalence').suppressionCoversColumnSql('es.email', 'newsletter_subscribers.email'))
+      // A global type from any stream, OR any row scoped to no group or the
+      // newsletter's own group (an unsubscribe recorded under another Gmail
+      // spelling than the subscriber row, codex #5323 r8) — the same rule
+      // automationSuppressionMatches applies.
+      .where(function newsletterScoped() {
+        this.whereRaw('LOWER(es.suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+          .orWhereNull('es.group_key')
+          .orWhere('es.group_key', '')
+          .orWhere('es.group_key', 'marketing_newsletter');
+      });
   });
 }
 
@@ -113,6 +123,169 @@ function excludeArchivedCustomers(query) {
       .whereRaw('ac.id = newsletter_subscribers.customer_id')
       .whereNotNull('ac.deleted_at');
   });
+}
+
+// Owner ruling 2026-09-29 (#5165, option A): mailbox mailability is judged
+// at SEND TIME by state, not fenced by per-writer locks (the writer-lock
+// approach kept spreading into live paths and produced a genuine deadlock —
+// see the git history on this predicate for the reverted attempt). This one
+// predicate now carries BOTH rules for EVERY audience read:
+//
+//   1. Explicit marketing opt-out — owner ruling 2026-09-28: exclude an
+//      active subscriber when its linked customer, or any live
+//      (non-archived) profile holding the same MAILBOX, has marketing_offers
+//      = false, email_enabled = false, or a marketing_channel that resolves
+//      to 'sms' (email-division/eligibility.js channelFor — only a stored
+//      'sms' resolves there; anything else reads as the 'email' default).
+//      NULL / missing prefs are NOT an opt-out.
+//   2. Non-mailable mailbox sibling — owner ruling 2026-09-29: exclude an
+//      active subscriber when ANY OTHER newsletter_subscribers row for the
+//      SAME MAILBOX has a status other than 'active'. newsletter_subscribers
+//      .status carries no CHECK constraint (schema: a plain string,
+//      defaultTo('active')), so this reads every value the code actually
+//      writes there — 'unsubscribed' (the unsubscribe routes / SendGrid and
+//      Resend complaint webhooks), 'pending' (double opt-in, not yet
+//      confirmed), 'inactive' (newsletter-sunset.js, 90-day win-back
+//      grace), 'waitlist' (inspection-public.js's out-of-area consultation
+//      prompt — never itself a subscription) — plus, fail-closed, any
+//      other/unrecognised value or NULL (IS DISTINCT FROM 'active', not
+//      `<> 'active'`, so a NULL status blocks too, never silently passing).
+//      A hard bounce/spam-complaint alone does NOT write this column —
+//      admin-newsletter.js's own comment: "there's no status='bounced' in
+//      the table"; bounces live on bounce_count/last_bounced_at and the
+//      separate email_suppressions ledger (excludeGloballySuppressed).
+//   3. Duplicate ACTIVE rows for the SAME mailbox — codex #5165 P2: rule 2
+//      above only catches a sibling whose status is NOT 'active', so a
+//      pending Google-alias row that races the import and is later
+//      CONFIRMED — both rows now 'active' — passed rule 2 entirely on both
+//      sides and both got sent, a duplicate delivery to one inbox. At send
+//      time, only ONE active row per mailbox is sendable: the CANONICAL
+//      one, deterministically the earliest `created_at` then `id`
+//      (matches the tie-break every other canonical pick in this codebase
+//      uses — customers' twin picker, the reconcile candidate order —
+//      applied here directly on newsletter_subscribers itself, no join to
+//      customers needed, since two active rows sharing a mailbox are
+//      compared on their OWN rows). Every other active row on that mailbox
+//      is excluded.
+//
+// Same mailbox = exact LOWER(TRIM), or Google's mailbox identity (dots and
+// '+tag' ignored, googlemail.com = gmail.com) — the repo's one rule,
+// customer-comms-lock.js GOOGLE_MAILBOX_SQL.
+//
+// Because the check runs on every audience read (buildSubscriberQuery, the
+// resume refetch, the per-chunk re-check, the resume precheck, and the
+// newsletter-sunset reads), an opt-out or a same-mailbox unsubscribe/pending/
+// inactive row recorded after a subscriber joined stops the next campaign,
+// and a resume ledger row for that recipient is terminalized through
+// skipIneligibleDeliveries.
+// Every call site wraps excludeArchivedCustomers with this helper (pinned
+// by newsletter-sender-marketing-optout.test.js).
+//
+// Both the notification_prefs/customers join AND the mailbox-sibling scan
+// are pre-filtered FIRST, each in its own `WITH ... AS MATERIALIZED` CTE
+// (opted_out_profiles / blocked_mailbox_siblings) — EXPLAIN against the QA
+// database (codex #5165) showed Postgres re-running the join/scan ONCE PER
+// OUTER SUBSCRIBER ROW (a Nested Loop Anti Join re-executed
+// `loops=<subscriber count>` times) whenever the match condition is an OR
+// of several LOWER/TRIM/SPLIT_PART comparisons — that shape defeats
+// Postgres's usual subquery flattening/decorrelation AND defeats a hash
+// join (Postgres can't hash an OR of two different equality keys), so a
+// plain (non-materialized) derived table, or a materialized one still
+// matched by an OR condition, both get replanned right back into the same
+// per-row rescan. opted_out_profiles stays small enough (an opt-out list)
+// that this was already fast (measured: 497ms / ~284k buffer hits ->
+// 153ms / ~560, same rows, on a 4,000-customer / 800-subscriber seed) —
+// but blocked_mailbox_siblings is the WHOLE non-active tail (every
+// unsubscribe/pending/inactive/waitlist row ever recorded), routinely much
+// larger, so it ALSO needs to be a genuine equality: MAILBOX_KEY_SQL
+// collapses "exact match OR Google-alias match" into ONE computed key
+// (a Google address's stripped mailbox identity, or the address itself)
+// so Postgres can plan the match as a real Hash Anti Join — one hash of
+// the small deduped key set, one probe per outer row — instead of a
+// nested loop that rescans the whole CTE per row. Measured on the same
+// seed plus a 3,000-row non-active tail (40 of them Google-alias siblings
+// of active rows): the OR-matched version (materialized, but still an OR)
+// ran 1,927ms with `Rows Removed by Join Filter: 2,173,600` — the CTE
+// rescanned per outer row despite being materialized; the single-key
+// equi-join version ran 166ms as a genuine `Hash Anti Join`, same result
+// rows either way.
+const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
+const OPTOUT_SAME_MAILBOX_SQL = (() => {
+  const profile = 'TRIM(oo.email)';
+  const subscriber = 'TRIM(newsletter_subscribers.email)';
+  return `(LOWER(${profile}) = LOWER(${subscriber})
+    OR (${GOOGLE_MAILBOX_SQL.isGoogle(profile)} AND ${GOOGLE_MAILBOX_SQL.isGoogle(subscriber)}
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} <> ''
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(subscriber)} <> ''
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} = ${GOOGLE_MAILBOX_SQL.mailbox(subscriber)}))`;
+})();
+// One computed key per address: a Google address's mailbox identity
+// (dots/+"tag" stripped, always resolved to its @gmail.com spelling), or
+// the address itself, LOWER(TRIM)'d, for every other domain. Two rows
+// sharing a mailbox always compute the SAME key regardless of which alias
+// spelling either one uses — collapsing the exact-match-OR-Google-alias-
+// match rule into one equality Postgres can hash-join.
+const MAILBOX_KEY_SQL = (fieldExpr) => {
+  const trimmed = `TRIM(${fieldExpr})`;
+  return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
+    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
+    ELSE LOWER(${trimmed}) END)`;
+};
+// The ONE sendable row per mailbox among ACTIVE rows: DISTINCT ON collapses
+// each mailbox_key to its single earliest (created_at, id) row — the SAME
+// deterministic tie-break every other canonical pick in this codebase uses
+// (customers' twin picker, the reconcile candidate order), applied here
+// directly on newsletter_subscribers's own columns; genuinely one row per
+// key, so it hash-joins as cheaply as opted_out_profiles.
+//
+// The pick runs only over rows that can actually be mailed on their own —
+// active AND past the archived-customer and global-suppression predicates
+// (codex #5165 :235). Otherwise an oldest alias linked to an archived
+// customer wins the pick, is then dropped by the archive predicate, and the
+// live sibling is dropped as non-canonical: the mailbox gets nothing.
+// (Suppression is already inbox-wide for Gmail since #5323, so it filters
+// the pick set the same way it filters the audience.) The CTE is built on
+// the unaliased table so both shared helpers apply to it unchanged.
+const CANONICAL_ACTIVE_MAILBOX_SQL = (qb) => {
+  excludeArchivedCustomers(excludeGloballySuppressed(
+    qb.distinctOn(db.raw(MAILBOX_KEY_SQL('newsletter_subscribers.email')))
+      .select(db.raw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')} as mailbox_key`), 'newsletter_subscribers.id as canonical_id')
+      .from('newsletter_subscribers')
+      .where('newsletter_subscribers.status', 'active'),
+  )).orderByRaw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')}, newsletter_subscribers.created_at ASC, newsletter_subscribers.id ASC`);
+};
+function excludeMailboxNotMailable(query) {
+  return query
+    .withMaterialized('opted_out_profiles', (qb) => {
+      qb.select('moc.id as customer_id', 'moc.email as email')
+        .from('notification_prefs as mop')
+        .join('customers as moc', 'moc.id', 'mop.customer_id')
+        .whereNull('moc.deleted_at')
+        .whereRaw("(mop.marketing_offers = false OR mop.email_enabled = false OR LOWER(TRIM(mop.marketing_channel)) = 'sms')");
+    })
+    .withMaterialized('blocked_mailbox_siblings', (qb) => {
+      qb.distinct()
+        .select(db.raw(`${MAILBOX_KEY_SQL('email')} as mailbox_key`))
+        .from('newsletter_subscribers')
+        .whereRaw("status IS DISTINCT FROM 'active'");
+    })
+    .withMaterialized('canonical_active_mailbox', CANONICAL_ACTIVE_MAILBOX_SQL)
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('opted_out_profiles as oo')
+        .whereRaw(`(oo.customer_id = newsletter_subscribers.customer_id OR ${OPTOUT_SAME_MAILBOX_SQL})`);
+    })
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('blocked_mailbox_siblings as bm')
+        .whereRaw(`bm.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`);
+    })
+    .whereNotExists(function () {
+      this.select(db.raw('1'))
+        .from('canonical_active_mailbox as cam')
+        .whereRaw(`cam.mailbox_key = ${MAILBOX_KEY_SQL('newsletter_subscribers.email')}`)
+        .whereRaw('cam.canonical_id <> newsletter_subscribers.id');
+    });
 }
 
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
@@ -264,7 +437,7 @@ async function countSegmentRecipients(segmentFilter) {
  *   resolveSegmentCustomerIds(); null = no service-line constraint.
  */
 function buildSubscriberQuery(segmentFilter, customerIds = null) {
-  let q = excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' })));
+  let q = excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }))));
 
   // Service-line / membership constraint, pre-resolved to customer ids.
   if (Array.isArray(customerIds)) q = q.whereIn('customer_id', customerIds);
@@ -369,9 +542,11 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
 }
 
 // The rows a Resume would actually mail: retryable ledger rows with no
-// success signal whose subscriber is still active, not globally suppressed
-// and not an archived customer — the resume precheck's own predicate, in
-// one place. `sendId` is a value, or (with `correlate`) a column reference
+// success signal whose subscriber is still active, not globally suppressed,
+// not an archived customer, and whose mailbox is mailable — not explicitly
+// opted out of marketing and no same-mailbox sibling row in a non-active
+// state (excludeMailboxNotMailable) — the resume precheck's own predicate,
+// in one place. `sendId` is a value, or (with `correlate`) a column reference
 // such as `newsletter_sends.id` when the caller embeds this as an EXISTS
 // subquery.
 function outstandingEligibleDeliveries(sendId, { database = db, correlate = false } = {}) {
@@ -383,7 +558,7 @@ function outstandingEligibleDeliveries(sendId, { database = db, correlate = fals
   const scoped = correlate
     ? base.whereColumn('newsletter_send_deliveries.send_id', sendId)
     : base.where({ 'newsletter_send_deliveries.send_id': sendId });
-  return excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries')));
+  return excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries'))));
 }
 
 // Whether a campaign still has recipients a Resume would mail. THE predicate
@@ -391,7 +566,8 @@ function outstandingEligibleDeliveries(sendId, { database = db, correlate = fals
 // has a ledger too, and its archive must stay what its recipients received,
 // so a ledger row alone never makes a campaign correctable — and neither do
 // rows whose recipients Resume would exclude and terminalize anyway
-// (unsubscribed, globally suppressed, archived; codex round 17 P2).
+// (unsubscribed, globally suppressed, archived, explicitly opted out;
+// codex round 17 P2).
 async function hasOutstandingDeliveries(sendId, database = db) {
   // Relinked first, like the resume precheck (codex round 18 P2): a row whose
   // archived link has a live twin is outstanding, not excluded.
@@ -402,8 +578,8 @@ async function hasOutstandingDeliveries(sendId, database = db) {
 
 /**
  * THE terminal-skip write. A recipient that fails the eligibility predicate
- * (status active + not globally suppressed + no archived customer link)
- * after selection must never be mailed AND must never stay retryable — a
+ * (status active + not globally suppressed + no archived customer link +
+ * no explicit marketing opt-out) after selection must never be mailed AND must never stay retryable — a
  * resume would otherwise re-queue it, and prepareResumeCampaign would keep
  * counting it as outstanding. Both eligibility gates land here: the
  * pre-dispatch resume sweep (rows still queued/failed) and the per-chunk
@@ -735,11 +911,11 @@ async function sendCampaign(sendId, opts = {}) {
       .map((d) => d.subscriber_id)
       .filter((id) => id !== null && id !== undefined)));
     subscribers = retryableSubscriberIds.length
-      ? await excludeArchivedCustomers(excludeGloballySuppressed(
+      ? await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers')
           .where({ status: 'active' })
           .whereIn('id', retryableSubscriberIds),
-      )).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
+      ))).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
 
@@ -899,9 +1075,9 @@ async function sendCampaign(sendId, opts = {}) {
       // eligible — but the row we selected still carries the OLD (archived)
       // customer_id, which would personalize the email and file the customer
       // touchpoint against the archived profile.
-      const freshCustomerBySub = new Map((await excludeArchivedCustomers(excludeGloballySuppressed(
+      const freshCustomerBySub = new Map((await excludeMailboxNotMailable(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ).select('id', 'customer_id'))).map((r) => [r.id, r.customer_id ?? null]));
+      ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
       const stillEligible = freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
@@ -1583,4 +1759,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

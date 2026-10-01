@@ -1,4 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
+// The recovery phase marker is written on the dedicated marker connection at the provider boundary.
+const mockMarkerUpdate = jest.fn(async () => 1);
+jest.mock('../models/marker-db', () => () => Object.assign(() => ({ where: () => ({ update: mockMarkerUpdate }) }), { raw: jest.fn((sql) => sql) }));
 jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -276,7 +279,8 @@ describe('attemptRecovery codex-fix behaviors', () => {
       { event: 'bounce', type: 'bounce' },
     );
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
-    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
+    // the last ledger write that SETS a status (the pre-provider marker stamp is a metadata-only write)
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries' && c.data && 'status' in c.data).pop().data).toMatchObject({ status: finalStatus });
     if (fence.ownershipBusy) {
       expect(res).toEqual({ error: 'Email ownership assignment in progress' });
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({
@@ -1027,9 +1031,21 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       .resolves.toMatchObject({ resent: true, corrected: 'jane@gmail.com' });
 
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
-      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck, suppressErrorLog: true,
+      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck: expect.any(Function), suppressErrorLog: true,
       customArgs: { email_message_id: messageRow.id, send_attempt_token: messageRow.send_attempt_token },
     }));
+    // The boundary check sendOne receives wraps the authority's own (it still runs, and its verdict is kept):
+    // the phase marker is stamped by the wrapper once that check passes.
+    const passed = sendgrid.sendOne.mock.calls[0][0].providerBoundaryCheck;
+    expect(mockMarkerUpdate).not.toHaveBeenCalled(); // nothing stamped while sendOne is still preparing
+    expect(await passed({ database: heldDatabase })).toEqual({ ok: true });
+    expect(providerBoundaryCheck).toHaveBeenCalledWith({ database: heldDatabase });
+    expect(mockMarkerUpdate).toHaveBeenCalledTimes(1); // stamped once the authority's boundary check passed
+    // a refused boundary check stamps nothing and its verdict is returned untouched
+    providerBoundaryCheck.mockResolvedValueOnce({ ok: false, code: 'X' });
+    mockMarkerUpdate.mockClear();
+    expect(await passed({ database: heldDatabase })).toEqual({ ok: false, code: 'X' });
+    expect(mockMarkerUpdate).not.toHaveBeenCalled();
   });
 
   // #4843 gate checklist: a billing row whose producer stored no replay

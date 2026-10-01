@@ -2,7 +2,10 @@
 // (owner-approved 2026-09-28, GATE_REPORT_PRODUCT_COPY). Pure modules,
 // synthetic data only — no DB.
 
-const { REPORT_PRODUCT_COPY, findReportProductCopyEntry, reportProductCopyFor } = require('../config/report-product-copy');
+const {
+  REPORT_PRODUCT_COPY, findReportProductCopyEntry, reportProductCopyFor,
+  floorToMultipleOf25, normalizeReportCity, buildAlsoLabeledForText,
+} = require('../config/report-product-copy');
 const {
   reportProductCopyGateOn,
   reportProductCopyForApplicationProduct,
@@ -53,7 +56,10 @@ describe('REPORT_PRODUCT_COPY config', () => {
     const { validateCustomerCopy } = require('../services/service-report/premium-experience');
     for (const entry of REPORT_PRODUCT_COPY) {
       expect(validateCustomerCopy(entry.howItWorks)).toBe(true);
-      if (entry.alsoLabeledFor) expect(validateCustomerCopy(entry.alsoLabeledFor)).toBe(true);
+      if (entry.alsoLabeledForPestCount) {
+        expect(validateCustomerCopy(buildAlsoLabeledForText(entry.alsoLabeledForPestCount, 'Bradenton'))).toBe(true);
+        expect(validateCustomerCopy(buildAlsoLabeledForText(entry.alsoLabeledForPestCount, null))).toBe(true);
+      }
       expect(validateCustomerCopy(entry.petsKids)).toBe(true);
     }
   });
@@ -65,7 +71,10 @@ describe('passesReportCopyScreen', () => {
   it('passes every owner-approved line', () => {
     for (const entry of REPORT_PRODUCT_COPY) {
       expect(passesReportCopyScreen(entry.howItWorks)).toBe(true);
-      if (entry.alsoLabeledFor) expect(passesReportCopyScreen(entry.alsoLabeledFor)).toBe(true);
+      if (entry.alsoLabeledForPestCount) {
+        expect(passesReportCopyScreen(buildAlsoLabeledForText(entry.alsoLabeledForPestCount, 'Bradenton'))).toBe(true);
+        expect(passesReportCopyScreen(buildAlsoLabeledForText(entry.alsoLabeledForPestCount, null))).toBe(true);
+      }
       expect(passesReportCopyScreen(entry.petsKids)).toBe(true);
     }
   });
@@ -135,25 +144,85 @@ describe('findReportProductCopyEntry / reportProductCopyFor — matching', () =>
 });
 
 describe('reportProductCopyFor — public shape', () => {
-  it('returns how_it_works / also_labeled_for / pets_kids for a normal approved product', () => {
-    const copy = reportProductCopyFor({ epaReg: '53883-279', name: 'Taurus SC' });
+  it('returns how_it_works / also_labeled_for / pets_kids for a normal approved product, also_labeled_for as a rounded count + city sentence', () => {
+    const copy = reportProductCopyFor({ epaReg: '53883-279', name: 'Taurus SC', city: 'Bradenton' });
     expect(copy).toEqual({
       how_it_works: expect.stringContaining('walk right through the treated band'),
-      also_labeled_for: expect.stringContaining('Big-headed'),
+      also_labeled_for: 'Labeled for 25+ Bradenton pests', // raw count 35 -> floors to 25+
       pets_kids: expect.stringContaining('Keep people and pets off treated areas'),
     });
   });
 
+  it('falls back to the no-city wording when no city is given', () => {
+    const copy = reportProductCopyFor({ epaReg: '53883-279', name: 'Taurus SC' });
+    expect(copy.also_labeled_for).toBe('Labeled for 25+ pests');
+  });
+
   it('LESCO carries no also_labeled_for KEY at all (owner ruling) — never null, never an empty string', () => {
-    const copy = reportProductCopyFor({ epaReg: null, name: 'LESCO 90/10 Nonionic Surfactant' });
+    const copy = reportProductCopyFor({ epaReg: null, name: 'LESCO 90/10 Nonionic Surfactant', city: 'Bradenton' });
     expect(copy).not.toBeNull();
     expect(copy).not.toHaveProperty('also_labeled_for');
     expect(copy.how_it_works).toMatch(/spreader/i);
     expect(copy.pets_kids).toBe('Follows the spray it’s mixed into.');
   });
+
+  it.each([
+    ['Advion Evolution Cockroach Gel Bait', '100-1484'],
+    ['Advion Ant Bait Gel', '100-1498'],
+    ['Advion WDG Granular', '100-1483'],
+    ['Gentrol IGR', '2724-351'],
+    ['Tekko Pro IGR', '53883-335'],
+  ])('narrow product %s carries no also_labeled_for key at all (owner ruling 2026-09-29)', (name, epaReg) => {
+    const copy = reportProductCopyFor({ epaReg, name, city: 'Bradenton' });
+    expect(copy).not.toBeNull();
+    expect(copy).not.toHaveProperty('also_labeled_for');
+  });
+
+  it.each([
+    [169, 150],
+    [88, 75],
+    [90, 75],
+    [66, 50],
+    [35, 25],
+    [30, 25],
+  ])('rounds a raw label count of %i down to a multiple of 25 (%i+)', (raw, expected) => {
+    expect(floorToMultipleOf25(raw)).toBe(expected);
+  });
+
+  it('composes "Labeled for {N}+ {City} pests" with a city, and "Labeled for {N}+ pests" without one', () => {
+    expect(buildAlsoLabeledForText(169, 'Bradenton')).toBe('Labeled for 150+ Bradenton pests');
+    expect(buildAlsoLabeledForText(169, null)).toBe('Labeled for 150+ pests');
+    expect(buildAlsoLabeledForText(169, '')).toBe('Labeled for 150+ pests');
+    expect(buildAlsoLabeledForText(169, '   ')).toBe('Labeled for 150+ pests');
+  });
+
+  it('normalizeReportCity title-cases an ALL-CAPS value, trims, and collapses internal whitespace', () => {
+    expect(normalizeReportCity('BRADENTON')).toBe('Bradenton');
+    expect(normalizeReportCity('LAKEWOOD  RANCH')).toBe('Lakewood Ranch');
+    expect(normalizeReportCity('  lakewood ranch  ')).toBe('Lakewood Ranch'); // all-lowercase is title-cased too
+    expect(normalizeReportCity('North port')).toBe('North port'); // mixed case is trusted as entered
+    expect(normalizeReportCity('Port Charlotte')).toBe('Port Charlotte');
+  });
+
+  it('normalizeReportCity returns null for blank or unusable input — never invents a city', () => {
+    expect(normalizeReportCity(null)).toBeNull();
+    expect(normalizeReportCity(undefined)).toBeNull();
+    expect(normalizeReportCity('')).toBeNull();
+    expect(normalizeReportCity('   ')).toBeNull();
+    expect(normalizeReportCity('12345')).toBeNull();
+    expect(normalizeReportCity('---')).toBeNull();
+  });
 });
 
 describe('reportProductCopyForApplicationProduct — report-data.js shape', () => {
+  it('a city name that looks like a claim word ("Safety Harbor") keeps all three lines (codex r1 on #5352)', () => {
+    const copy = reportProductCopyForApplicationProduct({ product_name: 'Taurus SC', epa_reg_number: '53883-279' }, 'Safety Harbor');
+    expect(copy).not.toBeNull();
+    expect(copy.also_labeled_for).toBe('Labeled for 25+ Safety Harbor pests');
+    expect(copy.how_it_works).toBeTruthy();
+    expect(copy.pets_kids).toBeTruthy();
+  });
+
   it('reads epa_reg_number and product_name off the enriched service_products row', () => {
     const copy = reportProductCopyForApplicationProduct({ product_name: 'Demand CS', epa_reg_number: '100-1066' });
     expect(copy).not.toBeNull();
@@ -166,10 +235,15 @@ describe('reportProductCopyForApplicationProduct — report-data.js shape', () =
     expect(copy.how_it_works).toMatch(/waterproof dust/);
   });
 
-  it('a product with no product_id / no catalog join still resolves by its snapshotted product_name', () => {
-    const copy = reportProductCopyForApplicationProduct({ product_name: 'Gentrol IGR' });
+  it('a product with no product_id / no catalog join still resolves by its snapshotted product_name — Gentrol is a narrow IGR with no also_labeled_for line', () => {
+    const copy = reportProductCopyForApplicationProduct({ product_name: 'Gentrol IGR' }, 'Bradenton');
     expect(copy).not.toBeNull();
-    expect(copy.also_labeled_for).toMatch(/German and American cockroaches/);
+    expect(copy).not.toHaveProperty('also_labeled_for');
+  });
+
+  it('threads the visit city through to also_labeled_for', () => {
+    const copy = reportProductCopyForApplicationProduct({ product_name: 'Demand CS', epa_reg_number: '100-1066' }, 'Bradenton');
+    expect(copy.also_labeled_for).toBe('Labeled for 75+ Bradenton pests'); // raw count 90 -> floors to 75+
   });
 
   it('an unapproved product on the applied-products list gets no report_copy', () => {

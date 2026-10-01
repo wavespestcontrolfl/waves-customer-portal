@@ -366,15 +366,15 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
 
   // --- series gates (reused, read-only, from admin-schedule.js) -----------
   describe('series gates', () => {
-    test('annual_prepay_series: a stamped future prepaid_method row excludes the whole series', async () => {
+    test('an annual-prepay rider still rides (owner ruling 2026-09-29): no annual_prepay_series refusal, the prepaid visit stays pinned', async () => {
       const { lawnParent, pestParent } = await buildValidPair();
-      const cols = await trx('scheduled_services').columnInfo();
-      if (!cols.prepaid_method) return; // schema variance guard, matches the engine's own posture
-      await trx('scheduled_services').where({ recurring_parent_id: pestParent.id })
-        .limit(1)
-        .update({ prepaid_method: 'annual_prepay_invoice' });
+      const [prepaidRow] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+      await trx('scheduled_services').where({ id: prepaidRow.id })
+        .update({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 120 });
       const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
-      expect(preview.reasons).toContain('annual_prepay_series');
+      expect(preview.reasons).not.toContain('annual_prepay_series');
+      expect(preview.eligible).toBe(true);
+      expect(preview.pinned).toEqual(expect.arrayContaining([expect.objectContaining({ id: prepaidRow.id, why: 'prepaid' })]));
     });
 
     test('duplicate_series: a second active ongoing pest series for the same customer blocks both', async () => {
@@ -687,6 +687,119 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
       // Not a structural blocker — the plan still shows.
       expect(preview.eligible).toBe(false);
       expect(preview.plan.length).toBeGreaterThan(0);
+    });
+  });
+
+  // --- unstamped parent + id-stamped children ---------------------------------
+  // A series root with no property_id and no stamped address resolves from
+  // the customer's primary address (an address KEY only); its child rows
+  // carry only a stamped property_id. The two shapes are not directly
+  // comparable, so every child row used to be dropped from the host dates
+  // (the planner then fell back to standalone +84-day dates).
+  describe('an unstamped host parent with id-stamped child rows (mixed scope shapes)', () => {
+    const LAWN_CHILD = addDays(LAWN_START, 96); // inside the 77..105 walk window, off the standalone +84 date
+    const STANDALONE = addDays(LAWN_START, 84);
+
+    async function propertyAt(fields) {
+      const [p] = await trx('customer_properties').insert({
+        id: randomUUID(), customer_id: customerId, ...fields,
+      }).returning('*');
+      return p.id;
+    }
+
+    async function pairWithLawnChildAt(propertyId, childFields = {}) {
+      const lawnParent = await row({
+        status: 'confirmed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks',
+        scheduled_date: LAWN_START, // no property_id, no stamped address
+      });
+      await row({
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_pattern: 'every_6_weeks', scheduled_date: LAWN_CHILD, property_id: propertyId, ...childFields,
+      });
+      const pestParent = await row({
+        status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control', scheduled_date: ANCHOR,
+      });
+      return { lawnParent, pestParent };
+    }
+
+    test('children stamped with the SAME property as the customer primary address stay host dates', async () => {
+      const same = await propertyAt({ address_line1: '100 Test Lane', city: 'Test City', zip: '00000' });
+      const { lawnParent, pestParent } = await pairWithLawnChildAt(same);
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toEqual([]);
+      expect(preview.plan).toContain(LAWN_CHILD);
+      expect(preview.plan).not.toContain(STANDALONE);
+    });
+
+    test('the reverse shape (id-only host parent, address-only child rows) is also comparable', async () => {
+      const same = await propertyAt({ address_line1: '100 Test Lane', city: 'Test City', zip: '00000' });
+      const lawnParent = await row({
+        status: 'confirmed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks',
+        scheduled_date: LAWN_START, property_id: same,
+      });
+      await row({
+        recurring_parent_id: lawnParent.id, status: 'confirmed', is_recurring: true,
+        recurring_pattern: 'every_6_weeks', scheduled_date: LAWN_CHILD,
+        service_address_line1: '100 Test Lane', service_address_city: 'Test City', service_address_state: 'FL', service_address_zip: '00000',
+      });
+      const pestParent = await row({
+        status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control', scheduled_date: ANCHOR,
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toEqual([]);
+      expect(preview.plan).toContain(LAWN_CHILD);
+      expect(preview.plan).not.toContain(STANDALONE);
+    });
+
+    test('a child stamped with a DIFFERENT property is still dropped from the host dates', async () => {
+      const other = await propertyAt({ address_line1: '999 Elsewhere Road', city: 'Other City', zip: '11111' });
+      const { lawnParent, pestParent } = await pairWithLawnChildAt(other);
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.plan).not.toContain(LAWN_CHILD);
+      expect(preview.plan).toContain(STANDALONE);
+    });
+
+    test('a child stamped with a property that has no address is dropped (fail closed, never guessed)', async () => {
+      const blank = await propertyAt({ address_line1: null, city: null, zip: null, state: null });
+      const { lawnParent, pestParent } = await pairWithLawnChildAt(blank);
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.plan).not.toContain(LAWN_CHILD);
+      expect(preview.plan).toContain(STANDALONE);
+    });
+
+    test('candidate pairing: an unstamped lawn root and an id-stamped pest root at the same property pair; a different property does not', async () => {
+      const { findCandidatePairs } = require('../services/rider-series-candidates');
+      const same = await propertyAt({ address_line1: '100 Test Lane', city: 'Test City', zip: '00000' });
+      const other = await propertyAt({ address_line1: '999 Elsewhere Road', city: 'Other City', zip: '11111' });
+      const lawnParent = await row({
+        status: 'confirmed', is_recurring: true, recurring_ongoing: true,
+        recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: LAWN_START,
+      });
+      const pestAt = (propertyId) => row({
+        status: 'completed', is_recurring: true, recurring_ongoing: true, recurring_pattern: 'quarterly',
+        service_type: 'Quarterly Pest Control', scheduled_date: ANCHOR, property_id: propertyId,
+      });
+      const pestSame = await pestAt(same);
+      let pairs = await findCandidatePairs(trx, { customerId });
+      expect(pairs.map((p) => [p.lawnParentId, p.pestParentId])).toEqual([[lawnParent.id, pestSame.id]]);
+      await trx('scheduled_services').where({ id: pestSame.id }).update({ property_id: other });
+      pairs = await findCandidatePairs(trx, { customerId });
+      expect(pairs).toEqual([]);
+    });
+
+    test('a child whose property row cannot be read at all (dangling id) is dropped', async () => {
+      const { withComparableKeys } = require('../services/rider-series-preview');
+      const idOnly = { propertyId: randomUUID(), key: null, resolved: true };
+      const keyOnly = { propertyId: null, key: { street: 'x', city: '', zip: '' }, resolved: true };
+      const [a, b] = await withComparableKeys(trx, [idOnly, keyOnly]);
+      expect(a.key).toBeNull();
+      expect(b).toBe(keyOnly);
+      const { seriesPropertyVerdict } = require('../services/rider-series-preview');
+      expect(seriesPropertyVerdict(a, b)).toBe('different');
     });
   });
 
@@ -1020,5 +1133,17 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
     expect(preview.reasons).toContain('host_reschedule_pending');
     expect(preview.eligible).toBe(false);
+  });
+
+  test('a movable visit after the horizon is reported beyond the lawn schedule, never as a cancellation', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const far = await row({
+      recurring_parent_id: pestParent.id, status: 'pending', is_recurring: true, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: addDays(ANCHOR, 500),
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(dateOnlyStr(far.scheduled_date) > preview.horizon).toBe(true);
+    expect(preview.beyondSchedule).toEqual([{ id: far.id, date: dateOnlyStr(far.scheduled_date) }]);
+    expect(preview.cancel.map((c) => c.id)).not.toContain(far.id);
   });
 });

@@ -38,6 +38,10 @@
  *      a disabled reason template falls back to the generic one, and a
  *      disabled generic template is the lane's kill switch.
  *   7. Never to a staff phone (the bridge's admin leg).
+ *   8. Never to a number whose caller said no to texts on any call (owner
+ *      2026-09-30 — the same "no texts" the booking-link text and the
+ *      missed-call / voicemail texts honour). The admin's call still rings
+ *      through to the voicemail greeting as before.
  *
  * Ordering contract with the webhook: the TEXT IS SENT FIRST and the
  * customer leg is hung up only on a real provider send (codex #4195 r1 P1 —
@@ -58,6 +62,7 @@ const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-s
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const { REASONS, visitInProgress, nonServiceCaller } = require('./outbound-call-reason');
+const { saidNoTextsOnAnyCall } = require('./messaging/auto-text-holds');
 
 const CLAIM_PREFIX = 'outbound_voicemail:';
 const CLAIM_WINDOW = '24 hours';
@@ -153,6 +158,9 @@ async function precheck({ phone: rawPhone, customerId = null, relatedCallId = nu
     // The call being returned was not a service contact (a complaint about a
     // van, a solicitor, a job applicant, a wrong number): no text at all.
     if (await nonServiceCaller({ customerId, phone, relatedCallId, before: now })) return { ok: false, skipped: 'non_service_caller' };
+    // They said no to texts on a call with this number, the call being
+    // returned included (owner 2026-09-30).
+    if (await saidNoTextsOnAnyCall(phone, { originCallId: relatedCallId })) return { ok: false, skipped: 'said_no_texts' };
   } catch (e) {
     logger.warn(`[outbound-voicemail-sms] context probe failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
     return { ok: false, skipped: 'visit_probe_failed' };

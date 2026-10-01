@@ -9,8 +9,11 @@
  * need are passed; recipient EMAIL resolution is centralized in the
  * executor (processTrigger's resolveEmailForTrigger), not duplicated here.
  *
- * visit.completed_first and customer.churned are intentionally NOT wired
- * here yet — see the PR body for why (deferred to a follow-up PR).
+ * customer.churned is intentionally NOT wired here yet — see the PR body for
+ * why (deferred to a follow-up PR). visit.completed_first has its emitter
+ * below (emitVisitCompletedFirst, the email division's lc.first_visit_pest)
+ * but NO caller yet: the producer call belongs at the completion site, after
+ * the closeout commits, and is a separate step.
  *
  * codex round 3 on #5154 — STRUCTURAL rewrite of the recovery sweep. Round 2
  * re-derived "missed events" by guessing from entity timestamps
@@ -42,6 +45,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { scrubSentryText } = require('../utils/sentry-scrub');
+const { etDateString } = require('../utils/datetime-et');
 
 // Every error text this module logs or persists (intents.last_error) goes
 // through the shared PII scrubber first (pre-push audit P1): a Postgres
@@ -71,6 +75,20 @@ function safeErrorText(err) {
 const RECIPIENT_EMAIL_REQUIRED_CODE = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
 function isDeterministicAutomationError(err) {
   if (!err) return false;
+  // Per-automation isolation (pre-live fix): processTrigger visits EVERY
+  // automation on the trigger before rethrowing, tagging the error with each
+  // automation's own failure. A failure of an automation's own CONFIGURATION
+  // (blank/invalid idempotency template, a key variable the payload never
+  // provides) is fixable in the admin editor, and the marker is SHARED by
+  // every automation on the event — settling it 'unrecoverable' on the first
+  // such 400 would leave the fixed automation (and any that failed
+  // transiently) unable to ever replay the event. So it stays 'pending' for
+  // the bounded retry budget (MAX_INTENT_ATTEMPTS, then the 24h shelf life);
+  // only a failure set made ENTIRELY of the permanent recipient error (a
+  // payload fact no automation edit can change) terminalizes immediately.
+  if (Array.isArray(err.automationFailures) && err.automationFailures.length) {
+    return err.automationFailures.every((f) => f && f.code === RECIPIENT_EMAIL_REQUIRED_CODE);
+  }
   return err.code === RECIPIENT_EMAIL_REQUIRED_CODE || Number(err.status) === 400;
 }
 
@@ -135,7 +153,10 @@ async function emitTrigger(eventKey, args, intentId = null) {
     await settleIntent(intentId, { status: 'processed' });
     return result;
   } catch (err) {
-    const errorText = safeErrorText(err);
+    const failedKeys = Array.isArray(err && err.automationFailures)
+      ? err.automationFailures.map((f) => f.automation_key).filter(Boolean)
+      : [];
+    const errorText = safeErrorText(err) + (failedKeys.length ? ` [automations: ${failedKeys.join(', ')}]` : '');
     if (isDeterministicAutomationError(err)) {
       await settleIntent(intentId, { status: 'unrecoverable', last_error: errorText, attempts: db.raw('attempts + 1') });
     } else {
@@ -149,11 +170,31 @@ async function emitTrigger(eventKey, args, intentId = null) {
 // estimate.expired — fired once per row estimate-expiration.js's
 // flipExpiredBatch flips, immediately after that row's own transaction
 // (which also recorded the intent marker below) commits.
-async function emitEstimateExpired({ id, customer_id: customerId, customer_email: customerEmail, category, service_interest: serviceInterest, expires_at: expiresAt } = {}, intentId = null) {
+async function emitEstimateExpired({
+  id, customer_id: customerId, customer_email: customerEmail, category, service_interest: serviceInterest, expires_at: expiresAt,
+  flipped_at: flippedAt, updated_at: updatedAt,
+} = {}, intentId = null) {
   if (!id) {
     // A marker whose payload can never be dispatched is settled, never left
     // pending to pin the sweep batch.
     await settleUndispatchable(intentId, 'marker payload has no estimate id');
+    return null;
+  }
+  // The expiry's own ET date. An estimate aged out by Rule 1 can have NO
+  // expires_at: the flip's own instant stands in (the marker stores it as
+  // flipped_at; a direct emit reads the flipped row's updated_at, the same
+  // instant), so the direct emit and a replay derive the same key. Neither
+  // present: the per-expiry run key cannot be built, and no replay could change
+  // that — settled, not retried.
+  // The EFFECTIVE expiry is the earlier of the two: an estimate aged out before its
+  // expires_at (ESTIMATE_EXPIRATION_DAYS shorter than the send window) really expired
+  // at the flip, not at its later stored expiry.
+  const instants = [expiresAt, flippedAt || updatedAt]
+    .filter(Boolean).map((value) => new Date(value)).filter((date) => !Number.isNaN(date.getTime()));
+  const expiryInstant = instants.length ? new Date(Math.min(...instants.map((date) => date.getTime()))) : null;
+  const expiresOn = expiryInstant ? etDateString(expiryInstant) : '';
+  if (!expiresOn) {
+    await settleUndispatchable(intentId, 'marker payload has neither an expiry nor a flip time');
     return null;
   }
   return emitTrigger('estimate.expired', {
@@ -168,6 +209,9 @@ async function emitEstimateExpired({ id, customer_id: customerId, customer_email
       category: category || '',
       service_interest: serviceInterest || '',
       expires_at: expiresAt || null,
+      // One nurture touch per (estimate, expiry): a run skipped because the
+      // estimate was extended never consumes the key of the NEXT expiry.
+      expires_on: expiresOn,
     },
   }, intentId);
 }
@@ -191,6 +235,24 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
     recipient: { type: 'customer', id: customerId },
     payload: { review_id: reviewId, customer_id: customerId, location_id: locationId || '' },
   }, intentId);
+}
+
+// visit.completed_first — a customer's FIRST performed visit on a service
+// line, fired by the completion site after the closeout commits (no caller is
+// wired yet; see the header). Ids only: the email division's payload builder
+// (email-division/payload-builders.js) reads the visit itself and re-judges
+// that it really is the customer's first performed, customer-visible pest
+// visit, so a wrong or repeated emit can only produce a skipped run, never a
+// send. No intent marker: the completion transaction does not record one.
+async function emitVisitCompletedFirst({ serviceRecordId, customerId } = {}) {
+  if (!serviceRecordId || !customerId) return null;
+  return emitTrigger('visit.completed_first', {
+    triggerEventId: `visit_completed_first:${serviceRecordId}`,
+    entityType: 'service_record',
+    entityId: serviceRecordId,
+    recipient: { type: 'customer', id: customerId },
+    payload: { service_record_id: serviceRecordId, customer_id: customerId },
+  });
 }
 
 // Best-effort marker insert, isolated from the caller's transaction (codex
@@ -335,7 +397,10 @@ async function retryPendingIntents() {
       const payload = typeof marker.payload === 'string' ? JSON.parse(marker.payload) : (marker.payload || {});
       let result = null;
       if (marker.trigger_event_key === 'estimate.expired') {
-        result = await emitEstimateExpired(payload, marker.id);
+        // A marker written before flipped_at existed (Rule 1, no expires_at) has
+        // no flip instant in its payload: the marker's own occurred_at IS the
+        // flip's `now` (recordAutomationIntents is handed it), so it stands in.
+        result = await emitEstimateExpired({ ...payload, flipped_at: payload.flipped_at || marker.occurred_at }, marker.id);
       } else if (marker.trigger_event_key === 'review.linked_5star') {
         result = await emitReviewLinked5Star({
           reviewId: payload.review_id, customerId: payload.customer_id, locationId: payload.location_id, starRating: payload.star_rating,
@@ -380,6 +445,7 @@ module.exports = {
   MAX_INTENT_ATTEMPTS,
   emitEstimateExpired,
   emitReviewLinked5Star,
+  emitVisitCompletedFirst,
   recordAutomationIntent,
   recordAutomationIntents,
   sweepMissedLifecycleEvents,

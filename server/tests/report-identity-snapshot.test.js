@@ -59,6 +59,8 @@ const FROZEN_FACTS = {
   irrigationRequired: null,
   labelVerifiedAt: '2026-05-30',
   labelVersion: '2026-label',
+  // New completions freeze the resolved watering rule (null = unknown).
+  wateringRule: null,
 };
 
 function snapshotFixture(overrides = {}) {
@@ -373,6 +375,59 @@ describe('attachApprovedReportProductFacts with frozen facts', () => {
     expect(products[1].approved_report_product_facts).toBeUndefined();
   });
 
+  test('a legacy frozen fact with no wateringRule key gets the live rule on a COPY; the snapshot is never mutated', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const frozenMap = { [PRODUCT_ID]: legacyFacts };
+    const before = JSON.parse(JSON.stringify(frozenMap));
+    const chain = {
+      whereIn: jest.fn(() => chain),
+      select: jest.fn(() => Promise.resolve([{
+        id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', formulation: 'WG',
+        application_method: null, irrigation_required: false, rainfast_minutes: 60,
+        post_application_watering: null,
+      }])),
+    };
+    const knex = jest.fn(() => chain);
+    const [product] = await attachApprovedReportProductFacts(knex, [{ product_id: PRODUCT_ID }], { frozenFacts: frozenMap });
+    expect(chain.whereIn).toHaveBeenCalledWith('id', [PRODUCT_ID]);
+    expect(product.approved_report_product_facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'default' });
+    expect(product.approved_report_product_facts).not.toBe(legacyFacts);
+    expect(Object.prototype.hasOwnProperty.call(legacyFacts, 'wateringRule')).toBe(false);
+    expect(frozenMap).toEqual(before);
+  });
+
+  test('the live fallback prefers a stored rule over the derivation', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const chain = {
+      whereIn: jest.fn(() => chain),
+      select: jest.fn(() => Promise.resolve([{
+        id: PRODUCT_ID, name: 'Celsius WG', category: 'herbicide', formulation: 'WG',
+        irrigation_required: false, rainfast_minutes: 60,
+        post_application_watering: { mode: 'hold', hold_hours: 6, source: 'label', label_note: 'Do not irrigate until the spray has dried.' },
+      }])),
+    };
+    const [product] = await attachApprovedReportProductFacts(jest.fn(() => chain), [{ product_id: PRODUCT_ID }], { frozenFacts: { [PRODUCT_ID]: legacyFacts } });
+    expect(product.approved_report_product_facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
+  });
+
+  test('a frozen null (unapproved at completion) and a frozen wateringRule: null never hit the catalog', async () => {
+    const knex = jest.fn(() => { throw new Error('catalog must not be queried'); });
+    const products = await attachApprovedReportProductFacts(knex, [
+      { product_id: PRODUCT_ID },
+      { product_id: 'not-approved-at-completion' },
+    ], { frozenFacts: { [PRODUCT_ID]: FROZEN_FACTS, 'not-approved-at-completion': null } });
+    expect(knex).not.toHaveBeenCalled();
+    expect(products[0].approved_report_product_facts.wateringRule).toBeNull();
+    expect(products[1].approved_report_product_facts).toBeUndefined();
+  });
+
+  test('a failed live rule lookup leaves the frozen facts exactly as they were', async () => {
+    const { wateringRule: _omit, ...legacyFacts } = FROZEN_FACTS;
+    const chain = { whereIn: jest.fn(() => chain), select: jest.fn(() => Promise.reject(new Error('db down'))) };
+    const [product] = await attachApprovedReportProductFacts(jest.fn(() => chain), [{ product_id: PRODUCT_ID }], { frozenFacts: { [PRODUCT_ID]: legacyFacts } });
+    expect(product.approved_report_product_facts).toEqual(legacyFacts);
+  });
+
   test('ids absent from the frozen map still resolve live', async () => {
     const chain = {
       whereIn: jest.fn(() => chain),
@@ -432,6 +487,20 @@ describe('buildReportV1Data renders identity from the snapshot', () => {
       || (data.applications || [])[0];
     expect(JSON.stringify(application)).toContain('432-1507');
     expect(JSON.stringify(application)).not.toContain('999-9999');
+  });
+
+  test('the public payload carries no watering rule (frozen or live)', async () => {
+    const rule = { mode: 'hold', hold_hours: 6, source: 'label', label_note: 'Do not irrigate until the spray has dried.', verified_at: null, verified_by: null };
+    const data = await buildReportV1Data(
+      liveJoinedRow({ reportIdentitySnapshot: snapshotFixture({ productFacts: { [PRODUCT_ID]: { ...FROZEN_FACTS, wateringRule: rule } } }) }),
+      'token-rule',
+      stubKnex({
+        ...liveFixtures,
+        products_catalog: [{ ...liveFixtures.products_catalog[0], post_application_watering: rule }],
+      }),
+    );
+    const json = JSON.stringify(data);
+    expect(json).not.toMatch(/wateringRule|post_application_watering|hold_hours|Do not irrigate until/);
   });
 
   test('legacy record (no snapshot) keeps the live join behavior', async () => {

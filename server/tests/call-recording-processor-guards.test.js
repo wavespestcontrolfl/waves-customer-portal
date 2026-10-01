@@ -1854,17 +1854,24 @@ describe('startPrecedesCall\'s call site is exempted by an existing call appoint
 // call into prompts/call-extraction-v1.js) carries its own ARRIVAL WINDOW
 // EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
 // sibling v1 prompt was just fixed for. Fixed here with the identical rule.
-describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION requires an unambiguous period, same as the sibling v1 prompt (codex #4919 round-8 P1)', () => {
+describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION states or business-hours-reads the period, same as the sibling v1 prompt (codex #4919 round-8 P1; owner decision 2026-09-29)', () => {
   const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
   test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
     const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');
     expect(ruleAt).toBeGreaterThan(-1);
-    const section = processorSrc.slice(ruleAt, ruleAt + 1600);
+    const section = processorSrc.slice(ruleAt, ruleAt + 3600);
     expect(section).toContain('UNAMBIGUOUS period for that start');
     expect(section).toContain('"Tuesday, 2 to 4 PM"');
-    expect(section).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
-    expect(section).toContain('does NOT count as confirmed');
+    // Owner decision 2026-09-29 (prompt v18): an hour with no AM/PM is read as
+    // business hours when both sides committed to it, with the same closed
+    // shapes as the V2 prompt (never an approximation, bound or alternative).
+    expect(section).toContain('BUSINESS-HOURS READING');
+    expect(section).toContain('"Tuesday, 2 to 4"; "between 2 and 4"');
+    expect(section).toContain('"can we plan on 2 o\'clock?" answered "Sure."');
+    expect(section).toContain('appointment_confirmed stays false');
+    expect(section).toContain('"two or three"');
+    expect(section).not.toContain('does NOT count as confirmed (you would otherwise have to invent AM or PM)');
     expect(section).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES count as confirmed/);
     // The already-unambiguous examples still qualify unchanged.
     expect(section).toContain('"between 6 and 9 tonight"');
@@ -2424,6 +2431,22 @@ describe('dropped-call text honors the disclaimed-number hold, both directions (
   });
 });
 
+// Owner 2026-09-30: a caller who said no to texts on THIS call gets no
+// dropped-call text. Read from the live V2 extraction (the row may not be
+// saved yet); the sender itself checks every earlier call with the number.
+describe('dropped-call text honors a "no texts" said on the call itself', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
+  const declinedIdx = src.indexOf('genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true', blockStart);
+  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
+
+  test('the decline check sits before the real send and skips with said_no_texts', () => {
+    expect(declinedIdx).toBeGreaterThan(blockStart);
+    expect(realSendIdx).toBeGreaterThan(declinedIdx);
+    expect(src.slice(declinedIdx, realSendIdx)).toContain("smsOutcome = { sent: false, skipped: 'said_no_texts' };");
+  });
+});
+
 // codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
 // canAutoRoute, and callDateET call sites was removed with the
 // provider-timestamp/call-timeline work it was introduced alongside — this
@@ -2518,5 +2541,34 @@ describe('outbound prior-contact: the call.customer_id created_at lookup is live
   test("the lookup filters deleted_at IS NULL before reading created_at", () => {
     expect(src).toContain("db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at')");
     expect(src).not.toContain("db('customers').where({ id: call.customer_id }).first('created_at')");
+  });
+});
+
+// Owner ruling 2026-09-30 (#5466): a reply to the customer's own inbound call
+// is never held to 8 AM — but only when it IS a reply to something they just
+// did. Fable review: processAllPending retries and admin force-reprocess can
+// book a visit days after the call at 11 PM; those sends keep the hold.
+describe('inbound-reply quiet-hours marker is fresh-inbound only (#5466)', () => {
+  const { isFreshInboundCall } = require('../services/call-recording-processor')._test;
+  const NOW = Date.parse('2026-10-01T02:00:00Z');
+
+  test('fresh inbound call → true; outbound → false; stale / undated → false', () => {
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(true);
+    expect(isFreshInboundCall({ direction: 'outbound-api', created_at: new Date(NOW - 10 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW - 2 * 24 * 60 * 60 * 1000) }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound' }, NOW)).toBe(false);
+    expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW + 60 * 1000) }, NOW)).toBe(false);
+  });
+
+  test('all three call-pipeline send sites use the fresh-inbound helper, never a bare direction check', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const cardAt = src.indexOf("trigger: 'ai_call_pipeline',\n                recipientPhone");
+    expect(cardAt).toBeGreaterThan(-1);
+    expect(src.slice(cardAt, cardAt + 500)).toContain('customerInitiated: isFreshInboundCall(call)');
+    const confirmationSites = src.split("purpose: 'appointment_confirmation',").slice(1)
+      .map((chunk) => chunk.slice(0, 1400));
+    const marked = confirmationSites.filter((c) => c.includes("isFreshInboundCall(call) ? { customerInitiated: true } : {}"));
+    expect(marked).toHaveLength(2);
+    expect(src).not.toContain('!isOutboundCall(call) ? { customerInitiated: true }');
   });
 });

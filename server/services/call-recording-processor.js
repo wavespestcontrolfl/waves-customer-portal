@@ -28,9 +28,11 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
-const { lockTriageCall } = require('../utils/triage-locks');
+const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
-const { resolveLocation } = require('../config/locations');
+const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
+const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -111,9 +113,10 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
-const { normalizeState } = require('../utils/address-normalizer');
+const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -132,15 +135,23 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its
+// prerequisite GATE_CALL_FAIL_OPEN_BOOKING (the Assessment fallback and the
+// fail-open filter both need it). ONE predicate for the canAutoRoute option in
+// both processor lanes, so the gate alone never half-applies (codex #5371 r2).
+function unclearServiceAssessmentActive(enabled = isEnabled) {
+  return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
+const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -866,6 +877,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
+  service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
@@ -878,6 +890,7 @@ const CONFIRM_REASON_TEXT = {
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
+  street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -950,6 +963,21 @@ async function updateUnifiedVoiceMessage(call, patch = {}) {
 
 function isOutboundCall(call = {}) {
   return String(call.direction || '').toLowerCase().startsWith('outbound');
+}
+
+// The customer's OWN inbound contact, and recent (owner ruling 2026-09-30: a
+// reply to it is never held to 8 AM). Freshness bound mirrors the dropped-
+// call lane's MAX_CALL_AGE_MS: a retry of a no_transcription row, a 7-day
+// extraction_failed retry, or an admin force-reprocess can book a visit off
+// a call from days ago at 11 PM — that send is NOT answering anything the
+// customer just did, so it keeps the send-window hold (Fable review on
+// #5466). No call start = cannot prove freshness = fenced.
+const INBOUND_REPLY_MAX_CALL_AGE_MS = 24 * 60 * 60 * 1000;
+function isFreshInboundCall(call = {}, now = Date.now()) {
+  if (isOutboundCall(call)) return false;
+  const at = callStartedAt(call) || (call.created_at ? new Date(call.created_at) : null);
+  const ms = at ? now - new Date(at).getTime() : Number.NaN;
+  return Number.isFinite(ms) && ms >= 0 && ms <= INBOUND_REPLY_MAX_CALL_AGE_MS;
 }
 
 // Single source of truth for whether implied SMS/email consent may apply to
@@ -1269,6 +1297,90 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
   }
 }
 
+// Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
+// enforce gate already vetoes out_of_service_area, but with
+// CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
+// CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
+// auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
+// 2026-09-30). This survives every routing mode. Callers pass only a VALID
+// V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
+// object is untrusted and must not suppress a valid V1 booking. Evidence:
+//   1. any DeSoto locality evidence — a DeSoto city, a DeSoto ZIP, or an
+//      on-file pin in the DeSoto rectangle — vetoes first, ahead of a
+//      positive AV verdict (which may describe a different, V2 address) and
+//      of any served-town exemption (Riverview + 34266 cannot launder it).
+//   2. a positive Address Validation verdict (inServiceArea === true) then
+//      clears the rest, including a model-stated county NAME of DeSoto.
+//   3. an AV out_of_service_area / inServiceArea false verdict, or a county
+//      outside the served set, vetoes — except a Hillsborough county whose
+//      city is a served south-Hillsborough town (config/locations.js), which
+//      stays bookable exactly as before.
+//   4. the on-file address (city, ZIP, and stored coordinates in the DeSoto
+//      rectangle with no served ZIP) is ALWAYS checked for DeSoto evidence —
+//      the booking keeps a populated stored address even when the call names
+//      a served town. When the call states NO locality at all, the on-file
+//      city/ZIP also stand in for the stated ones. If that
+//      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
+//      review (reason on_file_address_unavailable) instead of passing on no
+//      evidence.
+function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
+  const av = addressValidation || null;
+  const svc = v2Extraction?.property?.service_address || null;
+  const lower = (v) => String(v || '').toLowerCase().trim();
+  const zip5 = (v) => String(v || '').trim().slice(0, 5);
+  const statedCities = [extracted?.city, svc?.city, av?.normalized?.city].map(lower).filter(Boolean);
+  const statedZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].map(zip5).filter(Boolean);
+  const statedCounty = av?.county || svc?.county || extracted?.county || null;
+  const statedNothing = !statedCities.length && !statedZips.length && !statedCounty;
+  if (statedNothing && onFile?.lookupFailed) {
+    return { reason: 'on_file_address_unavailable', county: null };
+  }
+  // The on-file address is ALWAYS checked for DeSoto evidence, stated
+  // locality or not: backfillCustomerFromAppointmentContact keeps a
+  // populated stored address, so a returning Arcadia customer who mentions
+  // a served town is still booked at the stored DeSoto address. A customer
+  // who genuinely moved is held for review, never auto-booked. When the call
+  // stated nothing, the on-file city also drives the checks below.
+  const onFileCities = onFile && !onFile.lookupFailed ? [lower(onFile.city)].filter(Boolean) : [];
+  const onFileZips = onFile && !onFile.lookupFailed ? [zip5(onFile.zip)].filter(Boolean) : [];
+  const cities = statedNothing ? onFileCities : statedCities;
+  const zips = statedNothing ? onFileZips : statedZips;
+  let coordsInDesoto = false;
+  if (onFile && !onFile.lookupFailed) {
+    const lat = Number(onFile.latitude);
+    const lng = Number(onFile.longitude);
+    coordsInDesoto = Number.isFinite(lat) && Number.isFinite(lng)
+      && isInDesotoExclusion(lat, lng) && !onFileZips.some((z) => zipToCity(z));
+  }
+  const onFileDesoto = onFileCities.some(isDesotoLocality) || onFileZips.some(isDesotoZip) || coordsInDesoto;
+  // A DeSoto city / ZIP / on-file pin vetoes BEFORE a positive AV verdict:
+  // in V2 shadow the AV may describe V2's served address while the legacy
+  // branch books V1's DeSoto one (the bridge refuses a disagreeing V2
+  // street), so an AV "in area" cannot clear locality evidence it may not
+  // describe. It still outranks a model-stated county NAME below.
+  const countyKey = normalizeCounty(statedCounty);
+  if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || onFileDesoto) {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  if (av && av.inServiceArea === true) return null;
+  if (countyKey === 'desoto') {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  // A served south-Hillsborough town named by city OR by a served ZIP (AV
+  // can return a ZIP with no locality), as the inspection route checks it.
+  const servedHillsboroughTown = [...cities, ...zips.map((z) => lower(zipToCity(z)))]
+    .some((c) => c && SOUTH_HILLSBOROUGH_CITIES.includes(c));
+  if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
+    return { reason: 'address_validation_out_of_service_area', county: av.county || null };
+  }
+  if (statedCounty && !isInServiceAreaCounty(statedCounty)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
+    return { reason: 'county_out_of_service_area', county: String(statedCounty) };
+  }
+  return null;
+}
+
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
   return !!leadId && finalStatus === 'processed' && !nonLeadCall && !voicemailLeadPath
     && call?.status === 'completed' && call.call_outcome !== 'voicemail'
@@ -1519,13 +1631,368 @@ function judgedAddressMatches(judged, knownCaller) {
   const now = onFileAddressJudged(knownCaller, normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE);
   return ['line1', 'line2', 'city', 'state', 'zip'].every((k) => String(judged[k] || '') === now[k]);
 }
+// ── Web-form lead, street-level on-file address ───────────────────────────
+// (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling 2026-09-30.)
+// A new-build street in Parrish or Lakewood Ranch is often one Google has not
+// indexed by house: Address Validation resolves the ROUTE but not the premise
+// (status missing_component, granularity ROUTE), so the lead's typed form
+// address never earned on-file trust and an agreed time went unbooked. When
+// the address on file was typed into the lead's own web form and the call
+// does not repeat or replace it, that form address is booked anyway — and the
+// office gets an admin bell.
+// Narrow on every side: form-sourced only, a house number on file, the same
+// street Google resolved, a service county Google itself reports (owner ruling
+// 2026-09-30: never a ZIP inference), and a verdict that is street-level
+// (never "the street does not exist", never out of area).
+const STREET_LEVEL_FORM_STATUS = 'street_level_form_accept';
+function streetLevelFormAddressGateOn() {
+  const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
+  return typeof reader === 'function' && reader() === true;
+}
+// The street a line names, house number dropped: suffix spellings collapse to
+// one form ("Dr" / "Drive", "Ave E" / "Avenue East") but DISTINCT street types
+// stay distinct ("Sample Palm Drive" is not "Sample Palm Court"). An empty
+// result means no comparable street.
+const DIRECTIONAL_ABBREV = {
+  north: 'n', south: 's', east: 'e', west: 'w', northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
+function streetNameKey(line) {
+  const bare = String(line || '').trim().replace(/^\d+(?:-\d+|[a-z])?\s+(?=\S)/i, '');
+  return normalizeStreetLine(bare).toLowerCase().replace(/[.,#]/g, ' ').split(/\s+/).filter(Boolean)
+    .map((t) => DIRECTIONAL_ABBREV[t] || t).join('').replace(/[^a-z0-9]/g, '');
+}
+const zip5Of = (zip) => (String(zip || '').match(/^\d{5}/) || [''])[0];
+const alnum = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// The COMPLETE primary number of a street line, alphabetic suffix included:
+// "123B Main St" is not "123 Main St" and not "123A Main St". Empty when the
+// line does not open with a number.
+function houseNumberOf(line) {
+  const token = String(line || '').trim().split(/\s+/)[0] || '';
+  // Digits with at most one letter suffix (or a hyphenated range); an ordinal like "14th" opens a street name, not an address.
+  // The hyphen stays: "12-14" is a range, not "1214".
+  return /^\d+(?:-\d+|[a-z])?$/i.test(token) ? token.toLowerCase() : '';
+}
+// leads.extracted_data.stage values the web forms stamp. A form typed onto a
+// lead a call created (the voicemail text-back and phone-match attaches keep
+// first_contact_channel 'call') leaves its own typed address here too.
+const FORM_LEAD_STAGES = new Set(['lead_webhook_received', 'property_lookup_started', 'property_lookup_complete', 'quote_calculated']);
+function parseJsonObjectSafe(v) {
+  if (v && typeof v === 'object') return v;
+  try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
+}
+// The address a lead row's own web form typed: the normalized address the
+// form endpoint wrote into extracted_data, on EVERY lead channel. leads.address
+// is never read here — it is fill-if-empty by the call pipeline, so a form that
+// arrived without an address and was later enriched by a call would otherwise
+// pass call-derived text off as the form's. Call writers never put an address
+// in extracted_data. Fails closed when the snapshot is absent.
+function formTypedAddressOf(row) {
+  const ex = parseJsonObjectSafe(row.extracted_data);
+  const addr = parseJsonObjectSafe(ex?.address);
+  if (!ex || !FORM_LEAD_STAGES.has(ex.stage) || !addr || !String(addr.line1 || '').trim()) return null;
+  // Unit-bearing addresses are outside the street-level lane entirely: a
+  // street-level match cannot verify a unit, and a form for Apt 4 must never
+  // vouch for an on-file edit to Apt 5.
+  if (String(addr.line2 || '').trim()) return null;
+  return { line1: String(addr.line1).trim(), city: addr.city, zip: addr.zip, state: addr.state };
+}
+// True when the customer's on-file street is what their own web form typed:
+// a live lead linked to the customer whose form-typed address is the same
+// house (whole number, suffix included) and the whole same street, city and
+// ZIP. An address only a call ever wrote has no such row. Any lookup failure
+// fails closed.
+async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
+  try {
+    if (!knownCaller?.id || String(knownCaller.addressLine2 || '').trim()) return false;
+    const line1 = String(knownCaller.addressLine1 || '').trim();
+    const house = houseNumberOf(line1);
+    const name = streetNameKey(line1);
+    if (!house || !name) return false;
+    const rows = await conn('leads')
+      .where({ customer_id: knownCaller.id })
+      .whereNull('deleted_at')
+      .orderBy('created_at', 'desc')
+      .select('extracted_data')
+      .limit(25);
+    const zip = zip5Of(knownCaller.addressZip);
+    const city = alnum(knownCaller.addressCity);
+    const onFileState = normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE;
+    return rows.some((row) => {
+      const typed = formTypedAddressOf(row);
+      if (!typed || houseNumberOf(typed.line1) !== house) return false;
+      // The WHOLE street must match, type and directional included — a form
+      // typing "Sample Palm Drive East" is not the saved "Sample Palm Dr".
+      // Whatever follows the street (city, state, ZIP) is parsed off first, so
+      // an extra street word can never hide as a city: the parsed city must be
+      // the one on file, and a ZIP, when given, the same ZIP.
+      if (streetNameKey(typed.line1) !== name) return false;
+      // The snapshot must CARRY and match a locality discriminator (city or ZIP)
+      // and the state: a street-line-only snapshot ("123 Main St") could belong to
+      // any town, so it never vouches for this address.
+      if (!typed.city && !typed.zip) return false;
+      if (typed.city && alnum(typed.city) !== city) return false;
+      if (typed.zip && zip5Of(typed.zip) !== zip) return false;
+      if (!typed.state || normalizeState(String(typed.state).trim()) !== onFileState) return false;
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+// Pure: does Google's answer for the on-file address qualify as street-level
+// on the SAME street, in area? Returns the evidence to persist, else null.
+// Google must AFFIRM the area itself: either it placed the point in a service
+// county, or — when it has no coordinates for a new-build street — it returned
+// the very ZIP and state on file, and that ZIP is one we serve. The form's own
+// ZIP is never the only witness.
+function streetLevelMatch(knownCaller, verdict) {
+  // Route-level, in a service county Google ITSELF reports (owner ruling 2026-09-30: a ZIP is never
+  // promoted to a county), and a clean verdict: Google replaced and could not confirm nothing
+  // (deriveStatus labels such a result missing_component before looking at those flags).
+  const v = verdict || {};
+  if (v.status !== 'missing_component' || v.granularity !== 'ROUTE' || v.inServiceArea !== true
+    || v.hasReplaced !== false || v.hasUnconfirmed !== false) return null;
+  const line1 = knownCaller.addressLine1;
+  const house = houseNumberOf(line1);
+  const zip = zip5Of(knownCaller.addressZip);
+  // No unit (a street-level match cannot verify one), a house number to read back, a ZIP on file.
+  if (String(knownCaller.addressLine2 || '').trim() || !house || !zip) return null;
+  const n = v.normalized || {};
+  const street = streetNameKey(line1);
+  // The same (non-empty) street, and Google did not rewrite the house number.
+  if (!street || street !== streetNameKey(n.street_line_1) || !['', house].includes(houseNumberOf(n.street_line_1))) return null;
+  // Google's own ZIP must match; with none, Google's city must equal the on-file city (a common street
+  // name in another served city must not vouch for this address).
+  const localityOk = n.postal_code ? zip5Of(n.postal_code) === zip : !!alnum(n.city) && alnum(n.city) === alnum(knownCaller.addressCity);
+  if (!localityOk || normalizeState(n.state) !== SERVICE_STATE) return null;
+  return { granularity: 'ROUTE', route: String(n.street_line_1).trim(), zip, areaBasis: 'google_county' };
+}
+function applyStreetLevelFormVerdict(knownCaller, verdict) {
+  // Re-checked here so an offline replay of a persisted verdict honors the
+  // gate and the same bounds the live pass applied.
+  if (!streetLevelFormAddressGateOn()) return knownCaller;
+  if (verdict?.inServiceArea !== true || verdict?.streetLevel?.granularity !== 'ROUTE') return knownCaller;
+  if (verdict.streetLevel.areaBasis !== 'google_county') return knownCaller;
+  if (!houseNumberOf(knownCaller.addressLine1)) return knownCaller;
+  if (String(knownCaller.addressLine2 || '').trim()) return knownCaller;
+  if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
+  knownCaller.addressTrusted = true;
+  knownCaller.addressOnly = true;
+  knownCaller.onFileStreetLevel = { ...verdict.streetLevel };
+  knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
+  return knownCaller;
+}
+// The pending-review details for a street-level web-form booking: null unless
+// the booking really dispatches to that on-file address. Such a booking lands
+// on the existing office-review pending path (the voice agent's pending
+// bookings: source_action voice_agent, an outbound_booking_review card,
+// activation on office confirm), plus ONE admin bell per visit.
+function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
+  if (routingResult?.usesOnFileAddress !== true || !knownCaller?.onFileStreetLevel) return null;
+  return {
+    address_on_file: [knownCaller.addressLine1, knownCaller.addressLine2, knownCaller.addressCity, knownCaller.addressState, knownCaller.addressZip]
+      .map((v) => String(v || '').trim()).filter(Boolean).join(', '),
+    google_street: knownCaller.onFileStreetLevel.route || null,
+    customer_name: knownCaller.name || null,
+  };
+}
+// The one admin bell for a held visit (raiseAdminAlert, bell:true, deduped on the visit id). No existing bell fires for a pending
+// office-review call booking (voice-agent rows file an outbound_booking_review
+// triage card instead), so this is the only one.
+// The dispatch schedule link for a held visit: ?appointment opens the visit,
+// ?date selects its day. Shared by the admin bell and the review card.
+function streetLevelVisitLink(visitId, visitDate) {
+  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+}
+function streetLevelVisitWhen(scheduledDate, windowStart) {
+  return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
+}
+// "Mon Oct 5, 1 PM" — a weekday and short date a person would say (docs/admin-notifications.md
+// keeps ISO dates and 24-hour clock strings out of a headline or a why).
+function spokenVisitWhen(scheduledDate, windowStart) {
+  const iso = dateOnlyISO(scheduledDate);
+  const parts = [];
+  if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    parts.push(new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(',', ''));
+  }
+  const m = String(windowStart || '').match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    const h = Number(m[1]);
+    parts.push(`${h % 12 || 12}${m[2] === '00' ? '' : `:${m[2]}`} ${h >= 12 ? 'PM' : 'AM'}`);
+  }
+  return parts.join(', ');
+}
+// The one admin bell for a held visit, raised through raiseAdminAlert
+// (docs/admin-notifications.md): headline "Schedule — Confirm address before dispatch",
+// a one-sentence why of at most 110 characters (customer, address, when, and that Google
+// matched only the street). The address gives way first when the line runs long.
+function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
+  const visitDate = dateOnlyISO(scheduledDate);
+  const when = spokenVisitWhen(scheduledDate, windowStart);
+  const who = hold.customer_name || 'New lead';
+  const tail = '; Google matched the street only.';
+  const clip = (text, room) => (room <= 0 ? '' : text.length <= room ? text : `${text.slice(0, Math.max(room - 1, 0)).trimEnd()}…`);
+  const whenPart = when ? `, ${when}` : '';
+  const room = 110 - tail.length - whenPart.length - `${who}, `.length;
+  let why = `${who}, ${clip(hold.address_on_file, room)}${whenPart}${tail}`;
+  if (why.length > 110) why = `${clip(who, 110 - tail.length - whenPart.length)}${whenPart}${tail}`.slice(0, 110);
+  const link = streetLevelVisitLink(visitId, visitDate);
+  return {
+    category: 'schedule',
+    title: 'Schedule — Confirm address before dispatch',
+    body: why,
+    spec: {
+      area: 'Schedule', action: 'Confirm address before dispatch', why, severity: 'needs-you', link,
+      subject: { type: 'visit', id: String(visitId) }, doneWhen: 'visit_confirmed', who: 'person',
+    },
+    opts: {
+      icon: '📍',
+      link,
+      bell: true,
+      dedupeKey: `street-level-address-hold:${visitId}`,
+      // Ids only: the name and address are in the why the owner asked for; the visit link carries the rest.
+      metadata: { scheduledServiceId: visitId, callSid },
+    },
+  };
+}
+// True when the customer row's address no longer matches the on-file snapshot the
+// street-level proof was computed against (house line, unit, city, ZIP, state).
+// A missing snapshot or row counts as changed (fail closed).
+function streetLevelProofAddressChanged(snapshot, row) {
+  if (!snapshot || !row) return true;
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const stateOf = (v) => normalizeState(String(v || '').trim()) || SERVICE_STATE;
+  // The house number is compared as a STRUCTURED token (a ranged "12-14" keeps its hyphen and
+  // never equals "1214") and the street apart from it, never by stripping every separator.
+  const houseA = houseNumberOf(snapshot.line1);
+  const houseB = houseNumberOf(row.address_line1);
+  if (!houseA || !houseB || houseA !== houseB) return true;
+  return streetNameKey(snapshot.line1) !== streetNameKey(row.address_line1)
+    || norm(snapshot.line2) !== norm(row.address_line2)
+    || norm(snapshot.city) !== norm(row.city)
+    || zip5Of(snapshot.zip) !== zip5Of(row.zip)
+    || stateOf(snapshot.state) !== stateOf(row.state);
+}
+// A reused PENDING voice-agent booking (ConversationRelay inserted it) that THIS pass now finds to be
+// a street-level web-form address: promote its review card (or file one) to the durable street-level
+// hold BEFORE lead conversion and the reuse activation, so every hold predicate applies. Same card
+// shape the fresh insert writes. No-op unless the row is an unconfirmed pending voice_agent visit that
+// is not already a hold. Runs on the booking transaction.
+// Error text safe to log / persist: a database or driver error (it carries sql / bindings, or the
+// driver's severity / routine fields) is reduced to name + code, since its message can echo bound values.
+function safeScheduleErrorText(err) {
+  if (err && (err.sql || err.bindings || err.severity || err.routine)) return `${err.name || 'Error'}:${err.code || 'unknown'}`;
+  return err?.message;
+}
+
+async function promoteReusedRowToStreetLevelHold(trx, row, { hold, callLogId, leadId, keepOpenForQuote, followUpPlan, extraction }) {
+  if (!hold || row?.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION || row.customer_confirmed || row.status !== 'pending') return false;
+  const callId = row.source_call_log_id || callLogId;
+  // Serialize with the status routes (which lock this row, then recheck the hold): take the visit lock
+  // and RE-READ eligibility under it — a confirm that committed first makes the row ineligible.
+  // Lock order everywhere in this feature: the per-call triage lock FIRST, then the visit row (close and
+  // reopen, the follow-up refresh and the confirm hook take them the same way).
+  await lockTriageCall(trx, callId);
+  const live = await trx('scheduled_services').where({ id: row.id }).forUpdate().first('status', 'customer_confirmed');
+  if (!live || live.customer_confirmed || live.status !== 'pending') return false;
+  if (await findStreetLevelHoldCard(trx, { callLogId: callId, visitId: row.id })) return false;
+  const fields = {
+    street_level_address: true,
+    address_on_file: hold.address_on_file || null,
+    visit_when: streetLevelVisitWhen(row.scheduled_date, row.window_start) || null,
+    visit_link: streetLevelVisitLink(row.id, dateOnlyISO(row.scheduled_date)),
+    ...(followUpPlan ? { follow_up_plan: { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null } } : {}),
+  };
+  try {
+  const card = await trx('triage_items')
+    .where({ call_log_id: callId, reason_code: 'outbound_booking_review' })
+    .whereIn('status', ['open', 'in_progress'])
+    .first('id', 'payload');
+  if (card) {
+    const cur = (card.payload && typeof card.payload === 'object') ? card.payload : (() => { try { return JSON.parse(card.payload) || {}; } catch { return {}; } })();
+    await trx('triage_items').where({ id: card.id }).update({
+      payload: JSON.stringify({ ...cur, scheduled_service_id: cur.scheduled_service_id || row.id, lead_id: cur.lead_id || leadId || null, ...fields }),
+      updated_at: new Date(),
+    });
+  } else {
+    await trx('triage_items')
+      .insert(buildTriageItem({
+        callLogId: callId,
+        flag: 'outbound_booking_review',
+        extraction,
+        severity: 'advisory',
+        extraPayload: { origin: 'voice_agent', scheduled_service_id: row.id, lead_id: leadId || null, keep_open_for_quote: !!keepOpenForQuote, ...fields },
+      }))
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+  }
+  await syncCallReviewStatus(trx, callId);
+  } catch (err) {
+    // The card writes carry the street address in their bound payload, and a Knex / driver error can
+    // echo those bindings in its message: rethrow code / name only so the scheduling catch (which logs
+    // and persists the message) never sees address text.
+    throw Object.assign(new Error(`street_level_promotion_failed${err?.code ? `:${err.code}` : ''}`), { code: 'street_level_promotion_failed', cause: undefined });
+  }
+  return true;
+}
+// Rings the one "confirm the address" admin bell for a held visit. Reads the visit
+// LIVE right before ringing: staff may have confirmed (or cancelled) it since the
+// booking committed, and a bell for a confirmed visit is noise (a lookup blip
+// answers "still held", so the bell rings). Best effort, and its failure log carries no error message: a database
+// error can echo the bound body (customer name and address).
+async function ringStreetLevelHoldBell({ hold, visit, callSid }) {
+  try {
+    if (!(await isStreetLevelHoldVisit(visit.id, db))) {
+      logger.info(`[call-proc] street-level confirm-address bell skipped for ${maskSid(callSid)}: visit ${visit.id} is no longer an unconfirmed hold`);
+      return false;
+    }
+    const alert = buildStreetLevelHoldAlert({
+      hold, visitId: visit.id, callSid, scheduledDate: visit.scheduled_date, windowStart: visit.window_start,
+    });
+    await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
+    return true;
+  } catch (notifyErr) {
+    logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.code || notifyErr.name || 'error'}`);
+    return false;
+  }
+}
+// True when this row is a street-level address hold: a pending office-review
+// row whose outbound_booking_review card carries payload.street_level_address.
+// The card is the durable signal (no new source_action, no new column); it is
+// read whether open or resolved, so a denied card cannot release the hold. Fails
+// CLOSED (treated as a hold) on a lookup error.
+async function isStreetLevelHoldRow(conn, row) {
+  try {
+    // Same lifetime as the shared hold predicate: unconfirmed (customer_confirmed false) and
+    // not ended — NOT status = 'pending' alone, since the office confirm commits the status
+    // before the activation stamps customer_confirmed.
+    if (!row?.id || !row.source_call_log_id || row.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION
+      || row.customer_confirmed || ['cancelled', 'skipped', 'rescheduled'].includes(String(row.status || ''))) return false;
+    const card = await findStreetLevelHoldCard(conn, { callLogId: row.source_call_log_id, visitId: row.id });
+    return !!card;
+  } catch (err) {
+    logger.warn(`[call-proc] street-level hold lookup failed for ${row?.id}: ${err.code || err.name || 'error'}`);
+    return true;
+  }
+}
+function dateOnlyISO(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
   const status = verdict?.status || null;
   knownCaller.onFileAddressVerdict = status
-    ? { status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}) }
+    ? {
+      status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}),
+      // Only the street-level verdict carries the evidence behind it, so
+      // every other persisted verdict keeps its exact prior shape.
+      ...(status === STREET_LEVEL_FORM_STATUS && verdict?.streetLevel ? { streetLevel: verdict.streetLevel } : {}),
+    }
     : null;
   if (knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (status === STREET_LEVEL_FORM_STATUS) return applyStreetLevelFormVerdict(knownCaller, verdict);
   if (!(status === 'validated_accept' && verdict?.inServiceArea === true)) return knownCaller;
   // A verdict carries the address it judged; the record must still match it.
   if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
@@ -1544,7 +2011,7 @@ function applyOnFileAddressVerdict(knownCaller, verdict) {
 // stored — a non-Florida state fails closed rather than being rewritten to
 // FL, or Google would accept a synthesized Florida address the proof
 // snapshot never carried (codex #4685 r2 P1).
-async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true } = {}) {
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true, isFormAddress = onFileAddressIsFromWebForm } = {}) {
   if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
   if (knownCaller.onFileAddressVerdict !== undefined) return knownCaller;   // already judged this pass
   const line1 = String(knownCaller.addressLine1 || '').trim();
@@ -1573,6 +2040,17 @@ async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAd
   } catch (err) {
     logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
     return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null, address });
+  }
+  // GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL: a confirmed booking on a web-form
+  // lead's own typed address that Google resolved only to the street. Every
+  // other verdict — and gate off — takes the exact path below.
+  if (extraction?.scheduling?.status === 'confirmed' && streetLevelFormAddressGateOn()) {
+    const evidence = streetLevelMatch(knownCaller, verdict);
+    if (evidence && await isFormAddress(knownCaller)) {
+      return applyOnFileAddressVerdict(knownCaller, {
+        status: STREET_LEVEL_FORM_STATUS, inServiceArea: true, address, streetLevel: evidence,
+      });
+    }
   }
   return applyOnFileAddressVerdict(knownCaller, { status: verdict?.status || null, inServiceArea: verdict?.inServiceArea ?? null, address });
 }
@@ -1637,6 +2115,7 @@ function callerIdNameForPrompt(call) {
  */
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
+  unclearServiceAssessmentEnabled = false,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1661,6 +2140,10 @@ function buildFailOpenRoutingContext({
       failOpen: !!failOpenEnabled,
       callerAni: contactPhone,
       knownCustomer: failOpenKnownCustomer(knownCaller),
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT, effective only with fail-open on
+      // (the live pass's own two-gate predicate). Absent when off, so the
+      // options shape the audits compare is unchanged gate-off.
+      ...(failOpenEnabled && unclearServiceAssessmentEnabled ? { unclearServiceAssessment: true } : {}),
     },
   };
 }
@@ -1743,7 +2226,33 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     reason: 'v1_only_new_address',
     flags: routingResult.flags,
     appointmentBlockingFlags: ['address_unverified'],
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the held call still owes staff the
+    // advisory service card for the flag(s) the gate waived — the blocked
+    // branch files failedOpenFlags as advisory cards. Only the gate's own
+    // waivers ride along (the on-file address flags stay dropped, as before),
+    // so gate off the replacement verdict is unchanged.
+    ...(routingResult.unclearServiceDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
+      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    } : {}),
   };
+}
+
+// The downstream half of the GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT contract for
+// the OFFLINE production-parity audits (readiness, replay, shadow verify): a
+// call the gate admitted is still vetoed when the resolver — reading the FULL
+// transcript, exactly as the live pass does for every gate admission — finds an
+// unsupported / administrative-only call. The live path skips the appointment
+// there; an audit that stops at canAutoRoute would count it auto-routable.
+// Returns the routing verdict unchanged unless that veto applies. One helper,
+// shared by all three scripts.
+function applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription) {
+  if (!routingResult?.allowed || routingResult.unclearServiceGateAdmitted !== true) return routingResult;
+  const resolution = resolveSchedulableCallService(extracted || {}, { transcription, fullTranscriptVeto: true });
+  // ok:true books; noMatch:true books the Assessment fallback. Only a hard
+  // veto (ok:false without noMatch) holds the call.
+  if (resolution.ok || resolution.noMatch === true) return routingResult;
+  return { ...routingResult, allowed: false, reason: resolution.reason || 'unsupported_service' };
 }
 
 // Fail-open on-file address PROOF is customer-scoped (codex P1, 2026-09-09):
@@ -1780,6 +2289,8 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // decision and the successor-inheritance gate can never drift apart. The
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
+const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, refreshOwedFollowUpPlan } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -1859,13 +2370,19 @@ function safeParseJsonPayload(payload) {
 // Two payloads with the same signature describe the identical question —
 // same candidates, same disagreement flag, same release target; anything
 // else means the office needs to see fresh evidence.
-function emailCardSignature(reasonCode, payload) {
+function emailCardSignature(reasonCode, payload, { wording = false } = {}) {
   const candidates = Array.isArray(payload?.email_candidates)
     ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
     : [];
   const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
   const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
-  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+  const key = [reasonCode || null, !!payload?.email_disagreement, candidates, target];
+  // gmail_same_inbox (2026-09-29) is card WORDING, not evidence: it counts
+  // only when comparing against a still-open card, so a card minted before
+  // the same-inbox wording refreshes on reprocess (codex #5323 r5) — never
+  // against a card a human already confirmed, which must stay satisfied.
+  if (wording) key.push(payload?.gmail_same_inbox || null);
+  return JSON.stringify(key);
 }
 
 // The single address (or blank) a card's evidence supports holding a
@@ -2018,8 +2535,8 @@ async function mintEmailReviewCardsFenced({
       for (const live of liveCards) {
         const desired = cards.find((c) => c.reason_code === live.reason_code);
         const same = !!desired
-          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
-            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload), { wording: true })
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload), { wording: true });
         if (same) {
           satisfiedReasonCodes.add(desired.reason_code);
           continue; // identical evidence — no-op, card untouched
@@ -4738,8 +5255,12 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // services/assessment-booking predicate), never supplied by callers, so every
 // entry point — the four in-file booking paths and the outbound-review
 // confirm hook — agrees on what an assessment is.
-async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null, deferConversion = false }) {
   if (!leadId) return false;
+  // A street-level address hold is not a closed deal: the lead converts when
+  // the office confirms the visit (runOutboundReviewConfirmHook), like every
+  // pending office-review booking. Any other booking converts as before.
+  if (deferConversion) return false;
   try {
     return await trx.transaction(async (inner) => {
       const keepOpenForAssessment = !!booking
@@ -4883,7 +5404,15 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
   }
 }
 
-async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }) {
+// `dbh`: a caller already inside a transaction that holds the address lock (and
+// possibly hold rows) passes it so the confirmation send runs on THAT
+// connection (a savepoint here) instead of opening a second one that would
+// block on the address lock the caller holds (B13).
+async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }, { dbh = null } = {}) {
+  // The caller's transaction when it has one, else the pool: the WHOLE path
+  // (lookup, subscribe, verify, send, stamp bookkeeping) runs on one connection,
+  // so a caller holding a connection + locks never waits on a second pooled one.
+  const conn = dbh && dbh.isTransaction ? dbh : db;
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
 
@@ -4892,10 +5421,10 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     return { skipped: true, reason: 'invalid_email' };
   }
 
-  const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
+  const existing = await conn('newsletter_subscribers').where({ email: emailLc }).first();
   if (existing?.status === 'unsubscribed') {
     if (!existing.customer_id) {
-      await db('newsletter_subscribers')
+      await conn('newsletter_subscribers')
         .where({ id: existing.id })
         .update({ customer_id: customerId, updated_at: new Date() });
     } else if (existing.customer_id !== customerId) {
@@ -4912,9 +5441,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     source: 'call_recording',
     strict: true,
     requireConfirmation: true,
+    dbh: conn === db ? null : conn,
   });
 
   let confirmationEmailSent = null;
+  let deliveryAmbiguous = false;
   if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
     // The subscriber row is re-verified and LOCKED through the provider
     // call (Codex #3084 r51 — the same pending/token lock-through-send
@@ -4931,7 +5462,12 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // durable.
     let sendRefused = false;
     try {
-      await db.transaction(async (trx) => {
+      await conn.transaction(async (trx) => {
+        // Address key BEFORE the row lock (suppression / ownership writers
+        // take the key first, then rows); sendConfirmationEmail re-enters it
+        // and runs its vetoes on THIS connection (B13).
+        await require('../utils/customer-comms-lock')
+          .lockCustomerEmail(trx, String(result.subscriber.email || emailLc).trim().toLowerCase());
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: result.subscriber.id,
@@ -4945,7 +5481,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
           sendRefused = true;
           return;
         }
-        await sendConfirmationEmail(result.subscriber);
+        await sendConfirmationEmail(result.subscriber, { dbh: trx });
         confirmationEmailSent = true;
       });
       if (sendRefused) {
@@ -4958,6 +5494,16 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         // transaction commit failed — the DOI is out and the pre-stamp is
         // durable; do NOT clear it or the retry double-mails.
         logger.warn(`[call-proc] newsletter send transaction commit errored after the send for customer ${customerId}: ${e.code || e.name || 'db_error'} — pre-stamp stands`);
+        e = null;
+      }
+      if (e && e.deliveryAmbiguous) {
+        // A provider timeout / 5xx / network failure AFTER dispatch: the DOI
+        // may have been accepted. Keep the pre-stamp (the dedupe evidence) and
+        // report neutral "maybe sent" state — never clear it and never arm the
+        // forced resend (sendgrid-mail's isDefiniteRejection convention).
+        logger.warn(`[call-proc] Newsletter confirmation delivery is ambiguous for customer ${customerId}: ${e.code || e.name || 'provider_error'} — pre-stamp stands`);
+        confirmationEmailSent = false;
+        deliveryAmbiguous = true;
         e = null;
       }
       if (e) {
@@ -4974,7 +5520,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         // the rotation's own callback owns its stamp.
         if (result.subscriber?.id) {
           try {
-            await db('newsletter_subscribers')
+            await conn('newsletter_subscribers')
               .where({
                 id: result.subscriber.id,
                 confirmation_token: result.subscriber.confirmation_token,
@@ -5000,6 +5546,9 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // newer token whose DOI may already be delivered.
     confirmationToken: result.subscriber?.confirmation_token || null,
     confirmationEmailSent,
+    // Set only for an ambiguous provider failure: the resume lane re-pends with
+    // the neutral marker (dedupe evidence kept), not the forced-resend one.
+    ...(deliveryAmbiguous ? { deliveryAmbiguous: true, retryReason: 'doi_delivery_ambiguous' } : {}),
   };
 }
 
@@ -5651,6 +6200,105 @@ async function loadCustomerServiceContext(customerId, conn = db) {
   return { estimates, serviceRecords, scheduledServices };
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: what an ambiguous-service demotion
+// books, decided in ONE place (codex #5371 r1 + r2).
+//
+// THE RULE: the flag says the PEST/service is unclear, so a service that only
+// the model's own guess named (specific_service_name / matched_service /
+// requested_service, or a transcript keyword) is replaced by the Waves
+// Assessment. A service DETERMINISTIC logic settled is kept, because the
+// ambiguity was about the pest, not the program: a covered re-service row (the
+// live lane override) and a recurring pest program the caller voiced or
+// accepted (applyRecurringIntentDefault's own evidence, recurringIntentEvidence)
+// — on INBOUND calls only, the same condition that runs applyRecurringIntentDefault
+// at all: outbound speaker labels are untrusted, so on an outbound call a
+// model-picked recurring row is forced to the Assessment too.
+//
+// A forced Assessment carries NO treatment signals: the returned
+// `extractedPatch` clears the quoted treatment price (so pricing falls back to
+// the Assessment's own catalog handling) and the follow-up-visit signals (so no
+// "Follow-up treatment" visit 2 is created for a service nobody identified)
+// and the call summary (it may name a treatment or price; it would land in the
+// customer-visible scheduled_services.notes).
+// The caller books from `{ ...extracted, ...extractedPatch }`.
+//
+// Applies only where the resolver did not hard-veto the call (ok:false WITHOUT
+// noMatch stays un-bookable). Returns { applied:false, row } when it does not
+// apply (`kept` names why a deterministic service survived), { applied:true,
+// row, extractedPatch } with the Assessment row, or { applied:true,
+// unbookable:true } when that row is unavailable (hold; never the concrete
+// service the model flagged as unclear).
+function forcedAssessmentBooking({ serviceResolution, services, current, extracted, transcription, inbound = false }) {
+  if (!(serviceResolution?.ok || serviceResolution?.noMatch === true)) return { applied: false, row: current };
+  if (current && isReServiceCatalogRow(current)) return { applied: false, row: current, kept: 're_service' };
+  if (inbound && current && extracted?.is_lead === true
+      && RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(current.name))
+      && recurringIntentEvidence(transcription)) {
+    return { applied: false, row: current, kept: 'recurring_program' };
+  }
+  const row = (services || []).find((s) => /^waves assessment$/i.test(String(s.name || '')));
+  if (!row) return { applied: true, unbookable: true, row: current };
+  return {
+    applied: true,
+    row,
+    extractedPatch: { quoted_price: null, follow_up_visit_mentioned: false, follow_up_date_time: null, call_summary: null },
+  };
+}
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a card an earlier (held) pass left
+// open as `blocking` for a flag this pass let through must not stay red on a
+// call that is now booked. The advisory insert is ON CONFLICT DO NOTHING, so
+// demote in place — open / in-progress blocking rows only; nothing is resolved.
+// Fenced to the OWNING pass exactly like the processor's other triage writes:
+// under the per-call triage lock, and only while this pass still holds the
+// call's processing_token (a superseded worker must not demote the current
+// pass's genuinely blocking card). Returns rows updated (0 = nothing to demote)
+// or null when the claim is lost — the caller must NOT proceed to book then.
+//
+// The same fenced transaction also PROVES the advisory card exists (codex #5371
+// r9 P1): on a call's first gate-enabled pass there is no blocking card to
+// demote, and the caller's own advisory insert is best-effort (its catch only
+// logs). `advisoryItems` (built triage rows, one per flag) are inserted here if
+// missing, and every flag must then have an OPEN advisory-or-demoted row, or this
+// THROWS — which the enclosing routing catch turns into a held appointment, so a
+// Waves Assessment is never booked without the card telling staff to identify
+// the real service. Flags with no built row are still verified.
+async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisoryItems = []) {
+  if (!Array.isArray(flags) || !flags.length) return 0;
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const owned = await trx('call_log')
+      .where({ id: callLogId })
+      .where('processing_token', procToken)
+      .forUpdate()
+      .first('id');
+    if (!owned) return null;
+    const demoted = await trx('triage_items')
+      .where({ call_log_id: callLogId, severity: 'blocking' })
+      .whereIn('reason_code', flags)
+      .whereIn('status', ['open', 'in_progress'])
+      .update({ severity: 'advisory', updated_at: trx.fn.now() });
+    for (const item of advisoryItems || []) {
+      if (!item || !flags.includes(item.reason_code)) continue;
+      await trx('triage_items')
+        .insert(item)
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .ignore();
+    }
+    const present = await trx('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('reason_code', flags)
+      .whereIn('status', ['open', 'in_progress'])
+      .select('reason_code');
+    const have = new Set((present || []).map((r) => r.reason_code));
+    const missing = flags.filter((f) => !have.has(f));
+    if (missing.length) {
+      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+    }
+    return demoted;
+  });
+}
+
 function resolveSchedulableCallService(extracted = {}, opts = {}) {
   const requestedText = compactText(extracted.requested_service);
   const extractedDetailText = compactText(
@@ -5677,6 +6325,15 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
     && !requestedHistoryReference;
 
   if (hasUnsupportedCallContext(extractedDetailText)) {
+    return { ok: false, reason: 'unsupported_service', service: null };
+  }
+  // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (opts.fullTranscriptVeto): a call let
+  // through past ambiguous_pest_or_service has no settled service, so the
+  // unsupported-topic veto reads the WHOLE transcript up front — otherwise a
+  // solicitor whose extracted fields still say "pest control" resolves a
+  // service first and the transcript-only veto below (no service) never runs.
+  // Off = byte-identical: the check below stays as it was.
+  if (opts.fullTranscriptVeto === true && hasUnsupportedCallContext(fullContextText)) {
     return { ok: false, reason: 'unsupported_service', service: null };
   }
   if (hasAdministrativeOnlyContext(adminContextText, extracted)) {
@@ -5711,6 +6368,69 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   // admin-only call), which a catalog match must never override.
   if (!service) return { ok: false, reason: 'unsupported_service', service: null, noMatch: true };
   return { ok: true, reason: null, service };
+}
+
+// The service fields the V2-approved booking will actually book from: the same
+// overrides the approved-extraction merge applies to `extracted` further down
+// (matched_service under its adoption rule, requested_service, and
+// specific_service_name INCLUDING a null clear). The waiver is judged on this
+// view as well as on the fields as they stand at the gate, so a V1 pick that
+// V2 replaces at booking cannot carry a waiver onto a different service.
+function v2BookingServiceView(extracted = {}, v2Extraction = null) {
+  if (!v2Extraction || !isV2Extraction(v2Extraction)) return null;
+  const v2Flat = flatView(v2Extraction);
+  const view = { ...extracted };
+  const v2Category = v2Flat.primary_service_category
+    || v2Extraction?.service_request?.primary_service_category || null;
+  const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+  if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+    view.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
+  }
+  if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
+  view.specific_service_name = v2Flat.specific_service_name || null;
+  return view;
+}
+
+// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
+// caller checks the gate). Resolves the call's service the way the booking
+// resolves it and hands the verdict to the pure waiver in call-triage-flags.js.
+// The service must resolve to a bookable CATALOG row on the allowlist — a
+// coarse label alone never waives, since that booking would carry no service_id.
+// Every view of the call's service must qualify: the V1 extraction as it stood
+// BEFORE V2-primary adoption (`preAdoptionExtracted`), the merged fields at the
+// gate, and the V2-overridden view the approved booking will book. Returns the
+// SAME verdict object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  // Both gates on and the call carries the unclear-service signal: routing may
+  // force the Waves Assessment row, which is not a whole-structure service.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
+  const prop = property || v2Extraction?.property || {};
+  const views = [];
+  if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+  views.push(extracted);
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  const results = views.map((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyWholeStructureUnitWaiver(addressValidation, {
+      enabled: true,
+      serviceKey: row?.service_key || null,
+      propertyType: prop.property_type,
+      commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+      text: [transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '),
+    });
+    return { waived, service: row?.service_key || null };
+  });
+  if (results.some((r) => r.waived === addressValidation)) return addressValidation;
+  const out = results[results.length - 1].waived;
+  out.wholeStructureUnitWaived.service = results[results.length - 1].service;
+  return out;
 }
 
 async function resolveDefaultCallBookingTechnician(conn = db) {
@@ -6887,20 +7607,13 @@ function resolveProgramName(cadenceKey, fallback, catalogNames) {
   return hit || fallback;
 }
 
-function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
-  if (!extracted || extracted.is_lead !== true) return extracted;
-  // specific_service_name outranks matched_service in catalog booking
-  // resolution (call-booking-catalog.js), so a singular value THERE would
-  // book the one-time service no matter what matched_service says — both
-  // fields get the rule.
-  const matchedKey = normalizeServiceKey(extracted.matched_service);
-  const specificKey = normalizeServiceKey(extracted.specific_service_name);
-  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
-  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
-  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
-  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
-  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
-
+// The caller-intent evidence behind the recurring-program default: the caller's
+// own text plus the agent plan offer they accepted, or null when the caller
+// voiced / accepted no recurring intent (or declined it). ONE place, read by
+// applyRecurringIntentDefault (to rewrite the service) and by
+// forcedAssessmentBooking (to know a recurring program is the caller's, not the
+// model's guess).
+function recurringIntentEvidence(transcription) {
   const normalized = normalizeApostrophes(transcription);
   const turns = speakerTurns(normalized);
   const callerText = callerOnlyText(normalized);
@@ -6921,12 +7634,32 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
     // want a package either") is not fresh intent.
     if (!nonNegatedMatch(RECURRING_INTENT_STRONG_RE, afterDecline)
       && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)
-      && !postDeclineOffer) return extracted;
+      && !postDeclineOffer) return null;
   }
   const callerVoiced = nonNegatedMatch(RECURRING_INTENT_STRONG_RE, callerText)
     || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
   const acceptedOffer = postDeclineOffer || (callerVoiced ? null : acceptedPlanOffer(turns, -1));
-  if (!callerVoiced && !acceptedOffer) return extracted;
+  if (!callerVoiced && !acceptedOffer) return null;
+  return { callerText, acceptedOffer };
+}
+
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
+  if (!extracted || extracted.is_lead !== true) return extracted;
+  // specific_service_name outranks matched_service in catalog booking
+  // resolution (call-booking-catalog.js), so a singular value THERE would
+  // book the one-time service no matter what matched_service says — both
+  // fields get the rule.
+  const matchedKey = normalizeServiceKey(extracted.matched_service);
+  const specificKey = normalizeServiceKey(extracted.specific_service_name);
+  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
+  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
+  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
+  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
+  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
+
+  const evidence = recurringIntentEvidence(transcription);
+  if (!evidence) return extracted;
+  const { callerText, acceptedOffer } = evidence;
   // Cadence: honor the ONE cadence the caller actually chose (from their own
   // words, or from the agent offer they accepted); when they float several
   // ("quarterly or every six months? I don't know") or name none, pest
@@ -7132,7 +7865,7 @@ Do not inflate quality: a caller who is still comparing companies or said they'd
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
-- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — an explicit AM/PM stated on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon") — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range with NO explicit AM/PM, no "noon"/"midnight", and no day-part word — "Tuesday, 2 to 4", "between 2 and 4" — leaves the START's period unstated, so it does NOT count as confirmed (you would otherwise have to invent AM or PM). An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
+- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed (appointment_confirmed true, preferred_date_time set from that reading) from that reading. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so appointment_confirmed stays false. An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
@@ -7527,17 +8260,39 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
       await recordVerdict(call.id, spamVerdictResult);
     }
     if (isEnabled('callDispositionV1')) {
+      // A street-level hold is booked only once the office confirms. The pending
+      // state was decided earlier in the pass, so re-read the visit HERE, in the
+      // final writer: staff may already have confirmed it (their compare-and-swap
+      // found no pending disposition to flip yet).
+      let appointmentPendingReview = appointmentResult?.pendingOfficeReview === true;
+      if (appointmentPendingReview) {
+        const visit = await db('scheduled_services').where({ id: appointmentResult.scheduledServiceId }).first('customer_confirmed');
+        if (visit?.customer_confirmed === true) appointmentPendingReview = false;
+      }
       const { disposition, reason } = decideDisposition({
         extraction: v2ForDisposition,
         legacy: extracted,
         spamVerdict: spamVerdictResult,
         outcome: {
           appointmentCreated: !!appointmentResult?.scheduledServiceId,
+          // A street-level address hold is booked only once the office confirms.
+          appointmentPendingReview,
           customerId: customerId || null,
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
       });
       await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      // ...and once more after the write: a confirm that landed between the read
+      // and the write found nothing to flip, so flip it now (compare-and-swap on
+      // the pending value we just wrote).
+      if (appointmentPendingReview) {
+        const after = await db('scheduled_services').where({ id: appointmentResult.scheduledServiceId }).first('customer_confirmed');
+        if (after?.customer_confirmed === true) {
+          await writeCallDisposition({
+            callId: call.id, priorDisposition: disposition, disposition: 'booked', reason: 'appointment_confirmed_by_office', callSid,
+          });
+        }
+      }
     }
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
@@ -8787,10 +9542,18 @@ const CallRecordingProcessor = {
         // open cards under an already-cleared review_status.
         const dismissed = await db.transaction(async (trx) => {
           await lockTriageCall(trx, call.id);
-          return trx('triage_items')
+          const n = await trx('triage_items')
             .where({ call_log_id: call.id })
             .whereIn('status', ['open', 'in_progress'])
+            // A street-level address hold's card belongs to its VISIT, not to the
+            // transcript: it stays until the office confirms, corrects or cancels it.
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+          // The rejection write cleared review_status; a preserved hold card (or any
+          // other card still open) means the call is still under review, so recompute
+          // it (null when nothing is open, as the rejection left it).
+          await syncCallReviewStatus(trx, call.id, null);
+          return n;
         });
         if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
       } catch (trErr) {
@@ -8906,6 +9669,34 @@ const CallRecordingProcessor = {
     // Every card this pass files is created after this instant — the
     // canonical re-stamp after Step 3 below is scoped to them.
     const cardsFiledSince = new Date();
+    // GATE_CALL_ADDRESS_ONFILE_ASSIST: the on-file address may only vouch for
+    // the customer this call FINALLY resolves to. knownCaller is the
+    // phone-only pre-lookup; Step 3 (below, after both assist sites) can
+    // retain or reassign the call to someone else on a shared number. So the
+    // assist gets knownCaller only when Step 3's own inputs agree with it: no
+    // link to a different customer, and the name-aware phone resolution
+    // Step 3 runs (same function, same extraction) lands on this customer
+    // without ambiguity. Anything else (or the gate off) gets null, which
+    // makes both assist paths no-ops. Gate off costs no lookup.
+    // Judged against BOTH identities Step 3 may end up with: the V1 record and
+    // the V2 extraction's caller (V2-primary adoption, later in this pass, can
+    // replace the V1 name) — the assist runs before that adoption, so every
+    // candidate identity must resolve to the same customer.
+    const onFileAssistCaller = async (...extractionsNow) => {
+      let bound = knownCaller;
+      for (const extractedNow of extractionsNow) {
+        bound = await bindAssistCaller({
+          knownCaller: bound,
+          callCustomerId: call.customer_id,
+          hasLinkOverride: !!customerLinkOverride,
+          resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
+            resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
+          ),
+        });
+        if (!bound) return null;
+      }
+      return bound;
+    };
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -9013,11 +9804,14 @@ const CallRecordingProcessor = {
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
           try {
-            v2AddressValidation = await validateAddress({
-              addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
-              // The validator preserves an explicit state over this hint.
-              // Contrary model geography also disables the fallback hint.
-              administrativeArea: v2Result.extraction.triage_flags?.includes('out_of_service_area') ? null : SERVICE_STATE,
+            // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
+            // same validateAddress call this site always made. Gate on, a
+            // street-only request may borrow the on-file city + ZIP.
+            v2AddressValidation = await validateWithOnFileAssist({
+              serviceAddress: v2Result.extraction.property?.service_address,
+              knownCaller: await onFileAssistCaller(extracted, flatView(v2Result.extraction)),
+              outOfServiceFlagged: !!v2Result.extraction.triage_flags?.includes('out_of_service_area'),
+              validate: validateAddress,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -9123,6 +9917,10 @@ const CallRecordingProcessor = {
     // requires the enforce gate's approval and SMS still requires consent.
     // The merged object stays legacy-flat, so canonical ai_extraction keeps
     // the reader-compatible shape.
+    // The V1 extraction as it stood BEFORE V2-primary adoption: the whole-
+    // structure unit waiver must agree with it too (a V1 pick V2 overwrites
+    // is a service disagreement, not a WDO).
+    const preAdoptionExtracted = { ...extracted };
     if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       const adoption = adoptV2PrimaryFields(extracted, v2Result.extraction, {
         etWallClock: v2IsoToEtWallClock,
@@ -9597,6 +10395,17 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
+    let v2StreetLevelHold = null;
+    // True when the booking landed on the office-review pending path (street-level web-form address).
+    let pendingOfficeReview = false;
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: set when routing let the call
+    // through past ambiguous_pest_or_service — the booking must then be the
+    // Waves Assessment row (never a resolver/model-picked service) and the
+    // resolver's unsupported-call veto reads the full transcript.
+    let v2ForceAssessmentService = false;
+    // Every call this gate newly admitted (either flag waived): the resolver's
+    // unsupported-call veto reads the full transcript for all of them.
+    let v2UnclearServiceGateAdmitted = false;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -9778,6 +10587,57 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
     }
 
+    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
+    // held for a missing unit number. The verdict is rewritten HERE, once,
+    // after the shadow row persisted the ORIGINAL — so the enforce gate, the
+    // shadow bridge and the audit path all read the same waived verdict. The
+    // service is resolved the way the booking below resolves it (catalog row
+    // first, coarse label only when no catalog row matched). Gate off, or any
+    // non-qualifying call, returns the verdict object untouched.
+    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+      try {
+        // A reprocess of a call an earlier pass parked on the unit ask: the
+        // open missing_unit_number card (and its clarify draft and merged
+        // needs_confirmation reason) is a human-verdict-only artifact that
+        // nothing auto-resolves (AGENTS.md; triage-auto-resolve.js), so the
+        // hold stands until the office settles it. A dismissed/resolved card is
+        // that verdict and does not block.
+        const openUnitCard = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'missing_unit_number' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id');
+        if (openUnitCard) {
+          logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
+        } else {
+          const wsAv = wholeStructureUnitWaiverForCall({
+            addressValidation: v2AddressValidation,
+            extracted,
+            preAdoptionExtracted,
+            transcription,
+            services: bookableCallServices,
+            property: v2Result?.extraction?.property,
+            v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
+          });
+          if (wsAv !== v2AddressValidation) {
+            // Stamp the pass's waiver on the PERSISTED verdict (status stays
+            // the original) so the offline audits can rebuild the verdict the
+            // gate saw. Fenced like the write above; pass-scoped, since the
+            // next pass rewrites ai_address_validation without the marker.
+            await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+              ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
+              updated_at: new Date(),
+            });
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            v2AddressValidation = wsAv;
+          }
+        }
+      } catch (wsErr) {
+        logger.warn(`[call-proc] whole-structure unit waiver failed open (hold stands) for ${maskSid(callSid)}: ${wsErr.message}`);
+      }
+    }
+
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
     // Runs before the routing gate: in enforce mode a recovered street must
     // reach canAutoRoute as the validated verdict it is, or the very garble
@@ -9791,7 +10651,15 @@ const CallRecordingProcessor = {
         // Street re-hearings the contact-dictation decoder already produced
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
-        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // Plus (gate on, house number matching, call bound to that customer)
+        // the caller's on-file street, appended AFTER the decoder's so it never
+        // displaces one (recovery evaluates the first five) — still only
+        // adopted when Google confirms exactly one premise.
+        extraStreetCandidates: withOnFileStreetCandidate({
+          spokenStreet: extracted.address_line1,
+          knownCaller: await onFileAssistCaller(extracted, flatView(v2Result?.extraction)),
+          decoderCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        }),
         // "Building resolved, unit missing" is not a garbled street — the
         // recovery module refuses it outright (codex r10 P1), so the
         // ambiguous hold stands and missing_unit_number names the ask
@@ -9987,6 +10855,11 @@ const CallRecordingProcessor = {
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
+            // address is not held on an unclear service — the Waves
+            // Assessment fallback below books it (both directions, same as
+            // the fallback itself). Off = today.
+            unclearServiceAssessment: unclearServiceAssessmentActive(),
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -10001,6 +10874,14 @@ const CallRecordingProcessor = {
               routingResult = demoted;
             }
           }
+          // …and the downstream full-transcript service veto the live pass
+          // applies to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted
+          // (the resolver skips the appointment there). Applied BEFORE the
+          // decision is built (codex #5371 r9 P1) — the SAME shared helper the
+          // shadow and offline-audit paths use — so the enforce decision records
+          // the call as held (needs_review, blocked reason), never as an allowed
+          // auto-route that is silently skipped later.
+          routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
@@ -10088,11 +10969,12 @@ const CallRecordingProcessor = {
             mode: 'enforce',
             recordingSid: call.recording_sid,
           });
-          // Targetless DO NOTHING: tolerant of BOTH the legacy three-column
-          // constraint (kept until the contract migration) and the
-          // recording-keyed index, so no release depends on a constraint by
-          // name during a rolling deploy (Codex #3736 r9 P1).
-          await db('route_decisions').insert(routeDecision).onConflict().ignore();
+          // Insert-or-REFRESH on the recording-keyed key (see
+          // upsertRouteDecision): a reprocess that decides differently — a
+          // dark gate flipped either way — replaces the recommendation and
+          // created_at instead of leaving the first pass's verdict as the
+          // newest decision. Fenced to the pass that owns the processing token.
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -10247,6 +11129,12 @@ const CallRecordingProcessor = {
           } else {
             // Approved — dispatch proceeds on the AV-normalized address
             // adopted above (both branches adopt it now).
+            // Street-level web-form address (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL):
+            // the visit books to the address the lead typed into their form,
+            // which Google confirmed only to the street. It books through the
+            // existing office-review pending path — decided here, applied at the
+            // insert, announced by one admin bell after commit.
+            v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -10282,6 +11170,26 @@ const CallRecordingProcessor = {
                 extracted.zip = null;
               }
             }
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the advisory insert above is
+            // ON CONFLICT DO NOTHING, so a card an earlier (held) pass left
+            // open as `blocking` would stay red on a call that is now booked
+            // — and read as an unbooked visit. Demote it in place (open /
+            // in-progress rows only, blocking ones only; nothing is resolved).
+            // FAIL CLOSED: if the demotion cannot be made (a transaction error
+            // propagates to this block's catch, which holds the appointment for
+            // triage exactly as before the gate) or this pass no longer owns the
+            // call (null = claim lost: abandon), the call is NOT booked — a
+            // blocking card left standing on a booked visit is what invites a
+            // duplicate booking.
+            const demoted = await demoteOpenTriageCards(
+              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
+              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+                callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
+              })),
+            );
+            if (demoted === null) return abandonToPeer('the unclear-service card demotion');
+            v2ForceAssessmentService = routingResult.forceAssessmentService === true;
+            v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;
             v2ApprovedExtraction = v2Extraction;
             v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
             if (v2UsesOnFileAddress) {
@@ -14605,6 +15513,12 @@ const CallRecordingProcessor = {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
               smsOutcome = { sent: false, skipped: 'callback_number_needed' };
+            } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
+              // The caller said no to texts on THIS call (owner 2026-09-30).
+              // Read from the live extraction: the row may not carry it yet.
+              // genuineNewProspect already requires a valid V2 result; the
+              // sender checks every earlier call with this number itself.
+              smsOutcome = { sent: false, skipped: 'said_no_texts' };
             } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
@@ -15271,7 +16185,7 @@ const CallRecordingProcessor = {
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
-    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext, fullTranscriptVeto: v2UnclearServiceGateAdmitted });
     // Catalog anchor: the specific bookable service this call maps to, when
     // one resolves. Drives service_type/service_id/price/duration/follow-up on
     // the booking. Also rescues catalog services whose names don't hit the
@@ -15347,6 +16261,40 @@ const CallRecordingProcessor = {
         // can't book.)
         genericBookingUnbookable = true;
         logger.warn(`[call-proc] "Waves Assessment" fallback row unavailable for ${maskSid(callSid)} — holding generic booking for review`);
+      }
+    }
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: routing let this call through past
+    // ambiguous_pest_or_service, so the service is NOT settled — book the
+    // Waves Assessment row even when the resolver or a model-selected catalog
+    // field named a concrete service (the office card sets the real one). A
+    // resolver hard veto (ok:false, no noMatch) is left alone: it still makes
+    // the call un-bookable. No Assessment row available = hold, never the
+    // concrete service the model flagged as unclear.
+    // The extraction the booking reads. Identical to `extracted` unless the
+    // ambiguous-service force below strips treatment signals (see
+    // forcedAssessmentBooking) — `extracted` itself stays whole for the record.
+    let bookingExtracted = extracted;
+    if (v2ForceAssessmentService && isEnabled('callFailOpenBooking')) {
+      const forced = forcedAssessmentBooking({
+        serviceResolution, services: bookableCallServices, current: callBookingCatalogRow, extracted, transcription,
+        // The processor's own recurring-intent backstop skips outbound calls
+        // (diarization can label the Waves agent as Caller) — so does this.
+        inbound: !isOutboundCall(call),
+      });
+      if (forced.applied) {
+        if (forced.unbookable) {
+          genericBookingUnbookable = true;
+          logger.warn(`[call-proc] "Waves Assessment" row unavailable for ${maskSid(callSid)} — holding ambiguous-service booking for review`);
+        } else {
+          if (forced.row !== callBookingCatalogRow) {
+            logger.info(`[call-proc] Service flagged ambiguous for ${maskSid(callSid)} — booking as "Waves Assessment" (forced; assess on-site)`);
+          }
+          callBookingCatalogRow = forced.row;
+          genericBookingUnbookable = false;
+          bookingExtracted = { ...extracted, ...forced.extractedPatch };
+        }
+      } else if (forced.kept) {
+        logger.info(`[call-proc] Service flagged ambiguous for ${maskSid(callSid)} — keeping the ${forced.kept} service (deterministic)`);
       }
     }
     // Use the module-level isOutboundCall(call) helper — a local `const
@@ -15427,6 +16375,27 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
+    // Geographic hard veto inputs, resolved only when the legacy booking would
+    // otherwise create a visit. The on-file customer row is read here (before
+    // the booking branch loads it) so a known caller who confirms a time
+    // without repeating the address is judged on the address the visit will
+    // use. Only a VALID V2 extraction counts (v2CanonicalExtraction).
+    let legacyGeoVeto = null;
+    if (!v2RoutingBlocked && extracted.appointment_confirmed && extracted.preferred_date_time
+        && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      let onFileGeo = null;
+      try {
+        onFileGeo = await db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude');
+      } catch (geoErr) {
+        logger.warn(`[call-proc] on-file address read for geographic veto failed for ${maskSid(callSid)}: ${geoErr.message}`);
+        // Fail closed: with no stated locality, an unread on-file address
+        // must hold the booking for review, not pass as "no evidence".
+        onFileGeo = { lookupFailed: true };
+      }
+      legacyGeoVeto = legacyGeographicVeto({
+        addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
+      });
+    }
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -15436,6 +16405,34 @@ const CallRecordingProcessor = {
         skippedReason: 'v2_routing_blocked',
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
+    } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall
+      && legacyGeoVeto) {
+      // Geographic hard veto (owner ruling 2026-09-30, DeSoto is not served):
+      // survives V2-off and V2-shadow routing, where nothing else stops a
+      // confirmed booking on an out-of-area address. The customer + lead are
+      // kept; only the visit is withheld, and the call is left for human review.
+      // An unreadable on-file address is held under its own reason, not
+      // mislabelled as out of area.
+      const geoSkipReason = legacyGeoVeto.reason === 'on_file_address_unavailable'
+        ? 'service_area_unverified'
+        : 'out_of_service_area';
+      appointmentResult = {
+        service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: geoSkipReason,
+      };
+      logger.warn(`[call-proc] Skipping appointment auto-create for ${maskSid(callSid)}: ${geoSkipReason} (${legacyGeoVeto.reason}, county=${legacyGeoVeto.county || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes(geoSkipReason)) bridgeNeedsConfirmation.push(geoSkipReason);
+      if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+        await fileSkippedBookingCard({
+          call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+          skippedReason: geoSkipReason,
+          preferredDateTime: extracted.preferred_date_time,
+          serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
+        });
+      }
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -15604,7 +16601,7 @@ const CallRecordingProcessor = {
             // Price: transcript-quoted (what the agent and caller agreed)
             // first, catalog list price fallback (one_time services only).
             const priceInfo = resolveCallBookingPrice({
-              quotedPrice: extracted.quoted_price,
+              quotedPrice: bookingExtracted.quoted_price,
               catalogRow: callBookingCatalogRow,
             });
             const smsPhone = customerValidation.details.phone;
@@ -15926,7 +16923,7 @@ const CallRecordingProcessor = {
               const callFollowUpPlan = isReServiceCatalogRow(callBookingCatalogRow)
                 ? null
                 : resolveCallFollowUpPlan({
-                  extracted,
+                  extracted: bookingExtracted,
                   catalogRow: callBookingCatalogRow,
                   parentDate: scheduledDate,
                   parentWindowStart: windowStart || '09:00',
@@ -15989,6 +16986,28 @@ const CallRecordingProcessor = {
                   if (freshValidation.advisory?.includes('last_name')) {
                     await fileLastNameAdvisoryCard(trx);
                   }
+                  // Geographic veto re-runs on the fenced row (Codex #5403
+                  // r6): when the call stated no locality, the pre-fence
+                  // on-file read was the only service-area check, and an
+                  // address edit since then must not book a DeSoto visit.
+                  const fencedGeoVeto = legacyGeographicVeto({
+                    addressValidation: effectiveAddressValidation,
+                    v2Extraction: v2CanonicalExtraction,
+                    extracted,
+                    onFile: freshCallCustomer,
+                  });
+                  if (fencedGeoVeto) {
+                    const geoErr = new Error(`service-area check failed on the fenced customer row (${fencedGeoVeto.reason}) — booking held for office review`);
+                    geoErr.fencedGeoVeto = fencedGeoVeto;
+                    throw geoErr;
+                  }
+                  // The street-level trust was proved against the on-file address as it stood
+                  // BEFORE this fence; if the customer row's address moved while we waited
+                  // (an office edit, a merge-undo), that proof no longer vouches for it.
+                  // Held for office review (the schedErr path), nothing booked.
+                  if (v2StreetLevelHold && streetLevelProofAddressChanged(v2OnFileAddressProofSnapshot, freshCallCustomer)) {
+                    throw new Error('on-file address changed while waiting on the comms fence — street-level address proof is stale; booking held for office review');
+                  }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
                   // call_log the undo repointed while we waited means
@@ -16039,6 +17058,16 @@ const CallRecordingProcessor = {
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
                   if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  // A street-level address hold has no visit 2 until the office
+                  // confirms the address: the promised follow-up rides on the review
+                  // card (payload.follow_up_plan) instead of a child at an unverified
+                  // address.
+                  if (await isStreetLevelHoldRow(trx, primaryRow)) {
+                    // A reprocess / replacement may have found or corrected the follow-up:
+                    // keep the card (which the confirm hook reads) on the current plan.
+                    await refreshHoldFollowUpPlan(trx, { callLogId: primaryRow.source_call_log_id, visitId: primaryRow.id, plan: callFollowUpPlan });
+                    return null;
+                  }
                   // Any existing follow-up off this primary — whatever its
                   // status or origin (AI child OR a completion-CTA follow-up)
                   // — means dispatch already owns the outcome (a cancelled
@@ -16051,6 +17080,17 @@ const CallRecordingProcessor = {
                       .orWhere({ followup_source_service_id: primaryRow.id }))
                     .first('id');
                   if (existingChild) return null;
+                  // A street-level hold's owed follow-up (the confirm hook filed it, or
+                  // the office already handled it) is OWNED by the office: a reprocess
+                  // after the confirm must not also create the child. The card, in any
+                  // status, is the ownership marker (open: to be booked by hand;
+                  // resolved / dismissed: booked or declined).
+                  if (await hasOwedFollowUpForStreetLevelVisit(trx, primaryRow)) {
+                    // An OPEN owed task takes the current plan (a reprocess may have found or
+                    // corrected it); a resolved / dismissed one is left exactly as the office left it.
+                    await refreshOwedFollowUpPlan(trx, primaryRow, callFollowUpPlan);
+                    return null;
+                  }
                   // A reused primary may have been RESCHEDULED since the call
                   // was first processed — callFollowUpPlan above was spaced
                   // from the extraction's date, so a retry that lost the child
@@ -16062,7 +17102,7 @@ const CallRecordingProcessor = {
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({
-                      extracted,
+                      extracted: bookingExtracted,
                       catalogRow: callBookingCatalogRow,
                       parentDate: primaryActualDate,
                       parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
@@ -16267,8 +17307,21 @@ const CallRecordingProcessor = {
                   serviceType,
                   trx,
                 });
+                // The street-level proof binds only while it was computed against THIS customer.
+                const holdBinds = !!v2StreetLevelHold && resolveOnFileAddressAuthority({
+                  usesOnFileAddress: v2UsesOnFileAddress,
+                  proofCustomerId: v2OnFileAddressProofCustomerId,
+                  proofAddress: v2OnFileAddressProofSnapshot,
+                  canonicalCustomerId: customerId,
+                }).useOnFileAddress;
+                const reuseHold = holdBinds ? v2StreetLevelHold : null;
+                const promoteArgs = { hold: reuseHold, callLogId: call.id, leadId, keepOpenForQuote: callQuotePromised, followUpPlan: callFollowUpPlan, extraction: v2ApprovedExtraction || extracted };
                 if (existing) {
                   reusedExistingSchedule = true;
+                  // Lock order for the hold lifecycle: the per-call triage lock BEFORE any visit row lock — the
+                  // technician-backfill UPDATE below locks the row, and promotion / the follow-up refresh then
+                  // need the triage lock (reopen / close take triage first, then the row).
+                  if (existing.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION) await lockTriageCall(trx, existing.source_call_log_id || call.id);
                   // An ATTACHED human booking resurfacing through the linked
                   // (source_call_log_id) lookup keeps its attach semantics on
                   // reprocess (Codex #2771 r5): no AI follow-up child on a
@@ -16337,6 +17390,11 @@ const CallRecordingProcessor = {
                         .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
                     }
                   }
+                  // A pending voice booking the relay inserted that this pass found to be a street-level
+                  // address becomes the durable hold before anything converts or activates it. AFTER the
+                  // tech-day fences above (dispatch assignment takes those fences, then the visit row):
+                  // the promotion's own visit lock then follows the same order.
+                  await promoteReusedRowToStreetLevelHold(trx, primaryRow, promoteArgs);
                   // A reused appointment still closed the deal: reprocessing a
                   // call (or recovering from an earlier savepoint-contained
                   // conversion failure) must not strand the lead as open. The
@@ -16360,6 +17418,8 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: primaryRow,
+                      // A reused street-level hold converts on office confirm, not here.
+                      deferConversion: await isStreetLevelHoldRow(trx, primaryRow),
                     });
                   }
                   if (isAttachedManualBooking) {
@@ -16435,6 +17495,9 @@ const CallRecordingProcessor = {
                   proofAddress: v2OnFileAddressProofSnapshot,
                   canonicalCustomerId: customerId,
                 });
+                // The street-level hold applies only while the on-file proof
+                // binds to the customer this booking finally resolves to.
+                const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
                 const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
                   ? {
                     ...extracted,
@@ -16891,9 +17954,13 @@ const CallRecordingProcessor = {
                     customer_request: callBookingCustomerRequest,
                     ...(callBookingCustomerRequest ? { customer_request_source: 'call' } : {}),
                   } : {}),
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
+                  // A street-level web-form booking lands on the existing
+                  // office-review pending path (the voice agent's pending
+                  // bookings): pending, unconfirmed, until the office confirms
+                  // the address; everything customer-facing waits for that.
+                  status: streetLevelPending ? 'pending' : 'confirmed',
+                  customer_confirmed: !streetLevelPending,
+                  ...(streetLevelPending ? {} : { confirmed_at: new Date() }),
                   notes: [
                     // Customer-visible (GET /api/schedule returns notes verbatim):
                     // keep it customer-safe. The office review cue lives in
@@ -16904,13 +17971,19 @@ const CallRecordingProcessor = {
                     priceInfo.price != null
                       ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
                       : null,
-                    extracted.call_summary || null,
+                    // bookingExtracted: a forced Assessment drops the model's summary
+                    // (it may name a treatment or price nobody agreed to) from this
+                    // customer-visible note.
+                    bookingExtracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   // Dispatcher-only price provenance: scheduled_services.notes
                   // is customer-visible (GET /api/schedule returns it verbatim),
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
+                    streetLevelPending
+                      ? 'Address from the web form; Google confirmed only the street, not the house number — CONFIRM the address with the customer before dispatch (pending review).'
+                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
@@ -16924,14 +17997,14 @@ const CallRecordingProcessor = {
                     (priceInfo.price == null
                       && callBookingCatalogRow
                       && callBookingCatalogRow.billing_type !== 'one_time'
-                      && typeof extracted.quoted_price === 'number'
-                      && extracted.quoted_price > 0)
-                      ? `Rate quoted on call: $${extracted.quoted_price.toFixed(2)} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`
+                      && typeof bookingExtracted.quoted_price === 'number'
+                      && bookingExtracted.quoted_price > 0)
+                      ? `Rate quoted on call: $${bookingExtracted.quoted_price.toFixed(2)} (recurring service — set up plan billing at this rate; intentionally not stamped on this visit).`
                       : null,
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  source_action: 'ai_call_pipeline',
+                  source_action: streetLevelPending ? VOICE_AGENT_BOOKING_SOURCE_ACTION : 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -17018,11 +18091,69 @@ const CallRecordingProcessor = {
                   // Inspection credit: a booked phone sale is a REAL
                   // customer booking — durable evidence, same transaction
                   // (Codex #3178 r6 P0). The hourly sweep mints from it.
-                  await require('./inspection-credit').markBookingForInspectionCredit(trx, {
-                    customerId: created.customer_id,
-                    scheduledServiceId: created.id,
-                    source: 'phone_call',
-                  });
+                  // EXCEPT a pending office-review row: not a closed deal until
+                  // the office confirms — runOutboundReviewConfirmHook writes
+                  // the evidence then.
+                  if (!streetLevelPending) {
+                    await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                      customerId: created.customer_id,
+                      scheduledServiceId: created.id,
+                      source: 'phone_call',
+                    });
+                  }
+                  // The confirm queue's card (outbound_booking_review), carrying
+                  // the ORIGINATING lead id so the office confirm converts
+                  // exactly that lead. Same card and payload the voice agent's
+                  // pending bookings file; no card, no booking (the insert
+                  // rolls back), as in that lane.
+                  if (streetLevelPending) {
+                    const cardBase = v2ApprovedExtraction || extracted;
+                    // The card's own summary names the address and the visit (the office
+                    // works this card from here), then any owed follow-up.
+                    const cardWhen = streetLevelVisitWhen(created.scheduled_date, created.window_start);
+                    const cardExtraction = {
+                      ...cardBase,
+                      meta: {
+                        ...(cardBase?.meta || {}),
+                        call_summary: `Web-form address ${v2StreetLevelHold?.address_on_file || 'on file'}: Google matched the street only. `
+                          + `Visit booked pending${cardWhen ? ` for ${cardWhen}` : ''} — confirm the address with the customer, then confirm, correct, or cancel the visit.`
+                          + (callFollowUpPlan
+                            ? ` Book the promised follow-up visit${callFollowUpPlan.scheduledDate ? ` (${dateOnlyISO(callFollowUpPlan.scheduledDate)})` : ''} once the address is confirmed.`
+                            : ''),
+                      },
+                    };
+                    const [card] = await trx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'outbound_booking_review',
+                        extraction: cardExtraction,
+                        severity: 'advisory',
+                        extraPayload: {
+                          // Same origin the voice agent's card carries: the confirm hook
+                          // then never guesses a lead when lead_id is null.
+                          origin: 'voice_agent',
+                          scheduled_service_id: created.id,
+                          lead_id: leadId || null,
+                          keep_open_for_quote: !!callQuotePromised,
+                          // The durable signal that this pending row is a street-level
+                          // address hold (see isStreetLevelHoldRow): a pipeline reuse
+                          // of the row must not activate it, and no follow-up visit
+                          // is created off it until the office confirms.
+                          street_level_address: true,
+                          // What the office needs on the card itself: the form address, when
+                          // the visit is, and a link to it (TriageInboxTabV2 renders these).
+                          address_on_file: v2StreetLevelHold?.address_on_file || null,
+                          visit_when: streetLevelVisitWhen(created.scheduled_date, created.window_start) || null,
+                          visit_link: streetLevelVisitLink(created.id, dateOnlyISO(created.scheduled_date)),
+                          // The promised second treatment, if any, rides on the card
+                          // (as the held-attach cards do); the office books it on confirm.
+                          ...(callFollowUpPlan ? { follow_up_plan: { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null } } : {}),
+                        },
+                      }))
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore()
+                      .returning('id');
+                    if (!card) throw new Error('a booking review card is already open for this call');
+                  }
                   // A phone-booked appointment is the deal closing — convert the
                   // call's lead to won in the SAME transaction (mirrors the
                   // admin-leads schedule-appointment route), so the conversion
@@ -17040,6 +18171,7 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: created,
+                      deferConversion: streetLevelPending,
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
@@ -17068,6 +18200,7 @@ const CallRecordingProcessor = {
                 }
                 if (existingByKey) {
                   reusedExistingSchedule = true;
+                  await promoteReusedRowToStreetLevelHold(trx, existingByKey, promoteArgs);
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
@@ -17085,6 +18218,7 @@ const CallRecordingProcessor = {
                       callSid,
                       keepOpenForQuote: callQuotePromised,
                       booking: existingByKey,
+                      deferConversion: await isStreetLevelHoldRow(trx, existingByKey),
                     });
                   }
                   // This is exactly the retry whose first attempt may have
@@ -17170,6 +18304,14 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // Street-level address holds only (reused legacy / voice-agent rows keep their
+              // prior behavior): the visit is pending with its review card. The review reason is
+              // raised now that the booking really became the hold; one live-checked bell.
+              if (await isStreetLevelHoldRow(db, svc)) {
+                pendingOfficeReview = true;
+                if (!bridgeNeedsConfirmation.includes('street_level_address_review')) bridgeNeedsConfirmation.push('street_level_address_review');
+                if (v2StreetLevelHold) await ringStreetLevelHoldBell({ hold: v2StreetLevelHold, visit: svc, callSid });
+              }
               // Tech-facing "new visit" cards (tech-visit-notifications.js):
               // a phone booking inserts its assigned rows directly, bypassing
               // assignDispatchJob, so it tells the tech itself — the fresh
@@ -17191,7 +18333,9 @@ const CallRecordingProcessor = {
                   });
                 }
               }
-              if (scheduleWasReused && !disputeHeldReuse) {
+              if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
+                // (A street-level address hold is never activated by a pipeline
+                // reuse — only the office confirm activates it.)
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
                 // reuse branches convert its lead and the replay repair arms
@@ -17286,7 +18430,12 @@ const CallRecordingProcessor = {
                   }
                 }).catch((noteErr) => logger.warn(`[call-proc] retained visit not noted on the conflict card for ${maskSid(callSid)}: ${noteErr.code || noteErr.name || 'db_error'}`));
               };
-              if (!scheduleWasReused) {
+              if (pendingOfficeReview) {
+                // A pending office-review booking arms nothing yet and redeems
+                // no credit: the office confirm (runOutboundReviewConfirmHook)
+                // owns reminders, the lead, the card funnel and the credit.
+                logger.info(`[call-proc] Office-review booking ${svc.id} PENDING — activated on office confirm`);
+              } else if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -17802,8 +18951,30 @@ const CallRecordingProcessor = {
               appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false, skippedReason: 'unparseable_date' };
             }
           } catch (schedErr) {
-            logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
-            appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
+            // A database / driver error can echo its bound values (street address, phone) in its message:
+            // log and persist code / name only for those; deliberate application errors keep their text.
+            const schedErrText = safeScheduleErrorText(schedErr);
+            logger.error(`[call-proc] Failed to create scheduled service: ${schedErrText}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
+            appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErrText, smsSent: false };
+            // A fenced geographic veto (Codex #5403 r7) is a HOLD, not a
+            // failure: surface it exactly like the pre-fence veto — skip
+            // reason, confirm reason, and in legacy/shadow routing the
+            // skipped-booking card (enforce mode files its own card).
+            if (schedErr.fencedGeoVeto) {
+              const fencedSkipReason = schedErr.fencedGeoVeto.reason === 'on_file_address_unavailable'
+                ? 'service_area_unverified'
+                : 'out_of_service_area';
+              appointmentResult = { ...appointmentResult, scheduleCreated: false, skippedReason: fencedSkipReason };
+              if (!bridgeNeedsConfirmation.includes(fencedSkipReason)) bridgeNeedsConfirmation.push(fencedSkipReason);
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: fencedSkipReason,
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
+            }
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
@@ -17864,7 +19035,7 @@ const CallRecordingProcessor = {
           // Neither card-request path runs for a dispute-held reuse: no
           // "secure your appointment" link and no auto-secure while the
           // address is unresolved (codex r11 P1).
-          if (scheduledServiceId && !disputeHeldReuse && !v2SmsBlocked && !holdImpliedSmsLeg) {
+          if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview && !v2SmsBlocked && !holdImpliedSmsLeg) {
             // Durable clearance record (codex #3234 r3): this exact guard IS
             // the call-level SMS clearance decision, and nothing else
             // persists it — the pre-visit card backstop keys on this stamp
@@ -17893,11 +19064,15 @@ const CallRecordingProcessor = {
                 scheduledServiceId,
                 trigger: 'ai_call_pipeline',
                 recipientPhone: smsRecipient || null,
+                // Owner ruling 2026-09-30: the caller just phoned us, so the
+                // card ask answering that call goes out now, not at 8 AM.
+                // Outbound dials and stale reprocessed calls stay fenced.
+                customerInitiated: isFreshInboundCall(call),
               });
             } catch (cardErr) {
               logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
-          } else if (scheduledServiceId && !disputeHeldReuse) {
+          } else if (scheduledServiceId && !disputeHeldReuse && !pendingOfficeReview) {
             // No call-level SMS clearance (TCPA gate blocked, or the
             // implied-consent leg is held): run ONLY the funnel's
             // non-messaging side — the policy exemption + saved-card
@@ -17937,7 +19112,14 @@ const CallRecordingProcessor = {
           // row EXISTS, and dropping the id made the downstream
           // approved-but-unbooked audit read this as a skipped booking,
           // starving the assessment pre-draft hook.
-          if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
+          if (scheduledServiceId && pendingOfficeReview) {
+            // Pending office-review booking — never auto-text or email a
+            // "confirmed" appointment the customer hasn't been re-confirmed
+            // on. Keep scheduledServiceId so the downstream audit doesn't treat
+            // this as a skipped booking.
+            logger.info(`[call-proc] Skipping confirmation for ${callSid}: booking pending office review`);
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review', pendingOfficeReview: true };
+          } else if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
             logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
@@ -18145,6 +19327,10 @@ const CallRecordingProcessor = {
                         const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
                         return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
                       })() : {}),
+                      // Owner ruling 2026-09-30: a confirmation answering the
+                      // caller's own inbound call is never held to 8 AM.
+                      // Outbound dials and stale reprocessed calls stay fenced.
+                      ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
                       identityTrustLevel: 'phone_matches_customer',
                       metadata: {
                         original_message_type: 'confirmation',
@@ -18323,6 +19509,12 @@ const CallRecordingProcessor = {
                           identityTrustLevel: isServiceContactRole(contact.role)
                             ? 'service_contact_authorized'
                             : 'phone_matches_customer',
+                          // Same inbound-call provenance as the primary send
+                          // above (owner ruling 2026-09-30). These are the
+                          // booking's consented appointment contacts — the
+                          // on-site person the caller booked for is exactly who
+                          // the ruling wants texted now.
+                          ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
                           metadata: {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
@@ -18696,15 +19888,18 @@ const CallRecordingProcessor = {
         }
       }
       try {
-        await db('route_decisions')
+        // Row-locked like every write to an existing decision (codex #5371 r9 P1):
+        // a verdict landing concurrently serializes on the route_decisions row.
+        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row).
-          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' })
-          .update({
+          // and updates — its own fresh v2-1.1.0 row). A row a human has
+          // reviewed keeps the outcome that review judged.
+          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
+          {
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          });
+          }));
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
@@ -19390,6 +20585,8 @@ const CallRecordingProcessor = {
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,
+          // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
+          unclearServiceAssessment: unclearServiceAssessmentActive(),
         });
         // Same on-file satisfaction the live merge point applies to its card set.
         if (routingResult?.onFileAddressSatisfiedFlags?.length) {
@@ -19399,6 +20596,11 @@ const CallRecordingProcessor = {
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
         routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+        // …and the downstream full-transcript service veto the live pass applies
+        // to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted (the
+        // resolver skips the appointment there), or the stored shadow evidence
+        // overstates safe auto-routes.
+        routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
         // …and the house-number hold this pass actually applied (codex r38
         // P1): a call whose legacy booking was HELD must not be persisted as
         // a shadow auto-route candidate, or the promotion cohort counts an
@@ -19418,10 +20620,7 @@ const CallRecordingProcessor = {
             mode: 'shadow',
             recordingSid: call.recording_sid,
           });
-          await db('route_decisions')
-            .insert(shadowDecision)
-            .onConflict()
-            .ignore()
+          await upsertRouteDecision(db, shadowDecision, { callLogId: call.id, processingToken: procToken })
             .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
         }
       }
@@ -19515,6 +20714,14 @@ const CallRecordingProcessor = {
       // — each transaction sees the other's card as still open and both skip
       // clearing review_status, stranding it 'open' on a fully-terminal call.
       await lockTriageCall(trx, call.id);
+      // A street-level hold's review reason counts only while its visit is still
+      // an unconfirmed hold: staff may have confirmed (the confirm hook already
+      // resolved the card and closed review_status) since the booking pass pushed
+      // it, and a stale reason must not reopen a call with no open card.
+      const streetLevelStillHeld = !bridgeNeedsConfirmation.includes('street_level_address_review')
+        || (!!appointmentResult?.scheduledServiceId && await isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx));
+      const reviewReasonCount = bridgeNeedsConfirmation
+        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -19531,7 +20738,7 @@ const CallRecordingProcessor = {
           // a terminal status with a log line and nothing else — no review
           // flag, no card, no sweep — the one honest-failure state nobody
           // could see.
-          ...(bridgeNeedsConfirmation.length || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+          ...(reviewReasonCount || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
             ? { review_status: 'open' } : {}),
           metadata: db.raw(
             "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
@@ -20782,6 +21989,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,
@@ -20829,6 +22037,11 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  wholeStructureUnitWaiverForCall,
+  forcedAssessmentBooking,
+  demoteOpenTriageCards,
+  applyUnclearServiceTranscriptVeto,
+  unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   slotOnlyLinkAllowed,
@@ -20845,6 +22058,17 @@ CallRecordingProcessor._test = {
   failOpenKnownCustomer,
   trustValidatedNewLeadAddress,
   applyOnFileAddressVerdict,
+  onFileAddressIsFromWebForm,
+  streetLevelMatch,
+  buildStreetLevelHold,
+  buildStreetLevelHoldAlert,
+  streetLevelVisitLink,
+  streetLevelVisitWhen,
+  isStreetLevelHoldRow,
+  promoteReusedRowToStreetLevelHold,
+  safeScheduleErrorText,
+  streetLevelProofAddressChanged,
+  ringStreetLevelHoldBell,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
@@ -20888,6 +22112,7 @@ CallRecordingProcessor._test = {
   rerunAssessmentPreDraftAfterQuarantineClear,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  isFreshInboundCall,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
@@ -20926,6 +22151,7 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+CallRecordingProcessor.applyUnclearServiceTranscriptVeto = applyUnclearServiceTranscriptVeto;
 // Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
 // must be selected the same way production's Step 2 pre-lookup selects it
 // (operator override outranks the phone lookup; an explicit unlink is no

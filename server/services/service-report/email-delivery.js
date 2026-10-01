@@ -20,6 +20,7 @@ const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
 const { isFirstServiceVisit } = require('../customer-visit-history');
+const { stampedLine2Sql } = require('../stamped-address');
 
 const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
@@ -67,6 +68,23 @@ function readyAt(dynamicContext, key) {
   return target?.readyAt ? formatReadyTime(target.readyAt, dynamicContext.reentry.displayTimezone) : null;
 }
 
+// The one address the customer's email names. report-data builds
+// serviceAddress from the visit's stamped-or-customer address (street, city,
+// state, ZIP); cityState was the older, street-less fallback and is only
+// used when no address could be composed at all.
+function propertyAddressLine(data = {}) {
+  return String(data?.serviceAddress || data?.cityState || '').trim();
+}
+
+// Each re-entry fact appears once. dynamicContext.reentry.customerSummary
+// already states every pending "<Area> ready at <time>" (or "Treated areas
+// are ready for normal use."), so the per-target lines and advisory minutes
+// are only the fallback when there is no summary — listing both printed
+// "Exterior ready at 3:15 PM. Exterior ready at 3:15 PM" (16 of 20 sends).
+function reentryCustomerSummary(dynamicContext = {}) {
+  return String(dynamicContext.reentry?.customerSummary || '').trim();
+}
+
 function hasActionRequiredFinding(findings = []) {
   return findings.some((finding) => ['critical', 'high'].includes(String(finding.severity || '').toLowerCase()));
 }
@@ -86,13 +104,15 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
   const advisory = data?.advisory || {};
   const exteriorReadyAt = readyAt(dynamicContext, 'exterior');
   const interiorReadyAt = readyAt(dynamicContext, 'interior');
-  const reentryParts = [
-    dynamicContext.reentry?.customerSummary,
-    exteriorReadyAt ? `Exterior ready at ${exteriorReadyAt}` : null,
-    interiorReadyAt ? `Interior ready at ${interiorReadyAt}` : null,
-    !exteriorReadyAt && minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null,
-    !interiorReadyAt && minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null,
-  ].filter(Boolean);
+  const reentrySummary = reentryCustomerSummary(dynamicContext);
+  const reentryParts = reentrySummary
+    ? [reentrySummary]
+    : [
+      exteriorReadyAt ? `Exterior ready at ${exteriorReadyAt}` : null,
+      interiorReadyAt ? `Interior ready at ${interiorReadyAt}` : null,
+      !exteriorReadyAt && minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null,
+      !interiorReadyAt && minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null,
+    ].filter(Boolean);
   const pressureMetric = (data?.metrics || []).find((metric) => /pressure/i.test(metric.label || ''));
   const pressureValue = pressureMetric?.value != null && pressureMetric.value !== ''
     ? String(pressureMetric.value)
@@ -104,10 +124,13 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     service_label: serviceLabel,
     service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
     technician_name: data?.technicianName || '',
-    property_address: data?.cityState || '',
+    property_address: propertyAddressLine(data),
+    // Nothing logged = blank, so the template's "Findings" row drops (a
+    // details row with a blank value is not rendered). The row never
+    // announces an empty result.
     finding_summary: findings.length
       ? `${countLabel(findings.length, 'finding')} documented for review`
-      : 'No action-required findings were documented.',
+      : '',
     application_summary: countLabel(applications.length, 'application'),
     reentry_summary: reentryParts.join(' '),
     pressure_summary: dynamicContext.pressureTrend?.customerSummary || (pressureValue ? `Pressure index: ${pressureValue}` : ''),
@@ -316,7 +339,8 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
   const serviceDate = formatDate(data?.serviceDate);
   const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
   const tech = data?.technicianName || 'your Waves technician';
-  const location = data?.cityState ? ` at ${escapeHtml(data.cityState)}` : '';
+  const propertyAddress = propertyAddressLine(data);
+  const location = propertyAddress ? ` at ${escapeHtml(propertyAddress)}` : '';
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
   const advisory = data?.advisory || {};
@@ -333,11 +357,12 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     ? `<p style="margin:16px 0 6px 0;"><strong>Top findings</strong></p><ul style="margin:0 0 0 18px;padding:0;">${topFindings.map((finding) => `<li>${escapeHtml(finding.title || 'Finding documented')}</li>`).join('')}</ul>`
     : '<p style="margin:16px 0 0 0;">No action-required findings were documented during this visit.</p>';
 
+  const reentrySummary = reentryCustomerSummary(dynamicContext);
   const heroSummary = hasActionRequiredFinding(findings)
     ? 'One recommendation needs attention to help reduce recurring activity.'
     : dynamicContext.pressureTrend?.direction === 'down'
       ? dynamicContext.pressureTrend.customerSummary
-      : dynamicContext.reentry?.customerSummary
+      : reentrySummary
         || dynamicContext.pressureTrend?.customerSummary
         || 'Your routine service is complete.';
 
@@ -349,14 +374,26 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     inspectionCreditNote ? `<p style="margin:16px 0 0 0;"><strong>${escapeHtml(inspectionCreditNote)}</strong></p>` : null,
   ].filter(Boolean).join('');
 
+  // One statement of the re-entry timing: the hero already prints the summary
+  // when it is the headline, so the detail rows only carry it when the hero
+  // says something else, and fall back to per-area rows without a summary.
+  const heroShowsReentry = !hasActionRequiredFinding(findings)
+    && dynamicContext.pressureTrend?.direction !== 'down'
+    && Boolean(reentrySummary);
+  const reentryRows = reentrySummary
+    ? (heroShowsReentry ? [] : [['Ready to re-enter', escapeHtml(reentrySummary), true]])
+    : [
+      exteriorReadyAt ? ['Exterior ready at', escapeHtml(exteriorReadyAt), true] : (minutes(advisory.exterior_reentry_min) ? ['Exterior re-entry', escapeHtml(minutes(advisory.exterior_reentry_min)), true] : null),
+      interiorReadyAt ? ['Interior ready at', escapeHtml(interiorReadyAt), true] : (minutes(advisory.interior_reentry_min) ? ['Interior re-entry', escapeHtml(minutes(advisory.interior_reentry_min)), true] : null),
+    ];
+
   const lines = [
     ['Service', escapeHtml(serviceLine)],
     serviceDate ? ['Date', escapeHtml(serviceDate)] : null,
     ['Applications', escapeHtml(countLabel(applications.length, 'application'))],
-    ['Findings', escapeHtml(countLabel(findings.length, 'finding'))],
+    findings.length ? ['Findings', escapeHtml(countLabel(findings.length, 'finding'))] : null,
     pressureValue ? ['Pressure index', escapeHtml(pressureValue), true] : null,
-    exteriorReadyAt ? ['Exterior ready at', escapeHtml(exteriorReadyAt), true] : (minutes(advisory.exterior_reentry_min) ? ['Exterior re-entry', escapeHtml(minutes(advisory.exterior_reentry_min)), true] : null),
-    interiorReadyAt ? ['Interior ready at', escapeHtml(interiorReadyAt), true] : (minutes(advisory.interior_reentry_min) ? ['Interior re-entry', escapeHtml(minutes(advisory.interior_reentry_min)), true] : null),
+    ...reentryRows,
     dynamicContext.pressureTrend?.customerSummary ? ['Pressure trend', escapeHtml(dynamicContext.pressureTrend.customerSummary), true] : null,
   ].filter(Boolean);
 
@@ -381,17 +418,20 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
   const text = plainText([
     `Hi ${first},`,
     '',
-    `${tech} completed ${serviceLine}${data?.cityState ? ` at ${data.cityState}` : ''}${serviceDate ? ` on ${serviceDate}` : ''}.`,
+    `${tech} completed ${serviceLine}${propertyAddress ? ` at ${propertyAddress}` : ''}${serviceDate ? ` on ${serviceDate}` : ''}.`,
     '',
     `View full report: ${reportUrl}`,
     '',
-    dynamicContext.reentry?.customerSummary || null,
-    exteriorReadyAt ? `Exterior ready at: ${exteriorReadyAt}` : (minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null),
-    interiorReadyAt ? `Interior ready at: ${interiorReadyAt}` : (minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null),
+    ...(reentrySummary
+      ? [reentrySummary]
+      : [
+        exteriorReadyAt ? `Exterior ready at: ${exteriorReadyAt}` : (minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null),
+        interiorReadyAt ? `Interior ready at: ${interiorReadyAt}` : (minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null),
+      ]),
     dynamicContext.pressureTrend?.customerSummary || null,
     pressureValue ? `Pressure index: ${pressureValue}` : null,
     inspectionCreditNote || null,
-    `Findings: ${countLabel(findings.length, 'finding')}`,
+    findings.length ? `Findings: ${countLabel(findings.length, 'finding')}` : null,
     '',
     topFindings.length ? `Top findings: ${topFindings.map((finding) => finding.title || 'Finding documented').join('; ')}` : 'No action-required findings were documented during this visit.',
     '',
@@ -446,8 +486,14 @@ async function loadServiceRecord(recordId) {
       // The email's "completed ... at City, ST" line names the visit's
       // stamped city when present — a rental visit in another town must not
       // read as the primary home's city (codex round-9 P2 class).
+      // Full stamped-or-customer service address (same COALESCE as the public
+      // report route) so report-data's serviceAddress carries the street and
+      // ZIP, not just city/state.
+      db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
       db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
       db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+      db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
       'technicians.name as technician_name',
       // Feeds buildReportV1Data's applicatorFdacsId the same as every other
       // report-data caller (F.S. 482.2265(1)(b)); this email path doesn't
@@ -868,6 +914,7 @@ async function sendServiceReportV1Email(recordId, {
 
 module.exports = {
   buildServiceReportV1Email,
+  serviceReportTemplatePayload,
   sendServiceReportV1Email,
   REENTRY_SEND_LOCK_CLASS,
   REENTRY_SEND_SEAL_KEY,

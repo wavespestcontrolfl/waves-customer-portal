@@ -149,8 +149,10 @@ customer gate rather than hiding a second one behind the first.
 
 Reused **read-only** from `routes/admin-schedule.js` — the same annual-prepay
 / family-plan-hold / duplicate-active-series checks the nightly top-up
-applies before adding a visit: `annual_prepay_series`, `plan_hold`,
-`duplicate_series`. The write engine (and the nightly top-up itself) takes a
+applies before adding a visit: `plan_hold` and `duplicate_series`. The
+top-up's `annual_prepay_series` refusal does not apply to a rider (owner
+ruling 2026-09-29): a prepaid pest series rides too, its prepaid visits stay
+pinned (`prepaid`), and only the visits after them join lawn dates. The write engine (and the nightly top-up itself) takes a
 per-customer advisory try-lock before calling this — the preview does
 **not**: a lock is meaningless (and would silently no-op) for a read that
 commits nothing. As with the customer gates, the top-up's own first-hit
@@ -418,3 +420,10 @@ No hook, no new call site, no lock added or removed.
 No hook in `admin-schedule.js`, the seeder, or the scheduler. No nightly
 reconcile. No job-status changes. No write of any kind. See PR #5268 for all
 of the above.
+
+## Visits beyond the lawn schedule
+
+The plan runs to the horizon: the host's last scheduled date or the rider's
+own bounded horizon, whichever is later. A movable rider visit dated after
+the horizon isn't surplus. It would join a lawn date once lawn is extended,
+so the preview reports it in `beyondSchedule` and never in `cancel`.

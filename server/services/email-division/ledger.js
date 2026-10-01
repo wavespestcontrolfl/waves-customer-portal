@@ -31,7 +31,7 @@ const {
 // round-1 P1. Settled to 'failed'/'abandoned_reservation' the next time
 // ANY reservation attempt takes this customer's lock, so it stays visible
 // in the ledger and is never counted again.
-const RESERVATION_LIFETIME_MS = 30 * 60 * 1000; // 30 minutes
+const { RESERVATION_LIFETIME_MS } = require('./reservation-lifetime');
 
 // email_messages is the durable delivery authority: sendTemplate records
 // provider acceptance there (status 'sent', sent_at) before it returns.
@@ -242,6 +242,25 @@ async function settleReservedOnly(id, status, reason, conn) {
   });
 }
 
+// Reconcile ONE reservation from the delivery authority. A sender that has
+// CONFIRMED the message went out (email_messages sent_at) but finds the row
+// still `reserved`/`failed` (markSent failed, the worker died) calls this so the
+// row counts toward the caps as `sent`, linked to the message, with the
+// message's own sent_at — the same completion the sweep applies. Only an
+// accepted or uncertain message completes it; anything else leaves the row.
+// Returns whether a row changed.
+async function reconcileFromMessage(id, { conn } = {}) {
+  const runner = conn || db;
+  return runner.transaction(async (trx) => {
+    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id', 'idempotency_key');
+    if (!existing) return false;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
+    const state = await messageStateFor(trx, existing.idempotency_key);
+    if (state.kind !== 'accepted' && state.kind !== 'uncertain') return false;
+    return (await completeFromMessage(trx, id, state, ['reserved', 'failed'])) > 0;
+  });
+}
+
 async function markSkipped(id, reason, { conn } = {}) {
   return settleReservedOnly(id, 'skipped', reason, conn);
 }
@@ -291,7 +310,7 @@ async function markFailed(id, reason, { conn } = {}) {
  *     COMMITTED and store an address that was never actually checked).
  */
 async function reserveWithCap({
-  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(),
+  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), expectedRecipientEmail = null, guard = null,
 } = {}) {
   // The class the caps, the human-contact check and the outstanding guard
   // key off is the RESOLVED one (eligibility.js resolveMarketingClass), and
@@ -332,6 +351,11 @@ async function reserveWithCap({
         }
         const retryVerdict = await eligibleForEmail({ customerId, stream, marketingClass, emailKey, pestKey, now, conn: trx });
         if (!retryVerdict.ok) return { ok: false, reason: retryVerdict.reason, row: null, duplicate: false };
+        if (!recipientMatchesExpected(expectedRecipientEmail, retryVerdict.checks.customerEmail)) {
+          return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
+        }
+        const retryGuard = guard ? await guard(trx) : null;
+        if (retryGuard) return { ok: false, reason: retryGuard.reason, row: null, duplicate: false };
         const otherOutstanding = marketingClass === 'marketing' ? await outstandingReservation(trx, customerId, idempotencyKey) : null;
         if (otherOutstanding) return { ok: false, reason: capReasonFor(stream, otherOutstanding.stream), row: null, duplicate: false };
         await trx('marketing_email_ledger').where({ id: existingByKey.id, status: 'failed' }).update({
@@ -347,6 +371,14 @@ async function reserveWithCap({
       customerId, stream, marketingClass, emailKey, pestKey, now, conn: trx,
     });
     if (!verdict.ok) return { ok: false, reason: verdict.reason, row: null, duplicate: false };
+    if (!recipientMatchesExpected(expectedRecipientEmail, verdict.checks.customerEmail)) {
+      return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row: null, duplicate: false };
+    }
+    // A caller's own uniqueness rule (e.g. once per customer / estimate),
+    // judged on this same transaction under the customer's advisory lock, so
+    // two concurrent attempts serialize and exactly one can pass.
+    const callerGuard = guard ? await guard(trx) : null;
+    if (callerGuard) return { ok: false, reason: callerGuard.reason, row: null, duplicate: false };
 
     if (marketingClass === 'marketing') {
       const outstanding = await outstandingReservation(trx, customerId, idempotencyKey);
@@ -369,6 +401,16 @@ async function reserveWithCap({
       throw err;
     }
   });
+}
+
+// The address a caller BUILT its message for (expectedRecipientEmail). The
+// ledger always sends to the customer's current checked address, so a caller
+// whose payload was made for another address must be refused, never silently
+// retargeted (an email change between build and send). No expectation = no
+// check (every other sender).
+function recipientMatchesExpected(expected, actual) {
+  if (expected == null) return true;
+  return String(expected).trim().toLowerCase() === String(actual || '').trim().toLowerCase();
 }
 
 function outstandingReservation(trx, customerId, idempotencyKey) {
@@ -432,22 +474,45 @@ async function holdReservation(trx, id, now) {
   return { ok: true, reason: null, row };
 }
 
-function skipReservation(trx, id, reason) {
+function skipReservation(trx, id, reason, status = 'skipped') {
   return trx('marketing_email_ledger')
     .where({ id, status: 'reserved' })
-    .update({ status: 'skipped', reason, updated_at: trx.fn.now() });
+    .update({ status, reason, updated_at: trx.fn.now() });
 }
 
-async function judgeConsent(trx, row, now) {
+async function judgeConsent(trx, row, now, expectedRecipientEmail = null, boundaryGuard = null) {
+  // The caller's own last look comes FIRST: it may wait (a share lock on the
+  // entity it reads, held to the end of this transaction), and every read that
+  // decides the send must happen AFTER the last wait — a consent or address change
+  // committed while it waited is then seen by the recheck below, not missed by a
+  // verdict read before the wait. (Customer preference and address updates do not
+  // take the marketing-email advisory lock.)
+  const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
+  if (callerVerdict) {
+    // A RETRYABLE verdict (the caller will rebuild and try again under the same key)
+    // settles the reservation 'failed', which a same-key retry reopens through the
+    // normal eligibility checks and frees the customer's slot at once; every other
+    // verdict is a terminal skip.
+    await skipReservation(trx, row.id, callerVerdict.reason, callerVerdict.retryable ? 'failed' : 'skipped');
+    return { ok: false, reason: callerVerdict.reason, row };
+  }
   const verdict = await eligibleForEmail({
     customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
     emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
   });
+  // eligibleForEmail RETURNS (never throws) LOOKUP_FAILED when its reads fail:
+  // that is not a consent verdict, so it must not settle the reservation
+  // 'skipped' (a permanent drop) — it is the same unavailable-check failure the
+  // wrapper in reservationHandoff turns into a retryable, definitely-unsent abort.
+  if (!verdict.ok && verdict.reason === REASONS.LOOKUP_FAILED) {
+    throw new Error(`eligibility recheck lookup failed${verdict.checks?.error ? `: ${verdict.checks.error}` : ''}`);
+  }
   if (!verdict.ok) {
     await skipReservation(trx, row.id, verdict.reason);
     return { ok: false, reason: verdict.reason, row };
   }
-  if (verdict.checks.customerEmail !== row.recipient_email) {
+  if (verdict.checks.customerEmail !== row.recipient_email
+    || !recipientMatchesExpected(expectedRecipientEmail, verdict.checks.customerEmail)) {
     await skipReservation(trx, row.id, REASONS.RECIPIENT_CHANGED);
     return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row };
   }
@@ -461,14 +526,28 @@ async function judgeConsent(trx, row, now) {
  * result does not carry the fence's reason, so `onVerdict` receives every
  * verdict as it is made: the hold's, then the boundary check's.
  */
-function reservationHandoff(rowId, { onVerdict = () => {} } = {}) {
+function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmail = null, boundaryGuard = null } = {}) {
   return (dispatch) => db.transaction(async (trx) => {
     const now = new Date();
     const held = await holdReservation(trx, rowId, now);
     onVerdict(held);
     if (!held.ok) return { ok: false, reason: held.reason };
     await dispatch(trx, async () => {
-      const verdict = await judgeConsent(trx, held.row, now);
+      let verdict;
+      try {
+        verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail, boundaryGuard);
+      } catch (err) {
+        // The recheck itself could not read (infrastructure), which is not a
+        // consent verdict. sendOne awaits this check before it builds the
+        // provider request, so nothing was sent: tell the library so it
+        // settles the message row definitely-unsent (retryable) instead of
+        // leaving the handoff 'started' — which would read as an uncertain
+        // delivery, count toward the caps and refuse every retry.
+        const unavailable = new Error(`marketing email reservation ${rowId} boundary check unavailable: ${err.message}`);
+        unavailable.providerBoundaryCheckFailed = true;
+        unavailable.cause = err;
+        throw unavailable;
+      }
       onVerdict(verdict);
       if (!verdict.ok) {
         const veto = new Error(`marketing email reservation ${rowId} refused at the provider boundary: ${verdict.reason}`);
@@ -507,13 +586,13 @@ function reservationHandoff(rowId, { onVerdict = () => {} } = {}) {
  * settles it as failed and frees the customer's slot at once.
  */
 async function sendWithLedger({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {},
+  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null, guard = null, boundaryGuard = null,
 } = {}) {
   if (template.templateKey != null && template.templateKey !== emailKey) {
     return { ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false };
   }
   const reservation = await reserveWithCap({
-    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now,
+    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now, expectedRecipientEmail, guard,
   });
   if (!reservation.ok) {
     return { ok: false, sent: false, reason: reservation.reason, row: null, duplicate: false };
@@ -534,7 +613,7 @@ async function sendWithLedger({
       recipientId: row.customer_id,
       idempotencyKey: row.idempotency_key,
       suppressionGroupKey: groupKeyFor(row.stream, row.email_key, row.marketing_class),
-      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; } }),
+      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; }, expectedRecipientEmail, boundaryGuard }),
     });
   } catch (err) {
     await markFailed(row.id, `dispatch_error:${err.code || err.status || 'unknown'}`);
@@ -566,5 +645,5 @@ async function settleDispatchOutcome(row, outcome) {
 }
 
 module.exports = {
-  reserve, markSent, markSkipped, markFailed, reserveWithCap, reservationHandoff, sendWithLedger,
+  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, RESERVATION_LIFETIME_MS,
 };

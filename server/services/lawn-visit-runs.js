@@ -15,7 +15,12 @@ const parseObject = (value) => {
 const storedContext = (context) => context && Object.fromEntries(CONTEXT_KEYS.filter((key) => context[key] != null).map((key) => [key, context[key]]));
 
 function billedUsage(analysis) {
-  const legs = [...(analysis.failures || []).map((leg) => leg?.usage), analysis.usage].filter(Boolean);
+  // The gated referee's extra calls (Sol second opinion, Fable) are billed too;
+  // their diagnostics stay on `analysis.referee` and are never persisted.
+  const legs = [
+    ...(analysis.failures || []).map((leg) => leg?.usage), analysis.usage,
+    analysis.referee?.secondOpinion?.usage, analysis.referee?.usage,
+  ].filter(Boolean);
   if (!legs.length) return { input_tokens: null, output_tokens: null, reasoning_tokens: null };
   const sum = (key) => legs.reduce((total, usage) => total + (Number(usage[key]) || 0), 0);
   return { input_tokens: sum('input_tokens'), output_tokens: sum('output_tokens'), reasoning_tokens: sum('reasoning_tokens') };

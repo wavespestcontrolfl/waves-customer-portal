@@ -150,7 +150,7 @@ const FAILURE_RULES = [
   // `max_events`: a Managed Agents runner's own SSE event cap ended the
   // stream before the session did — our budget, not the provider's fault.
   ['budget', /^(budget_exhausted|max_cost|max_tool_calls|max_events)$/],
-  ['bad_input', /^bad_request$|_(400|413)$/],
+  ['bad_input', /^bad_request$|^typesafe_unpinned_model$|_(400|413|422)$/],
   ['incomplete', /^(empty_json|empty_text|unparseable|truncated)$/],
   // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the
   // same family as a safety gate, an eval candidate rather than plumbing.

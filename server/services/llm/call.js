@@ -16,6 +16,9 @@
  * incomplete / refused / unparseable answer); a chain's `failures` entries
  * carry it too, so a caller can account for every leg it paid for.
  *
+ * (callTypeSafe is the decision-only exception: it returns typed `answers` as
+ * `json`, via ROUTES.typedDecision.)
+ *
  * Callers route via dispatch(route, payload) where `route` is a models.ROUTES
  * entry ({ provider, model }). On { ok: false } the caller falls back to its
  * existing path — these helpers add a provider option, they don't replace the
@@ -37,6 +40,10 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const TYPESAFE_SYSTEMONE_API = 'https://api.typesafe.ai/v1/systemone';
+// Only a dated Jev version is allowed on the wire: the `jev-latest` alias moves
+// under us, so a typed-decision package's answers would silently change.
+const TYPESAFE_PINNED_MODEL_RE = /^jev-\d+\.\d+\.\d+$/;
 
 // Default per-request ceiling when a caller supplies no timeoutMs. Mirrors the
 // Anthropic SDK's built-in 10-minute default (which bounded these lanes before
@@ -415,6 +422,63 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
   }
 }
 
+// ── TypeSafe Jev (typed decisions) ───────────────────────────────────
+/**
+ * TypeSafe SystemOne: a decision-only model. It takes a `state` (string /
+ * object / array) and a map of typed `questions` (noul = yes/no probability,
+ * choice, score) and returns one typed answer per question id — never free
+ * text. Same contract as callOpenAI: never throws, `{ ok:false, reason }` on
+ * any miss (`no_key`, `typesafe_<status>`, `typesafe_timeout`, `error`,
+ * `empty_json`, `typesafe_unpinned_model`); on success `json` is the `answers`
+ * map. 429 / 529 are the provider asking to back off: they surface as
+ * reasons and the caller keeps its existing path; this adapter never retries.
+ * `model` must be a pinned version (jev-N.N.N), checked before any network call.
+ */
+async function callTypeSafe({ model, state, questions, timeoutMs = 15000, laneId, promptVersion, policyLabel } = {}) {
+  // `text` is the state, so a lane that opts into traces behaves like the
+  // other adapters (the trace writer redacts and caps it).
+  let stateText;
+  try { stateText = typeof state === 'string' ? state : JSON.stringify(state); } catch { stateText = undefined; }
+  const base = { provider: 'typesafe', requestedModel: model, laneId, promptVersion, policyLabel, text: stateText };
+  // Unlike the text adapters, a missing key or an unpinned model still files a
+  // failed ledger row (Codex #5476 r3): this lane is dark and has no user in
+  // front of it, so the ledger is the only place a dead credential shows.
+  if (!process.env.TYPESAFE_API_KEY) return failedLeg(base, { latencyMs: 0 }, 'no_key');
+  if (!TYPESAFE_PINNED_MODEL_RE.test(String(model || ''))) return failedLeg(base, { latencyMs: 0 }, 'typesafe_unpinned_model');
+  const t0 = nowMs();
+  try {
+    const resp = await fetch(TYPESAFE_SYSTEMONE_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}` },
+      body: JSON.stringify({ model, state, questions }),
+      ...abortAfter(timeoutMs),
+    });
+    if (!resp.ok) {
+      logger.warn(`[llm] TypeSafe ${resp.status}`);
+      return failedLeg(base, { latencyMs: elapsedMs(t0) }, `typesafe_${resp.status}`);
+    }
+    const data = (await resp.json()) || {};
+    const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers) ? data.answers : null;
+    const text = answers ? JSON.stringify(answers) : '';
+    const served = { servedModel: data.model, usage: usageOf('typesafe', data), latencyMs: elapsedMs(t0), response: text };
+    if (!answers || !Object.keys(answers).length) return failedLeg(base, served, 'empty_json');
+    const result = {
+      ok: true,
+      json: answers,
+      text,
+      model,
+      usage: served.usage,
+      ...(typeof data.model === 'string' && data.model.trim() ? { servedModel: data.model } : {}),
+    };
+    ledgerIdOf.set(result, recordLedgerCall(base, { ...served, ok: true }));
+    return result;
+  } catch (err) {
+    const reason = isTimeoutError(err) ? 'typesafe_timeout' : 'error';
+    logger.error(`[llm] callTypeSafe failed (${reason}): ${err.message}`);
+    return failedLeg(base, { latencyMs: elapsedMs(t0) }, reason);
+  }
+}
+
 // ── Gemini ────────────────────────────────────────────────────────────
 // Every text part of the first Gemini candidate, joined. Gemini 3.x Flash is a
 // thinking model: a thought part can precede the answer part, so parts[0].text
@@ -546,7 +610,14 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
 // and the lanes' own Ajv validators still enforce the full schema on the
 // answer, so only the wire copy sent to Anthropic drops them. Deep copy; the
 // caller's schema object is never mutated.
-const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems', 'minLength', 'maxLength']);
+// Numeric bounds too: `For 'number' type, properties maximum, minimum are not
+// supported` is a 400 on EVERY call (the plant photo ID referee's first live
+// run failed 3/3 on 2026-09-29, #5307), so any lane whose schema bounds a
+// number could never be answered by an Anthropic leg, primary or fallback.
+const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set([
+  'minItems', 'maxItems', 'minLength', 'maxLength',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+]);
 function anthropicSchema(schema) {
   return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
 }
@@ -628,6 +699,12 @@ async function dispatch(route, payload = {}) {
     // before: `effort: undefined` resolves through anthropicEffortFor
     // exactly like omitting it).
     case PROVIDER.ANTHROPIC: return callAnthropic({ ...args, effort: route.effort });
+    // Typed decisions answer `questions`, never free text: a payload without
+    // them is a caller bug, refused before any network call. Single-leg only —
+    // no TEXT_POLICIES entry may carry this provider.
+    case PROVIDER.TYPESAFE:
+      if (!args.questions || typeof args.questions !== 'object') return { ok: false, reason: 'typesafe_requires_questions' };
+      return callTypeSafe(args);
     default: return { ok: false, reason: `unknown_provider_${route.provider}` };
   }
 }
@@ -803,11 +880,14 @@ module.exports = {
   callGemini,
   geminiText,
   callAnthropic,
+  callTypeSafe,
   dispatch,
   dispatchWithFallback,
   extractOpenAIText,
   parseLooseJson,
   providerErrorReason,
   OPENAI_RESPONSES_API,
+  TYPESAFE_SYSTEMONE_API,
+  TYPESAFE_PINNED_MODEL_RE,
   geminiUrl,
 };

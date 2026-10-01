@@ -78,10 +78,13 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
+import { useCollectionHold } from "../../hooks/useCollectionHold";
+import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
@@ -3272,6 +3275,7 @@ function AdminAutopayPanelV2({
   monthlyRate,
   customerName,
   canCharge = false,
+  collectionHold = null,
 }) {
   const [state, setState] = useState(null);
   const [charging, setCharging] = useState(false);
@@ -3303,7 +3307,25 @@ function AdminAutopayPanelV2({
       setErr("Customer has no monthly_rate set");
       return;
     }
-    if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
+    // Charge now goes PAST a collections dispute hold (operatorOverride), so
+    // the confirm says so, and an unknown hold state needs its own explicit
+    // yes rather than reading as "no hold".
+    const holdStatus = collectionHold?.status;
+    if (collectionHold && holdStatus !== "ready" && holdStatus !== "idle") {
+      if (
+        !window.confirm(
+          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (collectionHold?.dispute) {
+      if (
+        !window.confirm(
+          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
       return;
     setCharging(true);
     setErr("");
@@ -3385,6 +3407,9 @@ function AdminAutopayPanelV2({
             </Button>
           )}
         </div>
+        {canCharge && (
+          <CollectionHoldStatus hold={collectionHold} variant="charge" className="mt-2.5" />
+        )}
         {msg && (
           <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
@@ -6257,6 +6282,7 @@ function CustomerProfileBilling({
   data,
   billingSummary,
   isAdmin,
+  collectionHold,
   setAnnualPrepayOpen,
   setAnnualPrepayInvoiceOpen,
   invoices,
@@ -6316,7 +6342,8 @@ function CustomerProfileBilling({
           </div>
           {(c.servicePausedAt ||
             displayedAnnualPrepayTerm ||
-            data.prepaidPlans?.length > 0) &&
+            data.prepaidPlans?.length > 0 ||
+            collectionHold.dispute) &&
             billingSummary}
           <Customer360Estimates estimates={data.estimates || []} />
         </>
@@ -6333,6 +6360,7 @@ function CustomerProfileBilling({
         monthlyRate={c.monthlyRate}
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
+        collectionHold={collectionHold}
       />{" "}
       <AccountCreditPanelV2
         customerId={c.id}
@@ -8283,6 +8311,7 @@ function CustomerBillingSummary({
   embedded,
   c,
   isAdmin,
+  collectionHold,
   resumeBilling,
   resumingBilling,
   resumeBillingErr,
@@ -8301,6 +8330,7 @@ function CustomerBillingSummary({
       <SectionTitle>
         {embedded ? "Billing status & prepay" : "Billing Summary"}
       </SectionTitle>{" "}
+      <CollectionHoldStatus hold={collectionHold} variant="banner" />
       <CustomerBillingPause
         c={c}
         isAdmin={isAdmin}
@@ -9154,6 +9184,7 @@ function CustomerWorkspacePresentation({
             <>
               {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
               <OwedCommitmentsSummary customerId={customerId} source="sms" />
+              {sections.engagement}
               {isAdmin && sections.activity}
               {sections.services}
             </>
@@ -9209,6 +9240,7 @@ function CustomerOverlayPresentation({
           {activeTab === "overview" && sections.overview}
           {activeTab === "billing" && sections.billing}
           {activeTab === "comms" && sections.conversation}
+          {activeTab === "comms" && sections.engagement}
           {activeTab === "services" && sections.services}
           {activeTab === "property" && sections.property}
           {activeTab === "compliance" && sections.compliance}
@@ -10325,6 +10357,9 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  // B10: read the dispute hold ONCE per customer; the billing summary shows
+  // it (with Release) and every manual charge control shows it beside itself.
+  const collectionHold = useCollectionHold(customerId, isAdmin);
   const { open: openIntelligenceBar, lastMutation } = useIntelligenceBarActions();
   usePublishIntelligenceBarPageData({ customer_id: customerId, overlay: true });
   const {
@@ -10566,6 +10601,7 @@ export default function Customer360ProfileV2({
       embedded={embedded}
       c={c}
       isAdmin={isAdmin}
+      collectionHold={collectionHold}
       resumeBilling={resumeBilling}
       resumingBilling={resumingBilling}
       resumeBillingErr={resumeBillingErr}
@@ -10680,6 +10716,7 @@ export default function Customer360ProfileV2({
         data={data}
         billingSummary={billingSummary}
         isAdmin={isAdmin}
+        collectionHold={collectionHold}
         setAnnualPrepayOpen={setAnnualPrepayOpen}
         setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
         invoices={invoices}
@@ -10746,6 +10783,9 @@ export default function Customer360ProfileV2({
         onLoadOlder={history.loadOlder}
       />
     ),
+    // Read-only sent/engagement feed; the server answers { enabled: false }
+    // while GATE_CUSTOMER_ACTIVITY_TIMELINE is dark and it renders nothing.
+    engagement: <CustomerEngagementTimeline customerId={customerId} adminOnly={isAdmin} />,
     timeline: (
       <CustomerProfileTimeline
         isAdmin={isAdmin}
