@@ -58,6 +58,9 @@ test('asks both packages with the same state and records each beside its rule fl
   const byPackage = Object.fromEntries(mockRecord.mock.calls.map(([a]) => [a.pkg.id, a]));
   expect(byPackage['sms_courtesy.v1']).toMatchObject({ capability: 'sms_courtesy', subjectType: 'sms_log', subjectId: 'sms-1', baselines: { is_courtesy_only: { rules: true } } });
   expect(byPackage['sms_courtesy.v1']).not.toHaveProperty('outcomeEvidence');
+  // the digest of exactly the state Jev was given (previous Waves text + the customer's text)
+  const { smsSubjectHash } = require('../services/typed-decisions/subject-hash');
+  expect(byPackage['sms_courtesy.v1'].subjectHash).toBe(smsSubjectHash({ previous: 'See you Tuesday.', body: 'Thanks so much!' }));
   expect(byPackage['sms_reschedule.v1']).toMatchObject({ capability: 'sms_reschedule', baselines: { wants_visit_change: { rules: false } } });
 });
 

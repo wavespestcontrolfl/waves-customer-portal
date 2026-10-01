@@ -23,7 +23,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudi
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
-const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { callSubjectHash, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
@@ -248,6 +248,19 @@ describe('POST /reviews/:id/label', () => {
     expect(body.code).toBe('subject_changed');
     expect(called(log, 'decision_reviews', 'update')).toEqual([]);
     expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('a text whose earlier Waves message now resolves differently is 409 subject_changed', async () => {
+    const smsRow = baseRow({ subject_hash: smsSubjectHash({ previous: 'See you Tuesday.', body: 'Thanks!' }) });
+    const log = installDb({
+      decision_reviews: { first: [smsRow] },
+      // the inbound row, then the previous-text lookup: that send no longer qualifies
+      sms_log: { first: [{ from_phone: '+15550000001', to_phone: '+15550000002', message_body: 'Thanks!', created_at: new Date('2026-09-30T11:59:00Z') }, undefined] },
+    });
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: smsRow.subject_hash });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+    expect(called(log, 'decision_reviews', 'update')).toEqual([]);
   });
 
   test('the same call transcript labels normally, bound to the transcript version shown', async () => {

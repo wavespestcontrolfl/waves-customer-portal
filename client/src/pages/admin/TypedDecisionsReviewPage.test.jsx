@@ -192,7 +192,7 @@ it('a call reprocessed after Jev answered shows why and offers no label buttons'
   mockList([yesNoRow({ id: 'm1', question: 'Moved question', subjectChanged: true })]);
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
   await screen.findByText('Moved question');
-  expect(screen.getByText(/reprocessed after Jev answered/)).toBeInTheDocument();
+  expect(screen.getByText(/changed after Jev answered/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Jev right' })).toBeNull();
 });
 
@@ -204,6 +204,6 @@ it('a 409 subject_changed from the server locks the row instead of offering Repl
   render(<MemoryRouter><TypedDecisionsReviewPage embedded /></MemoryRouter>);
   await screen.findByText('Live question');
   fireEvent.click(screen.getByRole('button', { name: 'Jev right' }));
-  expect(await screen.findByText(/reprocessed after Jev answered/)).toBeInTheDocument();
+  expect(await screen.findByText(/changed after Jev answered/)).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
 });

@@ -20,7 +20,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { recordAuditEvent } = require('../services/audit-log');
 const { typedDecisionsLive } = require('../config/feature-gates');
 const { packageFor, answerInDomain } = require('../services/typed-decisions/packages');
-const { callSubjectHash, callTranscriptSpan } = require('../services/typed-decisions/subject-hash');
+const { callSubjectHash, callTranscriptSpan, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { readLastOutboundBody } = require('../services/typed-decisions/sms-shadow');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -116,7 +116,9 @@ async function loadSubjects(rows) {
         const previous = t.from_phone && t.to_phone
           ? await readLastOutboundBody({ conn: db, customerPhone: t.from_phone, ourNumber: t.to_phone, before: t.created_at }).catch(() => null)
           : null;
-        subjects.set(`sms_log:${t.id}`, { type: 'sms_log', text: t.message_body || null, previousText: previous || null, at: t.created_at });
+        subjects.set(`sms_log:${t.id}`, {
+          type: 'sms_log', text: t.message_body || null, previousText: previous || null, at: t.created_at, hash: smsSubjectHash({ previous, body: t.message_body }),
+        });
       }));
     }
     if (callIds.length) {
@@ -198,13 +200,27 @@ function correctValueFor(target, { verdict, seen }, value) {
 
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer / transcript version moved since the page loaded (409, by code).
-// A call reprocessed after Jev answered: the live transcript's digest no longer
-// matches the one stored with the decision, so a label would confirm an
-// answer against text Jev never saw.
+// The subject changed after Jev answered: the live digest (a call's transcript,
+// or a text plus the previous Waves text, rebuilt exactly as the shadow built
+// Jev's state) no longer matches the one stored with the decision, so a label
+// would confirm an answer against content Jev never saw.
+async function liveSubjectHash(target) {
+  if (target.subject_type === CALL_SUBJECT) {
+    const call = await db('call_log').where({ id: target.subject_id }).first('transcription');
+    return call ? callSubjectHash(call.transcription) : null;
+  }
+  const text = await db('sms_log').where({ id: target.subject_id }).modify(excludeUnresolvedSendReservations)
+    .first('from_phone', 'to_phone', 'message_body', 'created_at');
+  if (!text) return null;
+  const previous = text.from_phone && text.to_phone
+    ? await readLastOutboundBody({ conn: db, customerPhone: text.from_phone, ourNumber: text.to_phone, before: text.created_at })
+    : null;
+  return smsSubjectHash({ previous, body: text.message_body });
+}
+
 async function subjectMoved(target) {
-  if (target.subject_type !== CALL_SUBJECT || !target.subject_hash) return false;
-  const call = await db('call_log').where({ id: target.subject_id }).first('transcription');
-  return !call || callSubjectHash(call.transcription) !== target.subject_hash;
+  if (!target.subject_hash) return false;
+  return (await liveSubjectHash(target)) !== target.subject_hash;
 }
 
 async function unwrittenLabel(id, force) {
@@ -228,7 +244,7 @@ router.post('/reviews/:id/label', async (req, res, next) => {
     const correct = correctValueFor(target, request, body.correct_value);
     if (correct.error) return res.status(400).json({ error: correct.error });
     if (await subjectMoved(target)) {
-      return res.status(409).json({ error: 'This call was reprocessed after Jev answered; its transcript is not the one Jev judged', code: 'subject_changed' });
+      return res.status(409).json({ error: 'This message or call changed after Jev answered; it is not what Jev judged', code: 'subject_changed' });
     }
     const { verdict, seen, seenSubject, note, force } = request;
     const labelStatus = VERDICT_STATUS[verdict];

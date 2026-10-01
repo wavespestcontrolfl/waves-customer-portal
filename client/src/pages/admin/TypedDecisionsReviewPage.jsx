@@ -120,8 +120,8 @@ function ReviewRow({ review, onLabeled, onStale }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState(null);
-  // The call was reprocessed after Jev answered (server: subjectChanged, or a
-  // 409 subject_changed): the transcript shown is not the one Jev judged.
+  // The subject changed after Jev answered (server: subjectChanged, or a 409
+  // subject_changed): what is shown is not what Jev judged.
   const [moved, setMoved] = useState(review.subjectChanged === true);
 
   const yesNo = isYesNo(review.jevAnswer);
@@ -174,7 +174,7 @@ function ReviewRow({ review, onLabeled, onStale }) {
 
       {moved ? (
         <div role="status" className="text-14 text-ink-secondary">
-          This call was reprocessed after Jev answered, so the transcript above is not the one Jev judged. It can't be labeled.
+          This changed after Jev answered (a reprocessed call, or a different earlier Waves text), so what's shown above is not what Jev judged. It can't be labeled.
         </div>
       ) : (
       <>

@@ -15,8 +15,6 @@
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const { typedDecisionsLive } = require('../../config/feature-gates');
 
-const MAX_TEXT_CHARS = 2000;
-
 // The last Waves text this customer was sent on this line, for the model's
 // "what was Waves answering" context. Same filters as the webhook's own
 // lastOutboundAskedQuestion (a failed send never reached them; internal
@@ -83,7 +81,9 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
       ? await readLastOutboundBody({ conn, customerPhone: fromPhone, ourNumber: toPhone, before: receivedAt }).catch(() => null)
       : null;
   }
-  const state = { previous_waves_text: previous || null, customer_text: text.slice(0, MAX_TEXT_CHARS) };
+  const { smsSubjectHash, smsCustomerText } = require('./subject-hash');
+  const state = { previous_waves_text: previous || null, customer_text: smsCustomerText(text) };
+  const subjectHash = smsSubjectHash({ previous, body: text });
 
   await Promise.all(QUESTIONS.map(async ({ packageId, question, rule }) => {
     out.asked += 1;
@@ -98,6 +98,7 @@ async function shadowInboundSms({ smsLogId, customerId, body, lastOutboundBody, 
         subjectId: smsLogId,
         result,
         baselines: { [question]: { rules: flag } },
+        subjectHash,
       });
       if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
     } catch (err) {
