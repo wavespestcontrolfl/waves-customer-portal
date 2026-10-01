@@ -1,0 +1,338 @@
+/**
+ * Cited pages — the third-party PAGES answer engines cite, ranked page by page
+ * (owner 2026-10-01: "rank cited pages, not websites"). The weekly
+ * `ai_citation` feeder (link-registry-ai-citation-ingest.js) rolls citations up
+ * to a website for the registry; this module keeps the page as the unit, so the
+ * outreach drafter and the admin panel can name the exact article an engine
+ * leans on and the questions it answers with it.
+ *
+ * Read-only: it reads seo_llm_mentions + seo_llm_mention_queries and writes
+ * nothing. No HTTP, no model calls. Only `listing` and `editorial` pages are
+ * ranked (ai-citation-classifier.js's ENQUEUABLE_CATEGORIES, the same set the
+ * feeder sends to the registry); owned, competitor, reference and community
+ * pages never are.
+ *
+ * Order (rankCitedPages):
+ *   tier 1 — cited in a CURRENT provider answer ("who should I hire") that does
+ *            not name Waves. Current = the dashboard's headline row: the newest
+ *            answer per question and engine on the engine's current surface.
+ *   tier 2 — cited in a current provider answer that does name Waves.
+ *   tier 3 — everything else cited in the window.
+ * Within a tier: more current misses first, then a priority city (owner O2
+ * 2026-09-27: Sarasota, Bradenton, Venice, Parrish), then more current
+ * citations, then more citations in the window, then the page key.
+ */
+
+const { classifyUrl, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
+const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
+const { isNeverTargetHost } = require('./link-registry');
+const { canonicalProspectDomain } = require('./prospect-domain-lock');
+const appScraper = require('./llm-app-scraper');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
+const benchmark = require('../../data/aeo-benchmark-v1.json');
+
+const DEFAULT_LOOKBACK_DAYS = 30;
+const DEFAULT_LIMIT = 50;
+// Owner O2 (2026-09-27): the cities that get service-page proof first.
+const PRIORITY_CITIES = Object.freeze(['sarasota', 'bradenton', 'venice', 'parrish']);
+// Tracking parameters engines and publishers append to the same article
+// (ChatGPT adds ?utm_source=chatgpt.com): dropped from the page key so one
+// article is one page.
+const TRACKING_PARAM_RE = /^(utm_.*|srsltid|gclid|fbclid|msclkid|mc_cid|mc_eid|ref|ref_src)$/i;
+
+/**
+ * pageKey(url) → 'host/path[?query]' | null. Canonical host (the registry's
+ * canonicalProspectDomain, so www/mail. drop), lowercased
+ * path without a trailing slash, tracking parameters and the fragment
+ * dropped, remaining parameters sorted. Two URLs with the same key are the
+ * same page.
+ */
+function pageKey(urlString) {
+  let u;
+  try { u = new URL(urlString); } catch { return null; }
+  if (!['http:', 'https:'].includes(u.protocol)) return null;
+  const host = canonicalProspectDomain(u.hostname);
+  const path = u.pathname.toLowerCase().replace(/\/+$/, '') || '';
+  const params = [...u.searchParams].filter(([k]) => !TRACKING_PARAM_RE.test(k)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const query = params.length ? `?${new URLSearchParams(params).toString()}` : '';
+  return `${host}${path}${query}`;
+}
+
+// The URL to show for a page: the most-cited spelling, tracking parameters
+// stripped, so a pitch or the panel never carries ?utm_source=chatgpt.com.
+function displayUrl(urlString) {
+  try {
+    const u = new URL(urlString);
+    for (const k of [...u.searchParams.keys()]) if (TRACKING_PARAM_RE.test(k)) u.searchParams.delete(k);
+    u.hash = '';
+    return u.href;
+  } catch { return urlString; }
+}
+
+function isPriorityCity(city) {
+  return PRIORITY_CITIES.includes(String(city || '').toLowerCase().replace(/,.*$/, '').trim());
+}
+
+/**
+ * currentRowIds(rows, currentSurfaces) → Set of row ids that are headline
+ * rows: newest per (query, platform, model) — rows are newest first — and,
+ * for a two-surface platform, only its current surface's newest row per
+ * question. The same selection llm-mention-prober.js's buildDashboard makes,
+ * so "current" here means what the dashboard counts.
+ */
+function currentRowIds(rows, currentSurfaces) {
+  const latest = new Map();
+  for (const row of rows) {
+    const key = `${row.query}::${row.llm_platform}::${row.model_version}`;
+    if (!latest.has(key)) latest.set(key, row);
+  }
+  const seen = new Set();
+  const ids = new Set();
+  for (const row of latest.values()) {
+    if (currentSurfaces && currentSurfaces[row.llm_platform]) {
+      if (!appScraper.onCurrentSurface(row, currentSurfaces)) continue;
+      const key = `${row.query}::${row.llm_platform}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    ids.add(row.id);
+  }
+  return ids;
+}
+
+// Question fields: the managed query row (operator-edited city/service) before
+// the benchmark entry, as the feeder does.
+function questionOf(row, queryById, benchmarkByQuery) {
+  const managed = queryById.get(row.query_id);
+  const bench = benchmarkByQuery.get(row.query);
+  return {
+    id: bench?.id || null,
+    query: row.query,
+    city: managed?.city || bench?.city || null,
+    service: managed?.service || bench?.service || null,
+    intent: bench?.intent || null,
+  };
+}
+
+function compareStrings(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function newPage(key, c) {
+  return {
+    key, host: c.host, category: c.category, subtype: c.subtype || null,
+    urlCounts: new Map(), citations: 0, currentCitations: 0, currentMisses: 0, namedIn: 0,
+    engines: new Set(), missEngines: new Set(), currentProviderNamed: 0, questions: new Map(),
+  };
+}
+
+// One answer's citation of a page: `a` is { url, question, provider, isCurrent, named, engine }.
+function addCitation(p, a) {
+  p.citations += 1;
+  p.urlCounts.set(a.url, (p.urlCounts.get(a.url) || 0) + 1);
+  p.engines.add(a.engine);
+  if (a.named) p.namedIn += 1;
+  const qKey = a.question.id || a.question.query || '-';
+  if (!p.questions.has(qKey)) p.questions.set(qKey, { ...a.question, provider: a.provider, current: false, miss: false, engines: new Set() });
+  const q = p.questions.get(qKey);
+  q.engines.add(a.engine);
+  if (!a.isCurrent) return;
+  p.currentCitations += 1;
+  q.current = true;
+  if (!a.provider) return;
+  if (a.named) { p.currentProviderNamed += 1; return; }
+  p.currentMisses += 1;
+  p.missEngines.add(a.engine);
+  q.miss = true;
+}
+
+function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
+  const [topUrl] = [...urlCounts].sort(([a, n], [b, m]) => m - n || compareStrings(a, b))[0];
+  const questions = [...p.questions.values()]
+    .map((q) => ({ ...q, engines: [...q.engines].sort() }))
+    .sort((a, b) => Number(b.miss) - Number(a.miss) || Number(b.current) - Number(a.current) || compareStrings(a.id || a.query, b.id || b.query));
+  return {
+    ...p,
+    url: displayUrl(topUrl),
+    tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
+    priorityCity: questions.some((q) => isPriorityCity(q.city)),
+    engines: [...p.engines].sort(),
+    missEngines: [...p.missEngines].sort(),
+    questions,
+  };
+}
+
+function comparePages(a, b) {
+  return a.tier - b.tier
+    || b.currentMisses - a.currentMisses
+    || Number(b.priorityCity) - Number(a.priorityCity)
+    || b.currentCitations - a.currentCitations
+    || b.citations - a.citations
+    || compareStrings(a.key, b.key);
+}
+
+/**
+ * rankCitedPages(rows, queryRows, { currentSurfaces, limit }) → ranked pages.
+ * Pure. `rows` are measured seo_llm_mentions rows, NEWEST FIRST (id, query,
+ * query_id, llm_platform, model_version, check_date, cited_urls,
+ * waves_mentioned). Each page:
+ *   { key, url, host, category, subtype, tier, rank,
+ *     citations, currentCitations, currentMisses, namedIn,
+ *     engines, missEngines, priorityCity,
+ *     questions: [{ id, query, city, service, intent, provider, current, miss, engines }] }
+ * citations counts answers (one per question, engine and day) that cite the
+ * page; currentMisses counts current provider answers citing it that do not
+ * name Waves; namedIn counts citing answers in the window that name Waves.
+ */
+function rankCitedPages(rows, queryRows, { currentSurfaces = null, limit = DEFAULT_LIMIT } = {}) {
+  const queryById = new Map((queryRows || []).map((q) => [q.id, q]));
+  const benchmarkByQuery = new Map(benchmark.questions.map((q) => [q.query, q]));
+  const current = currentRowIds(rows || [], currentSurfaces);
+  const pages = new Map();
+  for (const row of rows || []) {
+    const question = questionOf(row, queryById, benchmarkByQuery);
+    const provider = isProviderIntentQuestion(question);
+    const answer = { question, provider, isCurrent: current.has(row.id), named: row.waves_mentioned === true, engine: row.llm_platform || 'unknown' };
+    const seenThisRow = new Set();
+    for (const url of cleanUrls(row.cited_urls)) {
+      const c = classifyUrl(url, { providerIntent: provider });
+      if (!c || !ENQUEUABLE_CATEGORIES.includes(c.category) || isNeverTargetHost(c.host)) continue;
+      const key = pageKey(url);
+      // one answer citing the same page twice (with and without a tracking
+      // parameter) is one citation
+      if (!key || seenThisRow.has(key)) continue;
+      seenThisRow.add(key);
+      if (!pages.has(key)) pages.set(key, newPage(key, c));
+      addCitation(pages.get(key), { ...answer, url });
+    }
+  }
+  return [...pages.values()].map(finalizePage).sort(comparePages)
+    .slice(0, Math.max(0, limit)).map((p, i) => ({ ...p, rank: i + 1 }));
+}
+
+/**
+ * readCitedPageRows(db, { since }) → measured mention rows newest first, from
+ * active managed queries (or unmanaged legacy rows), since the ET date.
+ */
+async function readCitedPageRows(db, { since }) {
+  return db('seo_llm_mentions as m')
+    .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
+    .where({ 'm.measurement_version': MEASUREMENT_VERSION, 'm.answer_available': true, 'm.citations_complete': true })
+    .where('m.check_date', '>=', since)
+    .whereNotNull('m.cited_urls')
+    .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
+    .orderBy('m.check_date', 'desc')
+    .orderBy('m.created_at', 'desc')
+    .select('m.id', 'm.query', 'm.query_id', 'm.llm_platform', 'm.model_version', 'm.check_date', 'm.cited_urls', 'm.waves_mentioned');
+}
+
+/**
+ * loadCitedPages(db, { lookbackDays, limit, now, currentSurfaces })
+ *   → { since, lookbackDays, scanned, pages }
+ * `currentSurfaces` defaults to the prober's switch (LLM_MENTIONS_APP_SCRAPER).
+ */
+async function loadCitedPages(db, { lookbackDays = DEFAULT_LOOKBACK_DAYS, limit = DEFAULT_LIMIT, now = new Date(), currentSurfaces } = {}) {
+  const days = Math.max(1, Math.floor(Number(lookbackDays)) || DEFAULT_LOOKBACK_DAYS);
+  const since = etDateString(addETDays(now, -(days - 1)));
+  const surfaces = currentSurfaces !== undefined ? currentSurfaces : require('./llm-mention-prober').currentSurfaces;
+  const [rows, queryRows] = await Promise.all([
+    readCitedPageRows(db, { since }),
+    db('seo_llm_mention_queries').select('id', 'query', 'city', 'service', 'active'),
+  ]);
+  return { since, lookbackDays: days, scanned: rows.length, pages: rankCitedPages(rows, queryRows, { currentSurfaces: surfaces, limit }) };
+}
+
+// ---------------------------------------------------------------------------
+// Placement recheck (owner 2026-10-01): once a placement on a cited page goes
+// live, re-read the questions that cited that page. The prober already asks
+// every benchmark question on every engine daily, so this reads what it
+// stored — before vs. after the day the link was first seen live.
+// ---------------------------------------------------------------------------
+
+const RECHECK_BEFORE_DAYS = 30;
+const RECHECK_SETTLE_DAYS = 14;
+const RECHECK_MAX_PLACEMENT_AGE_DAYS = 120;
+
+function emptyTally() {
+  return { answers: 0, named: 0, citingPage: 0, namedWhenCiting: 0 };
+}
+
+function daysBetween(fromDate, toDate) {
+  return Math.round((Date.parse(`${toDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86400000);
+}
+
+/**
+ * recheckPlacements(placements, rows, { now }) → [{ prospectId, host, liveOn,
+ *   daysLive, pages, questions, before, after, verdict }]
+ * Pure. `placements` are seo_link_prospects rows with first_live_at
+ * (id, target_domain, live_url, first_live_at); `rows` are measured mention
+ * rows (any order) covering RECHECK_BEFORE_DAYS before the oldest placement.
+ * The page is the live_url when engines cited it before the link went live,
+ * else every page on the host they cited; the questions are those whose
+ * answers cited it before that day. before = those questions' answers in the
+ * RECHECK_BEFORE_DAYS before; after = their answers from that day on.
+ * verdict: too_early (under RECHECK_SETTLE_DAYS live, or no answer since) |
+ * named_when_cited (an answer since cites the page and names Waves) |
+ * page_not_cited_now | not_named_yet. A placement on a page no engine cited
+ * is not returned.
+ */
+function recheckPlacements(placements, rows, { now = new Date() } = {}) {
+  const today = etDateString(now);
+  const dated = (rows || []).map((r) => ({ ...r, date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(cleanUrls(r.cited_urls).map(pageKey).filter(Boolean)) }));
+  const out = [];
+  for (const pl of placements || []) {
+    const host = canonicalProspectDomain(pl.target_domain);
+    if (!host || !pl.first_live_at) continue;
+    const liveOn = etDateString(new Date(pl.first_live_at));
+    const onHost = (k) => k === host || k.startsWith(`${host}/`) || k.startsWith(`${host}?`);
+    const before = dated.filter((r) => r.date < liveOn);
+    const hostPages = new Set(before.flatMap((r) => [...r.keys].filter(onHost)));
+    if (!hostPages.size) continue;
+    const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
+    const pages = liveKey && hostPages.has(liveKey) ? new Set([liveKey]) : hostPages;
+    const cites = (r) => [...r.keys].some((k) => pages.has(k));
+    const questions = new Set(before.filter(cites).map((r) => r.query));
+    const windowStart = etDateString(addETDays(new Date(`${liveOn}T12:00:00Z`), -RECHECK_BEFORE_DAYS));
+    const tally = { before: emptyTally(), after: emptyTally() };
+    for (const r of dated) {
+      if (!questions.has(r.query) || r.date < windowStart) continue;
+      const t = r.date < liveOn ? tally.before : tally.after;
+      const named = r.waves_mentioned === true;
+      t.answers += 1;
+      if (named) t.named += 1;
+      if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
+    }
+    const daysLive = daysBetween(liveOn, today);
+    let verdict = 'not_named_yet';
+    if (tally.after.namedWhenCiting > 0) verdict = 'named_when_cited';
+    else if (daysLive < RECHECK_SETTLE_DAYS || tally.after.answers === 0) verdict = 'too_early';
+    else if (tally.after.citingPage === 0) verdict = 'page_not_cited_now';
+    out.push({
+      prospectId: pl.id, host, liveOn, daysLive, pages: [...pages].sort(), questions: [...questions].sort(),
+      before: tally.before, after: tally.after, verdict,
+    });
+  }
+  return out.sort((a, b) => compareStrings(b.liveOn, a.liveOn) || compareStrings(a.host, b.host));
+}
+
+/**
+ * loadPlacementRechecks(db, { now }) → recheckPlacements over every placement
+ * first seen live in the last RECHECK_MAX_PLACEMENT_AGE_DAYS.
+ */
+async function loadPlacementRechecks(db, { now = new Date() } = {}) {
+  const oldest = addETDays(now, -RECHECK_MAX_PLACEMENT_AGE_DAYS);
+  const placements = await db('seo_link_prospects')
+    .whereNotNull('first_live_at').where('first_live_at', '>=', oldest)
+    .select('id', 'target_domain', 'live_url', 'first_live_at');
+  if (!placements.length) return [];
+  const earliest = placements.reduce((m, p) => (new Date(p.first_live_at) < m ? new Date(p.first_live_at) : m), now);
+  const since = etDateString(addETDays(earliest, -RECHECK_BEFORE_DAYS));
+  const rows = await readCitedPageRows(db, { since });
+  return recheckPlacements(placements, rows, { now });
+}
+
+module.exports = {
+  rankCitedPages, loadCitedPages, readCitedPageRows, pageKey, displayUrl, currentRowIds, isPriorityCity,
+  recheckPlacements, loadPlacementRechecks,
+  PRIORITY_CITIES, DEFAULT_LOOKBACK_DAYS, DEFAULT_LIMIT, RECHECK_BEFORE_DAYS, RECHECK_SETTLE_DAYS,
+};

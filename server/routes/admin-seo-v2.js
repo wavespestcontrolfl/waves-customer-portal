@@ -670,6 +670,16 @@ router.get('/llm-mentions', async (req, res, next) => {
       logger.warn(`[llm-mentions] cited-URL health block failed: ${err.message}`);
       dashboard.citedUrlHealth = null;
     }
+    // Third-party pages the engines cite, ranked page by page (cited-pages.js)
+    // — additive like the health block above.
+    try {
+      const { loadCitedPages, loadPlacementRechecks } = require('../services/seo/cited-pages');
+      const [{ since, scanned, pages }, placements] = await Promise.all([loadCitedPages(db, { limit: 25 }), loadPlacementRechecks(db)]);
+      dashboard.citedPages = { since, scanned, pages, placements };
+    } catch (err) {
+      logger.warn(`[llm-mentions] cited-pages block failed: ${err.message}`);
+      dashboard.citedPages = null;
+    }
     res.json(dashboard);
   } catch (err) { next(err); }
 });

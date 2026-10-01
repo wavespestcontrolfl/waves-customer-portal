@@ -17,6 +17,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
+const { loadCitedPages, pageKey } = require('./cited-pages');
+const { canonicalProspectDomain } = require('./prospect-domain-lock');
+const entityCohort = require('../../data/aeo-entity-cohort-v1.json');
 const { callAnthropic, rejectCall } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
@@ -26,7 +29,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const DRAFT_MODEL = process.env.MODEL_OUTREACH_DRAFTER || MODELS.WORKHORSE;
 
-const SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control & Lawn Care (family-owned, SW Florida — Manatee/Sarasota/Charlotte counties). Write ONE short, personalized, one-to-one backlink-outreach email for a single prospect. A human reviews every draft before any send.
+const SYSTEM_PROMPT = `You are the outreach drafter for Waves Pest Control (family-owned, SW Florida — Manatee/Sarasota/Charlotte counties). Write ONE short, personalized, one-to-one backlink-outreach email for a single prospect. A human reviews every draft before any send.
 
 RULES (mandatory):
 - One-to-one, never templated. Reference the specific site/page/audience by name. The email sends from the PRIMARY Waves inbox, so anything templated or spammy risks real-inbox reputation.
@@ -41,6 +44,12 @@ ANGLE by tier / link_type:
 - Tier 2 (editorial/haro, local media): offer a seasonal hook (spring termite swarm, summer mosquito + hurricane surge, fall rodents) backed by Waves' Pest Pressure local data as a citable resource for an upcoming piece.
 - link_type resource: ask to be added to their resources/links/preferred-vendors page.
 - link_type guest_post: offer one specific, genuinely useful local guest-article idea.
+
+CITED-PAGE ANGLE — when the prompt has a CITED PAGE block, use this angle instead of the tier/link_type one:
+- Their page is one that AI assistants (ChatGPT, Perplexity, Gemini, Claude, Google's AI answers) cite when people ask the question listed. Say so plainly and name the question in your own words: it is a real compliment and the reason you are writing.
+- The ask: when they next update that page, consider adding Waves Pest Control for the city and service it covers. Give one or two reasons Waves fits, using ONLY the WAVES FACTS block (an editor can check the FDACS license number). Never invent reviews, ratings, awards, years in business or customer counts.
+- Never claim Waves ranks anywhere, that an AI recommends Waves, or that adding Waves does anything for their page. No payment, no reciprocal link, no exclusivity.
+- Offer to send anything they need to check (license lookup, service area, contact details).
 
 Return ONLY JSON: {"subject": "...", "body": "..."}. The body is plain text with \\n line breaks and ends with the two-line signature.`;
 
@@ -155,7 +164,61 @@ function parseDraft(text) {
   return null;
 }
 
-function buildUserPrompt(prospect, profile, loc, page) {
+// The owner-approved entity answers (aeo-entity-cohort-v1.json) a cited-page
+// pitch may state: license, footprint, services, ownership. Nothing else.
+const WAVES_FACT_IDS = Object.freeze(['E3', 'E5', 'E6', 'E8']);
+const WAVES_FACTS = Object.freeze(WAVES_FACT_IDS
+  .map((id) => (entityCohort.questions.find((q) => q.id === id) || {}).approved_answer)
+  .filter(Boolean));
+// A cited page that already names Waves needs no pitch.
+const WAVES_LISTED_RE = /\bwaves pest control\b/i;
+const MAX_CITED_QUESTIONS = 3;
+
+/**
+ * citedPagesByHost(pages) → Map host → ranked pages for that host, best first.
+ * `pages` is cited-pages.js's ranked list (already ordered).
+ */
+function citedPagesByHost(pages) {
+  const byHost = new Map();
+  for (const p of pages || []) {
+    const host = canonicalProspectDomain(p.host);
+    if (!host) continue;
+    if (!byHost.has(host)) byHost.set(host, []);
+    byHost.get(host).push(p);
+  }
+  return byHost;
+}
+
+/**
+ * citedPageFor(prospect, byHost) → the cited page to pitch, or null. The
+ * prospect's own page when an engine cites it, else the domain's best-ranked
+ * cited page. A subdomain prospect matches only its own host.
+ */
+function citedPageFor(prospect, byHost) {
+  if (!byHost || !byHost.size) return null;
+  const pages = byHost.get(canonicalProspectDomain(prospect.target_domain));
+  if (!pages || !pages.length) return null;
+  const own = prospect.target_url ? pageKey(prospect.target_url) : null;
+  return (own && pages.find((p) => p.key === own)) || pages[0];
+}
+
+function citedPageBlock(cited) {
+  if (!cited) return [];
+  const questions = (cited.questions || []).slice(0, MAX_CITED_QUESTIONS)
+    .map((q) => `  - "${q.query}" (${(q.engines || []).join(', ')})${q.miss ? ' — the current answer does not name Waves' : ''}`);
+  return [
+    '',
+    "CITED PAGE (from Waves' daily answer-engine tracking — use the CITED-PAGE ANGLE)",
+    `- their page: ${cited.url}`,
+    '- AI assistants cite it when people ask:',
+    ...questions,
+    '',
+    'WAVES FACTS (the only claims about Waves you may make):',
+    ...WAVES_FACTS.map((f) => `- ${f}`),
+  ];
+}
+
+function buildUserPrompt(prospect, profile, loc, page, cited = null) {
   const city = loc ? String(loc.name || '').replace(/,.*$/, '').trim() : 'Bradenton';
   return [
     'PROSPECT',
@@ -165,6 +228,7 @@ function buildUserPrompt(prospect, profile, loc, page) {
     `- strategist notes: ${prospect.notes || '(none)'}`,
     prospect.anchor_planned ? `- suggested anchor: ${prospect.anchor_planned}` : '',
     page && (page.title || page.snippet) ? `- what their page actually says: ${[page.title, page.snippet].filter(Boolean).join(' — ').slice(0, 500)}` : '',
+    ...citedPageBlock(cited),
     '',
     `LINK TO EARN (propose as the resource): ${prospect.target_page}`,
     '',
@@ -176,15 +240,22 @@ function buildUserPrompt(prospect, profile, loc, page) {
   ].filter(Boolean).join('\n');
 }
 
-async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText }) {
+/**
+ * draftOne → { subject, body } | { skip: reason } | null (no usable draft).
+ * With a cited page, the cited page is the one read, and a page that already
+ * names Waves is skipped rather than pitched.
+ */
+async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageText, cited = null }) {
   let page = null;
-  try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
+  const url = cited ? cited.url : (prospect.target_url || `https://${prospect.target_domain}/`);
+  try { page = await fetchPageFn(url, cited ? { matchers: { waves: WAVES_LISTED_RE } } : undefined); } catch { page = null; }
+  if (cited && page && page.matches && page.matches.waves) return { skip: `Waves already on the cited page ${cited.url}` };
   const loc = pickLocation(prospect, profile);
   const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
     max_tokens: 1200,
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page) }],
+    messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page, cited) }],
   }), { laneId: 'outreach_drafter' });
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
   const draft = parseDraft(text);
@@ -198,7 +269,26 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
  * summed over BOTH lanes (the follow-up pass + the pitches — what the cron log and the
  * CLI print), with the follow-up pass itemized under `followUps`.
  */
-async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = {}) {
+/**
+ * The cited-page ranking, by host, for this run's pitches. Never blocks a
+ * run: a failed read drafts every pitch with its usual angle.
+ */
+async function loadCitedByHost(citedPagesFn) {
+  try {
+    const r = await citedPagesFn();
+    return citedPagesByHost(r && r.pages);
+  } catch (err) {
+    logger.warn(`[outreach-drafter] cited pages unavailable — drafting without them: ${err.message}`);
+    return new Map();
+  }
+}
+
+const CITED_PAGES_LIMIT = 500;
+function defaultCitedPages() {
+  return loadCitedPages(require('../../models/db'), { limit: CITED_PAGES_LIMIT });
+}
+
+async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn, citedPagesFn = defaultCitedPages } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) {
@@ -220,7 +310,8 @@ async function run({ batchSize = 10, dryRun = false, anthropic, fetchPageFn } = 
     logger.info(remaining ? '[outreach-drafter] no claimable outreach prospects with a contact email' : `[outreach-drafter] the batch of ${batchSize} went to follow-ups — no pitch claimed`);
     return totals(followUps, { claimed: 0, drafted: 0, skipped: 0, failed: 0, samples: [] }, dryRun);
   }
-  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn });
+  const citedByHost = await loadCitedByHost(citedPagesFn);
+  const pitches = await draftPitches({ claimed, dryRun, client, profile, fetchPageFn, citedByHost });
   // (a dry run previewed without leasing — there is nothing to release)
   logger.info(`[outreach-drafter] claimed=${claimed.length} drafted=${pitches.drafted} skipped=${pitches.skipped} failed=${pitches.failed} follow-ups=${followUps.drafted}/${followUps.claimed}${dryRun ? ' (DRY-RUN)' : ''}`);
   return totals(followUps, pitches, dryRun);
@@ -236,7 +327,7 @@ function totals(followUps, pitches, dryRun) {
 }
 
 // the pitch lane: one draft per leased prospect, reported drafted / failed / skipped on its lease
-async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
+async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn, citedByHost = new Map() }) {
   let drafted = 0, skipped = 0, failed = 0;
   const samples = []; // dry-run previews — returned to the CLI's stdout, NOT logged (email/body are PII)
   for (const p of claimed) {
@@ -246,7 +337,13 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
       skipped++; continue;
     }
     try {
-      const draft = await draftOne(p, { profile, anthropic: client, fetchPageFn });
+      const cited = citedPageFor(p, citedByHost);
+      const draft = await draftOne(p, { profile, anthropic: client, fetchPageFn, cited });
+      if (draft && draft.skip) {
+        if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'skipped', lease_token: p.lease_token, notes: draft.skip }).catch(() => {});
+        if (dryRun) samples.push({ domain: p.target_domain, skipped: draft.skip });
+        skipped++; continue;
+      }
       if (!draft) {
         if (!dryRun) await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: 'drafter produced no usable draft' }).catch(() => {});
         failed++; continue;
@@ -254,13 +351,13 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
       if (dryRun) {
         // Don't log the recipient or body (PII / verbose) — collect for the CLI to print to stdout.
         logger.info(`[outreach-drafter][dry] drafted ${p.target_domain} (T${p.tier ?? '?'} ${p.link_type})`);
-        samples.push({ domain: p.target_domain, tier: p.tier, link_type: p.link_type, to_email: email, subject: draft.subject, body: draft.body });
+        samples.push({ domain: p.target_domain, tier: p.tier, link_type: p.link_type, to_email: email, cited_page: cited ? cited.url : null, subject: draft.subject, body: draft.body });
         drafted++; continue;
       }
       const res = await worker.report({
         prospect_id: p.id, outcome: 'drafted', lease_token: p.lease_token,
         outreach_to_email: email, outreach_subject: draft.subject, outreach_body: draft.body,
-        notes: `auto-drafted (tier ${p.tier ?? '?'} ${p.link_type})`,
+        notes: `auto-drafted (tier ${p.tier ?? '?'} ${p.link_type})${cited ? ` · cited page ${cited.url}` : ''}`,
       });
       if (res && res.ok) { drafted++; } else { failed++; logger.warn(`[outreach-drafter] report rejected for ${p.target_domain}: ${res && res.code}`); }
     } catch (err) {
@@ -273,4 +370,4 @@ async function draftPitches({ claimed, dryRun, client, profile, fetchPageFn }) {
 }
 
 module.exports = { run };
-module.exports._internals = { parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };
+module.exports._internals = { citedPagesByHost, citedPageFor, citedPageBlock, WAVES_FACTS, WAVES_LISTED_RE, parseDraft, pickLocation, buildUserPrompt, draftOne, draftFollowUp, buildFollowUpPrompt, sentLine, SYSTEM_PROMPT, FOLLOW_UP_SYSTEM_PROMPT, DRAFT_MODEL };

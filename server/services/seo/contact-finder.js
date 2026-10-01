@@ -354,7 +354,9 @@ async function findContact(domain, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TI
  * for outreach personalization (reuses the same hardened fetch path as findContact:
  * private-IP/redirect guards, timeout, fail-soft). Strips scripts/styles/tags.
  */
-async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+// `matchers` ({ name: RegExp }) are tested against the WHOLE page text, not the
+// 400-character snippet, and come back as `matches: { name: boolean }`.
+async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, matchers = null } = {}) {
   const html = await fetchText(url, { fetchFn, timeoutMs });
   if (!html) return null;
   const title = (html.match(/<title[^>]*>([\s\S]{1,200}?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || null;
@@ -364,7 +366,9 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return { title, snippet: text.slice(0, 400) || null };
+  const out = { title, snippet: text.slice(0, 400) || null };
+  if (matchers) out.matches = Object.fromEntries(Object.entries(matchers).map(([name, re]) => [name, re.test(text)]));
+  return out;
 }
 
 module.exports = { findContact, fetchPageText, fetchPage };
