@@ -99,21 +99,50 @@ function hasLiquidApplication(products) {
  * @param {string} [facts.reportUrl] the visit's report link
  * @returns {string} the text, or '' when there is no link to send it with
  */
+const MAX_SEGMENTS = 2;
+
+function composeFixedRecap({ street, where, pests, safety, link }) {
+  const pestPhrase = naturalJoin(pests);
+  const treated = [where, pestPhrase ? `for ${pestPhrase}` : ''].filter(Boolean).join(' ');
+  return [
+    street ? `Your re-service at ${street} is done.` : 'Your re-service is done.',
+    treated ? `We treated ${treated}.` : '',
+    safety ? SAFETY_LINE : '',
+    `Details: ${link}`,
+  ].filter(Boolean).join(' ');
+}
+
+function fitsSegments(body) {
+  const { countSegments } = require('./messaging/segment-counter');
+  return countSegments(providerBody(body)).segmentCount <= MAX_SEGMENTS;
+}
+
 function buildReserviceFixedRecap({ address, areas, products, reportUrl } = {}) {
   const link = text(reportUrl);
   // The text is a pointer to the report: without a link there is nothing
   // honest to send.
   if (!link) return '';
-  const street = text(address);
-  const where = whereOf(areas);
-  const pests = naturalJoin(pestsOf(products));
-  const treated = [where, pests ? `for ${pests}` : ''].filter(Boolean).join(' ');
-  return [
-    street ? `Your re-service at ${street} is done.` : 'Your re-service is done.',
-    treated ? `We treated ${treated}.` : '',
-    hasLiquidApplication(products) ? SAFETY_LINE : '',
-    `Details: ${link}`,
-  ].filter(Boolean).join(' ');
+  const parts = {
+    street: text(address),
+    where: whereOf(areas),
+    pests: pestsOf(products),
+    safety: hasLiquidApplication(products),
+    link,
+  };
+  // Two segments at most (comms-lint's ceiling), measured on the body the
+  // provider gets. Pests go first, from the end (the report lists them all);
+  // the safety line and the link are never dropped.
+  let body = composeFixedRecap(parts);
+  while (!fitsSegments(body) && parts.pests.length > 1) {
+    parts.pests = parts.pests.slice(0, -1);
+    body = composeFixedRecap(parts);
+  }
+  // Still over: shed whole clauses, least specific first.
+  for (const drop of [{ pests: [] }, { pests: [], where: '' }, { pests: [], where: '', street: '' }]) {
+    if (fitsSegments(body)) break;
+    body = composeFixedRecap({ ...parts, ...drop });
+  }
+  return body;
 }
 
 // Whether a request's `customerRecapMode` is honored: the mode asked for, both

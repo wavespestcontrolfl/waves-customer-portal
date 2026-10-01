@@ -2133,8 +2133,11 @@ function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
   reportToken,
+  // The fixed re-service text is only a pointer to the report, so it needs a
+  // real report token on any template version (never the portal home link).
+  reserviceFixedRecap = false,
 }) {
-  if (!serviceReportV1Delivery) return false;
+  if (!serviceReportV1Delivery && !reserviceFixedRecap) return false;
   if (typedDeliveryMode === 'disabled') return false;
   return !reportToken;
 }
@@ -12565,7 +12568,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (handOverExit) return handOverExit;
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
-      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
+      && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken, reserviceFixedRecap })) {
       // Report-v1 visit with no public report token (mint failed above): the
       // report-lane template would render "your report is ready" around
       // reportUrl, which is the portal HOME on this path (delivery.js only
@@ -12785,10 +12788,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (reserviceFixedRecap) {
           let reserviceFixedFacts;
           try {
+            // Shortened here (the same tracked report code the report lane
+            // mints), so the body is final before the send: GATE_SMS_LINK_WRAP
+            // leaves an /l/ link alone, and a send-window replay goes out
+            // with exactly the text stored and shown now.
+            const fixedReportLink = reportSmsUrl && reportSmsUrl !== reportUrl
+              ? reportSmsUrl
+              : await shortenOrPassthrough(reportUrl, {
+                kind: 'service_report',
+                entityType: 'service_records',
+                entityId: record.id,
+                customerId: svc.customer_id,
+                codePrefix: 'report',
+              });
             reserviceFixedFacts = await ReserviceFixedRecap.loadReserviceFixedRecapFacts(db, {
               svc,
               recordId: record.id,
-              reportUrl: reportSmsUrl || reportUrl,
+              reportUrl: fixedReportLink,
             });
           } catch (factsErr) {
             // A read outage before any send: nothing went out and no send
@@ -13426,6 +13442,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } else if (providerAccepted) {
           const snap = completionSmsAcceptedSnapshot || {};
           if (snap.fixedRecap && typeof e.sentBody === 'string' && e.sentBody) snap.body = e.sentBody;
+          // The normal result never arrived to switch the snapshot to push:
+          // the accepted outcome itself names the provider.
+          if (e.providerOutcome?.provider === 'push') snap.channel = 'push';
           const acceptedDelta = {
             ...(snap.fixedRecap && snap.body ? { completionSmsBody: snap.body } : {}),
             completionSmsStatus: 'sent',

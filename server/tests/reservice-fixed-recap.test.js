@@ -393,3 +393,58 @@ describe('review fixes (#5363 pre-push r3)', () => {
     expect(src).toContain('deliveryUnverified: !!finalRecordNotes.completionSmsDeliveryUnverifiedAt,');
   });
 });
+
+describe('review fixes (#5363 r4)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+  const { countSegments } = require('../services/messaging/segment-counter');
+  const longLink = `https://portal.wavespestcontrol.com/report/${'a1b2c3d4'.repeat(4)}`;
+
+  test('six pests, three areas, a long address and an unshortened link still fit two segments', () => {
+    const body = buildReserviceFixedRecap({
+      address: '12345 North Tamiami Trail Unit 1204',
+      areas: ['Inside', 'Outside', 'Garage'],
+      products: [{ ...SPRAY, targets: ['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Earwigs', 'Crickets'] }],
+      reportUrl: longLink,
+    });
+    expect(countSegments(providerBody(body)).segmentCount).toBeLessThanOrEqual(2);
+    expect(body).toContain(SAFETY_LINE);
+    expect(body).toContain(`Details: ${longLink}`);
+    expect(body).toMatch(/We treated inside, outside and the garage for ants/);
+  });
+
+  test('a link too long for any pest still keeps the where, then sheds it', () => {
+    const body = buildReserviceFixedRecap({
+      address: '12345 North Tamiami Trail Unit 1204', areas: ['Inside'],
+      products: [{ ...SPRAY, targets: ['Ants'] }], reportUrl: `https://portal.wavespestcontrol.com/report/${'a'.repeat(150)}`,
+    });
+    expect(countSegments(providerBody(body)).segmentCount).toBeLessThanOrEqual(2);
+    expect(body).toContain(SAFETY_LINE);
+  });
+
+  test('a short text keeps every pest', () => {
+    expect(build({ products: [{ ...SPRAY, targets: ['Ants', 'Roaches', 'Spiders'] }] })).toContain('for ants, roaches and spiders.');
+  });
+
+  test('the link is shortened before the send so the stored body is final', () => {
+    const at = src.indexOf('const fixedReportLink = reportSmsUrl && reportSmsUrl !== reportUrl');
+    expect(at).toBeGreaterThan(0);
+    expect(src.slice(at, at + 400)).toContain("codePrefix: 'report'");
+  });
+
+  test('the fixed text needs a real report token on any template version', () => {
+    const { completionSmsWithheldForMissingReportToken } = require('../services/complete-scheduled-service');
+    expect(completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery: false, typedDeliveryMode: 'auto_send', reportToken: null, reserviceFixedRecap: true })).toBe(true);
+    expect(completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery: false, typedDeliveryMode: 'auto_send', reportToken: null })).toBe(false);
+    expect(src).toContain('completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken, reserviceFixedRecap })');
+  });
+
+  test('an accepted push whose audit threw keeps the push channel', () => {
+    expect(src).toContain("if (e.providerOutcome?.provider === 'push') snap.channel = 'push';");
+  });
+
+  test('the legacy pest recap never texts a record frozen with the fixed-text marker', () => {
+    const recap = fs.readFileSync(path.join(__dirname, '..', 'services', 'pest-recap.js'), 'utf8');
+    expect(recap).toMatch(/const alreadyTexted = !!existing\?\.recap_sms_sent_at \|\| completionSmsAlreadySent \|\| fixedReserviceText;/);
+    expect(recap).toContain("existingNotes.completionSmsRecapMode === require('./reservice-fixed-recap').MODE");
+  });
+});
