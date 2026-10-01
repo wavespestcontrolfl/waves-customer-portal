@@ -380,6 +380,16 @@ describe('classifyListing', () => {
       expect(text('<p>Suite 5, Springfield IL 62704-1234</p>').status).toBe('unverified');
     });
 
+    test('a non-Florida state code in title case, or any case after a comma, is still an address', () => {
+      const r = text('<p>99 Palm Terrace, Atlanta, Ga 30303</p>');
+      expect(r.status).toBe('unverified');
+      expect(r.detail).toMatchObject({ reason: 'address_unconfirmed' });
+      expect(r.detail.seen).toContain('Atlanta, Ga 30303');
+      expect(text('<p>99 Palm Terrace, Atlanta, ga 30303</p>').status).toBe('unverified');
+      expect(text('<p>99 Palm Terrace, Atlanta,ga. 30303</p>').status).toBe('unverified');
+      expect(text('<p>Order id 12345 shipped in 2 days</p>').status).toBe('verified'); // prose word, no comma
+    });
+
     test('a page with no state + ZIP and no street-like string is still judged on name + phone', () => {
       expect(text('<p>Serving Manatee County since 2019. Call 24/7.</p>').status).toBe('verified');
       expect(text('<p>Order id 12345 shipped in 2 days</p>').status).toBe('verified'); // lowercase words are not states

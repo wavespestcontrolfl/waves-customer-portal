@@ -296,10 +296,15 @@ function extractNap(html, candidates = []) {
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
 // Any US state + ZIP on the page means an address is shown, whatever its street looks like
-// ("99 Palm Terrace, Atlanta, GA 30303"): an uppercase USPS state code (or FL / Florida in any
-// case) followed by a ZIP. Only real codes count, so "PO 12345" or "NO 12345" is not an address.
+// ("99 Palm Terrace, Atlanta, GA 30303"): a USPS state code (or Florida) followed by a ZIP. Only
+// real codes count, so "PO 12345" or "NO 12345" is not an address. Upper or title case anywhere
+// ("GA 30303", "Ga 30303"); any case right after a comma ("Atlanta, ga 30303"), so a lowercase
+// word in prose ("order id 12345") is not read as a state.
 const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY';
-const STATE_ZIP_RE = new RegExp(`\\b(?:${US_STATE_CODES}|[Ff][Ll]|[Ff]lorida|FLORIDA)\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b`);
+const ZIP_TAIL = '\\.?,?\\s+\\d{5}(?:-\\d{4})?\\b';
+const TITLE_STATE_CODES = US_STATE_CODES.split('|').map((c) => c[0] + c[1].toLowerCase()).join('|');
+const STATE_ZIP_RE = new RegExp(`\\b(?:${US_STATE_CODES}|${TITLE_STATE_CODES}|[Ff][Ll]|[Ff]lorida|FLORIDA)${ZIP_TAIL}`);
+const COMMA_STATE_ZIP_RE = new RegExp(`,\\s*\\b(?:${US_STATE_CODES}|Florida)${ZIP_TAIL}`, 'i');
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
 // Address, conservative: a false "unverified" is fine, a false "verified" is not.
@@ -337,7 +342,7 @@ function judgeTextAddress(nap, office, entityAddress) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }
-  const zip = STATE_ZIP_RE.exec(nap.text);
+  const zip = STATE_ZIP_RE.exec(nap.text) || COMMA_STATE_ZIP_RE.exec(nap.text);
   const first = seen[0] ? seen[0].trim() : (zip ? nap.text.slice(Math.max(0, zip.index - 60), zip.index + zip[0].length).trim() : null);
   return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (entityAddress && entityAddress.display) || first };
 }
