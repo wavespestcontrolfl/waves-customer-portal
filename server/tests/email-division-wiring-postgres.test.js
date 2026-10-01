@@ -13,6 +13,10 @@
  */
 const { randomUUID } = require('node:crypto');
 
+// The series-template overlay (recurring_template_overrides) is gate-controlled and the gates
+// map is read at load: turn it on before anything requires the gates.
+process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE = 'true';
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
@@ -868,6 +872,39 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(run.status).toBe('sent');
     });
 
+    test.each([
+      ['a commercial service', 'Commercial Quarterly Pest Control'],
+      ['a pest + termite bundle', 'Quarterly Pest + Termite Bait Station'],
+    ])('B1: the series root is OVERRIDDEN to %s AFTER the build (recurring_template_overrides): refused at the boundary, nothing sent', async (_label, overriddenTo) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('scheduled_services').where({ id: series }).update({ recurring_template_overrides: JSON.stringify({ service_type: overriddenTo }) }),
+      }));
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+      expect(run.status).toBe('skipped');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'visit_not_eligible' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -1467,6 +1504,29 @@ describeOrSkip('email division wiring (Postgres)', () => {
         };
         expect(await build('Commercial Quarterly Pest Control')).toEqual(expect.objectContaining({ skip: true, code: 'not_residential_plan' }));
         expect(await build('Quarterly Pest + Termite Bait Station')).toEqual(expect.objectContaining({ skip: true, code: 'not_single_pest_lane' }));
+      });
+
+      test.each([
+        ['a commercial service', 'Commercial Quarterly Pest Control', 'not_residential_plan'],
+        ['a pest + termite bundle', 'Quarterly Pest + Termite Bait Station', 'not_single_pest_lane'],
+      ])('a residential series root OVERRIDDEN to %s (recurring_template_overrides) is skipped by B1 and B5: the plan is read as the series now is', async (_label, overriddenTo, code) => {
+        const overrides = JSON.stringify({ service_type: overriddenTo });
+        const cohort = { byVisit: { pest: { 1: 3.14, 2: 1.16 } }, counts: {} };
+        const techId = await makeTech();
+        // B1: a linked first visit whose root carries the override.
+        const c1 = await makeCustomer();
+        await makeNextVisit(c1.id);
+        const root1 = await makeDoneRecurring(c1.id, { recurring_template_overrides: overrides });
+        const r1 = await makeVisit({ customerId: c1.id, technicianId: techId, products: ['taurus'], scheduledServiceId: root1 });
+        expect(await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', r1, c1), mode: 'live', deps: baseDeps() }))
+          .toEqual(expect.objectContaining({ skip: true, code }));
+        // B5: the second visit of the overridden quarterly series.
+        const c2 = await makeCustomer();
+        const root2 = await makeNextVisit(c2.id, 'quarterly', '2099-12-24', { recurring_template_overrides: overrides });
+        await makeVisit({ customerId: c2.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: root2, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const r2 = await makeVisit({ customerId: c2.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: root2 });
+        expect(await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', r2, c2), deps: baseDeps({ getActivityRatingAverages: async () => cohort }) }))
+          .toEqual(expect.objectContaining({ skip: true, code }));
       });
 
       test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
