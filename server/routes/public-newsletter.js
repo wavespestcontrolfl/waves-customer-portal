@@ -17,7 +17,10 @@ const {
 } = require('../services/newsletter-event-clicks');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
-const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
+const {
+  subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE,
+  WAITLIST_SOURCE, applyWaitlistTags,
+} = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
@@ -441,6 +444,18 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
       strict: true,
       requireConfirmation: true,
     });
+
+    // Out-of-area waitlist signups carry zip/city tags so the office can see
+    // where waitlisters live. Best-effort and never logged (PII): a failure
+    // here must not fail the signup. Other sources are untouched.
+    if (req.body.source === WAITLIST_SOURCE
+        && (result.action === 'confirmation_sent' || result.action === 'confirmation_resent')) {
+      try {
+        await applyWaitlistTags(result.subscriber, req.body.tags);
+      } catch (e) {
+        logger.error(`[newsletter] waitlist tags not saved for subscriber id=${result.subscriber?.id} code=${e.code || 'unknown'}`);
+      }
+    }
 
     // Send (or resend) the confirmation email when the row is in the
     // pending state. Errors here are best-effort: we still return 200

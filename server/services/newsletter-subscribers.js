@@ -316,6 +316,58 @@ async function insertNewSubscriber({ lc, firstName, lastName, source, requireCon
   };
 }
 
+// ---------------------------------------------------------------------------
+// Out-of-area waitlist location tags. The astro websites' out-of-area card
+// posts source 'out_of_area_waitlist' with tags ['out_of_area_waitlist',
+// 'zip:34205', 'city:ruskin'] so the office can see where waitlisters live.
+// Only that source's two location tags are persisted, into the existing
+// newsletter_subscribers.tags jsonb array; anything else in the posted tags is
+// dropped. Values are PII-adjacent: validated here, never logged.
+const WAITLIST_SOURCE = 'out_of_area_waitlist';
+const WAITLIST_CITY_MAX = 40;
+
+function sanitizeWaitlistTags(rawTags) {
+  const out = [WAITLIST_SOURCE];
+  if (!Array.isArray(rawTags)) return out;
+  let zip = null;
+  let city = null;
+  for (const raw of rawTags.slice(0, 20)) {
+    if (typeof raw !== 'string') continue;
+    const tag = raw.trim();
+    if (zip === null) {
+      const m = /^zip:(\d{5})$/i.exec(tag);
+      if (m) { zip = m[1]; continue; }
+    }
+    if (city === null && /^city:/i.test(tag)) {
+      const slug = tag.slice(5).trim().toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, WAITLIST_CITY_MAX)
+        .replace(/-+$/g, '');
+      if (slug) city = slug;
+    }
+  }
+  if (zip) out.push(`zip:${zip}`);
+  if (city) out.push(`city:${city}`);
+  return out;
+}
+
+// Writes the sanitized waitlist tags onto the signup's own mid-DOI row,
+// replacing any zip:/city: tag from an earlier attempt. Only a 'pending' row is
+// touched (this signup just created or re-armed it), so an anonymous post can't
+// rewrite tags on an already-confirmed subscriber. Returns the update count.
+async function applyWaitlistTags(subscriber, rawTags, dbh = null) {
+  if (!subscriber || !subscriber.id) return 0;
+  const conn = dbh || db;
+  const fresh = sanitizeWaitlistTags(rawTags);
+  const existing = Array.isArray(subscriber.tags) ? subscriber.tags : [];
+  const kept = existing.filter((t) => typeof t !== 'string'
+    || (!/^(zip|city):/i.test(t) && t !== WAITLIST_SOURCE));
+  return conn('newsletter_subscribers')
+    .where({ id: subscriber.id, status: 'pending' })
+    .update({ tags: JSON.stringify([...kept, ...fresh]), updated_at: new Date() });
+}
+
 /**
  * Read-only token lookup. Used by the GET confirm-page render path —
  * scanners and link previews would trip a state change if GET were
@@ -631,4 +683,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS, WAITLIST_SOURCE, sanitizeWaitlistTags, applyWaitlistTags };
