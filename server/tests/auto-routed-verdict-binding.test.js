@@ -309,7 +309,10 @@ describe('route_decisions writers and the shared listed-decision predicate', () 
     expect(q.bindings).toEqual([...V2_DECISION_VERSIONS, 'enforce']);
     const triage = fs.readFileSync(path.join(root, 'routes/admin-triage.js'), 'utf8');
     expect(triage).toMatch(/routeDecisionsListedScope\(db\('route_decisions'\)/);
-    expect(triage).toMatch(/filter\(isListedRouteDecision\)/);
+    // Only the auto-routed review is scoped to the listed set; a triage-card verdict
+    // keeps the true newest enforce row (codex #5446 r3).
+    expect(triage).toMatch(/decisionKind === 'auto_routed' \? isListedRouteDecision : \(\) => true/);
+    expect(triage).toMatch(/filter\(inScope\)/);
     expect(triage).not.toMatch(/whereIn\('decision_version', V2_DECISION_VERSIONS\)/);
   });
 

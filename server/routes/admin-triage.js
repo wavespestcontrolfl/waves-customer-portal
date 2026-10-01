@@ -171,8 +171,11 @@ async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, ve
     // The current decision is picked from the SAME set the auto-routed list shows
     // (isListedRouteDecision / routeDecisionsListedScope share one definition), so
     // a displayed row is never judged "stale" against a row the list excludes (codex
-    // #5446 r2 P2).
-    const newestOf = (list) => [...list].filter(isListedRouteDecision).sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+    // #5446 r2 P2). Only the auto-routed review is scoped that way: a triage-card verdict
+    // sends no displayed id, so it keeps the true newest enforce row, as before — a
+    // newer version an upgraded pod wrote mid-deploy must never be skipped (#5446 r3).
+    const inScope = decisionKind === 'auto_routed' ? isListedRouteDecision : () => true;
+    const newestOf = (list) => [...list].filter(inScope).sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
     const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionRevision);
     if (picked.missing || picked.stale) {
       const err = new Error('This decision changed since it loaded — review the refreshed decision before answering.');
