@@ -30,7 +30,7 @@ describe('finding 1: the live visit slot is read with the list, in the card\'s o
     const s = read('../routes/admin-triage.js');
     expect(s).toContain(".select('id', 'scheduled_date', 'window_start', 'service_address_line1'");
     expect(s).toContain('const when = visitWhenLine(r);');
-    expect(s).toContain('if (when) item.payload = { ...payload, visit_when: when };');
+    // Behavior (visit_when and the Open visit link on the live date): admin-triage-hold-live-visit.test.js.
   });
 });
 
@@ -56,9 +56,18 @@ describe('finding 3: an uncleared street-level hold is not a missed visit, a no-
     const list = ns.slice(ns.indexOf('async function listNoShows'), ns.indexOf('async function listNoShows') + 3500);
     expect(list.split('.whereNotExists(unclearedHold)').length - 1).toBe(2);   // the candidates and the stranded stops
 
+    // Scan-then-act rechecks (Codex #5506 r2): the no-show detector's per-card loop rechecks under the stop's
+    // FOR UPDATE row lock; the sweep and the tech-late scan re-read under runUnlessLiveHold's visit lock.
+    expect(ns).toContain("if (await require('./street-level-hold').isStreetLevelHoldVisit(card.id, trx)) return null;");
+    expect(ns.indexOf('isStreetLevelHoldVisit(card.id, trx)')).toBeGreaterThan(ns.indexOf('await lockedStop(trx, card.id'));
+    expect(ns.indexOf('isStreetLevelHoldVisit(card.id, trx)')).toBeLessThan(ns.indexOf('recordTrackingNotice(trx'));
+    expect(sweep.slice(0, sweep.indexOf('Missed appointment check done')))
+      .toContain("runUnlessLiveHold(svc.id, () => missedAppointment.onSkip(svc.id, 'no_show'))");
+    expect(read('../services/tech-late-detector.js')).toContain('runUnlessLiveHold(row.job_id, () => createAlert({');
+
     const late = read('../services/tech-late-detector.js');
     expect(late).toContain("AND NOT EXISTS (${heldVisitSql('s')})");
-    expect(late).toContain("const { heldVisitSql } = require('./street-level-hold');");
+    expect(late).toContain("const { heldVisitSql, runUnlessLiveHold } = require('./street-level-hold');");
   });
 
   test('the sweep query compiles to a NOT EXISTS over the hold card (exact SQL)', () => {

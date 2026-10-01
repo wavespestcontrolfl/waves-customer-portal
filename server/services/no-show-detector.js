@@ -1580,6 +1580,9 @@ async function sweep(conn, { now = new Date() } = {}) {
       const at = new Date();
       const { visit, live } = await lockedStop(trx, card.id, { now: at });
       if (!enabled() || !visit) return null;
+      // lockedStop holds the visit's row lock FOR UPDATE (the promoter's own lock): a street-level hold
+      // promoted after the candidate scan is seen here, atomically, and gets no card or notice.
+      if (await require('./street-level-hold').isStreetLevelHoldVisit(card.id, trx)) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;

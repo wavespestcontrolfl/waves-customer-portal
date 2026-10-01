@@ -1802,8 +1802,10 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // triage card instead), so this is the only one.
 // The dispatch schedule link for a held visit: ?appointment opens the visit,
 // ?date selects its day. Shared by the admin bell and the review card.
+// The card's "Open visit" link; the one builder lives in street-level-hold.js (the triage list rebuilds it
+// with a moved hold's live date).
 function streetLevelVisitLink(visitId, visitDate) {
-  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+  return require('./street-level-hold').streetLevelVisitLink(visitId, visitDate);
 }
 function streetLevelVisitWhen(scheduledDate, windowStart) {
   return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');

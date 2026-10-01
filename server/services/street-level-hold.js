@@ -60,6 +60,23 @@ async function isStreetLevelHoldVisit(scheduledServiceId, conn = db, { includeCl
   }
 }
 
+// Scan-then-act guard for the background scanners (missed-appointment sweep, tech-late scan): a promotion
+// (call-recording-processor promoteReusedRowToStreetLevelHold) can turn a visit into a hold AFTER a scanner's
+// candidate query. Take the visit row lock, re-read the hold under it, and run `action` only while the visit
+// is not held; the lock stays until `action` finishes, so a promotion waits behind it instead of landing
+// mid-action. The lock is FOR NO KEY UPDATE: it conflicts with the promoter's FOR UPDATE (and every other row
+// writer) but not with the FOR KEY SHARE an action's own foreign-key inserts take on this row from their own
+// connection, so an action that records against the visit cannot deadlock with it. A lookup error answers
+// held (isStreetLevelHoldVisit fails closed): the scanner skips and its next run tries again.
+// Returns { held: true } or { held: false, result }.
+async function runUnlessLiveHold(visitId, action, conn = db) {
+  return conn.transaction(async (trx) => {
+    await trx('scheduled_services').where({ id: visitId }).forNoKeyUpdate().first('id');
+    if (await isStreetLevelHoldVisit(visitId, trx)) return { held: true };
+    return { held: false, result: await action() };
+  });
+}
+
 function parsePayload(v) {
   if (v && typeof v === 'object') return v;
   try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
@@ -241,6 +258,11 @@ function visitServiceAddressLine(row) {
   return [row?.service_address_line1, row?.service_address_line2, row?.service_address_city, row?.service_address_state, row?.service_address_zip]
     .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
 }
+// The hold card's "Open visit" link into the admin schedule (navigation only), on the visit's date.
+function streetLevelVisitLink(visitId, visitDate) {
+  return `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`;
+}
+
 // The visit's date and window start as the hold card writes them ("2026-10-05 13:00"), so the live read
 // of a moved hold and the card's own captured `visit_when` are the same shape.
 function visitWhenLine(row) {
@@ -330,4 +352,4 @@ async function assertNotLiveHoldUnderLock(trx, visitId) {
   }
 }
 
-module.exports = { linkedVisitIdsFrom, visitWhenLine, recordApprovedAddressWitness, approvedAddressStillCurrent, assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, heldVisitSql, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+module.exports = { runUnlessLiveHold, streetLevelVisitLink, linkedVisitIdsFrom, visitWhenLine, recordApprovedAddressWitness, approvedAddressStillCurrent, assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, heldVisitSql, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

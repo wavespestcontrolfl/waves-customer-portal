@@ -66,3 +66,28 @@ it("a plain text with no inserted visit link carries no linkedVisitIds", async (
   await waitFor(() => expect(requests("/admin/communications/sms")).toHaveLength(1));
   expect(bodyOf("/admin/communications/sms")).not.toHaveProperty("linkedVisitIds");
 });
+
+it("a harmless edit to an inserted reschedule link (hostname case) keeps its tracking, so the send still carries the visit id", async () => {
+  responses["/admin/communications/link-library"] = { links: [] };
+  responses["/admin/communications/reschedule-link"] = {
+    url: "wavespest.co/r/abc123",
+    line: "Pick a new time here: wavespest.co/r/abc123\n\n",
+    firstName: null,
+    appointment: { id: "8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d", scheduledDate: "2099-01-05", windowStart: "09:00", serviceType: "Pest Control", status: "confirmed" },
+  };
+  responses["/admin/communications/sms"] = { sent: true, providerMessageId: "SMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+
+  render(<SmsTab active onSent={vi.fn()} />, { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByRole("button", { name: "Quick Links" }));
+  fireEvent.click(await screen.findByRole("button", { name: /Reschedule link/i }));
+  await waitFor(() => expect(requests("/admin/communications/reschedule-link")).toHaveLength(1));
+  const box = screen.getByRole("textbox", { name: "Text message" });
+  await waitFor(() => expect(box.value).toContain("wavespest.co/r/abc123"));
+
+  // The operator only changes the hostname's casing; the link still works.
+  fireEvent.change(box, { target: { value: box.value.replace("wavespest.co", "WavesPest.co") } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Send from" }), { target: { value: "+19412975749" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(requests("/admin/communications/sms")).toHaveLength(1));
+  expect(bodyOf("/admin/communications/sms").linkedVisitIds).toEqual(["8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d"]);
+});

@@ -2233,7 +2233,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // the operator deletes it (or the body clears on send).
   useEffect(() => {
     if (!insertedResched) return;
-    if (!msgBody.includes(insertedResched.url)) {
+    // Canonical presence (bodyHasLink): a harmless edit such as a hostname case change leaves the same live
+    // link in the body, so its tracking — and the visit id the send carries — must stay.
+    if (!bodyHasLink(msgBody, insertedResched.url)) {
       setInsertedResched(null);
       return;
     }
@@ -2245,14 +2247,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       currentRecipientKey !== insertedResched.recipientKey ||
       (selectedCustomerId || null) !== insertedResched.customerId
     ) {
-      setMsgBody((b) =>
-        b
-          .split("\n")
-          .filter((l) => !l.includes(insertedResched.url))
-          .join("\n")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim(),
-      );
+      setMsgBody((b) => stripLinkLines(b, insertedResched.url));
       setInsertedResched(null);
       setSendResult({
         ok: true,

@@ -8,6 +8,12 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
 }));
+// The street-level hold recheck (its row-lock transaction needs a database): a controllable stand-in.
+const mockHeld = new Set();
+jest.mock('../services/street-level-hold', () => ({
+  ...jest.requireActual('../services/street-level-hold'),
+  runUnlessLiveHold: jest.fn(async (id, action) => (mockHeld.has(id) ? { held: true } : { held: false, result: await action() })),
+}));
 
 jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn(), cleanupAfterDisable: jest.fn(async () => ({ resolved: 0, dismissed: 0 })) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(), recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}) }));
@@ -19,6 +25,7 @@ const detector = require('../services/tech-late-detector');
 describe('tech-late detector tuning', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockHeld.clear();
     require('../services/no-show-detector').enabled.mockReturnValue(false);
   });
 
@@ -135,4 +142,19 @@ describe('tech-late detector tuning', () => {
     expect(tracking.cleanupAfterDisable).toHaveBeenCalledTimes(1);
   });
 
+  test('a visit promoted to a street-level hold after the scan (scan saw none, the recheck sees one) raises no alert; the rest still alert', async () => {
+    mockHeld.add('job-held');
+    db.raw.mockResolvedValue({
+      rows: [
+        { job_id: 'job-held', tech_id: 'tech-1', window_start: '09:00:00', window_end: '11:00:00', scheduled_date: '2026-09-10', delay_minutes: 30 },
+        { job_id: 'job-ok', tech_id: 'tech-2', window_start: '09:00:00', window_end: '11:00:00', scheduled_date: '2026-09-10', delay_minutes: 30 },
+      ],
+    });
+
+    const result = await detector.runTechLateCheck();
+
+    expect(result).toEqual({ created: 1, suppressed: 0, scanned: 2 });
+    expect(createAlert).toHaveBeenCalledTimes(1);
+    expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-ok' }));
+  });
 });

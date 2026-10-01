@@ -125,7 +125,7 @@ async function runInner() {
   // (codex P1, PR #4403 round 10). Best-effort: a cleanup failure must not
   // stop the fallback scan.
   await tracking.cleanupAfterDisable(db).catch((err) => logger.warn(`[tech-late-detector] tracking cleanup failed: ${err.message}`));
-  const { heldVisitSql } = require('./street-level-hold');
+  const { heldVisitSql, runUnlessLiveHold } = require('./street-level-hold');
   let rows;
   try {
     const result = await db.raw(`
@@ -212,7 +212,9 @@ async function runInner() {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= TECH_LATE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
-      await createAlert({
+      // A promotion to a street-level hold can land after the scan above: re-read the hold under the visit
+      // row lock right before alerting, and raise nothing for a held (never dispatched) visit.
+      const guarded = await runUnlessLiveHold(row.job_id, () => createAlert({
         type: 'tech_late',
         severity,
         techId: row.tech_id,
@@ -223,7 +225,8 @@ async function runInner() {
           window_end: row.window_end,
           scheduled_date: normalizeDateOnly(row.scheduled_date),
         },
-      });
+      }));
+      if (guarded.held) continue;
       created += 1;
     } catch (err) {
       // 23505 = unique_violation. The partial unique index

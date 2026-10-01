@@ -317,7 +317,7 @@ router.get('/', async (req, res) => {
             .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
             .select('id', 'scheduled_date', 'window_start', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
           const byId = new Map(rows.map((r) => [String(r.id), r]));
-          const { visitServiceAddressLine, visitWhenLine } = require('../services/street-level-hold');
+          const { visitServiceAddressLine, visitWhenLine, streetLevelVisitLink } = require('../services/street-level-hold');
           for (const { item, payload } of holds) {
             const r = byId.get(String(payload.scheduled_service_id));
             if (!r) continue;
@@ -325,9 +325,16 @@ router.get('/', async (req, res) => {
             if (line) item.visit_address = line;
             // SmartRebooker / an admin can move the hold while its card stays open: the card's captured
             // visit_when is the booking-time slot, the confirm activates the CURRENT one. Refresh it in the
-            // payload the card and the read-back dialog both read.
+            // payload the card and the read-back dialog both read, and rebuild the "Open visit" link on the
+            // same live date (the link carries the schedule day, so the booking-time one opens the wrong day).
             const when = visitWhenLine(r);
-            if (when) item.payload = { ...payload, visit_when: when };
+            if (when) {
+              item.payload = {
+                ...payload,
+                visit_when: when,
+                visit_link: streetLevelVisitLink(r.id, visitWhenLine({ scheduled_date: r.scheduled_date })),
+              };
+            }
           }
         } catch (addrErr) {
           logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);

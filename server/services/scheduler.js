@@ -7555,7 +7555,10 @@ function initScheduledJobs() {
             .first('id');
           if (alreadyFlagged) continue;
           try {
-            await missedAppointment.onSkip(svc.id, 'no_show');
+            // A promotion to a street-level hold can land after the candidate scan above: re-read the hold
+            // under the visit row lock (the promoter's own lock) right before recording, and skip if held.
+            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, () => missedAppointment.onSkip(svc.id, 'no_show'));
+            if (guarded.held) continue;
             flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
