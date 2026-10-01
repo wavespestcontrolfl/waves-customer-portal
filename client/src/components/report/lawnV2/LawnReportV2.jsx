@@ -334,7 +334,7 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
 // card, so there is no Today's focus, "What's driving it" box, watching list,
 // "What Waves will do next", seasonal note or "no action needed" line here. The
 // watering banner (rendered above the report) owns the watering task.
-export function LawnLeadCard({ lead = {}, snapshot = {}, children, style = null }) {
+export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
   const visitDate = nextVisitSentence(snapshot.nextVisit);
@@ -353,15 +353,15 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, children, style = null 
             <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
               {lead.headline || statusMeta(status).label}
             </h2>
-            {lead.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
-            {lead.progress ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.progress}</p> : null}
+            {lead.why ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
+            {lead.progress ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.progress}</p> : null}
           </div>
         </div>
 
         {lead.applied ? (
           <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
-            <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
           </div>
         ) : null}
 
@@ -372,12 +372,12 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, children, style = null 
                 label="Your part this week"
                 value={yourPart.map((task, i) => <div key={i} style={i ? { marginTop: 4 } : null}>{task}</div>)}
                 dot={COLORS.glassNavy}
+                valueSize={16}
               />
             ) : null}
-            {nextVisit ? <KeyLine label="Next visit" value={nextVisit} dot={COLORS.glassNavy} /> : null}
+            {nextVisit ? <KeyLine label="Next visit" value={nextVisit} dot={COLORS.glassNavy} valueSize={16} /> : null}
           </div>
         ) : null}
-        {children}
       </Card>
     </div>
   );
@@ -404,13 +404,13 @@ export function LawnFollowUpCard({ followUp = null }) {
   );
 }
 
-function KeyLine({ label, value, dot }) {
+function KeyLine({ label, value, dot, valueSize = 14.5 }) {
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
         <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
-        <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
+        <div style={{ fontSize: valueSize, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
   );
@@ -661,7 +661,10 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
                 {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} /> : null}
                 {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} /> : null}
                 {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong /> : null}
-                {!it.customerAction && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
+                {/* In lead mode a plan the lead could not show (filtered under the
+                    banner or over its cap) prints beside the step, so the
+                    report still says a follow-up is planned (codex P2 #5496 r6). */}
+                {(inLead || !it.customerAction) && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
               </div>
               {it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? (
                 <div style={{ marginTop: 8, fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>

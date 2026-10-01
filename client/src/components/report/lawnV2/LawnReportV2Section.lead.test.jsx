@@ -139,7 +139,7 @@ describe('LawnLeadCard layout', () => {
     expect(screen.getByTestId('lawn-lead-region').firstElementChild.style.marginTop).toBe('16px');
   });
 
-  it('renders a bare lead with no children', () => {
+  it('renders a bare lead', () => {
     render(<LawnLeadCard lead={{ headline: null, why: null, progress: null, applied: null, yourPart: [], next: null }} snapshot={{ overallScore: 90 }} />);
     expect(screen.getByTestId('lawn-lead-region')).toBeInTheDocument();
   });
@@ -179,6 +179,13 @@ describe('LawnReportV2Section lead mode', () => {
   it('keeps the card plan when the lead has no next line', () => {
     render(<LawnReportV2Section data={payload({ lead: { ...LEAD, next: null }, insights: [{ ...INSIGHT, customerAction: null, nextVisitPlan: 'Spot-treat the edge.' }] })} />);
     expect(screen.getByText('Spot-treat the edge.', { exact: false })).toBeInTheDocument();
+  });
+
+  it('prints a plan the lead could not show beside the card step, so a follow-up is still stated', () => {
+    const card = { ...INSIGHT, customerAction: 'Check sprinkler coverage in that area.', nextVisitPlan: 'Recheck the moisture balance next visit.' };
+    render(<LawnReportV2Section data={payload({ insights: [card], lead: { ...LEAD, yourPart: [], next: null } })} />);
+    expect(screen.getByText('Check sprinkler coverage in that area.')).toBeInTheDocument();
+    expect(screen.getByText('Recheck the moisture balance next visit.', { exact: false })).toBeInTheDocument();
   });
 
   it('keeps a card step the lead did not carry (the lead dropped a watering step under the banner)', () => {
