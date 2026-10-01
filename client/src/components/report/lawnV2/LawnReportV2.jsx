@@ -334,14 +334,14 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
 // card, so there is no Today's focus, "What's driving it" box, watching list,
 // "What Waves will do next", seasonal note or "no action needed" line here. The
 // watering banner (rendered above the report) owns the watering task.
-export function LawnLeadCard({ lead = {}, snapshot = {}, children }) {
+export function LawnLeadCard({ lead = {}, snapshot = {}, children, style = null }) {
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
   const visitDate = nextVisitSentence(snapshot.nextVisit);
   const nextVisit = [visitDate, lead.next].filter(Boolean).join(' — ');
   return (
     <div data-testid="lawn-lead-region">
-      <Card style={{ background: TAN }}>
+      <Card style={{ background: TAN, ...(style || {}) }}>
         <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
           <div style={{ flex: 'none' }}>
             <ScoreRing value={snapshot.overallScore} status={status} size={116} />
@@ -646,7 +646,9 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
           const it = inLead ? {
             ...card,
             customerAction: (lead.yourPart || []).some((task) => sameText(task, card.customerAction)) ? null : card.customerAction,
-            nextVisitPlan: sameText(lead.next, card.nextVisitPlan) ? null : card.nextVisitPlan,
+            // The lead's "Next visit" line owns the plan whenever it has one,
+            // so the card never prints a second, different "Next visit".
+            nextVisitPlan: (lead.next || sameText(lead.next, card.nextVisitPlan)) ? null : card.nextVisitPlan,
           } : card;
           return (
             <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>

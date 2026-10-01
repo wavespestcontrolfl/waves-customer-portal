@@ -31,8 +31,14 @@ const YOUR_PART_MAX = 2;
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
-// Watering wording a lead field may not carry under a watering banner.
-const WATERING_WORDS = /water|irrigat|sprinkler/i;
+// Watering and moisture wording a lead field may not carry under a watering
+// banner. Plans phrase the water story without the word "water" ("Recheck
+// the moisture balance next visit."), so moisture, dryness, drought, damp and
+// rain count too (codex P0 #5496 r1).
+const WATERING_WORDS = /water|irrigat|sprinkl|moist|\bdr(?:y|ier|ies|ied|ying|yness)\b|drought|damp|\brain/i;
+// Insight categories whose plans and actions belong to the water card: under a
+// banner their text is never a lead source, whatever words it uses.
+const WATER_OWNED_CATEGORIES = new Set(['water', 'coverage']);
 
 function clean(value) {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -82,6 +88,17 @@ function deriveYourPart(reportV2, topIssue, bannerPresent) {
   return out.slice(0, YOUR_PART_MAX);
 }
 
+// The client composes this with snapshot.nextVisit.label. A planned
+// follow-up owns the line: when its reason is banner-owned watering wording
+// the line is left empty rather than swapped for a different plan, so the
+// lead never presents a second plan as the follow-up (and the top finding
+// card keeps its own plan, see LawnInsightCards).
+function deriveNext(reportV2, topIssue, bannerPresent) {
+  const followUpReason = clean(reportV2.followUp && reportV2.followUp.reason);
+  if (followUpReason) return pick([followUpReason], bannerPresent);
+  return pick([topIssue && topIssue.nextVisitPlan, reportV2.snapshot.wavesNext], bannerPresent);
+}
+
 /**
  * @param {object} reportV2 a finished (reconciled) lawn reportV2 payload
  * @returns {{ headline: string|null, why: string|null, progress: string|null,
@@ -91,21 +108,22 @@ function deriveYourPart(reportV2, topIssue, bannerPresent) {
 function deriveLawnLead(reportV2) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
-  const topIssue = topIssueOf(reportV2);
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
+  const rankedIssue = topIssueOf(reportV2);
+  // Under a banner a water-owned top issue contributes nothing to the lead:
+  // its plan and action are the water card's to print.
+  const topIssue = bannerPresent && rankedIssue && WATER_OWNED_CATEGORIES.has(rankedIssue.category)
+    ? null : rankedIssue;
   return {
     headline: pick([snapshot.statusHeadline], bannerPresent),
     why: pick([snapshot.rootCause, snapshot.scoreExplanation], bannerPresent),
     // Slot only: a later PR writes snapshot.progress.
     progress: pick([snapshot.progress], bannerPresent),
-    applied: pick([snapshot.treatmentSummary], bannerPresent),
+    // What Waves applied is a statement of record, not watering advice: a
+    // product summary that says "watered in" keeps its place in the lead.
+    applied: clean(snapshot.treatmentSummary),
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
-    // The client composes this with snapshot.nextVisit.label.
-    next: pick([
-      reportV2.followUp && reportV2.followUp.reason,
-      topIssue && topIssue.nextVisitPlan,
-      snapshot.wavesNext,
-    ], bannerPresent),
+    next: deriveNext(reportV2, topIssue, bannerPresent),
   };
 }
 
@@ -132,4 +150,4 @@ function leadWords(reportV2) {
   return parts.reduce((sum, part) => sum + countWords(part), 0) + STATIC_LABEL_WORDS;
 }
 
-module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS };
+module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS };

@@ -151,7 +151,40 @@ describe('deriveLawnLead', () => {
       expect(lead.headline).toBeNull();
       expect(lead.why).toBe('The score is mainly pulled down by weed pressure.');
       expect(lead.yourPart).toEqual([]);
-      expect(lead.next).toBe('We will recheck the edge.');
+      // The planned follow-up owns the line: a watering reason leaves it empty
+      // rather than swapping in another plan.
+      expect(lead.next).toBeNull();
+    });
+
+    test.each([
+      'Recheck the moisture balance next visit.',
+      'Recheck the dry spots next visit.',
+      'Check for drought stress next visit.',
+      'Look at the damp area next visit.',
+      'Recheck after the heavy rain next visit.',
+    ])('"%s" is filtered under a banner and kept without one', (reason) => {
+      const withReason = (banner) => reportOf({ banner, followUp: { reason } });
+      expect(deriveLawnLead(withReason(HOLD_BANNER)).next).toBeNull();
+      expect(deriveLawnLead(withReason(undefined)).next).toBe(reason);
+    });
+
+    test('a water or coverage top issue contributes no yourPart or next under a banner, but does without one', () => {
+      for (const category of ['water', 'coverage']) {
+        const insights = [issue({ category, customerAction: 'Raise your mower to 4 inches this week.', nextVisitPlan: 'Spot-treat the edge weeds.' })];
+        const under = deriveLawnLead(reportOf({ banner: HOLD_BANNER, insights }));
+        expect(under.yourPart).toEqual([]);
+        // No follow-up: the water-owned issue's plan is not a lead source; wavesNext is.
+        expect(under.next).toBe('We will recheck the edge.');
+        const bare = reportOf({ insights });
+        expect(deriveLawnLead(bare).yourPart).toEqual(['Raise your mower to 4 inches this week.']);
+        expect(deriveLawnLead(bare).next).toBe('Spot-treat the edge weeds.');
+      }
+    });
+
+    test('applied is a statement of record: "watered in" stays under a banner', () => {
+      const r = reportOf({ banner: HOLD_BANNER });
+      r.snapshot.treatmentSummary = 'Today we applied a broadleaf herbicide that is watered in by label.';
+      expect(deriveLawnLead(r).applied).toBe(r.snapshot.treatmentSummary);
     });
 
     test('the same strings are kept when there is no banner', () => {
@@ -169,6 +202,15 @@ describe('deriveLawnLead', () => {
       expect(deriveLawnLead(r).next).toBe('Recheck the thin edge.');
       expect(deriveLawnLead(reportOf()).next).toBe('Spot-treat the edge weeds.');
       expect(deriveLawnLead(reportOf({ insights: [issue({ nextVisitPlan: null })] })).next).toBe('We will recheck the edge.');
+    });
+
+    test('a planned follow-up owns next: the top issue plan is never used when one exists, even if it was filtered', () => {
+      const banner = reportOf({ banner: HOLD_BANNER, followUp: { reason: 'Recheck the moisture balance.' } });
+      expect(deriveLawnLead(banner).next).toBeNull();
+      const kept = reportOf({ banner: HOLD_BANNER, followUp: { reason: 'Recheck the thin edge.' } });
+      expect(deriveLawnLead(kept).next).toBe('Recheck the thin edge.');
+      // A blank follow-up reason is no follow-up.
+      expect(deriveLawnLead(reportOf({ followUp: { reason: '  ' } })).next).toBe('Spot-treat the edge weeds.');
       const bare = reportOf({ insights: [] });
       bare.snapshot.wavesNext = null;
       expect(deriveLawnLead(bare).next).toBeNull();
@@ -268,10 +310,19 @@ describe('applyLawnReportReconciliation lead tail', () => {
     expect(lead.yourPart).toEqual(['Raise your mower to 4 inches this week.']);
   });
 
-  test('a throw while deriving leaves the reconciled payload without a lead', () => {
-    const data = payload();
-    Object.defineProperty(data.reportV2.snapshot, 'treatmentSummary', { get() { throw new Error('boom'); }, enumerable: true });
-    const out = withGate('true', () => applyLawnReportReconciliation(data, dynamic()));
+  test('a throw in the lead derive leaves the reconciled payload intact and without a lead', () => {
+    let out;
+    jest.isolateModules(() => {
+      jest.doMock('../services/service-report/lawn-report-lead', () => ({
+        deriveLawnLead: () => { throw new Error('boom'); },
+      }));
+      const { applyLawnReportReconciliation: apply } = require('../services/service-report/report-consistency');
+      out = withGate('true', () => apply(payload(), dynamic()));
+    });
+    jest.dontMock('../services/service-report/lawn-report-lead');
     expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'lead')).toBe(false);
+    // The reconcile pass itself ran: the drought wording is already reworded.
+    expect(out.reportV2.followUp.reason).not.toMatch(/drought/i);
+    expect(out.reportV2.snapshot.scoreExplanation).toMatch(/uneven sprinkler coverage/);
   });
 });

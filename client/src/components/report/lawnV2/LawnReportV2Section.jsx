@@ -15,7 +15,6 @@
 import {
   PrintContext,
   LawnSnapshotHero,
-  LawnLeadCard,
   LawnFollowUpCard,
   LawnInsightCards,
   LawnPhotoStrip,
@@ -27,17 +26,18 @@ import {
   LawnTrends,
 } from './LawnReportV2';
 
-// GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout —
-// lead card (photo strip embedded) → findings → water → progression → the
-// score breakdown → rain → mowing → trends. The follow-up card is not mounted:
-// its reason is lead.next. Without `lead` the legacy layout below is untouched.
+// GATE_LAWN_REPORT_LEAD: a payload carrying `lead` renders the lead layout.
+// The lead card itself is mounted by ReportViewPage right under the watering
+// banner (the real top of the report, codex P1 #5496 r1), so this section
+// opens with the photo strip (its summary outside the lead's word budget) →
+// findings → water → progression → the score breakdown → rain → mowing →
+// trends. The follow-up card is not mounted: its reason is lead.next. Without
+// `lead` the legacy layout below is untouched.
 function LawnReportV2LeadSection({ data, print }) {
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
-      <LawnLeadCard lead={data.lead} snapshot={data.snapshot || {}}>
-        {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} embedded /> : null}
-      </LawnLeadCard>
+      {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} lead={data.lead} /> : null}
       {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}
       {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}

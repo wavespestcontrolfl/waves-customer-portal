@@ -9,7 +9,7 @@ const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2
 const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
 const { buildWateringBanner } = require('../services/service-report/report-data');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
-const { leadWords } = require('../services/service-report/lawn-report-lead');
+const { leadWords, WATERING_WORDS } = require('../services/service-report/lawn-report-lead');
 
 const DYNAMIC_CONTEXT_READY = { reentry: { targets: [{ statusAtGeneratedAt: 'ready' }], petAdvisory: 'Keep pets off treated turf until dry.' } };
 const COMPLETED = '2026-09-30T18:40:00Z';
@@ -188,7 +188,7 @@ describe('lawn report lead word budget', () => {
     (caseName, planName, bannerKind, plan) => {
       const v2 = build(caseName, plan, bannerKind, { progress: PROGRESS_26 });
       for (const text of leadStrings(v2)) {
-        expect({ text, watering: /water|irrigat|sprinkler/i.test(text) }).toEqual({ text, watering: false });
+        expect({ text, watering: WATERING_WORDS.test(text) }).toEqual({ text, watering: false });
       }
     },
   );

@@ -1679,17 +1679,22 @@ key) adds `reportV2.lead` `{ headline, why, progress, applied, yourPart, next }`
 LAWN reports only (never tree & shrub): `headline` is `snapshot.statusHeadline`
 (null falls back to the status label), `why` the root cause or score
 explanation, `progress` a reserved slot (null until a later change writes
-`snapshot.progress`), `applied` the treatment summary, `yourPart` at most two
+`snapshot.progress`), `applied` the treatment summary (never filtered), `yourPart` at most two
 homeowner tasks (may be empty; never the stock "No action is needed" line) and
-`next` the follow-up reason, else the top finding's next-visit plan, else
+`next` the follow-up reason when a follow-up is planned (never replaced by a
+different plan), otherwise the top finding's next-visit plan, else
 `snapshot.wavesNext`. It is derived at the tail of
 `applyLawnReportReconciliation` from the final reconciled strings, so it carries
 the same wording as the rest of the report. When `reportV2.banner` carries
 watering lines the banner owns the watering task: `yourPart` is the top
-finding's own step (dropped when it restates the aftercare task) and no `lead`
-field carries watering wording. The web report renders the lead in place of
-the snapshot hero and the follow-up card when the key is present; the PDF is
-unchanged and ignores it.
+finding's own step (dropped when it restates the aftercare task), a water or
+coverage top finding contributes nothing, and `headline`, `why`, `progress`,
+`yourPart` and `next` carry no watering or moisture wording (water, irrigation,
+sprinkler, moisture, dry, drought, damp, rain); such a field falls to its next
+source or null. The web report mounts the lead card right under the watering
+banner (above the plan, nearby and review cards); the lawn section then drops
+the snapshot hero and the follow-up card and opens with the photo strip. The
+PDF is unchanged and ignores it.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
