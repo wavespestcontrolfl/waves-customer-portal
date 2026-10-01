@@ -968,7 +968,7 @@ describe('a completed booking closes the customer\'s open preferred-time request
 
   test('the customer share lock is taken before the visit lock (codex #5477 r9: a merge locks customer, then visits)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
-    const customerLock = src.indexOf("trx('customers').where({ id: customerId }).forShare()");
+    const customerLock = src.indexOf("trx('customers').where({ id: ownerId }).forShare()");
     const visitLock = src.indexOf("trx('scheduled_services').where({ id: visit.id }).forUpdate()");
     expect(customerLock).toBeGreaterThan(-1);
     expect(visitLock).toBeGreaterThan(customerLock);

@@ -104,6 +104,15 @@ describe("lead status 'handled'", () => {
     expect(board).toMatch(/onDrop=\{acceptsDrops \? \(e\) => handleBoardDrop\(e, stage\) : undefined\}/);
   });
 
+  test('Agent Ops lead writes re-check the lead is still open AT the write (codex #5477 r12): a booking may have closed it as handled since the read', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-agents.js'), 'utf8');
+    // mark-contacted and schedule-follow-up: conditional UPDATEs, 409 on 0 rows
+    expect(src.match(/db\('leads'\)\.where\('id', req\.params\.id\)\s*\.whereNotIn\('status', CLOSED_LEAD_STATUSES\)/g)).toHaveLength(2);
+    expect(src.match(/if \(!updated\) return res\.status\(409\)/g)).toHaveLength(2);
+    // draft-response: re-read under a share lock inside the draft transaction
+    expect(src).toMatch(/const live = await trx\('leads'\)\.where\(\{ id: lead\.id \}\)\.forShare\(\)\.first\('status'\);\s*if \(!live \|\| CLOSED_LEAD_STATUSES\.includes\(live\.status\)\) return \{ closed: true \};/);
+  });
+
   test('the Intelligence Bar lead overview keeps handled out of the conversion denominator (a cohort containing a handled request)', async () => {
     mockRows.length = 0;
     mockRows.push({ status: 'won' }, { status: 'new' }, { status: 'lost' }, { status: 'handled' }, { status: 'handled' });

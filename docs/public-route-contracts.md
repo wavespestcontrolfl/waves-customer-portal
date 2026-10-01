@@ -975,13 +975,15 @@ row first takes the request's touch (source, detail, lead date, click ids,
 UTM campaign/term, `is_paid`; the earliest paid request wins; when the
 booking converted a genuine lead instead of writing its own row, that lead's
 booked row is the target, and it keeps its own touch when its first contact
-came before the request; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
+(`leads.first_contact_at`, the instant, not the row's calendar `lead_date`)
+came no later than the request's; a booking row with any paid click id of its own keeps it, whatever its `is_paid`; one with paid UTMs but no click id takes the request's touch), so the booking
 is credited, and reported, to that ad. Every other lead surface
 treats `handled` as closed: it is out of the open set, out of every prospect
 denominator (conversion, win and lost rates), and never re-attached by a later
 form, call, estimate or email fan-out. The close runs inside the per-(lead,
 visit) transaction that takes, in order, the booked customer `FOR SHARE`
-(re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
+(the visit's CURRENT owner, so a merge since the booking is judged on the
+winner; re-reading their phone, name and email), the booked visit `FOR UPDATE` (still
 live and not a callback; customer before visit, the order a customer merge
 uses), and the lead `FOR UPDATE` (still `book_preferred_time`, open, not
 converted or deleted, no estimate attached, phone still matching the
@@ -992,7 +994,7 @@ corroborated, same service line), then writes ONE `status_change` activity row
 replay never closes twice; a newer request is new work and stays open. The office
 gets ONE admin FYI per close (area Leads, category `lead`, linked to the lead,
 deduped per (lead, visit)) and nothing else: no customer message of any kind.
-`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. The lead's `first_contact_channel`
+`handled` is system-set only: the Leads PATCH refuses it (unless the lead already has it) and the Intelligence Bar tools never offer it; staff can reopen a handled request to any other status. Writers that read a lead open and write later re-assert it at the write, so a close in between wins: attaching an estimate (`attachLeadToEstimate`, 409 when the lead closed since) and the Agent Ops mark-contacted / follow-up / draft actions (409). The lead's `first_contact_channel`
 is `booking`, so the shared customer-originated-contact allowlist
 (`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
 booking that committed while a submit was still in flight (its close ran before

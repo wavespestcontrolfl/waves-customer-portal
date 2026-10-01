@@ -82,7 +82,7 @@ jest.setTimeout(60000);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text, first_name text, last_name text, email text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
-    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
+    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, customer_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
     await database.raw('CREATE TABLE ??.lead_activities (id serial PRIMARY KEY, lead_id uuid NOT NULL, activity_type text, description text, performed_by text, metadata jsonb, created_at timestamptz DEFAULT now())', [schema]);
     await database.raw('CREATE TABLE ??.ad_service_attribution (id serial PRIMARY KEY, lead_id uuid UNIQUE, customer_id uuid, self_booked_appointment_id uuid UNIQUE, lead_source text DEFAULT \'google_ads\', lead_source_detail text, lead_date date, fbp text, gclid text, wbraid text, gbraid text, fbclid text, fbc text, utm_campaign text, utm_term text, is_paid boolean, service_line text, specific_service text, service_bucket text, updated_at timestamptz DEFAULT now(), funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
@@ -340,15 +340,17 @@ jest.setTimeout(60000);
       });
 
       describe('a booking that converted a genuine lead instead of writing its own row (codex #5477 r11)', () => {
-        const setupConverted = async ({ genuineDate }) => {
+        // Same calendar day on both funnel rows: only the leads' first-contact instants order them (codex #5477 r12).
+        const setupConverted = async ({ genuineAt }) => {
           const cust = randomUUID();
           await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });
           const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+          await database('leads').where({ id: req.leadId }).update({ first_contact_at: '2026-09-20T14:00:00Z' });
           await database('ad_service_attribution').insert({
             lead_id: req.leadId, funnel_stage: 'lead', lead_source: 'google_ads', lead_date: '2026-09-20', gclid: 'g-first', utm_campaign: 'fall-pest', is_paid: true,
           });
-          const genuine = randomUUID();
-          await database('ad_service_attribution').insert({ lead_id: genuine, funnel_stage: 'booked', lead_source: 'website', lead_date: genuineDate, is_paid: false });
+          const [{ id: genuine }] = await database('leads').insert({ lead_type: 'quote_wizard', status: 'won', first_contact_at: genuineAt }).returning(['id']);
+          await database('ad_service_attribution').insert({ lead_id: genuine, funnel_stage: 'booked', lead_source: 'website', lead_date: '2026-09-20', is_paid: false });
           const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date() }).returning(['id', 'created_at']);
           await database('scheduled_services').insert({ self_booking_id: sba[0].id });
           await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0], convertedLeadIds: [genuine] });
@@ -358,11 +360,11 @@ jest.setTimeout(60000);
         };
 
         test('the paid request came first: the converted lead\'s row takes its touch', async () => {
-          expect(await setupConverted({ genuineDate: '2026-09-25' })).toMatchObject({ funnel_stage: 'booked', lead_source: 'google_ads', gclid: 'g-first', utm_campaign: 'fall-pest', is_paid: true });
+          expect(await setupConverted({ genuineAt: '2026-09-20T18:00:00Z' })).toMatchObject({ funnel_stage: 'booked', lead_source: 'google_ads', gclid: 'g-first', utm_campaign: 'fall-pest', is_paid: true });
         });
 
-        test('the genuine lead\'s own first contact came before the request: it keeps its own touch', async () => {
-          expect(await setupConverted({ genuineDate: '2026-09-01' })).toMatchObject({ lead_source: 'website', gclid: null, is_paid: false });
+        test('the genuine lead\'s own first contact came earlier the same day: it keeps its own touch', async () => {
+          expect(await setupConverted({ genuineAt: '2026-09-20T09:00:00Z' })).toMatchObject({ lead_source: 'website', gclid: null, is_paid: false });
         });
       });
 
@@ -622,6 +624,20 @@ jest.setTimeout(60000);
         expect(await closeBookedPreferredLeads(database, { customerId: cust, booking })).toMatchObject({ live: true, closed: 1 });
         expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
       });
+    });
+
+    test('a merge committed after the booking: the close judges the visit\'s CURRENT owner, not the retired loser (codex #5477 r12)', async () => {
+      const loser = randomUUID();
+      const winner = randomUUID();
+      await database('customers').insert([
+        { id: loser, phone: null, first_name: 'Pat', last_name: 'Sample' }, // the merge retired the loser's phone
+        { id: winner, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' },
+      ]);
+      const req = await recordPreferredTimeRequest(database, value(), { notify: false });
+      const sba = await database('self_booked_appointments').insert({ customer_id: loser, created_at: new Date() }).returning(['id', 'created_at']);
+      await database('scheduled_services').insert({ self_booking_id: sba[0].id, customer_id: winner }); // repointed by the merge
+      expect((await closeBookedPreferredLeads(database, { customerId: loser, booking: sba[0] })).closed).toBe(1);
+      expect(await database('leads').where({ id: req.leadId }).first()).toMatchObject({ status: 'handled' });
     });
 
     describe('the close FYI is retryable from the persisted audit rows (codex #5477 r4 P2)', () => {

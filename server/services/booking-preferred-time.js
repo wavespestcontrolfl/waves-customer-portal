@@ -453,6 +453,19 @@ function corroboratesBookedCustomer(lead, customer, customerId) {
   const last = normName(customer && customer.last_name);
   return !!(first && last && first === normName(lead.first_name) && last === normName(lead.last_name));
 }
+// The whole identity test the close applies under its locks: the request's phone
+// (same last-10 rule as tenMatch) still matches the booked customer's CURRENT phone,
+// it is linked to no customer or to this one (`customerIds`: the visit's current
+// owner, and the booking's own id when a merge has since repointed the visit), and
+// something besides the phone corroborates it.
+function requestIdentifiesCustomer(lead, customer, customerIds) {
+  const ten = tenDigitPhone(customer && customer.phone);
+  const ids = customerIds.filter(Boolean).map(String);
+  return !!ten
+    && String(lead.phone || '').replace(/\D/g, '').slice(-10) === ten
+    && (!lead.customer_id || ids.includes(String(lead.customer_id)))
+    && corroboratesBookedCustomer(lead, customer, ids[0]);
+}
 const CLOSED_STATUS = 'handled';
 // A booking settles only the request it answers (codex #5477 r9/r10): every service
 // line the request asked for (lawn, pest, mosquito, termite...) must be in the booked
@@ -565,7 +578,8 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
     const bookedMs = new Date(booking.created_at).getTime();
     const convertedIds = (Array.isArray(convertedLeadIds) ? convertedLeadIds : []).filter(Boolean).map(String);
     if (Number.isNaN(bookedMs)) return { live: true, closed: 0 };
-    const customer = await db('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name', 'email');
+    // The visit's current owner (a merge since the booking repoints it; codex #5477 r12).
+    const customer = await db('customers').where({ id: visit.customer_id || customerId }).first('phone', 'first_name', 'last_name', 'email');
     const ten = tenDigitPhone(customer && customer.phone);
     if (!ten) return { live: true, closed: 0 };
     const open = (await tenMatch(
@@ -602,11 +616,17 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
         // snapshot above, and the corroboration must judge the identity as it is now.
         // Taken BEFORE the visit lock (codex #5477 r9): a customer merge locks the
         // customer rows first and then sweeps their visits, so this order matches it.
-        const liveCustomer = await trx('customers').where({ id: customerId }).forShare()
+        // The customer is the visit's CURRENT owner (codex #5477 r12): a merge that
+        // committed since the booking repointed the visit to the winner and retired
+        // the loser's phone, so the booking's own customer id may be stale.
+        const owner = await trx('scheduled_services').where({ id: visit.id }).first('customer_id');
+        const ownerId = (owner && owner.customer_id) || customerId;
+        const liveCustomer = await trx('customers').where({ id: ownerId }).forShare()
           .first('phone', 'first_name', 'last_name', 'email');
-        const liveTen = tenDigitPhone(liveCustomer && liveCustomer.phone);
-        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type', 'scheduled_date');
+        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback', 'service_type', 'scheduled_date', 'customer_id');
         if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
+        // A merge between the owner read and the lock: leave it to the next closer.
+        if (liveVisit.customer_id && String(liveVisit.customer_id) !== String(ownerId)) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
         // the open-lead query above, and the customer may have refreshed the
@@ -624,11 +644,7 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           && !current.deleted_at
           && !current.estimate_id // staff may have attached an estimate since the query above
           && current.requested_in_time === true
-          // the lead's phone (same last-10 rule as tenMatch) and the customer's CURRENT
-          // phone both still match the number the request was found by
-          && [String(current.phone || '').replace(/\D/g, '').slice(-10), liveTen].every((phone) => phone === ten)
-          && (!current.customer_id || String(current.customer_id) === String(customerId))
-          && corroboratesBookedCustomer(current, liveCustomer, customerId)
+          && requestIdentifiesCustomer(current, liveCustomer, [ownerId, customerId])
           && bookingAnswersRequest(current.service_interest, liveVisit.service_type);
         if (!stillOurs) return null;
         // Named from the visit as locked (codex #5477 r10), not the earlier read.
@@ -754,7 +770,7 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
       // advances it. The earliest paid request wins; a replacement with a paid click of
       // its own keeps it (whatever its is_paid: attributeSelfBooking's new-customer
       // mint leaves it NULL), and so does a converted lead whose own first contact
-      // came before the request. The booking's own row is preferred as the target.
+      // came no later than the request. The booking's own row is preferred as the target.
       // The touch columns are the ones lead-funnel-bridge stampLeadFunnelRow writes
       // (fbp is a browser id, not a click).
       const { CLICK_ID_COLUMNS, PAID_CLICK_ID_COLUMNS } = require('./lead-funnel-bridge');
@@ -766,15 +782,25 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
         .forUpdate()
         .first('booked.*');
       const hasPaidClick = (row) => PAID_CLICK_ID_COLUMNS.some((col) => !!row[col]);
-      const dayMs = (d) => (d ? new Date(d).getTime() : null);
       if (target && !hasPaidClick(target)) {
         const requestRows = (await trx('ad_service_attribution')
           .whereIn('lead_id', closedIds)
           .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
           .orderBy([{ column: 'lead_date', order: 'asc', nulls: 'last' }, { column: 'id', order: 'asc' }])) || [];
         const firstPaid = requestRows.find((row) => row.is_paid === true);
-        const targetFirst = dayMs(target.lead_date) != null && dayMs(firstPaid?.lead_date) != null
-          && dayMs(target.lead_date) < dayMs(firstPaid.lead_date);
+        // A converted genuine lead keeps its own touch when it came first (codex
+        // #5477 r12): judged on the leads' first-contact instants, not the
+        // funnel rows' calendar lead_date (two contacts the same day tie there).
+        // A tie, or no instant to compare, keeps the genuine lead's own touch.
+        let targetFirst = false;
+        if (firstPaid && target.lead_id) {
+          const contacts = await trx('leads').whereIn('id', [target.lead_id, firstPaid.lead_id])
+            .select('id', trx.raw('COALESCE(first_contact_at, created_at) AS contacted_at'));
+          const at = (id) => contacts.find((c) => String(c.id) === String(id))?.contacted_at;
+          const targetAt = at(target.lead_id);
+          const requestAt = at(firstPaid.lead_id);
+          targetFirst = !targetAt || !requestAt || new Date(targetAt).getTime() <= new Date(requestAt).getTime();
+        }
         if (firstPaid && !targetFirst) {
           await trx('ad_service_attribution').where({ id: target.id })
             .update({ ...Object.fromEntries(touchColumns.map((col) => [col, firstPaid[col] ?? null])), updated_at: trx.fn.now() });

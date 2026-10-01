@@ -460,7 +460,18 @@ async function attachLeadToEstimate({
     updated_at: new Date(),
   };
 
-  await database('leads').where({ id: leadId }).update(updates);
+  // The write re-asserts what the validation above read (codex #5477 r12): the
+  // lead is still not closed, so a /book booking that closed the request as
+  // 'handled' in between (it locks the row) is never given an estimate behind
+  // its back. 0 rows = closed since the read: the same 409 the validation gives.
+  const attached = await database('leads').where({ id: leadId })
+    .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+    .update(updates);
+  if (!attached) {
+    const err = new Error('Lead is closed and cannot be linked to a new estimate');
+    err.statusCode = 409;
+    throw err;
+  }
   await database('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'estimate_created',

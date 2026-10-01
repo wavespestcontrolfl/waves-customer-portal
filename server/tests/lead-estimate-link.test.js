@@ -50,12 +50,15 @@ function makeDb(lead, estimate = null) {
         // deleted_at guard on the lead lookup — fixtures are never deleted,
         // so the guard is a chain no-op here.
         whereNull: () => q,
+        // the attach's still-not-closed write predicate (codex #5477 r12)
+        whereNotIn: (col, list) => { q._notIn = { col, list }; return q; },
         first: async () => {
           if (table === 'leads' && lead && clause.id === lead.id) return lead;
           if (table === 'estimates' && estimate && clause.id === estimate.id) return estimate;
           return null;
         },
         update: async (patch) => {
+          if (q._notIn && lead && q._notIn.list.includes(lead.status)) return 0;
           updates.push({ table, clause, patch });
           return 1;
         },
@@ -126,6 +129,28 @@ describe('lead-estimate link service', () => {
 
     expect(updates).toEqual([]);
     expect(activities).toEqual([]);
+  });
+
+  test('a booking that closed the request (handled) between the read and the write: 409, nothing attached (codex #5477 r12)', async () => {
+    const lead = { id: 'lead-1', status: 'new', phone: '9415550101', first_contact_at: new Date().toISOString() };
+    const { database, updates, activities } = makeDb(lead);
+    const read = database;
+    // the validation reads the lead open; the close commits before the attach's write
+    const racing = (table) => {
+      const q = read(table);
+      const where = q.where.bind(q);
+      return { ...q, where: (clause) => { const w = where(clause); const first = w.first; w.first = async () => { const r = await first(); if (r === lead) { const open = { ...lead }; lead.status = 'handled'; return open; } return r; }; return w; } };
+    };
+    racing.transaction = read.transaction;
+    await expect(attachLeadToEstimate({
+      database: racing,
+      leadId: lead.id,
+      estimateId: 'estimate-1',
+      estimate: { id: 'estimate-1', customer_phone: '+1 (941) 555-0101' },
+      technician: { first_name: 'Ava', last_name: 'Tech' },
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+    expect(activities).toHaveLength(0);
   });
 
   test('allows replacing a stale linked estimate when the caller opts in', async () => {
