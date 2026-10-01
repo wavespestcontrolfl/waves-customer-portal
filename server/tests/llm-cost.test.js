@@ -451,22 +451,37 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'spend_normal', expect.any(Object));
   });
 
-  test('a standing spike item stays open while its lane has unpriced calls: $0 priced is not a recovery', async () => {
+  test('a standing spike item stays open while its lane has unpriced calls: $0 priced is neither a recovery nor superseded', async () => {
     process.env.GATE_LLM_COST_TRACKING = 'true';
     process.env.GATE_LLM_CALL_LEDGER = 'true';
+    mockRaise.mockResolvedValue({ id: 2 });
     const fetchImpl = okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }]));
-    // 10-01: the spiked lane ran only on a model the feed no longer lists
+    const NEXT = new Date('2026-10-02T11:40:00Z');
+    const standing = [
+      { dedupeKey: 'llm-cost-spike:2026-09-29', spikes: [{ laneId: 'sms_draft', usd: 12, avgUsd: 0.43 }] },
+      { dedupeKey: 'llm-cost-spike:2026-09-30', spikes: [{ laneId: 'call_extraction', usd: 9, avgUsd: 0.5 }] },
+    ];
+    mockOpenKeys.mockResolvedValue(standing.map((m) => m.dedupeKey));
+    mockOpenMeta.mockResolvedValue(standing);
+    // 10-01: sms_draft ran only on a model the feed no longer lists
     await app('llm_dispatch_log').insert(row({ created_at: atET('2026-10-01'), served_model: 'claude-unlisted', input_tokens: 9_000_000 }));
-    mockOpenKeys.mockResolvedValue(['llm-cost-spike:2026-09-30']);
-    mockOpenMeta.mockResolvedValue([{ dedupeKey: 'llm-cost-spike:2026-09-30', spikes: [{ laneId: 'sms_draft', usd: 12, avgUsd: 0.43 }] }]);
-    const res = await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
-    expect(res).toMatchObject({ ran: true, raised: false, reason: 'standing_lane_unpriced' });
-    expect(mockCloseKeys).not.toHaveBeenCalled();
 
-    // the same unpriced calls on a lane no standing item names do not hold the close
-    mockOpenMeta.mockResolvedValue([{ dedupeKey: 'llm-cost-spike:2026-09-30', spikes: [{ laneId: 'call_extraction', usd: 12, avgUsd: 0.43 }] }]);
-    await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
+    // no new spike: only the item naming a judgeable lane closes
+    await llmCost.runLlmCostCheck({ now: NEXT, conn: app, fetchImpl });
     expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'spend_normal', expect.any(Object));
+
+    // a new spike on another lane supersedes the judgeable item, never the held one
+    mockCloseKeys.mockClear();
+    await app('llm_dispatch_log').insert(row({ created_at: atET('2026-10-01'), lane_id: 'call_extraction', input_tokens: 4_000_000 }));
+    const res = await llmCost.runLlmCostCheck({ now: NEXT, conn: app, fetchImpl });
+    expect(res).toMatchObject({ raised: true, dedupeKey: 'llm-cost-spike:2026-10-01' });
+    expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'superseded', expect.any(Object));
+
+    // the items cannot be read: nothing closes
+    mockCloseKeys.mockClear();
+    mockOpenMeta.mockRejectedValue(new Error('db down'));
+    await llmCost.runLlmCostCheck({ now: NEXT, conn: app, fetchImpl });
+    expect(mockCloseKeys).not.toHaveBeenCalled();
   });
 
   test('with no stored prices and a failing feed, the check fails loudly', async () => {

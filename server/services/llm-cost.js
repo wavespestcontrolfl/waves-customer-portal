@@ -393,20 +393,28 @@ function findSpikes(dayByLane, baselineByLane, { minUsd = alertMinUsd(), multipl
   return spikes.sort((a, b) => b.usd - a.usd);
 }
 
-// Lanes named by the standing spike items, or null when they cannot be read.
-async function standingSpikeLanes(conn) {
+// Standing spike items that must stay open: those naming a lane with
+// unpriced calls on the day just checked (its spend cannot be judged). null
+// = the items could not be read, so none may be closed.
+async function heldSpikeKeys(conn, dayByLane) {
+  const unjudged = new Set([...dayByLane].filter(([, c]) => c.unpricedCalls > 0).map(([id]) => id));
+  if (!unjudged.size) return new Set();
   try {
     const rows = await require('./admin-alert-episodes').openAdminAlertMetadata(conn, KEY_PREFIX);
-    return new Set(rows.flatMap((m) => (Array.isArray(m.spikes) ? m.spikes.map((s) => s.laneId) : [])));
+    return new Set(rows
+      .filter((m) => Array.isArray(m.spikes) && m.spikes.some((sp) => unjudged.has(sp.laneId)))
+      .map((m) => m.dedupeKey));
   } catch (err) {
     logger.warn(`[llm-cost] standing spike items unreadable: ${err.message}`);
     return null;
   }
 }
 
-async function closeSpikeItems(conn, now, reason, keep = null) {
+// Close every standing spike item except `keep` (keys). keep null = close none.
+async function closeSpikeItems(conn, now, reason, keep) {
+  if (keep === null) return 0;
   const episodes = require('./admin-alert-episodes');
-  const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => k !== keep);
+  const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => !keep.has(k));
   if (!keys.length) return 0;
   return Number(await episodes.closeAdminAlertKeys(conn, keys, reason, {
     now,
@@ -445,18 +453,12 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
   // standing items are left as they are
   if (!day.byLane.size) return { ran: true, raised: false, reason: 'no_ledger_rows', prices };
   const spikes = findSpikes(day.byLane, baseline.byLane);
+  // a standing item naming a lane with unpriced calls yesterday stays open on
+  // either path: that lane's spend cannot be judged normal, or superseded
+  const held = await heldSpikeKeys(conn, day.byLane);
   if (!spikes.length) {
-    // a lane with unpriced calls yesterday cannot be judged back to normal:
-    // keep the standing items while any of them names such a lane
-    const unjudged = [...day.byLane].filter(([, c]) => c.unpricedCalls > 0).map(([id]) => id);
-    if (unjudged.length) {
-      const standing = await standingSpikeLanes(conn);
-      if (!standing || unjudged.some((id) => standing.has(id))) {
-        return { ran: true, raised: false, spikes: 0, reason: 'standing_lane_unpriced', prices };
-      }
-    }
-    await closeSpikeItems(conn, now, 'spend_normal').catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
-    return { ran: true, raised: false, spikes: 0, prices };
+    await closeSpikeItems(conn, now, 'spend_normal', held).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
+    return { ran: true, raised: false, spikes: 0, held: held ? held.size : null, prices };
   }
 
   const names = new Map(require('./model-switchboard').getSwitchboard().lanes.map((l) => [l.id, l.name]));
@@ -491,7 +493,7 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
     logger.warn('[llm-cost] spend spike item was not persisted');
     return { ran: true, raised: false, reason: 'alert_not_persisted', spikes: spikes.length, prices };
   }
-  await closeSpikeItems(conn, now, 'superseded', dedupeKey).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
+  await closeSpikeItems(conn, now, 'superseded', held && new Set([...held, dedupeKey])).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
   return { ran: true, raised: true, spikes: spikes.length, dedupeKey, prices };
 }
 
