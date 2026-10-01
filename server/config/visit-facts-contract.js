@@ -75,9 +75,13 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   form (SchedulePage.jsx CompletionPanel) or Fast Complete sheet.
  * - voice: voice fill writes the value (owner ruling 2026-09-27: voice fill
  *   covers every completion except WDO + pre-treat; 2026-09-28: "Found" and
- *   "Treated" are read-only summary lines filled from voice). Voice fill is
- *   a follow-up PR — no fact is voice-written TODAY; 'voice' marks the fact
- *   voice fill must write into (the tap path stays behind "Show all fields").
+ *   "Treated" are read-only summary lines filled from voice). Voice fill
+ *   ships DARK on the Fast Complete report flow (GATE_FAST_COMPLETE_REPORT):
+ *   where product went down and the pests named are read from the note
+ *   (services/visit-voice-facts.js) and sent as each product's area and
+ *   targets and the visit's areas serviced. Every other 'voice' fact is
+ *   still filled by tap; 'voice' marks the fact voice fill must write into
+ *   (the tap path stays behind "Show all fields").
  * - prefill: defaulted from the protocol / product label / service config;
  *   the tech confirms or adjusts rather than starting from blank.
  * - derived: computed by the server from other recorded facts or photos

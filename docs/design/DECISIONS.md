@@ -2955,3 +2955,32 @@ another customer's id, or a failed lookup is `office`, which is never quoted.
 The suggestion skips empty bodies, STOP / HELP / opt-in keywords and
 natural-language opt-outs (the inbound opt-out detector's own rules), and
 spam or voicemail calls. Nothing is sent to a customer.
+
+## 2026-10-01 — Fast Complete report flow: talk, generate the report, trace, send (dark)
+
+Owner "ok go" on the talk / generate / trace / send mockup. Behind
+`GATE_FAST_COMPLETE_REPORT` (dark), the tech portal opens the one-screen
+Fast Complete sheet for every open untyped pest visit, a re-service or a
+regular visit, in its report flow: the tech talks into the note, adds
+photos (thumbnails), taps whether the customer was home (the full form's
+three choices, "not home, full access" picked every time), the pest activity
+on the 1–5 tracker (a first visit opens at 5, as the full form does), one tip
+and the promise check, then taps Generate AI report (the full form's own
+`POST /admin/schedule/generate-report`). The report the customer will see is
+read on its own step, with Edit and Write again (`fresh: true`, past the
+30-minute draft cache), then the spray is traced (the existing Treatment Zone
+tracer, opened over the sheet) and Complete & send posts `/complete` exactly
+as the full form does: billed at finish, the report text, a pay link and the
+review ask on a regular visit, never on a re-service. The edited-report
+heads-up and a promise changed after the report are confirmed on the sheet
+and resent under the same key.
+
+There are no Pests / Where / How taps (owner ruling 2026-09-30: those facts
+are voice only). `POST /admin/dispatch/:id/voice-facts` reads where product
+went down (Inside / Outside / Garage) and the pests named, each quoted from
+the note word for word, and the report step shows them as "Heard from you".
+They go on the record as the products' area and targets and the visit's
+areas serviced, so an indoor treatment keeps its re-entry wait on the
+customer's report. A saved perimeter trace makes the sprays perimeter sprays
+at the trace's length; without one they are spot treatments. Off, the tech
+portal routes pest visits exactly as before.

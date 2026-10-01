@@ -58,7 +58,7 @@ has a method and targets. 140 of 240 pest product rows have an area.
 | capture | meaning |
 |---|---|
 | `tap` | the tech types or picks it on the Complete Service form (`client/src/pages/admin/SchedulePage.jsx` CompletionPanel) or the Fast Complete sheet |
-| `voice` | voice fill must write it. Voice fill has **not shipped yet**, so today every `voice` fact is filled by `tap` |
+| `voice` | voice fill must write it. Voice fill ships **dark** on the Fast Complete report flow (`GATE_FAST_COMPLETE_REPORT`): where product went down and the pests named are read from the note (`server/services/visit-voice-facts.js`) and sent as each product's area and targets and the visit's areas serviced. Every other `voice` fact is still filled by `tap` |
 | `prefill` | defaulted from the protocol, the product label or the service config; the tech confirms it |
 | `derived` | computed by the server from other facts or photos |
 | `photo` | an uploaded image, optionally captioned |

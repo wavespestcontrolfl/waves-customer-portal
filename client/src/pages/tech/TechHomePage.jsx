@@ -110,6 +110,20 @@ function isReserviceFastCompleteEligible(service) {
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
+// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go"
+// 2026-10-01): with `fastCompleteReportEnabled` on the schedule row, every
+// open untyped pest visit, a re-service or a regular visit, opens the
+// one-screen sheet in its report flow (talk, generate the AI report, read
+// it, trace, send; billed and texted as the full form). Off, pest visits
+// route exactly as before.
+function isFastCompleteReportEligible(service) {
+  return service?.fastCompleteReportEnabled === true
+    && isPestControlService(service)
+    // A closed visit stays on the recap editor, which updates the existing
+    // record (/complete would answer service_already_completed).
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
 // Fast Complete for Tree & Shrub (GATE_TS_FAST_COMPLETE plus the per-tech
 // flag): `treeShrubFastCompleteEnabled` rides the schedule payload per
 // service, true only when the gate is live AND this tech has the flag. An
@@ -649,7 +663,7 @@ export default function TechHomePage({ section = 'today' }) {
   // Complete sheet instead of the full recap modal. Everything else routes
   // exactly as before.
   const openPestCompletion = useCallback((service) => {
-    if (isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
+    if (isFastCompleteReportEligible(service) || isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
     else setRecapService(service);
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
@@ -1165,6 +1179,14 @@ export default function TechHomePage({ section = 'today' }) {
             // exact true turns the customer recap on (see the sheet). Absent
             // (an older payload) or false = the sheet sends no customer text.
             recapEnabled: fastCompleteService.fastCompleteRecapEnabled === true,
+            // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
+            // step needs from the row (the tracer's map center and whether
+            // this visit takes a satellite trace at all).
+            reportFlow: isFastCompleteReportEligible(fastCompleteService),
+            technicianName: fastCompleteService.technicianName || fastCompleteService.technician_name || null,
+            traceEligible: fastCompleteService.traceEligible !== false,
+            lat: fastCompleteService.lat ?? null,
+            lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
           onClose={(options) => {

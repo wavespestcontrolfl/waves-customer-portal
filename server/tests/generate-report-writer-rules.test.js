@@ -192,6 +192,26 @@ test('gate on: a cached draft is never served for a different product set', asyn
   expect(second.json.mock.calls[0][0]).not.toHaveProperty('cached');
 });
 
+// "Write again" on the Fast Complete sheet: the same inputs, a new draft.
+test('fresh: a new draft for the same inputs replaces the cached one', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const body = { serviceNotes: 'Ghost ants on the slider track (write again case).' };
+  await handler(mkReq(body), mkRes());
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  const SECOND = CLEAN_V2.replace('trailing along the slider track', 'trailing along the back slider track');
+  mockProvider.mockImplementationOnce(async () => ({ ok: true, text: SECOND }));
+  const again = mkRes();
+  await handler(mkReq({ ...body, fresh: true }), again);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(again.json.mock.calls[0][0]).toEqual(expect.objectContaining({ report: SECOND }));
+  expect(again.json.mock.calls[0][0]).not.toHaveProperty('cached');
+  // A plain request for the same inputs now reads the newer draft back.
+  const later = mkRes();
+  await handler(mkReq(body), later);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(later.json).toHaveBeenCalledWith(expect.objectContaining({ report: SECOND, cached: true }));
+});
+
 test('gate on: the last-resort copy leaves out recorded items the rules forbid', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockProvider.mockImplementation(async () => ({ ok: false, reason: 'openai_503' }));

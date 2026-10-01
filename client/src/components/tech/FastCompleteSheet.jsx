@@ -41,6 +41,23 @@
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
 //
+// Report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go" 2026-10-01): with
+// `service.reportFlow`, the sheet opens for any open untyped pest visit (a
+// re-service or a regular visit) and runs talk, generate the AI report,
+// read it, trace the spray, send. The tech talks into the note, adds photos,
+// taps whether the customer was home (not home, full access, picked every
+// time), the pest activity 1 to 5, one tip and the promise check, then
+// generates the report (POST /admin/schedule/generate-report, the full
+// form's own request) and reads it before anything goes. Where product went
+// down and the pests named are read from the note (POST
+// /admin/dispatch/:id/voice-facts, owner 2026-09-30: those facts are voice
+// only) and shown under the report. A saved perimeter trace makes the
+// sprays perimeter sprays at the trace's length; without one they are spot
+// treatments. Complete & send posts /complete as the full form does: the
+// visit bills at finish, the customer gets the report text, a regular visit
+// also gets the pay link and the review ask (never a re-service). The pieces
+// live in FastCompleteReport.jsx.
+//
 // The frame, header, saved view, note, tip picker and tiles are shared with
 // every Fast Complete sheet (FastCompleteParts.jsx), as is the /complete
 // submit (hooks/useFastCompleteSubmit.js); products, photos, pests and the
@@ -60,6 +77,13 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { WarningIcon } from './FastCompleteProductPicker';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import TechServicePhotosModal from './TechServicePhotosModal';
+import TechTreatmentZoneModal from './TechTreatmentZoneModal';
+import {
+  ActivitySection, ConfirmPrompt, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, FIRST_VISIT_RATING, PhotoStripSection,
+  PromisesSection, ReportCard, SentSummary, StepFooter, TraceSection, WritingView, customerHomeWriterLabel,
+  perimeterFeetOf, photoCaptionsOf, useVisitPhotos, useVisitPromises, useVisitTrace,
+} from './FastCompleteReport';
+import { promiseMarksPayload } from '../schedule/PromiseCheck';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
   SheetHeader, TipSection, VisitNote, customerNameOf, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
@@ -121,12 +145,12 @@ const ACTIVITY_LEVELS = [
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
 // be that visit (same customer, day and property), still an open pest
-// re-service, and still eligible for the short form (not typed or
-// project-backed).
+// re-service (any open pest visit in the report flow), and still eligible
+// for the short form (not typed or project-backed).
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
   if (visitChangedSinceSchedule(visit, service)) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
-  if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
+  if (!service?.reportFlow && visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
   return '';
@@ -279,7 +303,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }) {
+function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow }) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -307,7 +331,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }),
+          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow }),
           visit,
           products,
           commonProducts,
@@ -316,14 +340,20 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount })),
           visitIdentity: recapVisitIdentity(visit),
-          rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
+          rating: {
+            allowed: ratingContract?.allowed === true,
+            scaleLabels: ratingContract?.scaleLabels || null,
+            // The report flow opens a first visit's tracker at 5 (owner
+            // ruling 2026-09-24, the full form's prefill).
+            firstVisit: ratingContract?.allowed === true && ratingContract?.firstVisit === true,
+          },
         });
       } catch (err) {
         if (active) setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load products' }));
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress, reportFlow]);
   // The stock on hand the server has now, for a product restocked while the
   // sheet is open; nothing else is re-read. Resolves to the fresh catalog
   // rows by id.
@@ -352,6 +382,14 @@ function usePhotoManager() {
   return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
 }
 
+// The spray tracer (report flow) opens over the sheet the same way.
+function useTracer() {
+  const [isOpen, setOpen] = useState(false);
+  const open = useCallback(() => setOpen(true), []);
+  const close = useCallback(() => setOpen(false), []);
+  return { isOpen, open, close };
+}
+
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -359,6 +397,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
+  const reportFlow = service?.reportFlow === true;
   const ctx = useFastCompleteContext({
     base,
     request,
@@ -367,10 +406,15 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     routedScheduledDate: service?.routedScheduledDate,
     routedPropertyId: service?.routedPropertyId,
     routedAddress: service?.routedAddress,
+    reportFlow,
   });
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
+  const tracer = useTracer();
+  // The visit's saved trace: read in the report flow only.
+  const trace = useVisitTrace({ serviceId: service?.id, request, enabled: reportFlow });
+  const isReservice = ctx.visit?.serviceKey === 'pest_re_service';
   // A recorded dictation clip is still being taken or transcribed (the
   // upload path). The full form is another page and carries nothing over,
   // so Full form and "+ Other product" wait for the clip, like Complete and
@@ -392,7 +436,27 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
   // so it is offered only before one may have reached the server.
-  const locked = submitting || submission.failure !== null;
+  // A confirmable prompt (report flow) holds the sheet until it is answered.
+  const locked = submitting || submission.failure !== null || !!submission.prompt;
+  // The report flow names a regular visit as a service; the re-service sheet
+  // keeps its words.
+  const title = reportFlow && !isReservice
+    ? (done ? 'Service complete' : 'Complete service')
+    : (done ? 'Re-service complete' : 'Complete re-service');
+  const overlay = (photoManager.isOpen && (
+    <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
+  )) || (tracer.isOpen && (
+    <TechTreatmentZoneModal
+      serviceId={service?.id}
+      customerName={customerNameOf(ctx.visit, service) || 'Customer'}
+      address={service?.routedAddress || service?.address || ''}
+      lat={service?.lat}
+      lng={service?.lng}
+      onClose={tracer.close}
+      onSaved={trace.saved}
+    />
+  ));
+  const covered = photoManager.isOpen || tracer.isOpen;
 
   return (
     <FastCompleteFrame
@@ -400,19 +464,20 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       dialogRef={dialogRef}
       titleId={titleId}
       onDismiss={close}
-      hiddenProps={photoManager.hiddenProps}
-      overlay={photoManager.isOpen && (
-        <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
-      )}
+      hiddenProps={covered ? { 'aria-hidden': true, inert: '' } : {}}
+      overlay={overlay}
     >
-      <SheetHeader titleId={titleId} title={done ? 'Re-service complete' : 'Complete re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetHeader titleId={titleId} title={title} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} trace={trace} onTrace={tracer.open} isReservice={isReservice} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) {
+function SheetBody({ service, request, ctx, submission, locked, photos, trace, onTrace, isReservice, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
+  const reportFlow = service?.reportFlow === true;
+  // The report flow keeps its form mounted through the saved view: what the
+  // tech marked shows there.
+  if (submission.done && !reportFlow) {
     return (
       <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
         <CustomerTextResult outcome={submission.done.customerText} />
@@ -422,6 +487,9 @@ function SheetBody({ service, request, ctx, submission, locked, photos, dictatio
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
+  if (reportFlow) {
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} trace={trace} onTrace={onTrace} isReservice={isReservice} dictationPending={dictationPending} onDictationPending={onDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />;
+  }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
 
@@ -581,6 +649,460 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   );
 }
 
+// ── Report flow (GATE_FAST_COMPLETE_REPORT) ─────────────────────────────────
+
+// How a spray went down when the tech picked no other way for it: a saved
+// perimeter trace makes it a perimeter spray at the trace's length;
+// otherwise a spot treatment. The server would otherwise read a spray with
+// no method as a perimeter spray and refuse it without linear feet.
+const reportSprayMethod = (perimeterFeet) => (perimeterFeet ? 'perimeter_spray' : 'spot_treatment');
+
+// "October 1, 2026" from the visit's ET calendar day, as the full form
+// sends it; never browser-local date math.
+function reportServiceDate(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(day || ''));
+  if (!match) return undefined;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12))
+    .toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+// What the report is written from. A change after it was written marks it
+// stale. The tip prints as its own card on the report (the writer never
+// repeats it) and photos only add, so neither is part of it.
+function writerSignature(form, rows, promiseMarks) {
+  return JSON.stringify({
+    note: form.note.trim(),
+    products: rows.filter((row) => row.active).map((row) => String(row.productId)).sort(),
+    customerHome: form.customerHome,
+    rating: form.rating,
+    promiseMarks,
+  });
+}
+
+// The report request: the same POST /admin/schedule/generate-report the
+// full form's "Generate AI report" sends. The visit id grounds it (the route
+// re-reads the visit, the customer's texts and calls, past visits and the
+// weather).
+function writerPayload({ service, visit, form, rows, sprayMethod, ratingAllowed, photos, promiseMarks }) {
+  const active = rows.filter((row) => row.active);
+  const captions = photoCaptionsOf(photos);
+  return {
+    scheduledServiceId: service?.id || null,
+    customerName: visit?.customerName || service?.customerName || undefined,
+    serviceType: visit?.serviceType || service?.serviceType,
+    ...(service?.technicianName ? { technicianName: service.technicianName } : {}),
+    serviceDate: reportServiceDate(visit?.scheduledDate),
+    serviceNotes: form.note.trim(),
+    productsApplied: active.map((row) => row.name).join(', '),
+    products: active.map((row) => {
+      const applicationMethod = rowMethod(row, sprayMethod);
+      const { rate, rateUnit } = rowRate(row, sprayMethod);
+      const hasRate = Number(rate) > 0 && !!rateUnit;
+      return {
+        productId: row.productId || null,
+        name: row.name,
+        rate: hasRate ? Number(rate) : null,
+        rateUnit: hasRate ? rateUnit : null,
+        applicationMethod,
+        targets: [],
+      };
+    }),
+    areasServiced: [],
+    customerInteraction: customerHomeWriterLabel(form.customerHome),
+    pestActivityRating: ratingAllowed && Number.isInteger(form.rating) ? form.rating : null,
+    photoCount: Array.isArray(photos) ? photos.length : 0,
+    ...(captions.length ? { photoCaptions: captions } : {}),
+    // The full form's default: the customer's texts and calls ground the report.
+    includeCustomerComms: true,
+    ...(promiseMarks.length ? { promiseMarks } : {}),
+  };
+}
+
+// The completion: the full /complete body for the report the tech read.
+// Where product went down and the pests named are what was heard from the
+// note; the report is the notes, and reportDraftBase tells the server what
+// was written so an edit gets its heads-up. A regular visit gets the full
+// form's customer text, pay link and review ask; a re-service never gets a
+// pay link or a review ask.
+function reportCompletionBody({
+  form, rows, draft, perimeterFeet, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+}) {
+  const sprayMethod = reportSprayMethod(perimeterFeet);
+  const areas = draft.facts?.areas || [];
+  const pests = draft.facts?.pests || [];
+  const applicationArea = areas.join(', ');
+  const ratingSent = ratingAllowed && Number.isInteger(form.rating);
+  return {
+    visitOutcome: 'completed',
+    ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
+    products: rows.filter((row) => row.active).map((row) => {
+      const applicationMethod = rowMethod(row, sprayMethod);
+      const { rate, rateUnit } = rowRate(row, sprayMethod);
+      const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+      return {
+        productId: row.productId,
+        applicationMethod,
+        targets: pests,
+        totalAmount,
+        amountUnit,
+        ...(applicationArea ? { applicationArea } : {}),
+        ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
+        ...(applicationMethod === 'perimeter_spray' ? { areaValue: perimeterFeet, areaUnit: 'linear_ft' } : {}),
+      };
+    }),
+    areasServiced: areas,
+    customerInteraction: form.customerHome,
+    ...(ratingSent ? { clientPestRating: form.rating } : {}),
+    // The untouched first-visit 5: the server re-checks it is still the
+    // first visit (owner ruling 2026-09-24).
+    ...(ratingSent && form.ratingPrefilled ? { clientPestRatingPrefilled: true } : {}),
+    technicianNotes: draft.text.trim(),
+    reportDraftBase: draft.base,
+    ...(promiseMarks.length ? { promiseMarks } : {}),
+    techTips: techTipsOf(form, tipsAvailable),
+    sendCompletionSms: true,
+    includePayLink: !isReservice,
+    requestReview: !isReservice,
+  };
+}
+
+// What still holds the report (generate) or the completion (complete), in
+// screen order, and the product whose stock holds it.
+function reportFlowMissing({ form, rows, ratingAllowed, dictationPending, perimeterFeet, stage }) {
+  const active = rows.filter((row) => row.active);
+  const outOfStock = active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
+  const missingAmount = active.find((row) => !hasAmount(row));
+  // Only an added product the tech set to a perimeter spray can be one with
+  // no trace; the trace comes after the report.
+  const untraced = stage === 'complete' && !perimeterFeet
+    && active.find((row) => rowMethod(row, reportSprayMethod(perimeterFeet)) === 'perimeter_spray');
+  const [, reason = '', stockRow = null] = [
+    [dictationPending, 'Finish dictating first.'],
+    [!active.length, 'Select at least one product.'],
+    [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
+    [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [ratingAllowed && !Number.isInteger(form.rating), 'Pick the pest activity, 1 to 5.'],
+    [untraced, untraced && `${untraced.name} is set to perimeter spray: trace where you sprayed, or pick another way.`],
+  ].find(([missing]) => missing) || [];
+  return { reason, stockRow };
+}
+
+function writerSources({ productCount, photoCount, marked, rated }) {
+  return [
+    'What you said',
+    `Products used (${productCount})`,
+    ...(photoCount ? [`Photos (${photoCount})`] : []),
+    'The customer’s texts and calls since the last visit',
+    'Past visits',
+    ...(marked ? ['The promises you marked'] : []),
+    'Whether the customer was home',
+    ...(rated ? ['The pest activity you rated'] : []),
+    'Rain this week',
+  ];
+}
+
+// The products as one line ("Taurus SC 4 fl oz · …"), opened to the full
+// product tiles on Edit.
+function ProductsLine({ rows, locked, onOpen }) {
+  const listed = rows.filter((row) => row.active)
+    .map((row) => (hasAmount(row) ? `${row.name} ${amountText(row.totalAmount, row.amountUnit)}` : row.name));
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Products</h3>
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={false} disabled={locked} onClick={onOpen}>Edit</Button>
+      </div>
+      <p className="tech-visit-muted">{listed.length ? listed.join(' · ') : 'None selected'}</p>
+    </section>
+  );
+}
+
+function ReportFlowForm({
+  service, request, ctx, submission, locked, photos, trace, onTrace, isReservice, dictationPending, onDictationPending,
+  onCompleted, onFullForm, isMobile,
+}) {
+  const base = `/admin/dispatch/${service?.id}`;
+  const products = useProductRows(ctx, service?.serviceType);
+  const { rows, addProduct } = products;
+  const [editAmounts, setEditAmounts] = useState(false);
+  const [productsOpen, setProductsOpen] = useState(false);
+  const [form, setForm] = useState(() => ({
+    note: '',
+    customerHome: DEFAULT_CUSTOMER_HOME,
+    rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
+    ratingPrefilled: !!ctx.rating.firstVisit,
+    tipId: '',
+    customTip: '',
+    promiseMarks: {},
+  }));
+  const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
+  // Each dictated chunk joins what is already in the box.
+  const appendNote = useCallback((text) => {
+    setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
+  }, []);
+  const tips = useTipLibrary({ base, request });
+  const tipsAvailable = !!tips;
+  const visitPromises = useVisitPromises({ base, request });
+  const visitPhotos = useVisitPhotos({ serviceId: service?.id, request, version: photos.version });
+
+  const [step, setStep] = useState('visit');
+  const [draft, setDraft] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const [writeError, setWriteError] = useState('');
+  const writeSequence = useRef(0);
+
+  const perimeterFeet = perimeterFeetOf(trace.zone);
+  const sprayMethod = reportSprayMethod(perimeterFeet);
+  const promiseMarks = visitPromises.available ? promiseMarksPayload(form.promiseMarks, visitPromises.promises) : [];
+  const signature = writerSignature(form, rows, promiseMarks);
+  const stale = !!draft && draft.signature !== signature;
+  const ratingAllowed = ctx.rating.allowed;
+
+  // The house mix is always on the sheet, so "Used most" lists the rest.
+  const pickerCommonProducts = useMemo(() => {
+    const mixIds = new Set(ctx.rows.map((row) => String(row.productId)));
+    return ctx.commonProducts.filter((common) => !mixIds.has(String(common.productId)));
+  }, [ctx.rows, ctx.commonProducts]);
+  const picker = useProductPicker({
+    products: ctx.products,
+    commonProducts: pickerCommonProducts,
+    rows,
+    locked: locked || dictationPending,
+    isMobile,
+    onFullForm,
+    onPick: (product) => addProduct(product, sprayMethod),
+  });
+
+  const generateMissing = reportFlowMissing({ form, rows, ratingAllowed, dictationPending, perimeterFeet, stage: 'generate' });
+  const completeMissing = reportFlowMissing({ form, rows, ratingAllowed, dictationPending, perimeterFeet, stage: 'complete' });
+  const completeReason = completeMissing.reason
+    || (writing ? 'Writing the report…' : '')
+    || (!draft ? 'Generate the report first.' : '')
+    || (!draft.text.trim() ? 'The report is empty. Write it again.' : '');
+
+  // "Update inventory or remove it": once the stock is updated, the tech
+  // re-reads it here rather than close the sheet and lose the visit.
+  const [checkingStock, setCheckingStock] = useState(false);
+  const checkStock = async () => {
+    setCheckingStock(true);
+    try {
+      products.applyStock(await ctx.refreshStock());
+    } catch {
+      // The hold stays; the tech can check again.
+    }
+    setCheckingStock(false);
+  };
+
+  // Writes the report and reads the note's facts side by side. Only the
+  // latest request may land.
+  const write = async ({ fresh = false } = {}) => {
+    if (writing || generateMissing.reason) return;
+    const sequence = ++writeSequence.current;
+    setStep('report');
+    setEditing(false);
+    setWriting(true);
+    setWriteError('');
+    const payload = writerPayload({
+      service, visit: ctx.visit, form, rows, sprayMethod, ratingAllowed, photos: visitPhotos, promiseMarks,
+    });
+    const basis = signature;
+    const [written, heard] = await Promise.allSettled([
+      request('/admin/schedule/generate-report', { method: 'POST', body: JSON.stringify(fresh ? { ...payload, fresh: true } : payload) }),
+      request(`${base}/voice-facts`, { method: 'POST', body: JSON.stringify({ note: form.note }) }),
+    ]);
+    if (sequence !== writeSequence.current) return;
+    setWriting(false);
+    const text = written.status === 'fulfilled' && typeof written.value?.report === 'string' ? written.value.report.trim() : '';
+    if (!text) {
+      setWriteError(written.status === 'rejected'
+        ? `${written.reason?.message || 'The report could not be written.'} Try again.`
+        : 'The writer sent back no report. Try again.');
+      return;
+    }
+    const factsRead = heard.status === 'fulfilled' && heard.value?.available === true;
+    const listOf = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []);
+    setDraft({
+      text,
+      base: text,
+      signature: basis,
+      deterministic: written.value?.deterministic === true,
+      facts: factsRead
+        ? { status: heard.value.status, areas: listOf(heard.value.areas), pests: listOf(heard.value.pests) }
+        : { status: 'failed', areas: [], pests: [] },
+    });
+  };
+
+  const summary = () => {
+    const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
+    const areas = draft?.facts?.areas || [];
+    return areas.length ? `${names} · ${areas.join(', ')}` : names;
+  };
+  const submit = () => {
+    if (completeReason && !submission.hasPendingBody()) return;
+    submission.submit(
+      () => reportCompletionBody({
+        form, rows, draft, perimeterFeet, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+      }),
+      summary(),
+    );
+  };
+  // A promise that changed after the report was written: the list reloads,
+  // and a mark that no longer holds makes the report stale.
+  const backFromPrompt = () => {
+    if (submission.prompt?.code === 'promise_marks_changed') visitPromises.reload();
+    submission.dismissPrompt();
+  };
+
+  if (submission.done) {
+    const doneMarks = promiseMarks
+      .filter((mark) => mark.mark === 'done')
+      .map((mark) => visitPromises.promises.find((promise) => promise.id === mark.id)?.description)
+      .filter(Boolean);
+    return (
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+        <SentSummary result={submission.done.response} doneMarks={doneMarks} />
+      </SavedView>
+    );
+  }
+
+  if (step === 'report') {
+    const showTrace = !!draft && !writing && trace.enabled && service?.traceEligible !== false;
+    let footer;
+    if (submission.prompt) {
+      footer = (
+        <footer className="tech-visit-footer tech-visit-footer--stacked">
+          <ConfirmPrompt prompt={submission.prompt} busy={submission.submitting} onBack={backFromPrompt} onConfirm={() => submission.confirm(summary())} />
+        </footer>
+      );
+    } else if (!draft || stale) {
+      footer = (
+        <StepFooter
+          reason={generateMissing.reason}
+          label={draft ? 'Write it again' : (writeError ? 'Try again' : 'Generate AI report')}
+          busy={writing}
+          disabled={writing}
+          onAction={() => write({ fresh: !!draft })}
+        />
+      );
+    } else {
+      footer = (
+        <CompleteFooter
+          submission={submission}
+          missingReason={completeReason}
+          warn={!!completeMissing.stockRow}
+          label="Complete & send"
+          onSubmit={submit}
+        >
+          {completeMissing.stockRow && !locked && (
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
+          )}
+        </CompleteFooter>
+      );
+    }
+    return (
+      <div className="tech-visit-form-area">
+        <div className="tech-visit-body">
+          <Button type="button" variant="ghost" className="tech-visit-action tech-report-back" disabled={locked || writing} onClick={() => { setEditing(false); setStep('visit'); }}>
+            Back to the visit
+          </Button>
+          {writing && (
+            <WritingView sources={writerSources({
+              productCount: rows.filter((row) => row.active).length,
+              photoCount: Array.isArray(visitPhotos) ? visitPhotos.length : 0,
+              marked: promiseMarks.length > 0,
+              rated: ratingAllowed && Number.isInteger(form.rating),
+            })} />
+          )}
+          {writeError && !writing && <ActionFeedback error className="tech-visit-feedback">{writeError}</ActionFeedback>}
+          {draft && !writing && (
+            <ReportCard
+              draft={draft}
+              editing={editing}
+              stale={stale}
+              locked={locked}
+              writing={writing}
+              photoCount={Array.isArray(visitPhotos) ? visitPhotos.length : 0}
+              traced={!!trace.zone}
+              onEdit={() => setEditing(true)}
+              onDoneEditing={() => setEditing(false)}
+              onChangeText={(text) => setDraft((prev) => ({ ...prev, text }))}
+              onWriteAgain={() => write({ fresh: true })}
+            />
+          )}
+          {showTrace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
+          {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+        </div>
+        {footer}
+      </div>
+    );
+  }
+
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body" {...picker.coverProps}>
+        <fieldset className="tech-visit-form" disabled={locked}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          {productsOpen ? (
+            <ProductsSection
+              products={products}
+              method={sprayMethod}
+              editAmounts={editAmounts}
+              locked={locked}
+              onToggleEdit={() => setEditAmounts((on) => !on)}
+              other={picker.button}
+              popover={picker.popover}
+              onCollapse={() => setProductsOpen(false)}
+            />
+          ) : (
+            <ProductsLine rows={rows} locked={locked} onOpen={() => setProductsOpen(true)} />
+          )}
+          {/* A clip being recorded keeps recording behind the photo manager, so
+              photos wait until the dictation is finished. */}
+          <PhotoStripSection photos={visitPhotos} locked={locked || dictationPending} onOpen={photos.open} />
+          <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
+          {ratingAllowed && (
+            <ActivitySection
+              value={form.rating}
+              scaleLabels={ctx.rating.scaleLabels}
+              locked={locked}
+              onChange={(rating) => setForm((prev) => ({ ...prev, rating, ratingPrefilled: false }))}
+            />
+          )}
+          {tipsAvailable && (
+            <TipSection
+              library={tips}
+              tipId={form.tipId}
+              customTip={form.customTip}
+              locked={locked}
+              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+            />
+          )}
+          {visitPromises.available && visitPromises.promises.length > 0 && (
+            <PromisesSection
+              promises={visitPromises.promises}
+              total={visitPromises.total}
+              marks={form.promiseMarks}
+              locked={locked}
+              onChange={(next) => setField('promiseMarks', next)}
+            />
+          )}
+        </fieldset>
+      </div>
+      <StepFooter
+        reason={draft && !stale ? '' : generateMissing.reason}
+        label={draft && !stale ? 'Back to the report' : (draft ? 'Write it again' : 'Generate AI report')}
+        busy={writing}
+        disabled={writing}
+        onAction={draft && !stale ? () => setStep('report') : () => write({ fresh: !!draft })}
+        coverProps={picker.coverProps}
+      />
+      {picker.sheet}
+    </div>
+  );
+}
+
 // Only an exact true turns the customer recap on (GATE_FAST_COMPLETE_RECAP,
 // delivered as the schedule row's fastCompleteRecapEnabled).
 const recapOn = (service) => service?.recapEnabled === true;
@@ -612,7 +1134,7 @@ function CustomerTextResult({ outcome }) {
 
 // Every product on the sheet. A house-mix tile taps off and on (struck
 // through, never removed); an added product's tile opens its editor.
-function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover }) {
+function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -631,13 +1153,22 @@ function ProductsSection({ products, method, editAmounts, locked, onToggleEdit, 
     other.buttonRef.current?.focus();
     removeRow(editing.productId);
   };
+  const editAmountsButton = (
+    <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={onToggleEdit}>
+      {editAmounts ? 'Done' : 'Edit amounts'}
+    </Button>
+  );
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={onToggleEdit}>
-          {editAmounts ? 'Done' : 'Edit amounts'}
-        </Button>
+        {/* The report flow folds the products back into one line. */}
+        {onCollapse ? (
+          <span className="tech-visit-head-actions">
+            {editAmountsButton}
+            <Button type="button" variant="ghost" className="tech-visit-action" onClick={onCollapse}>Hide</Button>
+          </span>
+        ) : editAmountsButton}
       </div>
       <div className="tech-visit-tile-grid">
         {rows.map((row) => (

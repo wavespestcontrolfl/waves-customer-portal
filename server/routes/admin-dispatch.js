@@ -666,6 +666,43 @@ router.get('/:serviceId/promises', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:serviceId/voice-facts — voice fill for the Fast
+// Complete report flow (GATE_FAST_COMPLETE_REPORT): where the technician
+// put product down (Inside / Outside / Garage) and the pests they named, read
+// from the note they dictated, each fact quoted word for word
+// (services/visit-voice-facts.js). Writes nothing: the sheet shows what was
+// heard and sends it with the completion. A failed read answers
+// { available: true, status: 'failed' } with no facts, never an error, so
+// the sheet carries on without them. Off = 404 { enabled: false }.
+router.post('/:serviceId/voice-facts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').fastCompleteReportLive()) {
+      return res.status(404).json({ enabled: false });
+    }
+    const note = req.body?.note;
+    if (typeof note !== 'string') return res.status(400).json({ error: 'note must be text' });
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'technician_id', 'status', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // A technician reads only their own assigned visit, while it is a
+    // current assignment; admins keep office-wide reach (same rule as the
+    // promise check above).
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
+    if (!technicianVisitRowInScope(req, svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const { readVoiceFacts } = require('../services/visit-voice-facts');
+    const facts = await readVoiceFacts(note);
+    res.json({ available: true, ...facts });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dispatch/:serviceId/completion-profile
 router.get('/:serviceId/completion-profile', async (req, res, next) => {
   try {
