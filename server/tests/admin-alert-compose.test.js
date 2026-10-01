@@ -120,6 +120,15 @@ describe('raiseAdminAlert', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('fyi with the per-emitter fyiRow opt-in is written like a needs-you row, severity stays fyi, and fyiRow never reaches notifyAdmin', async () => {
+    const out = await raiseAdminAlert('lead', spec({ area: 'Leads', severity: 'fyi', link: '/admin/leads?lead=l-1', subject: { type: 'lead', id: 'l-1' }, doneWhen: 'already_done' }), { bell: true, dedupeKey: 'k2', fyiRow: true });
+    expect(out).toEqual({ id: 'n-1' });
+    const [category, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(category).toBe('lead');
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'k2', link: '/admin/leads?lead=l-1', metadata: { area: 'Leads', severity: 'fyi', doneWhen: 'already_done' } });
+    expect(opts).not.toHaveProperty('fyiRow');
+  });
+
   test('broken is refused and points at deliverOpsDigest', async () => {
     await expect(raiseAdminAlert('system', spec({ severity: 'broken' }))).rejects.toMatchObject({ code: 'ADMIN_ALERT_RULE', violations: ['broken_uses_ops_digest'], message: expect.stringContaining('deliverOpsDigest') });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

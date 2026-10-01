@@ -322,6 +322,15 @@ function calculateOverall(scores = {}) {
   return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
 }
 
+// The typed form's landscape_condition suggested from the preview's 0-100
+// overall, on the same 85/70/55 bands the customer report uses. Only the four
+// score-derivable options are ever suggested — Declining / Recovering need
+// visit history — and a visit with no score suggests nothing.
+const LANDSCAPE_CONDITION_BY_BAND = { strong: 'Excellent', healthy: 'Good', watch: 'Fair', needs_attention: 'Poor' };
+function suggestLandscapeCondition(overallScore) {
+  return LANDSCAPE_CONDITION_BY_BAND[scoreStatus(overallScore)] || null;
+}
+
 // ── Vision API calls (mirror lawn-assessment.js) ────────────────────────────────
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -478,7 +487,7 @@ async function analyzePhoto(base64Image, mimeType = 'image/jpeg') {
 
 // ── Tech-facing findings (exception-based closeout) ─────────────────────────────
 
-const { buildTreeShrubVisualCategories } = require('./service-report/tree-shrub-visual-categories');
+const { buildTreeShrubVisualCategories, scoreStatus } = require('./service-report/tree-shrub-visual-categories');
 
 // Per-category tech-facing copy for a FLAGGED (watch/attention) signal. Stays in
 // "signals" language — the tech confirms before we ever assert a pest/disease.
@@ -1000,6 +1009,7 @@ module.exports = {
   isCompleteVisionResult,
   toCategoryScores,
   calculateOverall,
+  suggestLandscapeCondition,
   averageScores,
   isValidTreeShrubScores,
   normalizeTreeShrubScores,

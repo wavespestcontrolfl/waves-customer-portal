@@ -83,10 +83,13 @@ function completionRequestHashSegments(body) {
   // meets the prompt and then confirms must replay/resume the original
   // attempt, not strand it on a payload mismatch — so the bit is excluded
   // from both segments, like idempotencyKey and completionTelemetry
-  // (codex P1 on the reconciliation round).
+  // (codex P1 on the reconciliation round). promiseMarksConfirmed is the same
+  // kind of bit: an office edit between a failed claimed attempt and its
+  // retry can raise the promise check's prompt only on the retry, and its
+  // confirmation must resume that attempt (Codex #5516).
   const {
     idempotencyKey, timeOnSite, completionTelemetry, backfill,
-    reportReconcileConfirmed, ...stableBody
+    reportReconcileConfirmed, promiseMarksConfirmed, ...stableBody
   } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))

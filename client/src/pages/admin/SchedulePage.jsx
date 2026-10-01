@@ -42,12 +42,14 @@ import useLockBodyScroll from "../../hooks/useLockBodyScroll";
 import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
+import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
   isCustomAmountPreset,
@@ -689,9 +691,6 @@ const CUSTOMER_INTERACTION_ALIASES = {
   not_home_partial: "not_home_partial_access",
   concern: "customer_specific_concern",
 };
-const COMPLETION_PHOTO_MAX_BYTES = 1.5 * 1024 * 1024;
-const COMPLETION_PHOTO_MAX_DIMENSION = 1600;
-const COMPLETION_PHOTO_QUALITY_STEPS = [0.82, 0.72, 0.62, 0.54];
 
 function normalizeCustomerInteractionValue(value) {
   return CUSTOMER_INTERACTION_ALIASES[value] || value || "";
@@ -699,61 +698,6 @@ function normalizeCustomerInteractionValue(value) {
 
 function isCustomerConcernInteraction(value) {
   return normalizeCustomerInteractionValue(value) === "customer_specific_concern";
-}
-
-function dataUrlApproxBytes(dataUrl) {
-  const encoded = String(dataUrl || "").split(",")[1] || "";
-  return Math.ceil((encoded.length * 3) / 4);
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read photo"));
-    };
-    img.src = url;
-  });
-}
-
-async function prepareCompletionPhoto(file) {
-  if (!file?.type?.startsWith("image/")) {
-    throw new Error("Only image files can be attached.");
-  }
-  const image = await loadImageFromFile(file);
-  const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height);
-  let scale = largestSide > COMPLETION_PHOTO_MAX_DIMENSION
-    ? COMPLETION_PHOTO_MAX_DIMENSION / largestSide
-    : 1;
-
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(image, 0, 0, width, height);
-
-    for (const quality of COMPLETION_PHOTO_QUALITY_STEPS) {
-      const data = canvas.toDataURL("image/jpeg", quality);
-      if (dataUrlApproxBytes(data) <= COMPLETION_PHOTO_MAX_BYTES) {
-        return {
-          data,
-          name: file.name?.replace(/\.[^.]+$/, ".jpg") || "service-photo.jpg",
-          capturedAt: new Date().toISOString(),
-        };
-      }
-    }
-    scale *= 0.75;
-  }
-  throw new Error("Photo is too large to attach to completion.");
 }
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
@@ -1115,6 +1059,19 @@ export function shouldCaptureHandwrittenNotes({ notes, installedText = null, dra
 // something the report leaves out. Returns the confirm() text, or null for
 // any other error. Like the reconciliation 409 it keeps the idempotency key,
 // so the confirmed resubmit replays under the same key.
+export const PROMISE_MARKS_LOADING_ALERT = "Still loading the promises you marked. Try again in a moment.";
+// The promise list is an optional read: a stalled one gives up rather than
+// hold the form (Codex #5516).
+const PROMISE_CHECK_TIMEOUT_MS = 15000;
+
+export function completionPromiseMarksPrompt(error) {
+  if (error?.code !== "promise_marks_changed") return null;
+  const lead = String(error?.message || "").trim();
+  return `${lead}\n\nOK — send as is.\nCancel — go back (the promise list reloads).`;
+}
+
+export const PROMISE_MARKS_CHANGED_PROMPT = "You changed a promise mark after the report was written, so the report may not match it.\n\nOK — send as is.\nCancel — go back and write the report again.";
+
 export function completionReportRulesPrompt(error) {
   if (error?.code !== "report_rules_review") return null;
   const lead = String(error?.message || "").trim();
@@ -13151,6 +13108,10 @@ export function CompletionPanel({
   // merely use the report's headings, and is the base completion compares
   // the submitted report against for the edit heads-up (Codex #5500).
   const installedReportDraftRef = useRef(null);
+  // The promise marks the installed report was written with (pending while
+  // a Generate request is out): a later change asks before sending.
+  const pendingGenerationPromiseSignatureRef = useRef(null);
+  const generationPromiseSignatureRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
@@ -13321,6 +13282,21 @@ export function CompletionPanel({
   // and the tech's picks. `techTips.available === false` (gate off) keeps
   // the observations/recommendations textareas above in place.
   const [techTips, setTechTips] = useState(null);
+  // The promise check (owner "ok yes add these" 2026-10-01): the open
+  // promises the tech can mark, and the marks by promise id.
+  const [promiseCheck, setPromiseCheck] = useState(null);
+  const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
+  const [promiseReloadKey, setPromiseReloadKey] = useState(0);
+  // Older promises a restored draft had marked, beyond the newest ten the
+  // list shows: asked for by id so the mark is kept and shown (Codex #5516).
+  // `promiseIncludeAnswered` is the include list the last load answered.
+  const [promiseIncludeIds, setPromiseIncludeIds] = useState([]);
+  const [promiseIncludeAnswered, setPromiseIncludeAnswered] = useState("");
+  // The last load failed (or timed out): kept apart from a list that came
+  // back empty, so a failed read never drops the marks (Codex #5516).
+  const [promiseCheckUnavailable, setPromiseCheckUnavailable] = useState(false);
+  const promiseIncludeKey = promiseIncludeIds.join(",");
+  const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
   const [selectedTipIds, setSelectedTipIds] = useState([]);
@@ -14704,6 +14680,93 @@ export function CompletionPanel({
     return () => { cancelled = true; };
   }, [service.id]);
 
+  // The promise check: listed only while the writer rules are live on a
+  // visit the writer covers (the server decides). A failed load shows no
+  // card and keeps any marks as they stand; marking is optional.
+  useEffect(() => {
+    let cancelled = false;
+    setPromiseCheck(null);
+    if (!service.id) {
+      setPromiseCheckLoading(false);
+      return () => { cancelled = true; };
+    }
+    setPromiseCheckLoading(true);
+    const include = promiseIncludeKey;
+    // A deadline on every supported browser (AbortSignal.timeout is missing
+    // on older WebKit): a controller and a timer, which also cancels a load
+    // this effect has moved on from (Codex #5516).
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), PROMISE_CHECK_TIMEOUT_MS) : null;
+    const timeout = controller ? { signal: controller.signal } : {};
+    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`, timeout)
+      .then((data) => {
+        if (cancelled) return;
+        setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
+        setPromiseCheckUnavailable(false);
+        setPromiseIncludeAnswered(include);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPromiseCheck(null);
+        setPromiseCheckUnavailable(true);
+      })
+      .finally(() => {
+        clearTimeout(deadline);
+        if (!cancelled) setPromiseCheckLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      controller?.abort();
+    };
+  }, [service.id, promiseReloadKey, promiseIncludeKey]);
+  const visitPromises = promiseCheck?.promises || [];
+  // Marks on promises the list has not shown yet and has not been asked
+  // for: kept as they stand until the list answers for them. Nothing is
+  // asked of a list that could not be read.
+  const unlistedMarkIds = promiseCheckLoading || promiseCheckUnavailable ? [] : Object.keys(promiseMarks).filter((id) => (
+    !visitPromises.some((promise) => promise.id === id)
+    && !(promiseIncludeAnswered ? promiseIncludeAnswered.split(",") : []).includes(id)
+  ));
+  const unlistedMarkKey = unlistedMarkIds.join(",");
+  useEffect(() => {
+    if (!unlistedMarkKey) return;
+    setPromiseIncludeIds((ids) => [...new Set([...ids, ...unlistedMarkKey.split(",")])].slice(0, 50));
+  }, [unlistedMarkKey]);
+  // No marks while Quick complete hides the report, on a backdated closeout
+  // (the marks would never apply) or on a visit that did no work: declined
+  // or incomplete (Codex #5516).
+  const promiseMarksSuppressed = quickComplete || backfillCloseout
+    || visitOutcome === "customer_declined" || visitOutcome === "incomplete";
+  // Marked, listed promises only, each with the wording version the tech saw.
+  // While the list cannot be read, the marks go as the technician made them:
+  // the server checks each one against the promise as it stands, and asks
+  // when one changed (Codex #5516).
+  const markedPromises = Object.entries(promiseMarks || {}).map(([id, entry]) => ({ id, version: entry?.version }));
+  const promiseMarksForRequest = promiseMarksSuppressed ? []
+    : promiseMarksPayload(promiseMarks, promiseCheckUnavailable ? markedPromises : visitPromises);
+  // The marks that still hold: once the list loads, only marks on a listed
+  // promise's current wording (a restored mark on a reworded promise drops
+  // out); while it loads, or while it has yet to answer for a marked
+  // promise it did not show, the marks as they stand (so a restore never
+  // clears a good report early).
+  const validPromiseMarks = promiseCheckLoading || promiseCheckUnavailable || unlistedMarkIds.length
+    ? promiseMarks
+    : Object.fromEntries(visitPromises.flatMap((promise) => {
+      const entry = currentMark(promiseMarks, promise);
+      return entry ? [[promise.id, entry]] : [];
+    }));
+  // Marks the list has not answered for yet (still loading, or an older
+  // promise still being asked for): a report written now would leave them
+  // out while completion later applied them, so Generate and Complete wait
+  // (Codex #5516).
+  // Marks that will not be sent (a declined or incomplete visit, Quick
+  // complete, a backdated closeout) never hold anything (Codex #5516).
+  const promiseMarksPending = !promiseMarksSuppressed && promiseMarksSignature(promiseMarks).length > 0
+    && (promiseCheckLoading || unlistedMarkIds.length > 0);
+  // The marks as the staleness check and the report heads-up compare them.
+  const effectivePromiseSignature = JSON.stringify(promiseMarksSignature(promiseMarksSuppressed ? {} : validPromiseMarks));
+
   useEffect(() => {
     let cancelled = false;
     setProtocolActions([]);
@@ -15064,6 +15127,8 @@ export function CompletionPanel({
       recommendationsText.trim() ||
       selectedTipIds.length ||
       customTip.trim() ||
+      // A promise mark is tech input on its own (a mark-only draft saves).
+      promiseMarksSignature(promiseMarks).length ||
       parkedFound.trim() ||
       parkedNext.trim() ||
       nextVisitNote.trim() ||
@@ -15222,6 +15287,9 @@ export function CompletionPanel({
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
         installedReportDraft: installedReportDraftRef.current,
+        // The promise check's marks restore with the draft they shaped.
+        promiseMarks,
+        generationPromiseSignature: generationPromiseSignatureRef.current,
         // Whether that installed report was actually generated WITH photo
         // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
         // a reload/billing-detour doesn't forget a grounded draft is
@@ -15350,6 +15418,8 @@ export function CompletionPanel({
     service.address,
     service.serviceAddress,
     service.propertyAddress,
+    // A mark is operator input: a mark-only change must save the draft.
+    promiseMarks,
   ]);
 
   function restoreDraft() {
@@ -15635,6 +15705,12 @@ export function CompletionPanel({
     installedReportDraftRef.current = typeof savedDraft.installedReportDraft === "string" && savedDraft.installedReportDraft
       ? savedDraft.installedReportDraft
       : generatedReportTextRef.current;
+    setPromiseMarks(savedDraft.promiseMarks && typeof savedDraft.promiseMarks === "object" && !Array.isArray(savedDraft.promiseMarks)
+      ? savedDraft.promiseMarks
+      : {});
+    generationPromiseSignatureRef.current = typeof savedDraft.generationPromiseSignature === "string"
+      ? savedDraft.generationPromiseSignature
+      : null;
     // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
     // field, which defaults to false (byte-identical to this fix not
     // existing yet: nothing tracked, nothing invalidates).
@@ -16115,6 +16191,7 @@ export function CompletionPanel({
     // the OLD flag/shape, self-invalidating a draft the tech never touched
     // the instant the flag changes.
     generationInputsRef.current = buildGenerationInputsSnapshot();
+    generationPromiseSignatureRef.current = pendingGenerationPromiseSignatureRef.current;
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -16463,8 +16540,11 @@ export function CompletionPanel({
       // on the customer report" directly, with no separate opt-in step).
       ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
+      // The promise check: the report says only what the tech marked.
+      ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
       ...typedFindingsPayload,
     };
+    pendingGenerationPromiseSignatureRef.current = effectivePromiseSignature;
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
       productsApplied.length > 0 ||
@@ -16492,7 +16572,9 @@ export function CompletionPanel({
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
-      (isLawn && lawnAssessmentReady === "failed");
+      (isLawn && lawnAssessmentReady === "failed") ||
+      // A marked promise is visit detail the report can speak to (Codex #5516).
+      promiseMarksForRequest.length > 0;
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied, dryDown) {
@@ -17264,7 +17346,7 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false } = {}) {
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false, rulesConfirmed = false, promisesConfirmed = false } = {}) {
     // The status poll's "resumable" verdict re-enters here while submitting
     // is STILL true (the button stayed in its completing state through the
     // whole chain) — that re-entry is the continuation of the same logical
@@ -17300,6 +17382,22 @@ export function CompletionPanel({
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
+      return;
+    }
+    // Marks restored with a draft are checked against the promise list once
+    // it loads; completing before then would drop them (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !promisesConfirmed && !resumingPoll && promiseMarksPending) {
+      alert(PROMISE_MARKS_LOADING_ALERT);
+      return;
+    }
+    // A promise mark changed after the report was written and the tech kept
+    // their edited report (an untouched one clears itself): the report may
+    // not match the marks, so the tech decides (Codex #5516).
+    if (!reconcileConfirmed && !rulesConfirmed && !resumingPoll
+      && installedReportDraftRef.current
+      && generationPromiseSignatureRef.current != null
+      && generationPromiseSignatureRef.current !== effectivePromiseSignature
+      && !window.confirm(PROMISE_MARKS_CHANGED_PROMPT)) {
       return;
     }
     const specialtyProductConflict = exclusiveProtocolProductConflict(
@@ -17836,6 +17934,12 @@ export function CompletionPanel({
         // edited from, and the tech's "send as is" on the resubmit.
         reportDraftBase: installedReportDraftRef.current || null,
         ...(rulesConfirmed ? { reportRulesConfirmed: true } : {}),
+        // The tech chose to send though a marked promise changed since the
+        // report was written (promise_marks_changed).
+        ...(promisesConfirmed ? { promiseMarksConfirmed: true } : {}),
+        // The promise check: Done closes the promise in the office list,
+        // Partly adds the still-left note (applied after the save).
+        ...(promiseMarksForRequest.length ? { promiseMarks: promiseMarksForRequest } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -18148,7 +18252,7 @@ export function CompletionPanel({
       const result = await onSubmit(service.id, body);
       if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
-      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed);
+      return settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed, promisesConfirmed);
     }
     setSubmitting(false);
   }
@@ -18170,7 +18274,7 @@ export function CompletionPanel({
 
   // Every non-success outcome of a completion POST — the fresh build and
   // the committed replay end here.
-  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false) {
+  async function settleCompletionSubmitError(e, reconcileConfirmed, rulesConfirmed = false, promisesConfirmed = false) {
     // Any outcome but another quiet side-effects retry ends the retry
     // COUNT — the committed flag and body snapshot deliberately survive
     // (see the ref declarations): after a committed 409, even the manual
@@ -18195,7 +18299,7 @@ export function CompletionPanel({
     if (reconcileText) {
       setSubmitting(false);
       if (window.confirm(reconcileText)) {
-        return handleSubmit(true, { rulesConfirmed });
+        return handleSubmit(true, { rulesConfirmed, promisesConfirmed });
       }
       return;
     }
@@ -18205,8 +18309,20 @@ export function CompletionPanel({
     if (rulesText) {
       setSubmitting(false);
       if (window.confirm(rulesText)) {
-        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true });
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed: true, promisesConfirmed });
       }
+      return;
+    }
+    // A marked promise changed after the report was written (409, key
+    // preserved): OK sends as is; Cancel reloads the promises so the tech
+    // can mark them again and write the report again.
+    const promiseText = completionPromiseMarksPrompt(e);
+    if (promiseText) {
+      setSubmitting(false);
+      if (window.confirm(promiseText)) {
+        return handleSubmit(reconcileConfirmed, { rulesConfirmed, promisesConfirmed: true });
+      }
+      setPromiseReloadKey((key) => key + 1);
       return;
     }
     if (completionResumeOwedError(e)) {
@@ -18536,6 +18652,9 @@ export function CompletionPanel({
       // below invalidates an in-flight response on settle like any other
       // input
       aiReportIncludeComms,
+      // a promise marked (or re-marked) after generation changes what the
+      // report should say about it
+      effectivePromiseSignature,
     ]);
   }
   useEffect(() => {
@@ -18556,7 +18675,20 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
+  // The installed report was written with promise marks that no longer
+  // hold (a restored draft whose promise was reworded since, which the
+  // restore's fresh watcher baseline cannot see): an untouched report clears
+  // itself like any changed input; an edited one asks at submit (Codex #5516).
+  useEffect(() => {
+    if (promiseCheckLoading || generating) return;
+    const written = generationPromiseSignatureRef.current;
+    if (written == null || written === effectivePromiseSignature) return;
+    const installed = generatedReportTextRef.current;
+    if (installed && String(notes || "").trim() === installed) invalidateGeneratedReportOnTypedEdit();
+    // promiseMarks: a restore sets marks and the report together, and its
+    // stale marks may leave the effective signature itself unchanged.
+  }, [effectivePromiseSignature, promiseCheckLoading, generating, promiseMarks]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -19810,6 +19942,16 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
+            {!promiseMarksSuppressed && promiseCheck && (
+              <PromiseCheck
+                promises={visitPromises}
+                total={promiseCheck.total}
+                marks={promiseMarks}
+                onChange={setPromiseMarks}
+                disabled={generating || submitting}
+                tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, onInk: M.actionFg, font }}
+              />
+            )}
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
@@ -19826,6 +19968,10 @@ export function CompletionPanel({
                   // it. Hold the action until the transcript has landed.
                   if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                     alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                    return;
+                  }
+                  if (promiseMarksPending) {
+                    alert(PROMISE_MARKS_LOADING_ALERT);
                     return;
                   }
                   if (dictation.listening) dictation.toggle();
@@ -22246,6 +22392,17 @@ export function CompletionPanel({
               </div>
             )}{" "}
           </div>
+          {!promiseMarksSuppressed && promiseCheck && (
+            <PromiseCheck
+              promises={visitPromises}
+              total={promiseCheck.total}
+              marks={promiseMarks}
+              onChange={setPromiseMarks}
+              disabled={generating || submitting}
+              compact
+              tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, onInk: D.white }}
+            />
+          )}
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
@@ -22262,6 +22419,10 @@ export function CompletionPanel({
                 // it. Hold the action until the transcript has landed.
                 if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
                   alert("Stop dictation and wait for the transcript to appear in your notes first.");
+                  return;
+                }
+                if (promiseMarksPending) {
+                  alert(PROMISE_MARKS_LOADING_ALERT);
                   return;
                 }
                 if (dictation.listening) dictation.toggle();

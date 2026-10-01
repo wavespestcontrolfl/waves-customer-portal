@@ -506,9 +506,11 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 // round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
 // either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
 // the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+// The label-facts boundary recheck reports its own unreadable-visit code the same way (follow-up to #5416, Codex #5520 P2).
+const RETRYABLE_BOUNDARY_CODES = new Set(['LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY']);
 function isRetryableEtaBoundaryRefusal(result) {
   return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
-    && result.retryable === true && result.code === 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY';
+    && result.retryable === true && RETRYABLE_BOUNDARY_CODES.has(result.code);
 }
 
 // Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
@@ -1013,6 +1015,13 @@ async function labelFactsRefusal({ claim, reply }) {
   if (!(claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12')))) return null;
   const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
   if (!labelReason) return null;
+  if (require('./agent-decision-send-checks').isLabelRecheckInfrastructureFailure(labelReason)) {
+    // The latest visit could not be READ (Codex #5416 r31 P2): nothing is known to be stale, so the claim is RELEASED
+    // like the live-ETA case - reservation settled, parked siblings reopened, the draft falls through to a
+    // human-visible suggestion that the reviewer-send seam rechecks again. Never recorded as a failed auto-send.
+    logger.warn(`[sms-auto-send] label facts recheck unreadable (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    return { release: true, reason: labelReason, note: 'Auto-send paused: the label timing could not be rechecked — suggestion reopened.' };
+  }
   logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
   return { reason: labelReason, note: 'Auto-send held: the label timing in the draft is no longer current — suggestion reopened.' };
 }
@@ -1052,10 +1061,10 @@ async function liveEtaRefusal({ claim, reply }) {
 // Release a claim whose live ETA could not be rechecked: the claim row is removed (never auto_send_failed), the reservation
 // settled, parked siblings reopened; the verified draft falls through to a human-visible suggestion that the reviewer-send
 // seam rechecks again. Shared by the early executor check and the provider-boundary refusal.
-async function releaseClaimForEtaRetry({ claim, reopenParked }) {
+async function releaseClaimForEtaRetry({ claim, reopenParked, note = 'Auto-send paused: the live ETA could not be rechecked — suggestion reopened.' }) {
   await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
   await releaseClaim(claim.decisionId);
-  await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+  await reopenParked(note);
 }
 
 // BILLING (Zelle offer / denial, payment status): autoSendBillingRecheck. Codex round-49 P1: the fingerprint of every billing row
@@ -1139,7 +1148,7 @@ async function dispatchClaimedSend({
   try {
     const rechecks = await autoSendPreSendRechecks({ claim, gratitudeLane, reply, customerId, inboundMessage });
     if (rechecks.refusal?.release) {
-      await releaseClaimForEtaRetry({ claim, reopenParked });
+      await releaseClaimForEtaRetry({ claim, reopenParked, ...(rechecks.refusal.note ? { note: rechecks.refusal.note } : {}) });
       return { sent: false, reason: rechecks.refusal.reason, retryable: true };
     }
     if (rechecks.refusal) {
@@ -1183,8 +1192,9 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
     // Same release path as the early executor check: release the claim (never auto_send_failed),
     // settle the reservation, reopen parked siblings; the verified draft falls through to a
     // human-visible suggestion that the reviewer-send seam rechecks again.
-    logger.warn(`[sms-auto-send] live ETA recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
-    await releaseClaimForEtaRetry({ claim, reopenParked });
+    const what = result.code === 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' ? 'the label timing' : 'the live ETA';
+    logger.warn(`[sms-auto-send] ${what === 'the label timing' ? 'label facts' : 'live ETA'} recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await releaseClaimForEtaRetry({ claim, reopenParked, note: `Auto-send paused: ${what} could not be rechecked — suggestion reopened.` });
     return { sent: false, reason: result.code, retryable: true };
   }
 

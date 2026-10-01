@@ -3099,7 +3099,8 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
       expect(r.factsBlock).not.toContain('keep people and pets off');
       expect(r.converged).toBe(false);
-      expect(r.labelFactsSnapshot ?? null).toBeNull();
+      expect(r.labelFactsSnapshot?.visit_date ?? null).toBeNull(); // no visit is quoted (an asked-only record may remain, r31 P2)
+      expect(r.labelFactsSnapshot?.sentences ?? []).toEqual([]);
     });
 
     test('r13: an elliptical follow-up after a question about another visit gets none on file, and the sentence is then held', async () => {
@@ -3192,7 +3193,8 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).toContain(NONE);
       expect(r.factsBlock).not.toContain('keep people and pets');
       expect(r.converged).toBe(false);
-      expect(r.labelFactsSnapshot ?? null).toBeNull();
+      expect(r.labelFactsSnapshot?.visit_date ?? null).toBeNull(); // no visit is quoted (an asked-only record may remain, r31 P2)
+      expect(r.labelFactsSnapshot?.sentences ?? []).toEqual([]);
       // a row with no phone is not provably the sender's; so is an unknown sender phone with any inbound row shown
       r = await run('Can the dogs go out now?', bad, [row({ fromPhone: null })]);
       expect(r.factsBlock).toContain(NONE);
@@ -3217,7 +3219,8 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
       expect(r.factsBlock).not.toContain('keep people and pets off');
       expect(r.converged).toBe(false);
-      expect(r.labelFactsSnapshot ?? null).toBeNull();
+      expect(r.labelFactsSnapshot?.visit_date ?? null).toBeNull(); // no visit is quoted (an asked-only record may remain, r31 P2)
+      expect(r.labelFactsSnapshot?.sentences ?? []).toEqual([]);
       // an English question that gets a Spanish paraphrase is held by the guard too
       const en = await run('How long until the dogs can go out?', [spanish, spanish, spanish]);
       expect(en.factsBlock).toContain(`- ${RE}`);
@@ -3230,10 +3233,95 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(handoff.converged).toBe(true);
     });
 
-    test('a reply that copies no label sentence carries no snapshot', async () => {
+    test('a reply that copies no label sentence carries no visit, only the kinds the thread asked (follow-up to #5416, r31 P2)', async () => {
       const r = await run('Will rain wash it off?', [draft('A treatment needs to dry and bond to surfaces; after that it holds up to weather.')]);
       expect(r.converged).toBe(true);
-      expect(r.labelFactsSnapshot).toBeNull();
+      expect(r.labelFactsSnapshot).toEqual({ asked: ['rain'], sentences: [] });
     });
   });
+});
+
+describe('follow-up (#5416 r29): counted prior-visit references', () => {
+  const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, '2026-09-29', '2026-09-30');
+
+  test('a counted visit, service or treatment reference names another visit', () => {
+    for (const text of [
+      'When can the dogs go out after the treatment three visits ago?', 'two visits ago', '3 treatments ago', 'a couple services back',
+      'a few sprays ago', 'couple visits ago', 'few treatments back', 'four applications before', 'two rounds back', 'the spray 2 appointments ago', 'several treatments earlier',
+    ]) expect([text, other(text)]).toEqual([text, true]);
+  });
+
+  test('the latest visit with no count stays the latest visit', () => {
+    for (const text of ['Can the dogs go out after the treatment?', 'after the visit, how long?', 'the spray yesterday']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+  });
+});
+
+describe('follow-up (#5416 prod sweep): the inbound language check counts only language', () => {
+  const un = labelFactsLib.isUnverifiedLanguageInbound;
+  const english = (text) => !un(text) && labelFactsLib.isEnglishInbound(text);
+
+  test('reactions, names, addresses and short English replies are English', () => {
+    for (const text of [
+      'No growth', 'A min away', 'Running late', 'Liked “See you Tuesday between 8 and 10”', 'Loved “Thanks!”', 'Emphasized “The gate code is 1234”',
+      'Hi this is Marisol Quintanilla-Bergstrom', 'My address is 4821 Weatherby Oaks Cir, Parrish', '4821 weatherby oaks cir', 'Gate code is 2580, Thibodeaux residence', 'Sounds good Kowalczyk',
+      'CAN THE DOGS GO OUT NOW', 'Can The Dogs Go Out Now',
+    ]) expect([text, english(text)]).toEqual([text, true]);
+  });
+
+  test('a short text is held on positive evidence: a function word of a language the guards cannot read', () => {
+    for (const text of ['Dlaczego nie', 'Poczekaj dwie godziny', 'khi nao', 'KIEDY PSY MOGA WYJSC', 'Kailan Puwedeng Lumabas Ang Aso', '2 godziny wystarczy?', '2 hours later czy mozna wyjsc?', '2godziny wystarczy?', 'Pot iesi?', 'Kutyak kimehetnek?', 'Kutyak mehetnek outside?', 'Can Fido mehet?']) { // #5520 r1-r3: a number glued to a word keeps the word
+      expect([text, english(text)]).toEqual([text, false]);
+    }
+  });
+
+  test('a reaction in an unreadable script is still not English', () => {
+    expect(english('Нравится «Спасибо»')).toBe(false);
+  });
+});
+
+describe('follow-up (#5416 r30): first-person follow-ups inherit the thread', () => {
+  test('a short first-person modal follow-up to a label question asks that kind', () => {
+    for (const current of ['Can we now?', 'Can I now?', 'Are we allowed now?', 'Can we please now?', 'Can we just go out now?', 'Could we go out now?', 'Should we wait?', 'Am I ok to walk on it?', 'Is everyone ok to go out?']) {
+      expect([current, labelFactsLib.askedLabelKinds([current, 'When can the dogs go out after the spray?'])]).toEqual([current, ['reentry']]);
+    }
+  });
+  test('a first-person request about something else does not inherit', () => {
+    for (const current of ['Can I pay my bill?', 'Can we reschedule?', 'Can you call me?', 'can I clean the grill now?', 'can you spray the garage']) {
+      expect([current, labelFactsLib.askedLabelKinds([current, 'When can the dogs go out after the spray?'])]).toEqual([current, []]);
+    }
+  });
+});
+
+describe('follow-up (#5416 r34): whether watering hurts the treatment asks rainfast', () => {
+  test('an effect question about sprinklers / irrigation asks rain; general watering advice asks no kind', () => {
+    for (const text of ['Will the sprinklers weaken it?', 'will the sprinklers hurt it', 'will the sprinklers be a problem for the treatment?', 'does the irrigation dilute it']) {
+      expect([text, labelFactsLib.askedLabelKinds(text).includes('rain')]).toEqual([text, true]);
+    }
+    for (const text of ['what days should I water my lawn?', 'how often should I water', 'Sprinkler issue in zone 2', 'my irrigation has a problem', 'Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill?', 'Will irrigation reduce my water bill if it runs all night?', 'Will sprinklers hurt my new plants if it runs overnight?']) expect([text, labelFactsLib.askedLabelKinds(text)]).toEqual([text, []]); // #5520 r1 P2
+  });
+  test('a bare contextual answer to it is held', () => {
+    const asked = labelFactsLib.askedLabelKinds(['Will the sprinklers weaken it?']);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming("No, they won't make it less effective.", '', asked)).toBe(true);
+  });
+});
+
+test('#5520 r1 review: a watering question that also names a re-entry topic asks both kinds', () => {
+  expect(labelFactsLib.askedLabelKinds('Will the sprinklers hurt the dogs if they walk on it?')).toEqual(['reentry', 'rain']);
+});
+
+test('#5520 r3: a treatment earlier TODAY is the latest visit, not an older one', () => {
+  expect(labelFactsLib.inboundRefersToOtherVisit('You did a treatment earlier today, can the dogs go out?', '2026-09-30', '2026-09-30')).toBe(false);
+  expect(labelFactsLib.inboundRefersToOtherVisit('two treatments earlier, can the dogs go out?', '2026-09-30', '2026-10-01')).toBe(true);
+});
+
+test('#5520 r4: names count again when an unknown lowercase word remains; effectiveness wording asks rain', () => {
+  const english = (t) => !labelFactsLib.isUnverifiedLanguageInbound(t) && labelFactsLib.isEnglishInbound(t);
+  expect(english('Hi Fido kimehet most kerlek please?')).toBe(false);
+  expect(english('Hi this is Marisol Quintanilla-Bergstrom')).toBe(true);
+  for (const t of ['Will irrigation affect how well it works?', 'Will the sprinklers affect whether it works?', 'Will the sprinklers make it less effective?']) {
+    expect([t, labelFactsLib.askedLabelKinds(t).includes('rain')]).toEqual([t, true]);
+  }
+  for (const t of ['Will the sprinklers hurt my new plants?', 'Will irrigation reduce my water bill if it runs all night?']) expect([t, labelFactsLib.askedLabelKinds(t)]).toEqual([t, []]);
 });

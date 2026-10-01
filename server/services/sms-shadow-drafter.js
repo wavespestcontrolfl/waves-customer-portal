@@ -4228,11 +4228,17 @@ function logUnreadableThread(thread, context, lane) {
   logger.warn(`[sms-shadow] label-facts thread unreadable (${thread.noSender ? 'no_inbound_phone' : 'no_same_sender_rows'}); customer ${context?.customer?.id || 'unknown'}, lane ${lane || 'live'} - facts none on file for a short follow-up`);
 }
 
-function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
-  if (!labelFacts || !reply) return null;
-  return labelFactsLib.labelFactsSnapshotFor({
-    labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock), asked: labelFactsLib.askedLabelKinds(inboundMessage),
-  });
+function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage, realAnswers = false }) {
+  if (!reply) return null;
+  const asked = labelFactsLib.askedLabelKinds(inboundMessage);
+  const copied = labelFacts
+    ? labelFactsLib.labelFactsSnapshotFor({ labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock), asked })
+    : null;
+  if (copied) return copied;
+  // A real-answers draft that copied no label sentence still records which label kinds the THREAD asked (Codex #5416 r31 P2):
+  // a reviewer's edit is then checked at send time against the same question the draft was ("Can the dogs go outside?" then
+  // "Is it okay now?" asked re-entry only - the current message alone would read as both kinds). No visit: nothing to recheck.
+  return realAnswers && asked.length ? { asked, sentences: [] } : null;
 }
 
 // The days a send-time recheck compares against: the picker's that minted the
@@ -5588,7 +5594,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
       paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock, inboundMessage, context }),
-      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
+      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts, realAnswers: realAnswersApplied }),
     };
   }
 
@@ -5701,7 +5707,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // The payment-status sentences the FINAL reply copies (null = none): re-rendered from live data before any send.
     paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock, inboundMessage, context }),
     // The LABEL FACTS source, only when the final reply copies a label sentence.
-    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts }),
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts, realAnswers: realAnswersApplied }),
   };
 }
 

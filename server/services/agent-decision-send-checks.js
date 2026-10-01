@@ -189,6 +189,16 @@ function blockReasonIsEtaInfrastructure(blockReason) {
   const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
 }
+// LABEL FACTS (Codex #5416 r31 P2): a label recheck that could not READ the latest visit says nothing about the message
+// either - the attempt is refused, but the decision is not retired as stale.
+const LABEL_RECHECK_INFRASTRUCTURE_REASONS = new Set(['label_facts_recheck_failed']);
+const isLabelRecheckInfrastructureFailure = (reason) => LABEL_RECHECK_INFRASTRUCTURE_REASONS.has(reason);
+function blockReasonIsLabelInfrastructure(blockReason) {
+  const m = /^label timing no longer current \(([a-z_]+)\)$/.exec(String(blockReason || ''));
+  return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
+}
+/** Any send-time recheck that could not read its state (live ETA or label facts): refuse, keep the decision retryable. */
+const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -319,7 +329,7 @@ function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, te
 // A recheck that could not READ the visit rides the bounded retry rail; every other refusal is terminal.
 function labelFactsBoundaryVerdict(reason) {
   if (reason == null) return { ok: true };
-  const retryable = reason === 'label_facts_recheck_failed';
+  const retryable = isLabelRecheckInfrastructureFailure(reason);
   return {
     ok: false,
     code: retryable ? 'LABEL_FACTS_CHECK_FAILED_AT_BOUNDARY' : 'LABEL_FACTS_STALE_AT_BOUNDARY',
@@ -461,4 +471,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable };
+module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsRecheckInfrastructure };

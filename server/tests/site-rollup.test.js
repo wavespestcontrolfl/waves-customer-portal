@@ -147,6 +147,7 @@ describe('getRollup', () => {
     const builder = {
       where: jest.fn(() => builder),
       whereNull: jest.fn(() => builder),
+      whereNotIn: jest.fn(() => builder),
       leftJoin: jest.fn(() => builder),
       groupBy: jest.fn(() => builder),
       modify: jest.fn((fn) => { fn(builder); return builder; }),
@@ -171,6 +172,9 @@ describe('getRollup', () => {
     const sinceArg = callBuilder.where.mock.calls.find((c) => c[0] === 'created_at');
     expect(sinceArg[1]).toBe('>=');
     expect(sinceArg[2]).toBeInstanceOf(Date);
+
+    // lead counts are prospects only: 'handled' (and the other non-engaged statuses) excluded (codex #5477 r7)
+    expect(leadBuilder.whereNotIn).toHaveBeenCalledWith('l.status', expect.arrayContaining(['handled']));
 
     expect((await SiteRollup.getRollup('abc')).days).toBe(30);
     expect((await SiteRollup.getRollup(0)).days).toBe(30); // falsy → default
