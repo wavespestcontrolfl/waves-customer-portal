@@ -10726,11 +10726,14 @@ function seriesAckMatches(body, preview) {
 // written; the schedule board moves the whole stop with its partners.
 async function refuseCarriedStopInEditMove(ackedIds) {
   if (!require('../config/feature-gates').seriesMoveCarriesVisitLive()) return;
-  const vg = require('../services/visit-groups');
   const visitIds = [...new Set((await db('scheduled_services').whereIn('id', ackedIds).whereNotNull('visit_id')
     .select('visit_id')).map((r) => String(r.visit_id)))];
   for (const visitId of visitIds) {
-    if ((await vg.openMembers(db, visitId)).length >= 2) {
+    // NULL-safe: a legacy member with no status is live.
+    const live = await db('scheduled_services').where({ visit_id: visitId })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show']))
+      .count({ n: '*' }).first();
+    if (Number(live?.n || 0) >= 2) {
       throw Object.assign(
         httpError(409, 'A later visit in this plan is grouped with another service at the same stop. Move the plan from the schedule (each stop moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
         { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },

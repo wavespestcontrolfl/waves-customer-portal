@@ -403,6 +403,16 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
   });
 
+  test('a visit whose ONLY partner has no status still counts as grouped: the move refuses', async () => {
+    process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+    const f = await build();
+    await db.raw('UPDATE scheduled_services SET status = NULL WHERE id = ?', [f.pest[0].id]);
+    const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);
+    await expect(moveLawnSeries(f)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: f.pest[0].id });
+    const after = await rowsOf([...before.keys()]);
+    for (const [id, r] of before) expect(dateOnly(after.get(id).scheduled_date)).toBe(dateOnly(r.scheduled_date));
+  });
+
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {
     const f = await build();
     const before = await rowsOf([...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)]);

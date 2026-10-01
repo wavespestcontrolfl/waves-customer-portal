@@ -3024,10 +3024,12 @@ class SmartRebooker {
               .filter((x) => sweptSet.has(String(x.id)) && x.visit_id)
               .map((x) => String(x.visit_id)))];
             for (const vid of visitIds) {
-              const liveRes = await trx.raw(
-                "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
-                [vid],
-              );
+              // Carrying counts a legacy NULL-status member as live (it must
+              // ride or refuse with the stop); gate off keeps the old count.
+              const liveRes = await trx.raw(carriesVisit
+                ? "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND (status IS NULL OR status NOT IN ('completed','cancelled','skipped','no_show'))"
+                : "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
+              [vid]);
               const grouped = Number(liveRes?.rows?.[0]?.n || 0) >= 2;
               const preserveCommitment = deferFuturePlacement && String(siblings[droppedIdx]?.visit_id) !== vid;
               if (grouped && !preserveCommitment && !carriesVisit) {
