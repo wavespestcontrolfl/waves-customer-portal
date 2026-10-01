@@ -121,10 +121,9 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   }
   if (!rider?.hostParentId) return;
   try {
-    const cols = await require('./recurring-appointment-seeder').scheduledServiceColumns(conn);
-    if (cols.rides_parent_id) {
-      await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: parentRow.id }).update({ rides_parent_id: rider.hostParentId }));
-    }
+    // One savepoint for the whole optional write: any failure (including a
+    // schema without the column) rolls back to it and the accept continues.
+    await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: parentRow.id }).update({ rides_parent_id: rider.hostParentId }));
   } catch (err) {
     logger.warn(`[rider-accept] could not link rider ${parentRow.id} to lawn ${rider.hostParentId}: ${err.message}`);
   }

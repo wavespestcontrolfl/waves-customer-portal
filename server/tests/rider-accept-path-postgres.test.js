@@ -296,6 +296,22 @@ postgres('pest rides the lawn from accept', () => {
     } finally { spy.mockRestore(); await trx.rollback(); }
   });
 
+  test('a failing rider link write rolls back to its savepoint and leaves the transaction usable', async () => {
+    const RiderAcceptSeeding = require('../services/rider-accept-seeding');
+    const trx = await mockPg.transaction();
+    try {
+      const base = await customerFixture(trx);
+      const [row] = await trx('scheduled_services').insert({
+        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Pest Control',
+        status: 'pending', scheduled_date: weekdayAhead(10), window_start: '09:00', window_end: '10:00',
+      }).returning('*');
+      // A host id that does not exist violates the self-FK inside the write.
+      await RiderAcceptSeeding.afterSeed({ lawn: null }, trx, row, { hostParentId: randomUUID() }, { insertedRows: [] });
+      const again = await trx('scheduled_services').where({ id: row.id }).first('rides_parent_id');
+      expect(again.rides_parent_id).toBeNull();
+    } finally { await trx.rollback(); }
+  });
+
   test('gate on, no reservation (auto-schedule), pest listed before lawn: lawn seeds first and pest rides it', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
