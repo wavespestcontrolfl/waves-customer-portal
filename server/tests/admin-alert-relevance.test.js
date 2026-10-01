@@ -278,6 +278,26 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'stale-visit:z' } }))).reason).toBeNull();
   });
 
+  test('promise marks: settled once every promise it names is closed, gone, or acted on by the office after the bell', async () => {
+    const P1 = uid(510);
+    const P2 = uid(511);
+    const marks = note({ category: 'alert', link: `/admin/customers?customerId=${CUST}&tab=comms`, metadata: { dedupeKey: `visit-promise-marks:${VISIT}`, promise_ids: [P1, P2] } });
+    const promises = (one, two) => { mockTables.call_commitments = [{ id: P1, status: 'open', reviewed_at: null, ...one }, { id: P2, status: 'open', reviewed_at: null, ...two }]; };
+    promises({}, {});
+    expect(await reasonFor(marks)).toEqual({ cls: 'promise_marks', reason: null });
+    // One closed, the other still open and untouched: still relevant.
+    promises({ status: 'fulfilled' }, { reviewed_at: BEFORE_BELL });
+    expect((await reasonFor(marks)).reason).toBeNull();
+    // The office acted on the other after the bell (a note, a confirm): settled.
+    promises({ status: 'fulfilled' }, { reviewed_at: AFTER_BELL });
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // Dismissed, or gone.
+    mockTables.call_commitments = [{ id: P1, status: 'dismissed', reviewed_at: null }];
+    expect((await reasonFor(marks)).reason).toBe('Every promise it named is settled');
+    // A bell that names no promise is never judged.
+    expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
+  });
+
   const move = (metadata = {}) => note({
     category: 'schedule_conflict', link: '/admin/dispatch?tab=schedule',
     metadata: { scheduledServiceId: VISIT, seriesMoveId: 'move-1', conflicts: [], overlapDates: ['2026-10-05'], preservedOccurrences: [], ...metadata },

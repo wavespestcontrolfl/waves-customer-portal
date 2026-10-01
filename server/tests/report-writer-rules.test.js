@@ -122,6 +122,12 @@ describe('prompt rewrites', () => {
     }
   });
 
+  test('the promise rule: only listed promises, only as the technician marked them', () => {
+    expect(OWNER_RULES).toMatch(/18\. Promises\. A PROMISES record lists what we promised this customer before today/);
+    expect(OWNER_RULES).toMatch(/Never mention a promise that is not listed, never decide on your own whether one was kept/);
+    expect(OWNER_RULES).toContain('REACH-OUT DATE, PROMISES, prior visits');
+  });
+
   test('the gauge rule keeps the activity level in words', () => {
     expect(OWNER_RULES).toMatch(/activity gauge's number or scale/);
     expect(OWNER_RULES).toMatch(/activity level in words .* belongs in WHAT WE FOUND/);

@@ -815,7 +815,7 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     // mismatch. The pin keeps asserting the EXACT set so any further
     // drift is a deliberate edit here, not an accident.
     expect(attemptsSource).toMatch(
-      /const \{\s*idempotencyKey, timeOnSite, completionTelemetry, backfill,\s*reportReconcileConfirmed, \.\.\.stableBody\s*\} = body \|\| \{\};/,
+      /const \{\s*idempotencyKey, timeOnSite, completionTelemetry, backfill,\s*reportReconcileConfirmed, promiseMarksConfirmed, \.\.\.stableBody\s*\} = body \|\| \{\};/,
     );
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
     // auto-elapsed timer STRING (ticks every second) — hashing it turned

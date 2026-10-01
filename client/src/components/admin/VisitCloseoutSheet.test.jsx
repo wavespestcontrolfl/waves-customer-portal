@@ -13,6 +13,7 @@ vi.mock('../../pages/admin/SchedulePage', () => ({
   createCompletionIdempotencyKey: (id) => `fixture_${id}`,
   completionReconcilePrompt: (error) => error.code === 'report_reconcile' ? 'Confirm recorded values' : null,
   completionReportRulesPrompt: (error) => error.code === 'report_rules_review' ? 'Send report as is' : null,
+  completionPromiseMarksPrompt: (error) => error.code === 'promise_marks_changed' ? 'A promise you marked changed' : null,
   CompletionPanel: ({ service, onPrepared }) => <button onClick={() => onPrepared(service.id, {
     visitOutcome: service.fixtureOutcome || (service.id === 'one' ? 'completed' : 'incomplete'),
     completionPhotos: [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', capturedAt: '2020-01-01T12:00:00Z' }],
@@ -184,6 +185,45 @@ it.each([true, false])('preserves the member edit heads-up confirmation (confirm
   const posts = adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST');
   expect(posts).toHaveLength(confirmed ? 2 : 1);
   expect(posts.every(([, options]) => options.headers['Idempotency-Key'] === saved.key)).toBe(true);
+});
+
+it('a member whose marked promise changed asks: OK sends it as is, Cancel opens its form again', async () => {
+  for (const confirmed of [true, false]) {
+    cleanup();
+    globalThis.indexedDB = new IDBFactory();
+    adminFetch.mockReset().mockImplementation(async (path) => {
+      if (path.startsWith('/admin/schedule?')) return { services };
+      return { visitId: 'visit', serviceDate: '2020-01-01', members: services, packet };
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(confirmed);
+    mount();
+    await prepareBoth();
+    const saved = await getVisitCompletionDraft('visit', scope);
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => {
+      if (options?.method !== 'POST') return original(path);
+      const items = JSON.parse(options.body).items;
+      if (!items[0].body.promiseMarksConfirmed) throw Object.assign(new Error('A promise you marked changed'), {
+        code: 'promise_marks_changed', details: { serviceId: 'one' },
+      });
+      expect(await getVisitCompletionDraft('visit', scope)).toMatchObject({ key: saved.key,
+        forms: { one: { body: { ...saved.forms.one.body, promiseMarksConfirmed: true } }, two: saved.forms.two } });
+      return { packetId: 'packet', state: 'effects_pending' };
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledWith('A promise you marked changed'));
+    if (confirmed) {
+      await screen.findByRole('button', { name: 'Resume closeout' });
+    } else {
+      // That member's form is open to be marked again; the other stays prepared.
+      await screen.findByText('A promise changed. Open that service again to mark it, then complete the visit.');
+      await screen.findByText('1 of 2 forms ready. Saved forms and photos stay on this device until the visit is recorded.');
+      expect((await getVisitCompletionDraft('visit', scope)).forms.one.body).toBeNull();
+    }
+    const posts = adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST');
+    expect(posts).toHaveLength(confirmed ? 2 : 1);
+    vi.restoreAllMocks();
+  }
 });
 
 it('clears photo drafts when reopening a packet already finished by the server', async () => {

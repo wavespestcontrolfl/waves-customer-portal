@@ -686,6 +686,15 @@ describe('completion attempts', () => {
     expect(hashCompletionRequest({ a: 1 })).not.toBe(hashCompletionRequest({ a: 2 }));
   });
 
+  test("confirming the promise check on a retry resumes the same attempt (Codex #5516)", () => {
+    // An office edit between a failed claimed attempt and its retry raises
+    // the promise prompt only on the retry; its confirmation bit, like the
+    // reconcile prompt's, never changes the request's identity.
+    const body = { technicianNotes: 'Ghost ants', promiseMarks: [{ id: 'p-1', mark: 'done', version: '1111111111111111' }] };
+    expect(hashCompletionRequest({ ...body, promiseMarksConfirmed: true })).toBe(hashCompletionRequest(body));
+    expect(hashCompletionRequest({ ...body, reportReconcileConfirmed: true, promiseMarksConfirmed: true })).toBe(hashCompletionRequest(body));
+  });
+
   test('mode fields (backfill/timeOnSite) split the FULL hash but never the CORE segment (Codex P1, fix round 10)', () => {
     // Round 6 stripped `backfill` (and earlier `timeOnSite`) from EVERY
     // hash, so a same-key retry after a PRE-commit failure could flip

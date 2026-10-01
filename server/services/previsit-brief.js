@@ -912,7 +912,7 @@ async function assembleGrounding(svc, dbh = db) {
       .map((r) => ({
         type: cleanText(r.service_type, 120),
         date: calendarDay(r.service_date),
-        notes: cleanText(customerSafeVisitNotes(r.technician_notes), 500),
+        notes: cleanText(customerSafeVisitNotes(r), 500),
       })),
     propertyProfile: context?.propertyProfile || null,
     flags: (context?.flags || []).map((f) => ({

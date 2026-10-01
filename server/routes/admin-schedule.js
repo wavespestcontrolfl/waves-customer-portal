@@ -51,6 +51,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
+const reserviceOfficeRequest = require('../services/reservice-office-request');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
@@ -8176,6 +8177,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
+    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
+    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // the suggestion the client named — never taken from the client. Only the
+    // primary row below is stamped; null = nothing saved (gate off, not a
+    // pest/lawn re-service, or empty words).
+    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
+      && resolvedIsCallback
+      && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
+      && req.body.customerRequest && typeof req.body.customerRequest === 'object')
+      ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
+      : null;
+
     // A recurring booking that creates WaveGuard plan coverage IS the
     // membership sale — let the "any member" discount floor see that, since
     // the customer row's tier is only stamped after the series commits.
@@ -8639,6 +8652,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = resolvedIsCallback || false;
+      if (officeCustomerRequest && cols.customer_request && cols.customer_request_source) {
+        insertData.customer_request = officeCustomerRequest.text;
+        insertData.customer_request_source = officeCustomerRequest.source;
+      }
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
       if (cols.source_estimate_id && insertLinkId) insertData.source_estimate_id = insertLinkId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
@@ -22357,6 +22374,25 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
+// New Appointment modal's "Customer's words" suggestion for a pest/lawn
+// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// text or call note from the last 72 hours, whichever is newer, with its kind
+// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
+// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// requireAdmin like the booking route the suggestion feeds.
+router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
+  try {
+    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
+    const customerId = String(req.query.customerId || '');
+    if (!reserviceOfficeRequest.isUuid(customerId)) {
+      return res.status(400).json({ error: 'customerId required' });
+    }
+    const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    res.json({ enabled: true, suggestion });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/annual-prepay-preview — can the booking the
 // operator is composing in the New Appointment modal be sold as an annual
 // prepay, and for exactly how much?
@@ -24413,6 +24449,8 @@ router.post('/generate-report', async (req, res) => {
       includeCustomerComms,
       structuredFindings, companionFindings, typedActivityScore,
       treeShrubReview,
+      // The promise check: [{ id, mark, stillLeft? }] (visit-promises.js).
+      promiseMarks,
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
@@ -24577,6 +24615,10 @@ router.post('/generate-report', async (req, res) => {
       || ratingNum !== null
       || typedHasFindingInput
       || hasValidLawnAssessment
+      // Provisional, like companion input: submitted promise marks keep the
+      // request alive to grounding, and only marks that resolve against the
+      // customer's open promises open generation (re-checked below).
+      || (Array.isArray(promiseMarks) && promiseMarks.length > 0)
       || suppliedTreeShrubReview
       || cappedPhotoCaptions.length > 0;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
@@ -25141,7 +25183,21 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       || hasValidLawnAssessment
       || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       || cappedPhotoCaptions.length > 0;
-    if (!baseHasReportInput && !companionCustomerInput) {
+    // The technician's promise marks, resolved against this customer's open
+    // promises (owner "ok yes add these" 2026-10-01): with the writer rules
+    // on a grounded visit only. Fail-soft: no record, no mention. Resolved
+    // before the input check: a validated mark is visit detail on its own
+    // (Codex #5516).
+    let visitPromises = [];
+    if (writerRulesOn && groundingCustomerId && Array.isArray(promiseMarks) && promiseMarks.length) {
+      try {
+        visitPromises = await require('../services/service-report/visit-promises')
+          .resolveVisitPromiseMarks(db, { customerId: groundingCustomerId, marks: promiseMarks });
+      } catch (promiseErr) {
+        logger.warn(`[generate-report] promise marks not loaded (${require('../services/service-report/visit-promises').errorCode(promiseErr)})`);
+      }
+    }
+    if (!baseHasReportInput && !companionCustomerInput && !visitPromises.length) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
 
@@ -25174,6 +25230,7 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         writerRules: writerRulesOn,
         findingsType: reportPromptContext.findingsType || null,
         serviceKind: reportPromptContext.serviceKind || null,
+        visitPromises,
       });
       contextText = ctx.contextText || '';
       writerAllowedPhrases = Array.isArray(ctx.writerAllowedPhrases) ? ctx.writerAllowedPhrases : [];
@@ -25183,6 +25240,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
         ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    // A request grounded by promise marks alone lives or dies by them: when
+    // the marks were the only substantive input and never reached the
+    // writer's context (the context build failed), there is nothing real to
+    // write from. Reject retryably rather than return copy that leaves the
+    // marked promise out (Codex #5516), as the assessment-only path does.
+    if (visitPromises.length && !baseHasReportInput && !companionCustomerInput && !contextSignals.hasVisitPromises) {
+      return res.status(503).json({
+        error: 'The promises you marked could not be loaded right now — try Generate again in a moment.',
+        code: 'promise_grounding_unavailable',
+        retryable: true,
+      });
     }
 
     if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
