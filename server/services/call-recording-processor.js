@@ -11337,7 +11337,10 @@ const CallRecordingProcessor = {
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     // The caller asked not to be contacted: no on-site opt-in ask for any
     // contact on this call (the slot may still be written).
-    const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true;
+    // Either extractor hearing a do-not-contact request blocks the on-site
+    // opt-in ask (same both-signals rule as the other outbound gates).
+    const v2DoNotContact = v2CanonicalExtraction?.consent?.do_not_contact_request === true
+      || extracted.do_not_contact_request === true;
     const callSecondaryContact = callSecondaryContacts[0] || null;
     // Capture the caller's email BEFORE the secondary-contact scrub below clears
     // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
@@ -13212,7 +13215,11 @@ const CallRecordingProcessor = {
         await markOptinAsk(secondaryEntry, optinAskState);
         if (optinDispatch && optinAskState === 'dispatching') {
           const dispatchedEntry = secondaryEntry;
-          void optinDispatch.then((requested) => markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed'));
+          void optinDispatch.then((outcome) => {
+            // dispatchRecipientOptins resolves { requested }; the catch above yields 0.
+            const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);
+            return markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
+          });
         }
         if (result === 'skipped_phone_belongs_to_other_customer') {
           // Distinct review card: the named contact's number is another

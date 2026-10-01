@@ -106,7 +106,7 @@ describe('sendConfirmationToServiceContact', () => {
   });
 
   test('never for a dead, cancelled or past visit', async () => {
-    for (const svc of [{ id: 's1', status: 'cancelled' }, { id: 's1', status: 'completed' }, { id: 's1', status: 'en_route' }]) {
+    for (const svc of [{ id: 's1', status: 'cancelled' }, { id: 's1', status: 'completed' }, { id: 's1', status: 'en_route' }, { id: 's1', status: 'rescheduled' }]) {
       wire({ svc });
       expect((await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact })).reason).toBe('visit_not_live');
     }
@@ -145,5 +145,27 @@ describe('sendConfirmationToServiceContact', () => {
       expect(res).toEqual({ sent: false, reason });
     }
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('customer-facing label: the reminder row\'s label, admin suffixes stripped', async () => {
+    wire({ svc: { id: 's1', status: 'confirmed', service_type: 'Pest Control (Quarterly) — Heavy', customer_confirmed: true }, reminder: { appointment_time: future, cancelled: false, service_type: null } });
+    await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact });
+    expect(sendCustomerMessage.mock.calls[0][0].body).toContain(' Pest Control ');
+    expect(sendCustomerMessage.mock.calls[0][0].body).not.toMatch(/Quarterly|Heavy/);
+  });
+
+  test('dedupe compares last-10 digits (a formatted slot phone still matches the logged E.164)', async () => {
+    const q = {};
+    ['where', 'whereRaw', 'whereNull', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async () => ({ id: 'dup' }));
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain({ id: 's1', status: 'confirmed', service_type: 'Pest Control' });
+      if (table === 'appointment_reminders') return chain({ appointment_time: future, cancelled: false });
+      if (table === 'sms_log') return q;
+      return chain(undefined);
+    });
+    const res = await AppointmentReminders.sendConfirmationToServiceContact({ customerId: 'c1', scheduledServiceId: 's1', contact: { ...contact, phone: '(555) 010-0123' } });
+    expect(res).toEqual({ sent: false, reason: 'already_sent' });
+    expect(q.whereRaw.mock.calls.some(([, binds]) => binds && binds[0] === '5550100123')).toBe(true);
   });
 });

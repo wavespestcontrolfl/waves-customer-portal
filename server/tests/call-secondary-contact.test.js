@@ -804,6 +804,10 @@ describe('on-site contact opt-in ask', () => {
     // 'dispatching' until the fire-and-forget dispatch's outcome lands.
     expect(src).toContain("optinAskState = 'dispatching'");
     expect(src).toContain("markOptinAsk(dispatchedEntry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed')");
+    // dispatchRecipientOptins resolves { requested }: the count is read off the object.
+    expect(src).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
+    // Either extractor's do-not-contact request blocks the ask.
+    expect(src).toMatch(/const v2DoNotContact = v2CanonicalExtraction\?\.consent\?\.do_not_contact_request === true\s*\|\| extracted\.do_not_contact_request === true;/);
     expect(src).toContain('`not_sent:${onSiteDecision.reason}`');
     // Explicit V2 consent keeps the original claim path (fresh slot only).
     expect(src).toContain("(result === 'written' && secondaryEntry?.phone && v2SmsConsentExplicit)");

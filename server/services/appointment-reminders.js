@@ -5846,7 +5846,8 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
 
 // Terminal / in-flight visit states that must never get a replayed confirmation.
-const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress']);
+// 'rescheduled' = a pending rebook whose old slot is obsolete.
+const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress', 'rescheduled']);
 
 // Send ONE service contact the same appointment confirmation text the primary
 // got, for a visit that is still live and in the future. Used when an on-site
@@ -5872,7 +5873,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     // slot was pulled.
     const reminder = await db('appointment_reminders')
       .where({ scheduled_service_id: scheduledServiceId })
-      .first('appointment_time', 'cancelled');
+      .first('appointment_time', 'cancelled', 'service_type');
     if (reminder && reminder.cancelled) return { sent: false, reason: 'visit_not_live' };
     const apptTime = composeScheduledApptTime(svc) || (reminder && reminder.appointment_time ? new Date(reminder.appointment_time) : null);
     if (!apptTime || Number.isNaN(apptTime.getTime()) || apptTime.getTime() <= Date.now()) return { sent: false, reason: 'visit_not_future' };
@@ -5883,14 +5884,19 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     if (!prefs.appointmentConfirmation) return { sent: false, reason: 'confirmation_off' };
     if (!prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { sent: false, reason: 'sms_not_chosen' };
     const recentDup = await db('sms_log')
-      .where({ to_phone: contact.phone, message_type: 'confirmation' })
+      .where({ message_type: 'confirmation' })
+      // sms_log holds the E.164 the sender normalized; the slot phone may be
+      // stored formatted — compare last-10 digits.
+      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [String(contact.phone).replace(/\D/g, '').slice(-10)])
       .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .first('id')
       .catch(() => null);
     if (recentDup) return { sent: false, reason: 'already_sent' };
     const firstName = firstNameFrom(contact.name) || 'there';
-    const serviceLabel = svc.service_type || 'service';
+    // Same customer-facing label as the reminder rail: the reminder row's
+    // (merged, add-on-aware) label when registered, admin suffixes stripped.
+    const serviceLabel = smsServiceLabelStored((reminder && reminder.service_type) || svc.service_type);
     const day = formatDay(apptTime);
     const date = formatDate(apptTime);
     const time = formatTime(apptTime);

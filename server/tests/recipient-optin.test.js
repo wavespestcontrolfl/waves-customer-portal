@@ -232,8 +232,9 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
     });
     const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
-    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
-    expect(entryOf(state, OTHER, 's9').demoted_at).toBeDefined();
+    // Two slot phones on the final row: both get their confirmation, the
+    // caller is NOT stepped back (sole-slot rule judged on the current row).
+    expect(state.prefs).toEqual([]);
     expect(replays.map((r) => r.scheduledServiceId).sort()).toEqual(['s1', 's9']);
   });
 
@@ -301,6 +302,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test.each([
     ['under way', { status: 'en_route', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' }],
+    ['being rescheduled', { status: 'rescheduled', scheduled_date: new Date(Date.now() + 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' }],
     ['in the past but still confirmed', { status: 'confirmed', scheduled_date: new Date(Date.now() - 72 * 3600000).toISOString().slice(0, 10), window_start: '10:00:00' }],
   ])('a late YES for a visit %s demotes nobody; the entry is dropped', async (_label, visit) => {
     const { dbh, state } = fakeDb({ customer: spouseRow({ service_preferences: marker() }), optinRows: confirmed(), visit });
@@ -343,7 +345,7 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
 
   test('YES on an already-stamped (portal-attested) row keeps that stamp, and still demotes', async () => {
     const at = new Date('2026-07-22T00:00:00Z');
-    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contact2_phone: '+19415550444', service_contacts_consent_at: at, service_contacts_consent_source: 'portal_account_holder', service_preferences: marker() }), optinRows: confirmed() });
+    const { dbh, state } = fakeDb({ customer: spouseRow({ service_contacts_consent_at: at, service_contacts_consent_source: 'portal_account_holder', service_preferences: marker() }), optinRows: confirmed() });
     await applyDemoteMarkersOnConfirm(KEY, { dbh });
     expect(state.customer.service_contacts_consent_source).toBe('portal_account_holder');
     expect(state.customer.service_contacts_consent_at).toBe(at);
@@ -355,10 +357,11 @@ describe('recipient YES / NO: consent stamp, caller demotion, confirmation repla
       customer: spouseRow({ service_contact2_phone: '+19415550444', service_contacts_consent_at: new Date(), service_preferences: marker({ [OTHER]: { s9: { demote: true, set_at: 'y' } } }) }),
       optinRows: confirmed([{ phone_key: OTHER, customer_id: 'c1', status: 'confirmed' }]),
     });
-    await applyDemoteMarkersOnConfirm(KEY, { dbh });
-    expect(entryOf(state, KEY, 's1').demoted_at).toBeDefined();
+    const { replays } = await applyDemoteMarkersOnConfirm(KEY, { dbh });
+    expect(replays.map((r) => r.scheduledServiceId)).toEqual(['s1']);
     expect(entryOf(state, OTHER, 's9')).toEqual({ demote: true, set_at: 'y' });
-    expect(state.prefs).toHaveLength(1);
+    // Another slot phone is on the account now: a stale demote:true does not step the caller back.
+    expect(state.prefs).toEqual([]);
   });
 
   test('YES for a phone with NO marker entry leaves the pref alone (stamp still happens), and queues no replay', async () => {

@@ -63,7 +63,7 @@ const DEMOTE_MARKER_KEY = 'demote_primary_on_optin';
 // demoted for it.
 // Same set as appointment-reminders' CONFIRMATION_REPLAY_DEAD_STATUSES: a
 // visit that is over, called off or already under way.
-const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress']);
+const DEMOTE_STALE_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'no_show', 'en_route', 'on_site', 'in_progress', 'rescheduled']);
 // The visit's slot start (ET), as composeScheduledApptTime builds it.
 function visitSlotAt(visit) {
   const datePart = visit.scheduled_date instanceof Date
@@ -191,7 +191,14 @@ async function applyMarkerEntry(h, customer, phoneKey, visits, replays) {
       continue;
     }
     // demote:false = another slot phone already gets the texts: replay only.
-    if (entry && entry.demote !== false && !entry.demoted_at) {
+    // Re-judged on the CURRENT row too: a call that filed two on-site contacts
+    // wrote demote:true for the first before the second landed — with another
+    // slot phone now on the account, the caller is not stepped back.
+    const otherSlotPhone = SERVICE_CONTACT_SLOTS.some((sl) => {
+      const k = recipientPhoneKey(customer[sl.phone]);
+      return !!k && k !== phoneKey;
+    });
+    if (entry && entry.demote !== false && !entry.demoted_at && !otherSlotPhone) {
       await h('notification_prefs')
         .insert({ customer_id: customerId, appointment_notify_primary: false })
         .onConflict('customer_id')
