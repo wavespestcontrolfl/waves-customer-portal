@@ -566,6 +566,9 @@ async function buildReportCopyContext({
   findingsType = null,
   // 'one_time' | 're_service' | 'recurring' (null when unknown).
   serviceKind = null,
+  // The technician's promise marks, resolved by the route against the
+  // customer's open promises (visit-promises.js).
+  visitPromises = [],
   knex = db,
 } = {}) {
   const line = serviceLine || detectServiceLine(serviceType) || null;
@@ -782,6 +785,7 @@ async function buildReportCopyContext({
   // screen allows exactly the timeframes and dates it supplies.
   let writerAllowedPhrases = [];
   let writerAllowedDates = [];
+  let writerPromiseCount = 0;
   if (writerRules) {
     const records = buildWriterRecords({
       serviceYmd,
@@ -789,10 +793,12 @@ async function buildReportCopyContext({
       findingsType,
       serviceKind,
       applications: productEvidence.writerApplications,
+      promises: visitPromises,
     });
     sections.push(...records.sections);
     writerAllowedPhrases = records.allowedPhrases;
     writerAllowedDates = records.allowedDates;
+    writerPromiseCount = records.promiseCount || 0;
   } else if (line === 'pest' && pestReportExpectationsGateOn()) {
     const expectationProducts = productSafety.map(toExpectationProduct);
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
@@ -858,6 +864,8 @@ async function buildReportCopyContext({
     hasTreeShrubReviewedPhotoSignals: line === 'tree_shrub'
       && treeShrubReviewGrounding?.source === 'reviewed_photo_signals'
       && Object.keys(treeShrubReviewGrounding.scores || {}).length > 0,
+    // The technician's marked promises reached the writer's PROMISES record.
+    hasVisitPromises: writerPromiseCount > 0,
     targets,
     monthNum,
   };

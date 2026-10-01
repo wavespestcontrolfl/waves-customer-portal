@@ -358,21 +358,13 @@ const SERVICE_GEOCODE_MAX_MILES = 50;
 function resolveServiceLocation(customer = {}) {
   const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
 
-  const city = String(customer.city || '').toLowerCase().trim();
-  if (city && CITY_TO_LOCATION[city]) {
-    const hit = byId(CITY_TO_LOCATION[city]);
+  // The customer's own city first, then the ZIP's city. Full value to
+  // zipToCity — it extracts the 5-digit run itself, so messy legacy values
+  // like 'FL 34219' still resolve (a slice(0, 5) would not).
+  const cityNames = [customer.city, customer.zip && require('../utils/zip-to-city').zipToCity(customer.zip)];
+  for (const name of cityNames) {
+    const hit = byId(CITY_TO_LOCATION[String(name || '').toLowerCase().trim()]);
     if (hit) return hit;
-  }
-
-  // Full value to zipToCity — it extracts the 5-digit run itself, so messy
-  // legacy values like 'FL 34219' still resolve (a slice(0, 5) would not).
-  if (customer.zip) {
-    const { zipToCity } = require('../utils/zip-to-city');
-    const zipCity = String(zipToCity(customer.zip) || '').toLowerCase().trim();
-    if (zipCity && CITY_TO_LOCATION[zipCity]) {
-      const hit = byId(CITY_TO_LOCATION[zipCity]);
-      if (hit) return hit;
-    }
   }
 
   // Same null/blank guard as resolveReviewLocation: Number(null) === 0.

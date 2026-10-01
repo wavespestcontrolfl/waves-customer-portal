@@ -773,7 +773,7 @@ async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, no
     .join('customers as c', 'c.id', 's.customer_id')
     .where({ 's.customer_id': customerId, 'cc.status': 'open' }).whereNull('c.deleted_at')
     .modify(byLane)
-    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at',
+    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       'cc.sms_log_id', conn.raw('NULL::uuid as email_id'), 's.created_at as sms_started_at',
       's.customer_id', conn.raw("'sms' as channel"));
   const emailRows = conn('call_commitments as cc')
@@ -783,7 +783,7 @@ async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, no
       this.select(1).from('customers as c').whereRaw(`c.id = ${RESOLVED_EMAIL_CUSTOMER_ID_SQL}`).whereNull('c.deleted_at');
     })
     .modify(byLane)
-    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at',
+    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at', 'cc.human_note',
       conn.raw('NULL::uuid as sms_log_id'), 'cc.email_id', 'e.received_at as sms_started_at',
       conn.raw('?::uuid as customer_id', [customerId]), conn.raw("'email' as channel"));
   const wanted = Array.isArray(channels) ? channels : ['sms', 'email'];

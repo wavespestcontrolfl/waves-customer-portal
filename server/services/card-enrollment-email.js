@@ -94,9 +94,16 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
   let mode = null;
   let monthlyRate = 0;
   let resolvedMonthly = true; // read failure keeps the legacy monthly copy
+  let autopayPaused = false;
   try {
-    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier');
+    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier', 'autopay_paused_until');
     mode = row?.billing_mode || null;
+    // A paused customer's card is kept on file but NOT auto-charged — the
+    // per-service "charged automatically" sentence below would contradict the
+    // pause. Read from the LIVE pause only, never the rollout gate (GitHub
+    // Codex #5481 r3 P2): webhook recovery can send this email after the gate
+    // is turned off, and the pause is a customer fact the gate does not undo.
+    autopayPaused = require('./autopay-eligibility').isPaused(row || {});
     monthlyRate = Number(row?.monthly_rate) || 0;
     // GUARD 3c parity (Codex r9): the cron now runs NULL rows through the
     // lane resolver, so a tier-less/sentinel-tier row with a lingering rate
@@ -126,6 +133,9 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
   // exactly as the cron's GUARD 3c does (Codex r9).
   if (resolvedMonthly && monthlyRate > 0) {
     return `${Tender} is ${verb} your monthly plan amount on your billing day each month, and you get a receipt every time.`;
+  }
+  if (autopayPaused) {
+    return `Your Auto Pay is paused, so nothing is charged automatically right now. ${Tender} stays on file, and we send you a link to pay after each completed service.`;
   }
   return `After each completed service, ${tender} is ${verb} that service's amount automatically, and you get a receipt every time.`;
 }
