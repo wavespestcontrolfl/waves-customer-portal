@@ -149,7 +149,7 @@ async function releaseInMergeTransaction(trx, plan, { now = new Date() } = {}) {
   const released = [];
   if (toRelease.length) {
     const Schedule = require('./schedule');
-    await lockMemberInvoicesOf(trx, Schedule, [winnerId, loserId]);
+    await lockMemberInvoicesOf(trx, Schedule, [winnerId, loserId], toRelease);
     for (const prep of toRelease) {
       const out = await Schedule.closeUnderLock(trx, prep.schedule, MERGE_REASON, now, prep.at, prep.delivery);
       if (!out.closed) throw refused(prep.schedule, out.changed || !out.reason ? 'schedule_changed' : out.reason);
@@ -159,12 +159,17 @@ async function releaseInMergeTransaction(trx, plan, { now = new Date() } = {}) {
   return { renumbers: await renumberLoserEpisodes(trx, rows, { winnerId, loserId }), released };
 }
 
-// Every active member invoice of these customers, locked in ONE id-ordered statement (two per-customer
-// batches would each be ordered but interleave out of order across the pair).
-async function lockMemberInvoicesOf(trx, Schedule, customerIds) {
+// Every invoice the releases will touch, locked in ONE id-ordered statement before any member sequence (two
+// per-customer batches would each be ordered but interleave out of order across the pair): every landing
+// row's invoice (Schedule.landingMemberRows, the reader the release itself uses) and every invoice a
+// delivered final named.
+async function lockMemberInvoicesOf(trx, Schedule, customerIds, toRelease = []) {
   const ids = new Set();
   for (const id of sortedIds(customerIds)) {
-    for (const row of await Schedule.activeMemberRows(id, { database: trx })) ids.add(String(row.invoice_id));
+    for (const row of await Schedule.landingMemberRows(id, { database: trx })) ids.add(String(row.invoice_id));
+  }
+  for (const { delivery } of toRelease) {
+    if (delivery?.delivered && delivery.final && delivery.named) delivery.named.forEach((id) => ids.add(String(id)));
   }
   const sorted = [...ids].sort();
   if (sorted.length) await trx('invoices').whereIn('id', sorted).orderBy('id').forUpdate().select('id');

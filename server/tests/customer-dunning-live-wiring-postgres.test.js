@@ -123,7 +123,7 @@ postgres('customer-dunning live wiring (PostgreSQL)', () => {
     });
     await app.schema.createTable('invoice_followup_sequences', (t) => {
       t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
-      t.uuid('invoice_id');
+      t.uuid('invoice_id').unique(); // one sequence per invoice, as in production
       t.uuid('customer_id');
       t.string('status');
       t.integer('step_index').defaultTo(0);

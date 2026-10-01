@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
 const mockSchedule = {
   TABLE: 'customer_dunning_schedules',
   inReadOnlyTransaction: jest.fn(async (database, fn) => fn(database)),
-  activeMemberRows: jest.fn(),
+  landingMemberRows: jest.fn(),
   currentStepDelivery: jest.fn(async () => null),
   memberLanding: jest.fn(),
   release: jest.fn(),
@@ -109,7 +109,7 @@ describe('planRelease / executeRelease', () => {
       { id: 'q1', invoice_id: 'i1', step_index: 2 }, { id: 'q2', invoice_id: 'i2', step_index: 5 },
       { id: 'q3', invoice_id: 'i3', step_index: 3 }, { id: 'q4', invoice_id: 'i4', step_index: 1 },
     ];
-    mockSchedule.activeMemberRows.mockResolvedValue(rows);
+    mockSchedule.landingMemberRows.mockResolvedValue(rows);
     const delivery = { final: false, named: new Set(['i1']) };
     mockSchedule.currentStepDelivery.mockResolvedValueOnce(delivery);
     mockSchedule.memberLanding
@@ -121,7 +121,7 @@ describe('planRelease / executeRelease', () => {
     expect(database).toHaveBeenCalledWith('customer_dunning_schedules');
     expect(database.calls).toContainEqual(['whereIn', 'status', ['active', 'held', 'paused', 'autopay_hold']]);
     expect(database.calls).toContainEqual(['where', { customer_id: CUST }]);
-    expect(mockSchedule.activeMemberRows).toHaveBeenCalledWith(CUST, { database });
+    expect(mockSchedule.landingMemberRows).toHaveBeenCalledWith(CUST, { database });
     // the same plan the release writes: each row, the schedule as read, the current step's delivery evidence
     expect(mockSchedule.currentStepDelivery).toHaveBeenCalledWith(schedule('s1'));
     expect(mockSchedule.memberLanding.mock.calls).toEqual(rows.map((row) => [row, schedule('s1'), delivery, NOW]));
@@ -134,6 +134,16 @@ describe('planRelease / executeRelease', () => {
     expect(out).toMatch(/member invoice i3 {2}seq q3 {2}-> PAUSED at step d30_final \(the schedule is paused; reason on the admin page\)/);
     expect(out).not.toContain('customer called'); // free-text reason never printed
     expect(out).toMatch(/member invoice i4 {2}seq q4 {2}-> COMPLETED/);
+  });
+
+  // Codex #5503 r3 P1: a paused / autopay-held / completed member is landed too (status kept, step moved up).
+  test('the dry run lists a non-active member as staying in its status with its new step', async () => {
+    const database = fakeDatabase([schedule('s1')]);
+    mockSchedule.landingMemberRows.mockResolvedValue([{ id: 'q9', invoice_id: 'i9', step_index: 1, status: 'paused' }]);
+    mockSchedule.memberLanding.mockReturnValueOnce({ kind: 'keep_status', status: 'paused', stepIndex: 4 });
+    const plans = await script.planRelease(database, { customerId: CUST, now: NOW, Schedule: mockSchedule });
+    script.printPlan(plans[0], (i) => ['a', 'b', 'c', 'd30_final', 'e', 'f'][i]);
+    expect(logs.join('\n')).toMatch(/member invoice i9 {2}seq q9 {2}-> stays PAUSED, its step moves to e \(a resume never repeats a delivered step\)/);
   });
 
   test('a schedule whose delivery evidence cannot be read is listed as not releasable, with no landings', async () => {
@@ -149,7 +159,7 @@ describe('planRelease / executeRelease', () => {
   test('the dry run flags a schedule whose current step has an unconfirmed outcome', async () => {
     const database = fakeDatabase([schedule('s1')]);
     mockSchedule.currentStepDelivery.mockResolvedValueOnce({ delivered: false, unconfirmed: true, final: false, named: new Set() });
-    mockSchedule.activeMemberRows.mockResolvedValue([{ id: 'q1', invoice_id: 'i1', step_index: 2 }]);
+    mockSchedule.landingMemberRows.mockResolvedValue([{ id: 'q1', invoice_id: 'i1', step_index: 2 }]);
     mockSchedule.memberLanding.mockReturnValueOnce({ kind: 'land', stepIndex: 3, nextAt: NOW });
     const plans = await script.planRelease(database, { now: NOW, Schedule: mockSchedule });
     script.printPlan(plans[0], (i) => `step${i}`);
@@ -185,7 +195,7 @@ describe('main', () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const db = require('../models/db');
     db.mockImplementation(() => fakeDatabase([schedule('s1')])());
-    mockSchedule.activeMemberRows.mockResolvedValue([]);
+    mockSchedule.landingMemberRows.mockResolvedValue([]);
     await run([]);
     expect(mockSchedule.inReadOnlyTransaction).toHaveBeenCalledTimes(1);
     expect(mockSchedule.release).not.toHaveBeenCalled();
@@ -220,7 +230,7 @@ describe('main', () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const db = require('../models/db');
     db.mockImplementation(() => fakeDatabase([schedule('s1'), schedule('s2')])());
-    mockSchedule.activeMemberRows.mockResolvedValue([]);
+    mockSchedule.landingMemberRows.mockResolvedValue([]);
     mockSchedule.release.mockResolvedValueOnce({ closed: true, landed: [] }).mockResolvedValueOnce({ closed: false, landed: [], reason: 'in_flight' });
     await run(['--execute']);
     expect(mockSchedule.release).toHaveBeenCalledTimes(2);

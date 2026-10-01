@@ -142,6 +142,38 @@ async function activeMemberRows(customerId, { database = db, forUpdate = false }
   return query;
 }
 
+/**
+ * THE member-row reader for every writer that lands or exhausts members (release, completeFinal, the release
+ * script's dry run): every per-invoice row of the customer on an open invoice that a later per-invoice path
+ * could still send from — ACTIVE, and the quiet states a resume (paused, autopay_hold) or a revival pass
+ * (completed) brings back. Codex #5503 r3: reading ACTIVE rows only left a member paused from the invoice
+ * panel, autopay-held or completed on its stale per-invoice step, so its resume or revival re-sent steps the
+ * combined schedule had already delivered. `stopped` rows are an office stop and are never moved.
+ */
+const LANDING_STATUSES = Object.freeze(['active', 'paused', 'autopay_hold', 'completed']);
+async function landingMemberRows(customerId, { database = db, forUpdate = false } = {}) {
+  const query = database('invoice_followup_sequences as s')
+    .join('invoices as i', 'i.id', 's.invoice_id')
+    .where({ 's.customer_id': customerId })
+    .whereIn('s.status', LANDING_STATUSES)
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .orderBy('i.created_at', 'asc')
+    .select(
+      's.*',
+      'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
+      'i.created_at as invoice_created_at', 'i.status as invoice_status',
+    );
+  if (forUpdate) query.forUpdate('s');
+  return query;
+}
+
+/** Invoice rows locked FOR UPDATE in ONE id-ordered statement (the engine's order: invoices before sequences). */
+async function lockInvoices(trx, ids) {
+  const sorted = [...new Set([...ids].map(String))].sort();
+  if (sorted.length) await trx('invoices').whereIn('id', sorted).orderBy('id').forUpdate().select('id');
+  return new Set(sorted);
+}
+
 /** Narrow rows to the ones the resolved set counts as active members. */
 function rowsInSet(rows, set) {
   const ids = new Set((set?.members || []).filter((m) => m.seqStatus === 'active').map((m) => String(m.invoice_id)));
@@ -475,13 +507,21 @@ function landingFrom(row, fromIndex, now) {
  *   - past its final step: paused for a person;
  *   - a PAUSED schedule (the office's pause, or the engine's): the row keeps that pause on its own ladder,
  *     at its landing step, so releasing never resumes reminders nobody resumed.
+ *   - a row NOT active (paused from the invoice panel, autopay-held, completed): its status is kept (release
+ *     never un-pauses or revives anything) and only its step moves up to the same floor, so a later resume or
+ *     revival starts after what the schedule delivered: the schedule's step, the next one when that step was
+ *     delivered to it, past the last step when a delivered final named it (or its names cannot be read).
  * Returns { kind: 'land', stepIndex, nextAt } | { kind: 'paused', stepIndex, pausedReason, pausedBy }
- *   | { kind: 'complete' } | { kind: 'pause_for_person', reason }.
+ *   | { kind: 'complete' } | { kind: 'pause_for_person', reason } | { kind: 'keep_status', status, stepIndex }.
  */
 function memberLanding(row, schedule, evidence, now) {
   const delivery = evidence?.delivered === false ? null : evidence; // only DELIVERED evidence moves a landing
   const scheduleStep = Number(schedule.step_index) || 0;
   const named = !delivery?.named || delivery.named.has(String(row.invoice_id));
+  if (row.status && row.status !== 'active') {
+    const held = delivery?.final && named ? STEPS.length : (delivery && named ? scheduleStep + 1 : scheduleStep);
+    return { kind: 'keep_status', status: row.status, stepIndex: Math.max(Number(row.step_index) || 0, held) };
+  }
   if (delivery?.final) {
     if (!delivery.named) return { kind: 'pause_for_person', reason: 'released_final_notice_unreadable' };
     if (named) return { kind: 'complete' };
@@ -500,9 +540,14 @@ function memberLanding(row, schedule, evidence, now) {
 
 async function releaseOneMember(trx, row, schedule, delivery, now) {
   const plan = memberLanding(row, schedule, delivery, now);
-  const guard = { id: row.id, status: 'active', step_index: row.step_index };
+  const guard = { id: row.id, status: row.status || 'active', step_index: row.step_index };
   const out = { rowId: row.id, invoiceId: String(row.invoice_id) };
   const write = (patch) => trx('invoice_followup_sequences').where(guard).update({ ...patch, updated_at: trx.fn.now() });
+  if (plan.kind === 'keep_status') {
+    // Status (and its pause reason / hold) untouched: only the step moves, never down.
+    if (plan.stepIndex !== Number(row.step_index)) await write({ step_index: plan.stepIndex });
+    return { ...out, stepIndex: plan.stepIndex, kept: plan.status };
+  }
   if (plan.kind === 'complete') {
     // completeFinal's mark: past the last ladder step, so neither revival pass restarts it
     await write({ status: 'completed', step_index: STEPS.length, next_touch_at: null });
@@ -523,15 +568,56 @@ async function releaseOneMember(trx, row, schedule, delivery, now) {
 }
 
 /**
- * Every member row still ACTIVE goes back to its own per-invoice ladder (memberLanding: no step repeated,
- * a delivered current step never sent again, a paused schedule's pause kept, a row past its final step
- * paused for a person, never completed quietly).
+ * Every member row (landingMemberRows) goes back to its own per-invoice ladder (memberLanding: no step
+ * repeated, a delivered current step never sent again, a paused schedule's pause kept, a row past its final
+ * step paused for a person, never completed quietly; a paused / autopay-held / completed row keeps its status
+ * and only its step moves up). The caller holds the member invoice rows already (lockInvoices).
  */
 async function releaseMembers(trx, schedule, now, delivery = null) {
-  const rows = await activeMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
+  const rows = await landingMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
   const landed = [];
   for (const row of rows) landed.push(await releaseOneMember(trx, row, schedule, delivery, now));
   return landed;
+}
+
+/**
+ * Terminal evidence for every invoice a DELIVERED final notice named (Codex #5503 r3): the notice can name a
+ * quiet member (a `completed` sequence, or an invoice with no sequence at all), and only the per-invoice row
+ * is what the revival passes and orphan adoption read. So, for each named invoice of this customer:
+ *   - an active row: completed, past the last step (the cadence-exhausted mark both revival passes skip);
+ *   - a paused / autopay-held / completed row: past the last step, its status kept;
+ *   - no row at all: one inserted, completed and past the last step, so adoption (which arms only an invoice
+ *     with NO row) never arms it.
+ * A stopped row (an office stop) is left alone. The caller holds the named invoice rows (lockInvoices).
+ */
+async function exhaustNamedInvoices(trx, customerId, namedInvoiceIds) {
+  const ids = [...new Set((namedInvoiceIds || []).map(String))];
+  if (!ids.length) return;
+  const rows = await trx('invoice_followup_sequences').whereIn('invoice_id', ids).forUpdate()
+    .select('id', 'invoice_id', 'customer_id', 'status', 'step_index');
+  const withRow = new Set(rows.map((r) => String(r.invoice_id)));
+  for (const row of rows) {
+    if (String(row.customer_id) !== String(customerId) || row.status === 'stopped') continue;
+    const patch = row.status === 'active' ? { status: 'completed', next_touch_at: null } : {};
+    if (Number(row.step_index) >= STEPS.length && !patch.status) continue;
+    await trx('invoice_followup_sequences').where({ id: row.id, status: row.status })
+      .update({ ...patch, step_index: Math.max(Number(row.step_index) || 0, STEPS.length), updated_at: trx.fn.now() });
+  }
+  const missing = ids.filter((id) => !withRow.has(id));
+  if (!missing.length) return;
+  const invoices = await trx('invoices').whereIn('id', missing).select('id', 'customer_id');
+  const own = invoices.filter((inv) => String(inv.customer_id) === String(customerId));
+  if (!own.length) return;
+  await trx('invoice_followup_sequences').insert(own.map((inv) => ({
+    invoice_id: inv.id, customer_id: inv.customer_id, status: 'completed', step_index: STEPS.length, next_touch_at: null,
+  }))).onConflict('invoice_id').ignore();
+}
+
+// The invoices a release / final completion locks before any member sequence: every landing row's invoice,
+// plus the invoices a delivered final named (a sequence-less one gets a row inserted).
+async function lockLandingInvoices(trx, customerId, namedIds = []) {
+  const rows = await landingMemberRows(customerId, { database: trx });
+  return lockInvoices(trx, [...rows.map((r) => r.invoice_id), ...namedIds]);
 }
 
 // ── close / release ──────────────────────────────────────────────────────
@@ -595,8 +681,9 @@ async function closeUnderLock(trx, schedule, reason, now, at, delivery, { extra 
   // The engine's order: key -> schedule row -> member INVOICE rows (id order) -> sequence rows. An invoice
   // edit locks its invoice and then writes its sequence (InvoiceService.update -> rescheduleForInvoiceEdit),
   // so locking a member sequence before its invoice could close a cycle with that edit.
-  await lockMemberInvoices(trx, row.customer_id);
-  const members = await activeMemberRows(row.customer_id, { database: trx, forUpdate: true });
+  const finalNamed = delivery?.delivered && delivery.final && delivery.named ? [...delivery.named] : [];
+  await lockLandingInvoices(trx, row.customer_id, finalNamed);
+  const members = await landingMemberRows(row.customer_id, { database: trx, forUpdate: true });
   // A member row another sender holds right now (a per-invoice touch: the bank-verification nudge of an
   // invoice the set excludes claims only its own sequence, never this schedule) is a send in flight too:
   // landing that row under it would be overwritten by the send's own progress write. The caller's own
@@ -610,14 +697,17 @@ async function closeUnderLock(trx, schedule, reason, now, at, delivery, { extra 
   // A leg of the current step whose outcome is unconfirmed: handing members back could send that step
   // again on their own ladders, so nothing is released while one remains to land (judged after the
   // in-flight check: a send in flight right now is the next run's, not an unconfirmed outcome).
-  if (delivery?.unconfirmed && members.length) {
+  if (delivery?.unconfirmed && members.some((m) => m.status !== 'completed')) {
     return { closed: false, landed: [], reason: 'outcome_unconfirmed' };
   }
   await trx(TABLE).where({ id: row.id }).update({
     status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
     next_touch_at: null, updated_at: trx.fn.now(), ...extra,
   });
-  return { closed: true, landed: await releaseMembers(trx, row, now, delivery) };
+  const landed = await releaseMembers(trx, row, now, delivery);
+  // A delivered final named invoices the landing rows may not cover (no sequence row at all).
+  await exhaustNamedInvoices(trx, row.customer_id, finalNamed);
+  return { closed: true, landed };
 }
 
 const closeOnce = (schedule, reason, now, at, delivery, { database, ...opts }) => database.transaction(
@@ -732,17 +822,13 @@ async function completeFinal(schedule, {
       held_reason: null, updated_at: trx.fn.now(),
     });
     if (Number(changed) !== 1) return { completed: false, landed: [] };
-    if (namedInvoiceIds.length) {
-      await trx('invoice_followup_sequences')
-        .where({ customer_id: schedule.customer_id, status: 'active' })
-        .whereIn('invoice_id', namedInvoiceIds)
-        // step_index past the last ladder step: the per-invoice "cadence
-        // exhausted" mark. Both revival passes (Day 60/90 and reopened
-        // low-step) select completed rows INSIDE the ladder, so a member the
-        // final notice named, left on its low promotion-time step, would be
-        // revived next run and dunned again after its final notice.
-        .update({ status: 'completed', step_index: STEPS.length, next_touch_at: null, updated_at: trx.fn.now() });
-    }
+    // key -> schedule row (just written) -> invoices -> sequences, the engine's order.
+    await lockLandingInvoices(trx, schedule.customer_id, namedInvoiceIds);
+    // step_index past the last ladder step: the per-invoice "cadence exhausted" mark, for EVERY invoice the
+    // notice named (active, quiet completed, paused, or with no row at all). Both revival passes (Day 60/90 and
+    // reopened low-step) select completed rows INSIDE the ladder and adoption arms an invoice with no row, so
+    // a named invoice left without it would be dunned again after its final notice.
+    await exhaustNamedInvoices(trx, schedule.customer_id, namedInvoiceIds);
     return { completed: true, landed: await releaseMembers(trx, schedule, now) };
   });
   await alertPastFinal(schedule, out.landed);
@@ -993,6 +1079,8 @@ module.exports = {
   rowSnapshot,
   closeUnderLock,
   lockMemberInvoices,
+  landingMemberRows,
+  exhaustNamedInvoices,
   alertPastFinal,
   nextTouchFor,
   advance,

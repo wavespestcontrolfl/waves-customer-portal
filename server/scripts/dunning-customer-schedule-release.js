@@ -107,7 +107,7 @@ async function planRelease(database, { customerId = null, now, Schedule }) {
       plans.push({ schedule, landings: [], evidenceError: err.message });
       continue;
     }
-    const rows = await Schedule.activeMemberRows(schedule.customer_id, { database });
+    const rows = await Schedule.landingMemberRows(schedule.customer_id, { database });
     const landings = rows.map((row) => ({
       invoice_id: String(row.invoice_id), seq_id: row.id, landing: Schedule.memberLanding(row, schedule, delivery, now),
     }));
@@ -120,6 +120,7 @@ function landingText(landing, rawStepIdAt) {
   const stepIdAt = (i) => rawStepIdAt(i) || i;
   switch (landing.kind) {
     case 'complete': return 'COMPLETED (the delivered final notice named it)';
+    case 'keep_status': return `stays ${landing.status.toUpperCase()}, its step moves to ${stepIdAt(landing.stepIndex)} (a resume never repeats a delivered step)`;
     // The pause reason is free text staff typed (it can name the customer): ids only here.
     case 'paused': return `PAUSED at step ${stepIdAt(landing.stepIndex)} (the schedule is paused; reason on the admin page)`;
     case 'pause_for_person': return landing.reason === 'released_final_notice_unreadable'

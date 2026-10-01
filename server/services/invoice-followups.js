@@ -3150,6 +3150,6 @@ module.exports = {
   // customer-dunning PostgreSQL concurrency suite drives them directly).
   _test: {
     canSystemResume, isSystemStopStamp, holdTouchUntilNextDay, fireStep, notOwnedByCustomerSchedule, notOwnedOrMicrodepositCandidate,
-    reviveLegacyFinishedSequences,
+    reviveLegacyFinishedSequences, reviveReopenedLowStepSequences,
   },
 };

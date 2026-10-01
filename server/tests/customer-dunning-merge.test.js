@@ -14,6 +14,7 @@ const mockSchedule = {
   rowSnapshot: jest.fn(),
   currentStepDelivery: jest.fn(async () => null),
   activeMemberRows: jest.fn(async () => []),
+  landingMemberRows: jest.fn(async () => []),
   closeUnderLock: jest.fn(),
   alertPastFinal: jest.fn(async () => {}),
 };
@@ -73,6 +74,7 @@ beforeEach(() => {
   mockSchedule.rowSnapshot.mockImplementation(async (_db, id) => ({ step_index: 3, episode: 1, row_version: `v-${id}` }));
   mockSchedule.currentStepDelivery.mockImplementation(async () => null);
   mockSchedule.activeMemberRows.mockImplementation(async () => []);
+  mockSchedule.landingMemberRows.mockImplementation(async () => []);
   mockSchedule.closeUnderLock.mockImplementation(async () => ({ closed: true, landed: [] }));
 });
 
@@ -217,16 +219,20 @@ describe('lockInMergeTransaction + releaseInMergeTransaction: the releases run o
       };
       return q;
     });
-    mockSchedule.activeMemberRows.mockImplementation(async (id) => (id === WINNER
+    // the landing reader (paused / completed members included) names the invoices; a delivered final's named
+    // invoice with no member row (inv-7) is locked in the same statement
+    mockSchedule.landingMemberRows.mockImplementation(async (id) => (id === WINNER
       ? [{ invoice_id: 'inv-9' }, { invoice_id: 'inv-2' }] : [{ invoice_id: 'inv-5' }]));
     mockSchedule.closeUnderLock.mockImplementation(async (_t, schedule) => { order.push(['close', schedule.id]); return { closed: true, landed: [] }; });
-    const plan = await DunningMerge.lockInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared: rows.map(prep) });
+    const prepared = rows.map(prep);
+    prepared[1].delivery = { delivered: true, final: true, named: new Set(['inv-7', 'inv-5']) };
+    const plan = await DunningMerge.lockInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER, prepared });
     expect(fake.log.map(([kind]) => kind)).toEqual(['raw', 'raw', 'select']);
     expect(order).toEqual([]);
-    expect(mockSchedule.activeMemberRows).not.toHaveBeenCalled();
+    expect(mockSchedule.landingMemberRows).not.toHaveBeenCalled();
     await DunningMerge.releaseInMergeTransaction(fake.trx, plan, {});
     expect(order).toEqual([
-      ['lock invoices', ['inv-2', 'inv-5', 'inv-9']], ['orderBy', 'id'], ['forUpdate'],
+      ['lock invoices', ['inv-2', 'inv-5', 'inv-7', 'inv-9']], ['orderBy', 'id'], ['forUpdate'],
       ['close', 's-w'], ['close', 's-l'],
     ]);
   });
@@ -235,7 +241,7 @@ describe('lockInMergeTransaction + releaseInMergeTransaction: the releases run o
     const fake = withNegateRaw(fakeDb([{ id: 'w1', customer_id: WINNER, episode: 1, status: 'completed' }]));
     const plan = await DunningMerge.lockInMergeTransaction(fake.trx, { winnerId: WINNER, loserId: LOSER });
     await expect(DunningMerge.releaseInMergeTransaction(fake.trx, plan)).resolves.toEqual({ renumbers: [], released: [] });
-    expect(mockSchedule.activeMemberRows).not.toHaveBeenCalled();
+    expect(mockSchedule.landingMemberRows).not.toHaveBeenCalled();
   });
 
   // Codex #5503 r3 P2: the alert was keyed to the pre-merge schedule's customer (the archived loser).
