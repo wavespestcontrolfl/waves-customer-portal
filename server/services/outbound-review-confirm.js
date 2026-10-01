@@ -993,7 +993,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * source, and a visit confirmed ON SITE by its technician (field stamp / performed completion: the tech
  * stood at the property) stamp exactly as before — the caller passes bindAddress for the office approvals.
  */
-async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt = new Date() } = {}) {
+async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt = new Date(), markActivationPending = false } = {}) {
   const stamp = (conn) => conn('scheduled_services')
     .where({ id: svc.id, customer_confirmed: false })
     // A rejection that committed during the hook window wins: never stamp a
@@ -1003,12 +1003,19 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
   if (!bindAddress) return stamp(dbh);
   let refused = false;
   const stamped = await dbh.transaction(async (trx) => {
-    await trx('scheduled_services').where({ id: svc.id }).forUpdate().first('id');
+    const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first('id', 'source_call_log_id');
     if (!(await approvedAddressStillCurrent(trx, svc.id))) {
       refused = true;
       return 0;
     }
-    return stamp(trx);
+    const n = await stamp(trx);
+    // Stamp-first (activateHoldFencedByAddress): the legs still owed are recorded durably IN THE SAME
+    // transaction as the stamp, on the hold's review card, so a process exit before they finish is
+    // recovered by resumePendingHoldActivations instead of stranding a stamped, half-activated visit.
+    if (n > 0 && markActivationPending && locked?.source_call_log_id) {
+      await setHoldActivationPending(trx, locked.source_call_log_id, svc.id, true);
+    }
+    return n;
   });
   if (refused) {
     logger.info(`[street-level-hold] stamp refused for ${svc.id}: the visit address changed after the office approval — the hold stays pending`);
@@ -1017,6 +1024,20 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
     await reopenHoldCardForRestoredVisit(svc.id, dbh);
   }
   return stamped;
+}
+
+// The durable "legs still owed" marker of a stamp-first hold activation: payload.activation_pending on the
+// hold's latest review card (any status — the legs resolve it). Written with the stamp, cleared when the legs
+// are done (or the stamp is taken back).
+async function setHoldActivationPending(conn, callLogId, visitId, pending) {
+  const card = await findStreetLevelHoldCard(conn, { callLogId, visitId });
+  if (!card) return false;
+  await conn('triage_items').where({ id: card.id }).update({
+    payload: pending
+      ? conn.raw("COALESCE(payload, '{}'::jsonb) || '{\"activation_pending\": true}'::jsonb")
+      : conn.raw("COALESCE(payload, '{}'::jsonb) - 'activation_pending'"),
+  });
+  return true;
 }
 
 /**
@@ -1043,14 +1064,16 @@ async function stampCustomerConfirmed(dbh, svc, { bindAddress = false, stampedAt
  * cancelled during the legs, UN-STAMPS the visit (the exact stamp this call wrote, by its timestamp) and
  * reopens a review card the legs resolved, restoring the unstamped, office-approved state the lazy /
  * stranded-activation sweep retries (its witness check re-verifies the address first). A process exit
- * between the stamp and the legs leaves the visit confirmed with its hold card still OPEN in the office's
- * queue — visible, not silent. Every other source, and every non-hold voice booking, keeps hook-first.
+ * between the stamp and the legs is covered too: the stamp's own transaction also writes
+ * payload.activation_pending on the hold's review card (the legs still owed, durably), and the hourly
+ * sweep (resumePendingHoldActivations) re-runs the idempotent legs and clears the marker. Every other
+ * source, and every non-hold voice booking, keeps hook-first.
  *
  * @returns {Promise<boolean>} true when the legs ran and the visit is stamped; false otherwise.
  */
 async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
   const stampedAt = new Date();
-  const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt });
+  const stamped = await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: true });
   if (!(stamped > 0)) {
     // Refused (address changed: the card is reopened inside), a rejection took the row, or another activator
     // stamped it first — then it is activated by that one (the legs are idempotent), as for the other rails.
@@ -1070,14 +1093,52 @@ async function activateHoldFencedByAddress(dbh, svc, routeTag, hookOpts) {
         .where({ id: svc.id, customer_confirmed: true })
         .where('confirmed_at', stampedAt)
         .update({ customer_confirmed: false, confirmed_at: null });
+      if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false);
       await reopenHoldCardForRestoredVisit(svc.id, dbh);
     } catch (e) {
       logger.error(`[${routeTag}] un-stamp after a failed hold activation failed for ${svc.id}: ${e.message}`);
     }
     return false;
   }
+  if (svc.source_call_log_id) await setHoldActivationPending(dbh, svc.source_call_log_id, svc.id, false).catch(() => {});
   await reconcileStreetLevelHoldAfterStamp(dbh, svc);
   return true;
+}
+
+/**
+ * Recovery of stamp-first hold activations that a process exit interrupted: every hold card still marked
+ * activation_pending whose visit is stamped has its hook legs re-run (all idempotent) and, once they report
+ * success, the marker cleared. A visit a rejection took (cancelled / skipped / rescheduled) just drops the
+ * marker. The lazy-activation rules apply to the card-on-file ask (clearance-gated, never a text without
+ * the call-level clearance stamp). Run by the hourly stranded-activation sweep; bounded per run.
+ */
+async function resumePendingHoldActivations(dbh = db, { limit = 25 } = {}) {
+  const rows = await dbh('triage_items as ti')
+    .join('scheduled_services as ss', dbh.raw("ss.id::text = ti.payload->>'scheduled_service_id'"))
+    .where('ti.reason_code', 'outbound_booking_review')
+    .whereRaw("ti.payload->>'activation_pending' = 'true'")
+    .where('ss.customer_confirmed', true)
+    .limit(limit)
+    .select('ti.id as card_id', 'ss.id', 'ss.status', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.source_call_log_id', 'ss.source_action');
+  let resumed = 0;
+  for (const row of rows) {
+    try {
+      if (['cancelled', 'skipped', 'rescheduled'].includes(String(row.status))) {
+        await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
+        continue;
+      }
+      const ok = await runOutboundReviewConfirmHook(dbh, row, 'hold-activation-resume', { suppressCardAskWithoutClearance: true });
+      if (ok) {
+        await setHoldActivationPending(dbh, row.source_call_log_id, row.id, false);
+        await reconcileStreetLevelHoldAfterStamp(dbh, row);
+        resumed += 1;
+      }
+    } catch (e) {
+      logger.warn(`[hold-activation-resume] ${row.id} failed: ${e.message}`);
+    }
+  }
+  if (rows.length) logger.info(`[hold-activation-resume] resumed ${resumed}/${rows.length} interrupted hold activations`);
+  return { candidates: rows.length, resumed };
 }
 
 /**
@@ -1225,6 +1286,8 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
   if (rows.length) {
     logger.info(`[legacy-activation-sweep] activated ${activated}/${rows.length} stranded legacy outbound-review rows`);
   }
+  // Stamp-first street-level hold activations a process exit interrupted (activateHoldFencedByAddress).
+  await resumePendingHoldActivations(dbh, { limit }).catch((e) => logger.warn(`[hold-activation-resume] sweep leg failed: ${e.message}`));
   return { candidates: rows.length, activated };
 }
 
@@ -1238,6 +1301,7 @@ module.exports = {
   runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
+  resumePendingHoldActivations,
   verifyReminderSlotAfterRegistration,
   _test: { hasRecordedOfficeConfirm, stampCustomerConfirmed },
 };

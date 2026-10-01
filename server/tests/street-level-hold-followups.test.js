@@ -214,7 +214,7 @@ describe('finding 6: the office approval is bound to the address it was given fo
       expect(s).toContain('return await activateHoldFencedByAddress(db, row, routeTag, {');
       const fence = s.slice(s.indexOf('async function activateHoldFencedByAddress'), s.indexOf('async function runOfficeConfirmActivation'));
       // Order inside it: the locked, address-checked stamp, then the hook legs, then (on failure) the un-stamp.
-      expect(fence.indexOf('await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt })'))
+      expect(fence.indexOf('await stampCustomerConfirmed(dbh, svc, { bindAddress: true, stampedAt, markActivationPending: true })'))
         .toBeLessThan(fence.indexOf('await runOutboundReviewConfirmHook(dbh, svc, routeTag, hookOpts)'));
       expect(fence.indexOf('await runOutboundReviewConfirmHook')).toBeLessThan(fence.indexOf('.update({ customer_confirmed: false, confirmed_at: null })'));
       const stampFn = s.slice(s.indexOf('async function stampCustomerConfirmed'), s.indexOf('async function activateHoldFencedByAddress'));

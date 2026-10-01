@@ -70,7 +70,8 @@ postgres('an office-approved street-level hold is activated behind its address w
     created.customers.push(customerId); created.calls.push(callId); created.visits.push(visitId);
     return { customerId, callId, visitId, svc: { id: visitId, customer_id: customerId, source_action: 'voice_agent', source_call_log_id: callId, scheduled_date: '2099-01-05', window_start: '09:00:00', service_type: 'pest_control' } };
   }
-  const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+  const { runOfficeConfirmActivation, resumePendingHoldActivations, _test } = require('../services/outbound-review-confirm');
+  const marker = async (callId) => (await knex('triage_items').where({ call_log_id: callId }).first('payload')).payload.activation_pending;
   const state = async (visitId, callId) => ({
     confirmed: (await knex('scheduled_services').where({ id: visitId }).first('customer_confirmed')).customer_confirmed,
     card: (await knex('triage_items').where({ call_log_id: callId }).first('status')).status,
@@ -82,6 +83,37 @@ postgres('an office-approved street-level hold is activated behind its address w
     expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
     expect(reminders.registerAppointment).toHaveBeenCalledTimes(1);
     expect(cardRequest.requestCardForAppointment).toHaveBeenCalledTimes(1);
+    expect(await marker(callId)).toBeUndefined();   // the owed-legs marker is cleared once they ran
+  });
+
+  test('a process exit between the stamp and the legs leaves a durable marker, and the sweep resumes the legs', async () => {
+    const { visitId, callId, svc } = await seedApprovedHold();
+    // The stamp and its marker commit together; the legs never ran (the crash).
+    expect(await _test.stampCustomerConfirmed(knex, svc, { bindAddress: true, markActivationPending: true })).toBe(1);
+    expect(await marker(callId)).toBe(true);
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'open' });
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
+
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 1 });
+    expect(await state(visitId, callId)).toEqual({ confirmed: true, card: 'resolved' });
+    expect(reminders.registerAppointment).toHaveBeenCalledTimes(1);
+    expect(await marker(callId)).toBeUndefined();
+    // Nothing left to resume.
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 0, resumed: 0 });
+  });
+
+  test('a refused stamp writes no marker; a visit a rejection took just drops it', async () => {
+    const refused = await seedApprovedHold();
+    await knex('scheduled_services').where({ id: refused.visitId }).update({ service_address_line1: '1240 Sample Newbuild Trl' });
+    expect(await _test.stampCustomerConfirmed(knex, refused.svc, { bindAddress: true, markActivationPending: true })).toBe(0);
+    expect(await marker(refused.callId)).toBeUndefined();
+
+    const cancelled = await seedApprovedHold();
+    await _test.stampCustomerConfirmed(knex, cancelled.svc, { bindAddress: true, markActivationPending: true });
+    await knex('scheduled_services').where({ id: cancelled.visitId }).update({ status: 'cancelled' });
+    expect(await resumePendingHoldActivations(knex)).toEqual({ candidates: 1, resumed: 0 });
+    expect(await marker(cancelled.callId)).toBeUndefined();
+    expect(reminders.registerAppointment).not.toHaveBeenCalled();
   });
 
   test('a correction committed BEFORE the verify: no leg runs at all (no card resolve, no card text), the hold stays pending', async () => {
@@ -123,6 +155,7 @@ postgres('an office-approved street-level hold is activated behind its address w
     reminders.registerAppointment.mockResolvedValueOnce(null);   // the swallowed-failure signal of a core leg
     expect(await runOfficeConfirmActivation(knex, svc, 'admin-dispatch')).toBe(false);
     expect(await state(visitId, callId)).toEqual({ confirmed: false, card: 'open' });
+    expect(await marker(callId)).toBeUndefined();
     // The retry (the lazy / sweep activation) re-verifies the witness and completes it.
     const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
     const techId = randomUUID();
