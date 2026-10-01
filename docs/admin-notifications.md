@@ -168,7 +168,7 @@ A source that partly fails says so in `warnings`: a dashboard queue that threw i
 
 An item with `derived: true` comes from an older raw `notifyAdmin` call that never stamped
 the eight parts (a dashboard standing condition is not one of these: it is `derived: false`).
-Its area is inferred from the category, its severity is `broken` only for a
+Its area is inferred from the admin page its link opens, else from the category, its severity is `broken` only for a
 `FIX` digest (for a digest with no stamped kind, the legacy title prefix decides: `FIX:` broken,
 `ACT:` / `[Review]` needs-you, `FYI:` / `OK:` fyi and left out), a registry event its trigger marks `informational` (a payment received, a job completed) is `fyi` and left out, its who is `person` (an engineering digest is `claude`), its subject is read
 from the ids in its metadata, and its done-when is unknown. Treat those as best guesses and

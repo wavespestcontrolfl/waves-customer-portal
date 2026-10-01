@@ -363,3 +363,17 @@ test('a standing condition carries its dollar exposure', async () => {
   expect(items.find((i) => i.id === 'live:overdue_60').amount).toBe(1250.5);
   expect(items.find((i) => i.id === 'live:unassigned').amount).toBeNull();
 });
+
+test('an unstamped registry alert takes its area from its work link; category is the fallback', () => {
+  expect(mapAlertRow(row({ category: 'system', link: '/admin/estimates?estimateId=e1', metadata: { triggerKey: 'estimate_deposit_reconcile_needed' } })).area).toBe('Estimates');
+  expect(mapAlertRow(row({ category: 'system', link: '/admin/dispatch?visit=v1', metadata: { triggerKey: 'service_report_delivery_failed' } })).area).toBe('Schedule');
+  expect(mapAlertRow(row({ category: 'payment', link: '/admin/unknown', metadata: {} })).area).toBe('Billing');
+  // A skipped newsletter run asks for approvals: work, not a fact.
+  expect(mapAlertRow(row({ category: 'newsletter', metadata: { triggerKey: 'newsletter_autopilot_skipped' } })).severity).toBe('needs-you');
+});
+
+test('a standing condition names its dashboard check as its subject', async () => {
+  computeDashboardAlerts.mockResolvedValue({ alerts: [{ id: 'overdue_60', severity: 'critical', count: 1, label: '1 invoice 60+ days overdue', href: '/admin/invoices' }] });
+  const { items } = await listNeedsMe({});
+  expect(items[0].subject).toEqual({ type: 'check', id: 'overdue_60' });
+});

@@ -807,7 +807,6 @@ const TRIGGER_REGISTRY = {
     },
   },
   newsletter_autopilot_skipped: {
-    informational: true, // a fact, not work: needs_me leaves it out
     label: 'Newsletter autopilot skipped (not enough events)',
     category: 'newsletter',
     priority: 'high',

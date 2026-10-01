@@ -113,11 +113,11 @@ function digestLinks(row) {
   return { link: row.link, reportLink: focused };
 }
 
-// A row's area when it carries none: an ops digest names its work page in its
-// link (estimates, communications, ...), so that page's area wins over the
-// generic System its category maps to.
+// A row's area when it carries none: its link names the work page (estimates,
+// dispatch, communications, ...), so a recognized page wins over the category,
+// which is often a generic 'system'. The category is the fallback.
 function inferredArea(row) {
-  if (row.category === 'ops_digest' && row.link) {
+  if (row.link) {
     const fromLink = areaFrom(AREA_BY_PATH, String(row.link));
     if (fromLink !== 'System') return fromLink;
   }
@@ -173,6 +173,8 @@ function mapStanding(alert) {
     headline: alert.label,
     why: null,
     severity: 'needs-you',
+    // The dashboard check this count comes from.
+    subject: { type: 'check', id: String(alert.id) },
     count: alert.count,
     // Dollar exposure where the queue has one (overdue invoices, expiring estimates, MRR at risk).
     amount: Number.isFinite(alert.amount) ? alert.amount : null,
