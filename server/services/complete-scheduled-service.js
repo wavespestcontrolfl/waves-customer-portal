@@ -8885,7 +8885,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // declined / inspection-only visit, a backfill or a recap-only record
         // performed no application, so the stamp stays for the visit that does.
         if (obligation.owed && Array.isArray(obligation.unconsumableStamps) && obligation.unconsumableStamps.length
-          && visitPerformed && !isBackfillCompletion && !recapReviewOnly) {
+          && visitPerformed && !isIncompleteVisit && !isBackfillCompletion && !recapReviewOnly) {
           const { consumeUnconsumableSetupFeeStamps } = require('../services/setup-fee-obligation');
           const drafts = await consumeUnconsumableSetupFeeStamps(db, obligation.unconsumableStamps, {
             customerId: svc.customer_id,
@@ -11122,7 +11122,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // AFTER the mint: a stamp the mint consumed is null, and a negative stamp
     // (a mint in flight) is never touched. Only a performed, non-callback,
     // non-always-free, live completion; a failure leaves the stamp queued.
-    if (!packetEffects && visitPerformed && !isBackfillCompletion
+    if (!packetEffects && visitPerformed && !isIncompleteVisit && !isBackfillCompletion
       && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       try {
         const feeParentId = svc.recurring_parent_id || svc.id;

@@ -150,7 +150,8 @@ async function deferredSetupClaimStillQueued(trx, member) {
 // stamp is a single-visit completion mid-mint that will bill the fee itself,
 // left alone. Every member's series is scanned (billed or not), once per series.
 // Only a member whose visit was really PERFORMED as live work can be the first
-// visit the queued fee rides: a declined / inspection-only / incomplete visit,
+// visit the queued fee rides: a declined / inspection-only / incomplete visit
+// (record_notes.visitOutcome, even on a 'completed' record),
 // a backfill or an already-invoiced completion, a recap-only record, a callback
 // or always-free work keeps its series' stamp for the visit that is performed
 // (the single-visit completion's own rule).
@@ -158,7 +159,7 @@ function memberPerformedForSetupClaim(member) {
   const notes = member.record_notes || {};
   return member.record_status === 'completed'
     && !notes.backfill && !notes.invoiceAlreadySent && !notes.oneTimeRecapOnly
-    && !['inspection_only', 'customer_declined'].includes(notes.visitOutcome)
+    && !['inspection_only', 'customer_declined', 'incomplete'].includes(notes.visitOutcome)
     && !member.is_callback && !isAlwaysFreeServiceType(member.service_type);
 }
 

@@ -475,6 +475,39 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Codex #5485 r3 P1: the refund path's rodent-setup restoration must never
+  // re-arm a pay-after-first-visit fee (a refunded claim-backed fee stays
+  // resolved; the next completion must not bill it again).
+  test('a refunded first invoice does NOT re-arm the PAF setup fee through the rodent restoration path', async () => {
+    const f = await seed();
+    try {
+      expect(await complete(f, f.parentId)).toMatchObject({ status: 200 });
+      const [inv] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(setupLines(inv)).toHaveLength(1);
+      await mockPg('invoices').where({ id: inv.id }).update({ status: 'refunded' });
+      const refunded = await mockPg('invoices').where({ id: inv.id }).first();
+      const restored = await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(mockPg, refunded);
+      expect(restored).toBeNull();
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+    } finally { await cleanup(f); }
+  });
+
+  // Codex #5485 r3 P1: an accept that adopted an existing appointment leaves
+  // source_estimate_id on the CHILD and stamps the fee on its series parent
+  // (an older / unlinked series). The detector must find that stamp, or the
+  // first completion is parked while the claim stays armed.
+  test('a stamp on the parent of a source-linked child (adopted appointment) is read as deferred: the child completion bills it, nothing parked', async () => {
+    const f = await seed();
+    try {
+      await mockPg('scheduled_services').where({ id: f.parentId }).update({ source_estimate_id: null, status: 'completed' });
+      await makeDue(f.childIds[0]);
+      expect(await complete(f, f.childIds[0])).toMatchObject({ status: 200 });
+      expect(await parkAlerts(f)).toHaveLength(0);
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
   // Reviewer P2-B/P2-D: a stamp on a customer whose lane never runs the
   // completion mint (monthly membership: dues cover the visit) can never be
   // consumed. The detector must not call it a deferral (the fee would be

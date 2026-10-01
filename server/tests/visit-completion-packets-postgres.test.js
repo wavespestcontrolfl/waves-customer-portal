@@ -611,6 +611,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.body.billing.setupFeeDrafts).toBeUndefined();
   });
 
+  test('an INCOMPLETE member keeps its stamp on an office-required closeout (incomplete is not performed)', async () => {
+    await linkFixtureEstimate();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ pending_setup_fee: 99, recurring_parent_id: null });
+    await InvoiceService.create({ customerId: fixture.customerId, scheduledServiceId: fixture.serviceIds[0],
+      lineItems: [{ description: 'Manual visit bill', quantity: 1, unit_price: 120 }] });
+    const input = submission();
+    input.items[1].body.visitOutcome = 'incomplete';
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required' });
+    expect(await setupDraftsOf()).toHaveLength(0);
+    expect(Number((await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first('pending_setup_fee')).pending_setup_fee)).toBe(99);
+  });
+
   test('the closeout review alert carries the draft setup invoice id + amount', async () => {
     await linkFixtureEstimate();
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ pending_setup_fee: 99 });

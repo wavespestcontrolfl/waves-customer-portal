@@ -10585,6 +10585,24 @@ const InvoiceService = {
     // already restores.
     const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
     if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
+    // A pay-after-first-visit WaveGuard setup fee (GATE_PAF_SETUP_FEE) rides
+    // the same stamp + claim mechanism, but it is NOT a rodent obligation: a
+    // refunded claim-backed fee stays resolved (setup-fee-obligation.js
+    // deferredSetupFeeCovers; the public contract bills it once). Its anchor
+    // series comes from the accept that deferred it, which persisted
+    // setupFeeDeferredToFirstVisit on the estimate — never re-armed here.
+    if (claimRecord?.scheduled_service_id) {
+      const claimAnchor = await conn("scheduled_services").where({ id: claimRecord.scheduled_service_id }).first("source_estimate_id");
+      if (claimAnchor?.source_estimate_id) {
+        const deferringEstimate = await conn("estimates").where({ id: claimAnchor.source_estimate_id }).first("estimate_data");
+        let deferringData = deferringEstimate?.estimate_data;
+        if (typeof deferringData === "string") { try { deferringData = JSON.parse(deferringData); } catch { deferringData = null; } }
+        if (deferringData?.setupFeeDeferredToFirstVisit === true) {
+          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee on series ${claimRecord.scheduled_service_id} stays resolved (not a rodent obligation; never re-armed)`);
+          return null;
+        }
+      }
+    }
     if (claimRecord) {
       // A COMPLETION invoice writes a claim record too (crash-resume
       // evidence, admin-dispatch), consumed only AFTER a successful

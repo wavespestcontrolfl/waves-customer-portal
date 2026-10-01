@@ -168,7 +168,24 @@ async function deferredSetupFeeCovers(conn, estimate, { completingVisitId = null
     .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
     .whereNull('recurring_parent_id')
     .select('id', 'status', 'pending_setup_fee');
-  const rootRows = (Array.isArray(roots) ? roots : []).filter((r) => r && r.id != null);
+  // An accept that adopted an existing appointment leaves source_estimate_id
+  // on that CHILD and stamps the fee on its series parent (which may belong to
+  // an older or unlinked series): that parent is this estimate's root too.
+  const linkedChildren = await conn('scheduled_services')
+    .where({ source_estimate_id: estimate.id, customer_id: estimate.customer_id })
+    .whereNotNull('recurring_parent_id')
+    .select('recurring_parent_id');
+  const knownRootIds = new Set((Array.isArray(roots) ? roots : []).map((r) => String(r?.id)));
+  const adoptedParentIds = [...new Set((Array.isArray(linkedChildren) ? linkedChildren : [])
+    .map((c) => c?.recurring_parent_id).filter((id) => id != null && !knownRootIds.has(String(id))))];
+  const adoptedParents = adoptedParentIds.length
+    ? await conn('scheduled_services')
+      .whereIn('id', adoptedParentIds)
+      .where({ customer_id: estimate.customer_id })
+      .select('id', 'status', 'pending_setup_fee')
+    : [];
+  const rootRows = [...(Array.isArray(roots) ? roots : []), ...(Array.isArray(adoptedParents) ? adoptedParents : [])]
+    .filter((r) => r && r.id != null);
   if (!rootRows.length) return none;
   const { seriesCanStillConsume } = require('./secure-appointment-plans');
   const { resolveBillingLane } = require('./billing-lane');

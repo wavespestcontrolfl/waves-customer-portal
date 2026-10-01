@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
     const chain = {};
     const notIn = {};
     const self = () => chain;
-    ['where', 'whereNot', 'whereIn', 'whereNull', 'orderBy', 'leftJoin', 'whereRaw', 'orWhere'].forEach((m) => {
+    ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'orderBy', 'leftJoin', 'whereRaw', 'orWhere'].forEach((m) => {
       chain[m] = jest.fn(self);
     });
     // whereNotIn is honored on `first` so status-vocabulary filters (e.g.
