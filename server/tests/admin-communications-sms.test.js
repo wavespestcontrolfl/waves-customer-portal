@@ -545,6 +545,65 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  // Street-level address hold: the composer's reschedule / appointment link inserts carry their visit's
+  // id so the shared send step can hold the text when that visit is (or became) a live hold.
+  describe('linkedVisitIds — the visits the draft links point at', () => {
+    const VISIT_A = '3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6c';
+    const VISIT_B = '8a7b6c5d-4e3f-4a2b-8c1d-0e9f8a7b6c5d';
+    const postSms = (baseUrl, payload) => fetch(`${baseUrl}/admin/communications/sms`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+15551234567', body: 'Your reschedule link: https://example.test/r/abc', messageType: 'manual', ...payload }),
+    });
+
+    test('well-formed ids ride the send as metadata.linked_scheduled_service_ids; junk and duplicates are dropped; absent stays absent', async () => {
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM-linked' });
+      await withServer(async (baseUrl) => {
+        const res = await postSms(baseUrl, { linkedVisitIds: [VISIT_A, 'not-a-uuid', VISIT_A.toUpperCase(), VISIT_B, 42] });
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata.linked_scheduled_service_ids).toEqual([VISIT_A, VISIT_B]);
+        sendCustomerMessage.mockClear();
+        expect((await postSms(baseUrl, {})).status).toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('linked_scheduled_service_ids');
+      });
+    });
+
+    test('a send the shared step holds (a live street-level hold) is not reported as sent', async () => {
+      sendCustomerMessage.mockResolvedValue({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'STREET_LEVEL_HOLD', reason: 'Visit is an address hold awaiting the office confirm', retryable: true,
+      });
+      await withServer(async (baseUrl) => {
+        const res = await postSms(baseUrl, { linkedVisitIds: [VISIT_A] });
+        expect(res.status).not.toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].metadata.linked_scheduled_service_ids).toEqual([VISIT_A]);
+      });
+    });
+
+    test('schedule-sms refuses a draft whose link points at a live street-level hold (409, nothing queued); a clear visit queues', async () => {
+      const hold = require('../services/street-level-hold');
+      const spy = jest.spyOn(hold, 'isStreetLevelHoldVisit').mockImplementation(async (id) => id === VISIT_A);
+      db.mockImplementation((table) => {
+        const first = jest.fn(async () => (table === 'customers' ? { id: 'cust-A', phone: '+15551234567' } : null));
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'sched-1' }]) })) };
+      });
+      try {
+        await withServer(async (baseUrl) => {
+          const post = (payload) => fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to: '+15551234567', body: 'Your tech is on the way.', messageType: 'manual', customerId: 'cust-A', scheduledFor: '2099-01-01T10:00', ...payload }),
+          });
+          const held = await post({ linkedVisitIds: [VISIT_B, VISIT_A] });
+          expect(held.status).toBe(409);
+          expect((await held.json()).code).toBe('street_level_hold');
+          expect((await post({ linkedVisitIds: [VISIT_B] })).status).not.toBe(409);
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   describe('Auto Pay setup link in the body (delivery seam)', () => {
     const SECURE_BODY = 'Set it up here: https://portal.wavespestcontrol.com/secure/abcDEF123_-xyz789QWERTY';
     function wireAutopayDb({ row, owner = { id: 'cust-A', phone: '+15551234567' } }) {

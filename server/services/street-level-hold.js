@@ -31,6 +31,15 @@ function heldVisitSubquery(q, visitAlias = 'ss', { includeClosedOut = false } = 
   return includeClosedOut ? sub : sub.whereRaw("COALESCE(hold_ti.payload->>'closed_out', '') = ''");
 }
 
+// The same hold subquery as inline SQL text, for raw-SQL scanners (e.g. `AND NOT EXISTS (${heldVisitSql('s')})`).
+// Built from heldVisitSubquery so the two can never drift; the only bindings are constants, inlined by toQuery().
+let sqlCompiler = null;
+function heldVisitSql(visitAlias = 'ss', opts = {}) {
+  // A connection-less knex instance: it only compiles the builder to text (never opens a pool).
+  if (!sqlCompiler) sqlCompiler = require('knex')({ client: 'pg' });
+  return heldVisitSubquery(sqlCompiler.queryBuilder(), visitAlias, opts).toQuery();
+}
+
 // THE live predicate: true while the visit is an unconfirmed street-level hold
 // (card present, customer_confirmed false, not cancelled / skipped / rescheduled),
 // read fresh from the database. (findStreetLevelHoldCard below is the different
@@ -232,6 +241,12 @@ function visitServiceAddressLine(row) {
   return [row?.service_address_line1, row?.service_address_line2, row?.service_address_city, row?.service_address_state, row?.service_address_zip]
     .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
 }
+// The visit's date and window start as the hold card writes them ("2026-10-05 13:00"), so the live read
+// of a moved hold and the card's own captured `visit_when` are the same shape.
+function visitWhenLine(row) {
+  const day = row?.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : String(row?.scheduled_date || '').slice(0, 10);
+  return [day, row?.window_start ? String(row.window_start).slice(0, 5) : null].filter(Boolean).join(' ');
+}
 // Word boundaries survive ("1 23rd Ave" is not "12 3rd Ave"): punctuation becomes one space.
 const normAddress = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -251,6 +266,47 @@ async function assertExpectedServiceAddress(trx, visitId, expected) {
   }
 }
 
+// The address an office approval was given for. The approval itself is a job_status_history row, which
+// carries no address, so the confirm routes record this witness on the hold's review card, in the SAME
+// transaction as the approving transition and under the visit row lock: the normalized service address
+// the visit has at that instant (when the dialog sent expected_service_address, the check above already
+// proved it equals what the office read back). The lazy / stranded-activation retry compares it with the
+// visit's current address (approvedAddressStillCurrent), so a retry cannot release the hold for an
+// address nobody confirmed. A later approval overwrites it. No-op (false) unless the visit is a live hold.
+async function recordApprovedAddressWitness(trx, visitId) {
+  const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
+    .first('source_action', 'source_call_log_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+  if (!row || row.source_action !== 'voice_agent' || !row.source_call_log_id) return false;
+  if (!(await isStreetLevelHoldVisit(visitId, trx))) return false;
+  const card = await findStreetLevelHoldCard(trx, { callLogId: row.source_call_log_id, visitId });
+  if (!card) return false;
+  await trx('triage_items')
+    .where({ id: card.id })
+    .update({
+      payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ approved_address: normAddress(visitServiceAddressLine(row)) })]),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+// True when the office approval recorded for this hold is still for the visit's CURRENT address. A hold
+// with no witness (approved before the witness existed, or by a caller that never recorded one) keeps
+// the old behavior (true). Fails closed (false) on a lookup error: the retry rail tries again later.
+async function approvedAddressStillCurrent(dbh, visitId) {
+  try {
+    const row = await dbh('scheduled_services').where({ id: visitId })
+      .first('source_call_log_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+    if (!row?.source_call_log_id) return true;
+    const card = await findStreetLevelHoldCard(dbh, { callLogId: row.source_call_log_id, visitId });
+    const witness = card?.payload?.approved_address;
+    if (typeof witness !== 'string' || !witness) return true;
+    return normAddress(visitServiceAddressLine(row)) === witness;
+  } catch (err) {
+    logger.warn(`[street-level-hold] approved-address check failed for ${visitId}: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
 const HOLD_REFUSAL = 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.';
 
 // The status routes' hold guard, serialized with promotion: take the visit row lock FOR UPDATE (the
@@ -264,4 +320,4 @@ async function assertNotLiveHoldUnderLock(trx, visitId) {
   }
 }
 
-module.exports = { assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+module.exports = { visitWhenLine, recordApprovedAddressWitness, approvedAddressStillCurrent, assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, heldVisitSql, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

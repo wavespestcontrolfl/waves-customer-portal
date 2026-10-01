@@ -2582,6 +2582,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         if (isOfficeReviewConfirm && typeof req.body?.expected_service_address === 'string') {
           await require('../services/street-level-hold').assertExpectedServiceAddress(trx, svc.id, req.body.expected_service_address);
         }
+        // Record the address this approval is for (same transaction, same row lock), so a later retry of
+        // the activation cannot release the hold against an address that changed afterwards.
+        if (isOfficeReviewConfirm && svc.source_action === 'voice_agent' && svc.customer_confirmed !== true) {
+          await require('../services/street-level-hold').recordApprovedAddressWitness(trx, svc.id);
+        }
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = lockedRow;
           fieldConfirmVerified = !!locked

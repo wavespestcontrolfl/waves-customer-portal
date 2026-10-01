@@ -103,6 +103,23 @@ describe('the SMS send step holds a live street-level hold', () => {
     expect(sendViaTwilio).not.toHaveBeenCalled();
   });
 
+  test('a composer send that links visits (metadata.linked_scheduled_service_ids) is held when ANY linked visit is a live hold', async () => {
+    isStreetLevelHoldVisit.mockImplementation(async (id) => id === 'visit-held');
+    const send = (linked) => sendCustomerMessage({
+      to: '+19415550142', channel: 'sms', audience: 'customer', customerId: 'cust-1', purpose: 'conversational',
+      body: 'Here is your reschedule link.', metadata: { linked_scheduled_service_ids: linked },
+    });
+    const held = await send(['visit-ok', 'visit-held']);
+    expect(held).toMatchObject({ sent: false, blocked: true, code: 'STREET_LEVEL_HOLD', retryable: true });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+    expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({ validatorsFailed: ['street_level_hold'] }));
+    // None of them held: the text goes out. An empty / absent list never consults the hold.
+    expect((await send(['visit-ok'])).sent).toBe(true);
+    isStreetLevelHoldVisit.mockClear();
+    await send([]);
+    expect(isStreetLevelHoldVisit).not.toHaveBeenCalled();
+  });
+
   test('the office-confirm hook\'s own card invitation is part of the release and is not held; every other card-request trigger still is', async () => {
     isStreetLevelHoldVisit.mockResolvedValue(true);
     const send = (trigger) => sendCustomerMessage({

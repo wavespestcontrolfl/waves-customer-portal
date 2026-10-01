@@ -1862,6 +1862,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSendResult({ ok: false, text: "An attachment has expired. Remove it and attach it again before sending." });
       return;
     }
+    const linkedVisitIds = [insertedResched?.visitId, insertedCustomerLinks.appointment?.visitId].filter(Boolean);
     setSending(true);
     sendInFlightRef.current = true;
     setSendResult(null);
@@ -1896,6 +1897,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             messageType: "manual",
             fromNumber,
             scheduledFor,
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
             agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
           }),
@@ -1948,6 +1950,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             // A freshly inserted contract signing link is unwritten until
             // this send activates it — the server needs the contract it names.
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
+            // The visits the draft's reschedule / appointment links point at: the server's shared send
+            // step holds the text while one of them is a street-level address hold.
+            linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined,
           }),
         });
         if (!isAcceptedSms(sent)) {
@@ -2203,6 +2208,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         url: d.url,
         recipientKey: requestRecipientKey,
         customerId: requestCustomerId,
+        // The visit the link points at: the send carries it so a street-level address hold blocks the text.
+        visitId: d.appointment?.id || null,
       });
       setSendResult({
         ok: true,
@@ -2523,6 +2530,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         // resolved lead id, so the send can route through the leads-page
         // send route and get its audit trail (pre-push Codex P2).
         leadId: d.leadId || null,
+        // The appointment-page link's visit: carried through the send (see insertedResched).
+        visitId: d.appointment?.id || null,
         // Both: the send posts reviewRequestEmail so the same ask is
         // emailed once the text has really gone out.
         emailToo: channel === "both",

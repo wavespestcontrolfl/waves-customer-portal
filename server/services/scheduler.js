@@ -7462,6 +7462,11 @@ function initScheduledJobs() {
         const candidates = await db('scheduled_services')
           .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
+          // A street-level address hold the office has not cleared was never dispatched, so it cannot be
+          // a customer no-show (no customer_noshow row, no repeated-miss outreach).
+          .whereNotExists(function unclearedAddressHold() {
+            require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
+          })
           .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at

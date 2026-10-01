@@ -1161,6 +1161,11 @@ async function promisedVisitIds(conn, { now }) {
   ].filter(Boolean).map(String))];
 }
 
+// Subquery builder for `s`: the visit is a live, uncleared street-level address hold (street-level-hold.js).
+function unclearedHold() {
+  require('./street-level-hold').heldVisitSubquery(this, 's');
+}
+
 async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
   // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISED WINDOW: a
@@ -1175,6 +1180,8 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     .where((qb) => qb
       .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
       .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
+    // An uncleared street-level address hold was never dispatched: no no-show for it.
+    .whereNotExists(unclearedHold)
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   // A recalled row that is NOT live still names a stop: the grouped reminder
   // is linked to whichever member won the send claim, and that member may
@@ -1190,6 +1197,7 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
       .whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)
       .whereNotIn('s.id', rows.map((r) => r.id))
+      .whereNotExists(unclearedHold)
       .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
     : [];
   const liveRows = [...rows, ...stranded]

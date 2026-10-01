@@ -19,7 +19,7 @@
  */
 
 const logger = require('./logger');
-const { findStreetLevelHoldCard, isStreetLevelHoldVisit } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, approvedAddressStillCurrent } = require('./street-level-hold');
 const db = require('../models/db');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -903,7 +903,10 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
     // incomplete / declined closeout — stays a non-activatable hold.)
     if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION && await isStreetLevelHoldVisit(serviceId, db, { includeClosedOut: true })) {
       const approved = (row.status === 'completed' && !!row.field_confirmed_at)
-        || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId));
+        // The recorded approval binds to the address the office confirmed: a correction after it voids it
+        // (the office re-confirms the new address), so a retry never releases the hold for an unseen address.
+        || (row.status === 'confirmed' && await hasRecordedOfficeConfirm(db, serviceId)
+          && await approvedAddressStillCurrent(db, serviceId));
       if (!approved) {
         logger.info(`[${routeTag}] legacy activation skipped for ${serviceId}: street-level address hold awaiting the office confirm`);
         return false;
@@ -1017,7 +1020,15 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
     if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(dbh, svc);
-    return stamped > 0;
+    if (stamped > 0) return true;
+    // A zero-row stamp is not a failure when another activator (the stranded-activation sweep, a
+    // move's lazy activation, the completion release) won the guarded stamp while this call's legs
+    // ran: the legs are idempotent and all ran OK here, so the row IS activated. Re-read before
+    // answering false (same rule as releaseStreetLevelHoldForCompletion) — a false here suppresses the
+    // technician's new-visit card on an office approval of a moved hold (confirmed -> confirmed).
+    // A row a rejection took (cancelled / skipped / rescheduled) stays unstamped and answers false.
+    const after = await dbh('scheduled_services').where({ id: svc.id }).first('customer_confirmed');
+    return after?.customer_confirmed === true;
   } catch (e) {
     logger.error(`[${routeTag}] office-confirm stamp failed for ${svc.id}: ${e.message}`);
     return false;

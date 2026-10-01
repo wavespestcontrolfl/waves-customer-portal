@@ -121,16 +121,26 @@ const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
 function heldVisitIdOf(input) {
   return input.appointmentId || input.metadata?.scheduled_service_id || input.metadata?.scheduledServiceId || null;
 }
+// Every visit the send is about: the one above plus the visits a composer draft's links point at
+// (metadata.linked_scheduled_service_ids, set by the Communications composer's /sms route).
+function heldVisitIdsOf(input) {
+  const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
+  return [...new Set([heldVisitIdOf(input), ...linked].filter(Boolean).map(String))];
+}
 async function streetLevelHoldBlocksSend(input) {
-  const visitId = heldVisitIdOf(input);
-  if (!visitId || input.audience !== 'customer') return false;
+  const visitIds = heldVisitIdsOf(input);
+  if (!visitIds.length || input.audience !== 'customer') return false;
   // The card-on-file invitation the office-confirm hook itself sends (and its lazy-activation twin)
   // is part of releasing the hold: the hook runs before the confirmed stamp lands, and only after
   // the office approved the address (the activation guards refuse a hold otherwise).
   if (input.purpose === 'card_request' && input.metadata?.trigger === 'outbound_review_confirm') return false;
   // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
   // stops NEW holds but never releases the customer messages of holds already open.
-  return require('../street-level-hold').isStreetLevelHoldVisit(String(visitId));
+  const { isStreetLevelHoldVisit } = require('../street-level-hold');
+  for (const visitId of visitIds) {
+    if (await isStreetLevelHoldVisit(visitId)) return true;
+  }
+  return false;
 }
 
 // callback_number_needed hold — keyed on the DESTINATION NUMBER (codex

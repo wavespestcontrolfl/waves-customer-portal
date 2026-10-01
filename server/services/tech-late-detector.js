@@ -125,6 +125,7 @@ async function runInner() {
   // (codex P1, PR #4403 round 10). Best-effort: a cleanup failure must not
   // stop the fallback scan.
   await tracking.cleanupAfterDisable(db).catch((err) => logger.warn(`[tech-late-detector] tracking cleanup failed: ${err.message}`));
+  const { heldVisitSql } = require('./street-level-hold');
   let rows;
   try {
     const result = await db.raw(`
@@ -154,6 +155,8 @@ async function runInner() {
           AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
           AND s.technician_id IS NOT NULL
           AND s.window_start IS NOT NULL
+          -- An uncleared street-level address hold was never dispatched: no late alert for it.
+          AND NOT EXISTS (${heldVisitSql('s')})
       )
       SELECT
         c.job_id,

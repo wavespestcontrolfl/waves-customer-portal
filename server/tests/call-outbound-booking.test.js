@@ -927,6 +927,36 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
       expect(stampOf(db)).toBeUndefined();
     });
 
+    // A concurrent activator (the stranded-activation sweep, a move's lazy activation) can win the guarded
+    // customer_confirmed = false stamp while this call's legs run. Zero rows is then NOT a failure: the legs
+    // are idempotent and the row IS activated — the technician's new-visit card keys on this answer.
+    const zeroRowStamp = (svcRow) => {
+      const base = confirmHookDb({ fallbackLeads: [], svcRow });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.customer_confirmed) return 0;
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      return db;
+    };
+
+    test('a zero-row stamp is activated when a concurrent activator already stamped the row', async () => {
+      const db = zeroRowStamp({ status: 'confirmed', customer_confirmed: true, scheduled_date: '2026-07-14', window_start: '09:00' });
+      expect(await runOfficeConfirmActivation(db, svc, 'test')).toBe(true);
+    });
+
+    test('a zero-row stamp on a row nobody stamped (a rejection landed in the window) is still not activated', async () => {
+      const db = zeroRowStamp({ status: 'confirmed', customer_confirmed: false, scheduled_date: '2026-07-14', window_start: '09:00' });
+      expect(await runOfficeConfirmActivation(db, svc, 'test')).toBe(false);
+    });
+
     test('a stamp write that fails reports false — the sweep still owns the row', async () => {
       const base = confirmHookDb({ fallbackLeads: [] });
       const db = (table) => {

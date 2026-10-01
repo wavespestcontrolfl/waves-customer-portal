@@ -303,8 +303,8 @@ router.get('/', async (req, res) => {
       if (counts[r.status] !== undefined) counts[r.status] = parseInt(r.n, 10);
     }
 
-    // A street-level address hold's read-back dialog must show the visit's LIVE service address
-    // (corrections after booking change it), not only the address captured on the card. One batched
+    // A street-level address hold's read-back dialog must show the visit's LIVE service address and
+    // slot (corrections and moves after booking change them), not only what the card captured. One batched
     // read for the hold cards on this page, admin-only like the card's confirm action.
     if (req.techRole === 'admin') {
       const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
@@ -315,13 +315,19 @@ router.get('/', async (req, res) => {
         try {
           const rows = await db('scheduled_services')
             .whereIn('id', [...new Set(holds.map((h) => String(h.payload.scheduled_service_id)))])
-            .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+            .select('id', 'scheduled_date', 'window_start', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
           const byId = new Map(rows.map((r) => [String(r.id), r]));
+          const { visitServiceAddressLine, visitWhenLine } = require('../services/street-level-hold');
           for (const { item, payload } of holds) {
             const r = byId.get(String(payload.scheduled_service_id));
             if (!r) continue;
-            const line = require('../services/street-level-hold').visitServiceAddressLine(r);
+            const line = visitServiceAddressLine(r);
             if (line) item.visit_address = line;
+            // SmartRebooker / an admin can move the hold while its card stays open: the card's captured
+            // visit_when is the booking-time slot, the confirm activates the CURRENT one. Refresh it in the
+            // payload the card and the read-back dialog both read.
+            const when = visitWhenLine(r);
+            if (when) item.payload = { ...payload, visit_when: when };
           }
         } catch (addrErr) {
           logger.warn(`[admin-triage] hold visit address read failed: ${addrErr.code || addrErr.name || 'error'}`);
