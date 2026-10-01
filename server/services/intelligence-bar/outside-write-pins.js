@@ -57,7 +57,7 @@ function outsideWritePins(toolName, preview) {
       pins._verified_railway_gate_prior = preview.prior_value ?? null;
       pins._verified_railway_gate_prior_digest = preview.prior_value_digest ?? null;
       break;
-    case 'set_growthbook_feature':
+    case 'set_growthbook_feature_environment':
       put('_verified_growthbook_feature_id', preview.feature);
       put('_verified_growthbook_environment', preview.environment);
       put('_verified_growthbook_new_state', preview.new_state);

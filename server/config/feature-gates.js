@@ -4307,10 +4307,24 @@ function logGateStatus() {
 //   - mode:      a mode value is visible here ('shadow', 'auto', an ISO
 //                timestamp, a *_SINCE / *_AT / *_ALLOWLIST name).
 //   - unverified: only mentioned in a comment; nothing shows how it is read.
-// Only `boolean` gates can be flipped from the bar. RETIRED names stay out
-// entirely: the owner ruled they must not be re-enabled.
-const RETIRED = new Set(['GATE_ONE_TIME_WELCOME_EMAIL']);
+// Only `boolean` gates can be flipped from the bar. Each entry also records
+// its `reader` — how the code parses the value — so the bar judges the
+// current state the way the runtime does: 'loose' (gateEnvValue: '1' / 'true'
+// / 'on', any case), 'strict' (exactly 'true'; also assumed for a gate known
+// only from the header), or 'mixed' (read both ways in this file).
+// RETIRED names stay out entirely: they must not be re-enabled from the bar
+// (welcome email: owner ruling; self-book day cap: retired 2026-09-23 in
+// favor of the self-serve notice window; glass: the theme gates were removed).
+const RETIRED = new Set([
+  'GATE_ONE_TIME_WELCOME_EMAIL',
+  'GATE_SELF_BOOK_DAY_CAP',
+  'GATE_ESTIMATE_GLASS',
+  'GATE_EMAIL_GLASS',
+  'GATE_REPORT_GLASS',
+  'GATE_PORTAL_GLASS',
+]);
 const MAX_DESC = 300;
+const INVERTED_GATE_RE = /_(OFF|DISABLE|DISABLED|KILL_SWITCH)$/;
 let gateCatalogCache = null;
 
 function knownGateCatalog() {
@@ -4325,12 +4339,16 @@ function knownGateCatalog() {
     const text = m[3].replace(/^\(/, '').replace(/\)\s*$/, '').trim();
     headerDocs.set(m[1], { valueIsTrue: m[2] === 'true', description: text ? text.slice(0, MAX_DESC) : null });
   }
-  const boolEvidence = new Set();
+  const strictEvidence = new Set();
+  const looseEvidence = new Set();
   const modeEvidence = new Set();
   for (const line of src.slice(headerEnd).split('\n')) {
     for (const name of line.match(tokenRe) || []) {
       if (/['"](shadow|auto)['"]/.test(line) || /(=|\|)\s*(shadow|auto)\b/.test(line) || /<ISO/.test(line)) modeEvidence.add(name);
-      else if (line.includes(`process.env.${name} === 'true'`) || line.includes(`gateEnvValue('${name}')`)) boolEvidence.add(name);
+      else {
+        if (line.includes(`process.env.${name} === 'true'`)) strictEvidence.add(name);
+        if (line.includes(`gateEnvValue('${name}')`)) looseEvidence.add(name);
+      }
     }
   }
   const catalog = new Map();
@@ -4340,8 +4358,14 @@ function knownGateCatalog() {
     const mode = modeEvidence.has(name) || /(_SINCE|_AT|_ALLOWLIST)$/.test(name) || (doc && !doc.valueIsTrue);
     let kind = 'unverified';
     if (mode) kind = 'mode';
-    else if ((doc && doc.valueIsTrue) || boolEvidence.has(name)) kind = 'boolean';
-    catalog.set(name, { name, kind, boolean: kind === 'boolean', description: doc ? doc.description : null });
+    else if ((doc && doc.valueIsTrue) || strictEvidence.has(name) || looseEvidence.has(name)) kind = 'boolean';
+    let reader = 'strict';
+    if (looseEvidence.has(name)) reader = strictEvidence.has(name) ? 'mixed' : 'loose';
+    // Inverted (negative-polarity) gates: 'true' DISABLES the named thing
+    // (GATE_LATE_PAYMENT_CHECKER_OFF=true turns the checker off), so the bar
+    // never presents 'true' as "on" for these.
+    const inverted = INVERTED_GATE_RE.test(name);
+    catalog.set(name, { name, kind, boolean: kind === 'boolean', inverted, reader, description: doc ? doc.description : null });
   }
   gateCatalogCache = catalog;
   return catalog;

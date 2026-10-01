@@ -959,9 +959,9 @@
     "approval": "ui_confirm",
     "scope": "none"
   },
-  "set_growthbook_feature": {
+  "set_growthbook_feature_environment": {
     "module": "growthbook-tools.js",
-    "domain": "ops",
+    "domain": "growthbook",
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",

@@ -262,7 +262,7 @@ describe('outside-service write tools are full-access-only in the /query dispatc
 
   test('the owner-only refusal also covers every other outside-write tool name', async () => {
     await withServer(async (baseUrl) => {
-      for (const name of ['purge_cloudflare_cache', 'redeploy_railway_service', 'rerun_failed_github_checks', 'set_railway_gate', 'set_growthbook_feature']) {
+      for (const name of ['purge_cloudflare_cache', 'redeploy_railway_service', 'rerun_failed_github_checks', 'set_railway_gate', 'set_growthbook_feature_environment']) {
         mockMessagesCreate
           .mockResolvedValueOnce(toolUseTurn(name, { zone_name: 'wavespestcontrol.com', service_name: 'portal', pr_number: 1 }))
           .mockResolvedValueOnce(finalTextTurn());

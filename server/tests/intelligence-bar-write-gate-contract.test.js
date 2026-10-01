@@ -168,7 +168,7 @@ const WRITE_TWO_STEP = [
   // Feature switches (owner ruling 2026-09-28, Decision 5) — full-access-only,
   // PREVIEW ONLY: confirmed:true refuses until the commit-path PR.
   'set_railway_gate',
-  'set_growthbook_feature',
+  'set_growthbook_feature_environment',
   'cancel_queued_message',
 ];
 
@@ -619,7 +619,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['ops-tools', 'executeOpsTool', 'redeploy_railway_service', { service_name: 'portal-server' }],
     ['ops-tools', 'executeOpsTool', 'restart_railway_service', { service_name: 'portal-server' }],
     ['ops-tools', 'executeOpsTool', 'set_railway_gate', { gate_name: 'GATE_STAMPED_ZERO_FREE', value: 'true' }],
-    ['growthbook-tools', 'executeGrowthbookTool', 'set_growthbook_feature', { feature_id: 'synthetic-flag', enabled: true }],
+    ['growthbook-tools', 'executeGrowthbookTool', 'set_growthbook_feature_environment', { feature_id: 'synthetic-flag', enabled: true }],
     ['github-ops-tools', 'executeGithubOpsTool', 'rerun_failed_github_checks', { pr_number: 5230 }],
     ['github-ops-tools', 'executeGithubOpsTool', 'add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
     ['github-ops-tools', 'executeGithubOpsTool', 'request_codex_review', { pr_number: 5230 }],
@@ -725,7 +725,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { data: { variables: { GATE_STAMPED_ZERO_FREE: 'false' } } },
       ],
     },
-    set_growthbook_feature: {
+    set_growthbook_feature_environment: {
       env: { GROWTHBOOK_API_KEY: 'test-growthbook-key' },
       responses: [{
         feature: {

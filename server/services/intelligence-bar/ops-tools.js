@@ -118,13 +118,14 @@ Use for: "restart the server", "bounce the portal service", "it's hung, restart 
   },
   {
     name: 'set_railway_gate',
-    description: `Propose turning ONE known feature gate (a GATE_* variable) on or off on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value and what the gate controls. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows are accepted — a made-up name is refused.
-Use for: "turn on GATE_X", "switch the Y gate off in production", "flip the gate for Z"`,
+    description: `Propose setting ONE known feature gate (a GATE_* variable) to the literal value 'true' or 'false' on the portal's production service in Railway. Owner login only, through a confirmation card showing the current value, the new value, what the gate controls and what the new value means. Railway redeploys the portal when a variable changes (a brief restart). Only gates the portal already knows are accepted — a made-up name is refused.
+The value is the RAW variable value, not "on/off". Some gates are inverted: a name ending in _OFF, _DISABLE, _DISABLED or _KILL_SWITCH means 'true' turns the named thing OFF (GATE_LATE_PAYMENT_CHECKER_OFF=true disables the late-payment checker). Map what the operator wants to HAPPEN through the gate's meaning; if it is unclear which value they want, ask before proposing.
+Use for: "set GATE_X to true", "turn the Y feature on" (after mapping it to the right value), "flip the gate for Z"`,
     input_schema: {
       type: 'object',
       properties: {
         gate_name: { type: 'string', description: 'The gate variable name, e.g. GATE_SOMETHING (capitals, digits and underscores)' },
-        value: { type: 'string', enum: ['true', 'false'], description: "The desired value: 'true' (on) or 'false' (off)" },
+        value: { type: 'string', enum: ['true', 'false'], description: "The literal variable value to set. For an inverted gate (name ends in _OFF / _DISABLE / _DISABLED / _KILL_SWITCH) 'true' DISABLES the named thing." },
       },
       required: ['gate_name', 'value'],
     },
@@ -564,6 +565,17 @@ function valueDigest(raw) {
     .update(String(raw)).digest('hex').slice(0, 16);
 }
 
+// How the runtime reads a set value: true (on), false (off), or null when
+// that cannot be said for sure. 'true' / 'false' read the same under every
+// reader. Any other value is judged only for a gate this portal reads solely
+// through gateEnvValue ('1' / 'true' / 'on', any case); a strict or mixed
+// gate could be read differently by another module, so it stays unknown.
+function gateReadsOn(reader, raw) {
+  if (raw === 'true' || raw === 'false') return raw === 'true';
+  if (reader === 'loose') return ['1', 'true', 'on'].includes(String(raw).toLowerCase());
+  return null;
+}
+
 function knownGateOrRefusal(rawName) {
   const catalog = require('../../config/feature-gates').knownGateCatalog();
   const name = typeof rawName === 'string' ? rawName.trim() : '';
@@ -612,9 +624,15 @@ async function setRailwayGate(input) {
   if (raw === undefined || raw === null) currentKind = 'unset';
   else if (raw === 'true' || raw === 'false') { currentKind = 'boolean'; priorValue = raw; } else currentKind = 'non_boolean';
 
-  if (currentKind === 'boolean' && priorValue === input.value) {
+  // Judge "already set" the way the runtime reads this gate, so '1' / 'on' /
+  // 'TRUE' under a gateEnvValue reader count as on (a no-op, not a change
+  // and a redeploy). The non-boolean value itself is never echoed.
+  const readsOn = gateReadsOn(entry.reader, raw);
+  if (currentKind !== 'unset' && readsOn !== null && String(readsOn) === input.value) {
     return {
-      error: `${entry.name} is already set to ${priorValue} in production — nothing to change.`,
+      error: currentKind === 'boolean'
+        ? `${entry.name} is already set to ${priorValue} in production — nothing to change.`
+        : `${entry.name} already reads as ${input.value} in production (the portal's own parsing of its current value) — nothing to change.`,
       code: 'already_set',
     };
   }
@@ -628,6 +646,12 @@ async function setRailwayGate(input) {
     current_value: currentLabel,
     new_value: input.value,
     change: `${entry.name}: ${currentLabel} → ${input.value}`,
+    // Plain-English meaning of the NEW value, polarity-aware: for an
+    // inverted gate (…_OFF) 'true' turns the named thing off.
+    meaning: entry.inverted
+      ? `Inverted gate: ${input.value === 'true' ? "'true' turns the thing it names OFF" : "'false' lets the thing it names run again (its normal on state)"}.`
+      : `${input.value === 'true' ? "'true' turns this gate's feature ON" : "'false' turns this gate's feature OFF"}.`,
+    inverted: entry.inverted === true,
     redeploy_notice: 'Railway redeploys the portal when a variable changes, so the portal restarts briefly.',
     // The pinned target and prior state (compare-and-swap inputs for the
     // commit path, which must refuse if any of them changed).

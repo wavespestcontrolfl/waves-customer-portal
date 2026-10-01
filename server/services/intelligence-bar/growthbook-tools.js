@@ -3,14 +3,16 @@
  * server/services/intelligence-bar/growthbook-tools.js
  *
  * Visibility into GrowthBook: running/stopped experiments and feature flags,
- * plus one write tool, set_growthbook_feature. The earlier standing rule —
+ * plus one write tool, set_growthbook_feature_environment (enable or disable a
+ * feature in one environment — GrowthBook's environment switch, not the value
+ * the feature serves). The earlier standing rule —
  * GrowthBook changes happen only in the GrowthBook UI, never through
  * automation — was OVERRIDDEN by the owner on 2026-09-28 (Decision 5: GrowthBook
  * flag toggles may be made from the Intelligence Bar), so the bar may now
  * propose a flag toggle through the usual confirmation card (full-access login
  * only, write-gates.js OUTSIDE_WRITE_TOOL_NAMES).
  *
- * set_growthbook_feature is PREVIEW ONLY in this change: it reads the feature
+ * set_growthbook_feature_environment is PREVIEW ONLY in this change: it reads the feature
  * (GET /api/v1/features/{id}) and shows the environment's current state, but
  * called with confirmed:true it refuses (code not_yet_implemented). The commit
  * path will call GrowthBook's documented toggle endpoint —
@@ -59,14 +61,15 @@ Use for: "what feature flags exist in GrowthBook?", "is the pricing-hub flag on 
     },
   },
   {
-    name: 'set_growthbook_feature',
-    description: `Propose turning a GrowthBook feature flag ON or OFF in one environment (default production). Owner login only, through a confirmation card showing the flag's current state in that environment, its default value and how many targeting rules it has.
-Use for: "turn the pricing-hub flag on in production", "switch off the X feature in GrowthBook"`,
+    name: 'set_growthbook_feature_environment',
+    description: `Propose ENABLING or DISABLING a GrowthBook feature in one environment (default production). Owner login only, through a confirmation card showing whether the feature is enabled there now, the value it serves by default and how many targeting rules it has.
+This is GrowthBook's environment switch, NOT the value the flag serves: an enabled feature can still serve false (its default value), and disabling an environment makes SDK callers fall back to their own code default. If the operator asks to make a flag serve a different value, say this tool cannot change values or rules — that happens in the GrowthBook UI.
+Use for: "enable the pricing-hub feature in production", "disable the X feature in GrowthBook production"`,
     input_schema: {
       type: 'object',
       properties: {
         feature_id: { type: 'string', description: 'The GrowthBook feature key (id), exactly as shown by get_growthbook_features' },
-        enabled: { type: 'boolean', description: 'true = turn the feature ON in the environment, false = turn it OFF' },
+        enabled: { type: 'boolean', description: 'true = enable the feature in the environment, false = disable it there (not the value it serves)' },
         environment: { type: 'string', description: "GrowthBook environment name (default 'production')" },
       },
       required: ['feature_id', 'enabled'],
@@ -265,7 +268,7 @@ async function getExperimentResultsSummary() {
   return { experiments: out, running: out.length };
 }
 
-// ── set_growthbook_feature (preview only) ──────────────────────────────────
+// ── set_growthbook_feature_environment (preview only) ──────────────────────────────────
 
 function shortValue(v) {
   if (v === undefined || v === null) return null;
@@ -273,7 +276,7 @@ function shortValue(v) {
   return text.length > MAX_DEFAULT_VALUE_CHARS ? `${text.slice(0, MAX_DEFAULT_VALUE_CHARS)}…` : text;
 }
 
-async function setGrowthbookFeature(input) {
+async function setGrowthbookFeatureEnvironment(input) {
   if (input.confirmed === true) {
     return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
   }
@@ -287,7 +290,7 @@ async function setGrowthbookFeature(input) {
     return { error: 'environment must be a GrowthBook environment name such as production.', code: 'invalid_environment' };
   }
   if (typeof input.enabled !== 'boolean') {
-    return { error: 'enabled must be true (turn on) or false (turn off).', code: 'invalid_enabled' };
+    return { error: 'enabled must be true (enable in the environment) or false (disable there).', code: 'invalid_enabled' };
   }
 
   let json;
@@ -311,22 +314,28 @@ async function setGrowthbookFeature(input) {
   const priorEnabled = Boolean(envCfg.enabled);
   if (priorEnabled === input.enabled) {
     return {
-      error: `Feature "${feature.id || featureId}" is already ${priorEnabled ? 'ON' : 'OFF'} in ${environment} — nothing to change.`,
+      error: `Feature "${feature.id || featureId}" is already ${priorEnabled ? 'enabled' : 'disabled'} in ${environment} — nothing to change. (Enabled is not the same as serving true: it serves its default value and rules.)`,
       code: 'already_set',
     };
   }
-  const word = (b) => (b ? 'ON' : 'OFF');
+  const word = (b) => (b ? `enabled in ${environment}` : `disabled in ${environment}`);
   const ruleCount = Array.isArray(envCfg.rules) ? envCfg.rules.length : 0;
   return {
     preview: true,
-    tool: 'set_growthbook_feature',
+    tool: 'set_growthbook_feature_environment',
     feature: feature.id || featureId,
     environment,
     current_state: word(priorEnabled),
     new_state: word(input.enabled),
-    change: `Feature ${feature.id || featureId} in ${environment}: ${word(priorEnabled)} → ${word(input.enabled)}`,
+    change: `Feature ${feature.id || featureId}: ${word(priorEnabled)} → ${word(input.enabled)}`,
     default_value: shortValue(envCfg.defaultValue ?? feature.defaultValue),
     rule_count: ruleCount,
+    // What the switch actually does to served values — enabled is not "on":
+    // an enabled feature serves its default value and rules; a disabled
+    // environment makes SDK callers fall back to their own code default.
+    effect_note: input.enabled
+      ? `Once enabled, ${environment} serves the feature's default value (${shortValue(envCfg.defaultValue ?? feature.defaultValue) ?? 'none set'}) plus its ${ruleCount} targeting rule(s) — enabling does not by itself make it serve true.`
+      : `Once disabled, ${environment} stops serving this feature's value and rules; SDK callers fall back to the default written in their own code.`,
     // Pins for the commit path: the toggle must refuse if the flag was edited
     // (anywhere, including the GrowthBook UI) after this card was shown. Named
     // without a trailing "_at" so the fingerprint keeps them (it strips volatile
@@ -334,7 +343,7 @@ async function setGrowthbookFeature(input) {
     prior_enabled: priorEnabled,
     feature_version: feature.dateUpdated || null,
     revision_version: feature.revision && feature.revision.version !== undefined ? feature.revision.version : null,
-    note: `Turn GrowthBook feature ${feature.id || featureId} ${word(input.enabled)} in ${environment} (currently ${word(priorEnabled)}). This preview cannot be confirmed yet.`,
+    note: `${input.enabled ? 'Enable' : 'Disable'} GrowthBook feature ${feature.id || featureId} in ${environment} (currently ${word(priorEnabled)}). This preview cannot be confirmed yet.`,
   };
 }
 
@@ -349,7 +358,7 @@ async function executeGrowthbookTool(toolName, input = {}) {
     switch (toolName) {
       case 'get_growthbook_experiments': return await getGrowthbookExperiments(input);
       case 'get_growthbook_features': return await getGrowthbookFeatures(input);
-      case 'set_growthbook_feature': return await setGrowthbookFeature(input);
+      case 'set_growthbook_feature_environment': return await setGrowthbookFeatureEnvironment(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

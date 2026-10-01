@@ -560,6 +560,36 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
   }
   const propose = (input) => executeOpsTool('set_railway_gate', { gate_name: KNOWN_GATE, value: 'true', ...input });
 
+  // Codex r1 on #5489: an inverted (…_OFF) gate's 'true' DISABLES the named
+  // thing — the card must say so instead of presenting 'true' as "on".
+  test('an inverted _OFF gate: the card says true turns the named thing OFF', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ GATE_LATE_PAYMENT_CHECKER_OFF: 'false' }));
+    const result = await propose({ gate_name: 'GATE_LATE_PAYMENT_CHECKER_OFF', value: 'true' });
+    expect(result.preview).toBe(true);
+    expect(result.inverted).toBe(true);
+    expect(result.meaning).toMatch(/Inverted gate: 'true' turns the thing it names OFF/);
+  });
+
+  test('a normal gate: the meaning line says true turns its feature ON', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: 'false' }));
+    const result = await propose({});
+    expect(result.inverted).toBe(false);
+    expect(result.meaning).toMatch(/'true' turns this gate's feature ON/);
+  });
+
+  test('the value schema describes a raw variable value and names the inverted suffixes', () => {
+    const def = require('../services/intelligence-bar/ops-tools').OPS_TOOLS.find((t) => t.name === 'set_railway_gate');
+    expect(def.input_schema.properties.value.description).toMatch(/literal variable value/);
+    expect(def.input_schema.properties.value.description).toMatch(/_OFF/);
+    expect(def.description).toMatch(/RAW variable value, not "on\/off"/);
+  });
+
   test('unconfigured: configured:false, no error, no card, no network call', async () => {
     const result = await propose({});
     expect(result.configured).toBe(false);
@@ -642,12 +672,48 @@ describe('intelligence bar set_railway_gate (preview only)', () => {
     expect(result.error).toMatch(/already set to true/);
   });
 
+  // Codex r2 on #5489: "already set" is judged with the gate's own reader.
+  const LOOSE_GATE = 'GATE_TECH_LINES'; // read only via gateEnvValue
+  test.each(['1', 'on', 'TRUE', 'On'])('a gateEnvValue gate stored as %p already reads on: enable is a no-op, value not echoed', async (stored) => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [LOOSE_GATE]: stored }));
+    const result = await propose({ gate_name: LOOSE_GATE, value: 'true' });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('already_set');
+    expect(result.error).toMatch(/already reads as true/);
+    expect(JSON.stringify(result)).not.toContain(`"${stored}"`);
+  });
+
+  test('a gateEnvValue gate stored as "on": disable is still a real change', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [LOOSE_GATE]: 'on' }));
+    const result = await propose({ gate_name: LOOSE_GATE, value: 'false' });
+    expect(result.preview).toBe(true);
+    expect(result.prior_kind).toBe('non_boolean');
+  });
+
+  test('a strict gate stored as "1" is not judged: enable still previews (another reader could differ)', async () => {
+    configure();
+    global.fetch
+      .mockResolvedValueOnce(ENVIRONMENT())
+      .mockResolvedValueOnce(variables({ [KNOWN_GATE]: '1' }));
+    const result = await propose({ value: 'true' });
+    expect(result.preview).toBe(true);
+    expect(result.current_value).toBe('set to a non-boolean value');
+  });
+
   test.each([
     ['a name the portal does not know', 'GATE_TOTALLY_MADE_UP_FOR_TEST'],
     ['a lowercase name', 'gate_stamped_zero_free'],
     ['a name without the GATE_ prefix', 'STRIPE_SECRET_KEY'],
     ['a name with injection characters', 'GATE_X"; DROP'],
     ['a retired gate', 'GATE_ONE_TIME_WELCOME_EMAIL'],
+    ['the retired self-book day cap', 'GATE_SELF_BOOK_DAY_CAP'],
+    ['a retired glass theme gate', 'GATE_PORTAL_GLASS'],
   ])('refuses %s without any network call and without echoing it', async (_label, name) => {
     configure();
     const result = await propose({ gate_name: name });

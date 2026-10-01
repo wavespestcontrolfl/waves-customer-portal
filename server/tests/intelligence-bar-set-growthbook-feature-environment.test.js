@@ -1,5 +1,5 @@
 /**
- * set_growthbook_feature (owner ruling 2026-09-28, Decision 5) — PREVIEW ONLY.
+ * set_growthbook_feature_environment (owner ruling 2026-09-28, Decision 5) — PREVIEW ONLY.
  * Mocked GrowthBook API: the preview reads GET /api/v1/features/{id} and shows
  * the environment's current state; the toggle endpoint is never called, and
  * confirmed:true refuses without any network call.
@@ -48,9 +48,9 @@ beforeEach(() => {
   ({ executeGrowthbookTool } = require('../services/intelligence-bar/growthbook-tools'));
 });
 
-const propose = (input) => executeGrowthbookTool('set_growthbook_feature', { feature_id: 'pricing-hub', enabled: true, ...input });
+const propose = (input) => executeGrowthbookTool('set_growthbook_feature_environment', { feature_id: 'pricing-hub', enabled: true, ...input });
 
-describe('set_growthbook_feature (preview only)', () => {
+describe('set_growthbook_feature_environment (preview only)', () => {
   test('missing key: configured:false, no error, no card, no network call', async () => {
     const result = await propose({});
     expect(result.configured).toBe(false);
@@ -71,13 +71,17 @@ describe('set_growthbook_feature (preview only)', () => {
     const result = await propose({});
     expect(result.error).toBeUndefined();
     expect(result.preview).toBe(true);
-    expect(result.tool).toBe('set_growthbook_feature');
+    expect(result.tool).toBe('set_growthbook_feature_environment');
     expect(result.feature).toBe('pricing-hub');
     expect(result.environment).toBe('production');
-    expect(result.current_state).toBe('OFF');
-    expect(result.new_state).toBe('ON');
-    expect(result.change).toBe('Feature pricing-hub in production: OFF → ON');
+    expect(result.current_state).toBe('disabled in production');
+    expect(result.new_state).toBe('enabled in production');
+    expect(result.change).toBe('Feature pricing-hub: disabled in production → enabled in production');
     expect(result.default_value).toBe('false');
+    // Enabled is not "serving true" (Codex r1 on #5489): the card says what
+    // the environment will actually serve.
+    expect(result.effect_note).toMatch(/serves the feature's default value \(false\) plus its 2 targeting rule/);
+    expect(result.effect_note).toMatch(/does not by itself make it serve true/);
     expect(result.rule_count).toBe(2);
     expect(result.prior_enabled).toBe(false);
     expect(result.feature_version).toBe('2026-09-01T12:00:00.000Z');
@@ -94,8 +98,9 @@ describe('set_growthbook_feature (preview only)', () => {
     global.fetch.mockResolvedValueOnce(jsonResponse(featureBody()));
     const result = await propose({ environment: 'dev', enabled: false });
     expect(result.environment).toBe('dev');
-    expect(result.current_state).toBe('ON');
-    expect(result.new_state).toBe('OFF');
+    expect(result.current_state).toBe('enabled in dev');
+    expect(result.new_state).toBe('disabled in dev');
+    expect(result.effect_note).toMatch(/fall back to the default written in their own code/);
   });
 
   test('no-op: already in the requested state returns a plain answer, no card', async () => {
@@ -104,7 +109,7 @@ describe('set_growthbook_feature (preview only)', () => {
     const result = await propose({ enabled: false });
     expect(result.preview).toBeUndefined();
     expect(result.code).toBe('already_set');
-    expect(result.error).toMatch(/already OFF in production/);
+    expect(result.error).toMatch(/already disabled in production/);
   });
 
   test('an unknown environment is refused with the real environment names', async () => {

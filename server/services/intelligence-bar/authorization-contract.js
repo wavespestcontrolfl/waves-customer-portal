@@ -29,6 +29,7 @@ const {
   LEGACY_BARE_WRITE_TOOL_NAMES,
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   OUTSIDE_WRITE_TOOL_NAMES,
+  PREVIEW_ONLY_WRITE_TOOL_NAMES,
 } = require('./write-gates');
 
 const CONTRACT_VERSION = 1;
@@ -187,7 +188,7 @@ const ACTION_LABELS = {
   request_codex_review: 'Request a Codex review',
   submit_gsc_sitemap: 'Submit a sitemap to Search Console',
   set_railway_gate: 'Change a Railway feature gate',
-  set_growthbook_feature: 'Toggle a GrowthBook feature',
+  set_growthbook_feature_environment: 'Enable or disable a GrowthBook feature in one environment',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
@@ -955,6 +956,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
     notifies_technician: cancelTechnicianNotice !== 'none',
+    // Shown, not confirmable: the card hides Confirm (write-gates.js
+    // PREVIEW_ONLY_WRITE_TOOL_NAMES; /confirm-action refuses them too).
+    ...(PREVIEW_ONLY_WRITE_TOOL_NAMES.has(toolName) ? { preview_only: true } : {}),
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)
