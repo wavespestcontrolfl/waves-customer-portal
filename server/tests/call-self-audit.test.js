@@ -2,11 +2,17 @@
 // every lead-losing terminal disposition counts as drift.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), typedDecisionsLive: jest.fn(() => false) }));
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
+jest.mock('../services/typed-decisions/jev', () => ({ askPackage: jest.fn() }));
+jest.mock('../services/typed-decisions/shadow-recorder', () => ({ recordDecisions: jest.fn() }));
 
 const db = require('../models/db');
 const { createDeepMessage } = require('../services/llm/deep');
+const { typedDecisionsLive } = require('../config/feature-gates');
+const { askPackage } = require('../services/typed-decisions/jev');
+const { recordDecisions } = require('../services/typed-decisions/shadow-recorder');
+const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock } = require('../services/call-self-audit');
 
 const SAMPLE = (over = {}) => ({
@@ -152,4 +158,97 @@ test('stratifySample reserves half per direction and gives unused share to the o
   const fewInbound = stratifySample({ inbound: rows('in', 3), outbound: rows('out', 40), size: 25 });
   expect(fewInbound.filter((r) => r.id.startsWith('in')).length).toBe(3);
   expect(fewInbound.length).toBe(25);
+});
+
+
+// Typed-decisions shadow (GATE_TYPED_DECISIONS, dark): the same call is put to
+// TypeSafe Jev and recorded beside production's and the deep judge's reading.
+// It never changes the audit's own findings, counters or alerts.
+describe('Jev shadow', () => {
+  const VERDICT = { content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":true,"quote_promised":false,"complaint":true,"excerpt":"ok"}' }] };
+  const JEV_OK = { ok: true, answers: { is_lead: { p: 0.9, yes: true, confident: true } }, packageHash: 'h', servedModel: 'jev-1.13.0' };
+
+  beforeEach(() => {
+    typedDecisionsLive.mockReturnValue(false);
+    askPackage.mockReset();
+    recordDecisions.mockReset();
+    askPackage.mockResolvedValue(JEV_OK);
+    recordDecisions.mockResolvedValue({ recorded: 6 });
+  });
+  afterAll(() => typedDecisionsLive.mockReturnValue(false));
+
+  test('gate off: Jev is never asked and nothing is recorded', async () => {
+    mockDb({ calls: [SAMPLE()] });
+    const res = await runSelfAudit({ createMessage: async () => VERDICT });
+    expect(askPackage).not.toHaveBeenCalled();
+    expect(recordDecisions).not.toHaveBeenCalled();
+    expect(res.jev).toEqual({ asked: 0, recorded: 0, failed: 0 });
+  });
+
+  test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the transcript digest', async () => {
+    typedDecisionsLive.mockReturnValue(true);
+    const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false }) });
+    mockDb({ calls: [prodCall] });
+    const res = await runSelfAudit({ createMessage: async () => VERDICT });
+
+    expect(askPackage).toHaveBeenCalledTimes(1);
+    const [packageId, state] = askPackage.mock.calls[0];
+    expect(packageId).toBe('call_judge.v2');
+    expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
+    expect(state.duration_seconds).toBe(88);
+    expect(state.call_direction).toMatch(/^INBOUND/);
+    expect(state.transcript).toBe(prodCall.transcription.slice(0, 5000));
+
+    expect(recordDecisions).toHaveBeenCalledTimes(1);
+    const args = recordDecisions.mock.calls[0][0];
+    expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
+    expect(args).not.toHaveProperty('outcomeEvidence');
+    expect(args.pkg.id).toBe('call_judge.v2');
+    // production and deep judge side by side for the five shared fields
+    expect(args.baselines.appointment_agreed).toEqual({ production: false, deep_judge: true });
+    expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: true });
+    expect(args.baselines.is_spam).toEqual({ production: false, deep_judge: false });
+    // complaint has no production field: deep judge only
+    expect(args.baselines.complaint).toEqual({ deep_judge: true });
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+
+  test('a failed deep audit still asks Jev, recorded against production only', async () => {
+    typedDecisionsLive.mockReturnValue(true);
+    mockDb({ calls: [SAMPLE({ ai_extraction: JSON.stringify({ is_lead: true }) })] });
+    const res = await runSelfAudit({ createMessage: async () => { throw new Error('deep judge down'); } });
+    expect(askPackage).toHaveBeenCalledTimes(1);
+    const args = recordDecisions.mock.calls[0][0];
+    expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: undefined });
+    expect(args.baselines.complaint).toEqual({ deep_judge: undefined });
+    expect(res.jev).toEqual({ asked: 1, recorded: 1, failed: 0 });
+  });
+
+  test('an outbound call gets the outbound direction line and a missing duration is null', async () => {
+    typedDecisionsLive.mockReturnValue(true);
+    mockDb({ calls: [SAMPLE({ direction: 'outbound-dial', duration_seconds: undefined })] });
+    await runSelfAudit({ createMessage: async () => VERDICT });
+    const state = askPackage.mock.calls[0][1];
+    expect(state.call_direction).toMatch(/^OUTBOUND/);
+    expect(state.duration_seconds).toBeNull();
+  });
+
+  test.each([
+    ['Jev answers ok:false', () => askPackage.mockResolvedValue({ ok: false, reason: 'error' }), { asked: 1, recorded: 0, failed: 1 }],
+    ['Jev throws', () => askPackage.mockRejectedValue(new Error('provider down')), { asked: 1, recorded: 0, failed: 1 }],
+    ['the recorder throws', () => recordDecisions.mockRejectedValue(new Error('db down')), { asked: 1, recorded: 0, failed: 1 }],
+  ])('%s: the audit itself is unaffected', async (_name, arrange, jev) => {
+    typedDecisionsLive.mockReturnValue(true);
+    arrange();
+    const findings = [];
+    mockDb({
+      calls: [SAMPLE({ disposition: 'vendor_logged', ai_extraction: JSON.stringify({ is_lead: true }) })],
+      onInsert: (t, row) => { if (t === 'call_audit_findings') findings.push(row); },
+    });
+    const res = await runSelfAudit({ createMessage: async () => VERDICT });
+    expect(res.audited).toBe(1);
+    expect(res.dispositionRate).toBeGreaterThan(0);
+    expect(findings.map((f) => f.field).sort()).toEqual(['appointment_agreed']);
+    expect(res.jev).toEqual(jev);
+  });
 });
