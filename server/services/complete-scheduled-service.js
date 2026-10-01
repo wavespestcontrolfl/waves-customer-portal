@@ -13,9 +13,11 @@ const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
 // How long a NEGATIVE pending_setup_fee marker (a completion mid-mint) stays
-// an in-flight lease that no other completion may adopt. A mint is a few
-// seconds; a marker idle this long belongs to a dead worker.
-const SETUP_FEE_CLAIM_LEASE_MS = 10 * 60 * 1000;
+// an in-flight lease that no other completion may adopt: the SAME window after
+// which the owning completion attempt itself is stale and its own retry takes
+// over its side effects, so the two can never disagree about whether the owner
+// is still alive (pre-push audit P1). A mint is a few seconds.
+const SETUP_FEE_CLAIM_LEASE_MS = CompletionAttempts.STALE_SIDE_EFFECTS_MS || 10 * 60 * 1000;
 
 // The visit columns the issued-invoice closeout's record, service line and
 // attribution are derived from before the row lock; any of them moving under
