@@ -146,7 +146,7 @@ async function loadTodayRows(upcomingServices, conn) {
   if (!ids.length) return [];
   const rows = await conn('scheduled_services')
     .whereIn('id', ids)
-    .select('id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state', 'window_start',
+    .select('id', 'visit_id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state', 'window_start',
       'window_end', 'window_display', 'time_window', 'service_type');
   // Keep the aggregator's order (earliest-first upcoming list) and carry the
   // tech name it already resolved.
@@ -157,13 +157,19 @@ async function loadTodayRows(upcomingServices, conn) {
   }));
 }
 
-// Live stops on the tech's route today before this visit; null with no route order.
+// Live STOPS on the tech's route today before this visit; null with no route order.
+// A stop is a visit group (scheduled_services.visit_id — a pest + lawn stop is one
+// stop, as the tech route groups it) or an ungrouped row; this visit's own group
+// siblings are never "before" it.
 async function countStopsAhead(conn, visit, now) {
   const routeOrder = visit.route_order == null ? null : Number(visit.route_order);
   if (!Number.isFinite(routeOrder)) return null;
   const result = await conn('scheduled_services')
     .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
     .where('route_order', '<', routeOrder)
+    .modify((b) => {
+      if (visit.visit_id) b.where((w) => w.whereNull('visit_id').orWhereNot('visit_id', visit.visit_id));
+    })
     .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
     // performed-but-not-closed stops are not ahead of anyone (same completion
     // evidence findPastWindow and loadMissedVisit honor)
@@ -171,7 +177,7 @@ async function countStopsAhead(conn, visit, now) {
     .whereNotExists(function serviceRecorded() {
       this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
     })
-    .count('* as count').first();
+    .first(conn.raw('COUNT(DISTINCT COALESCE(visit_id, id)) AS count'));
   const n = Number(result?.count);
   return Number.isFinite(n) ? n : null;
 }
@@ -181,7 +187,7 @@ async function countStopsAhead(conn, visit, now) {
 // today, or reassigned). Throws on a read error — the caller fails closed.
 async function currentStopsAhead({ conn = db, visitId, techId, now = new Date() }) {
   const visit = await conn('scheduled_services').where({ id: visitId })
-    .first('id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state');
+    .first('id', 'visit_id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state');
   // started by status OR by tracker (the tracker can lead a lagging status), or done
   if (!visit || !NOT_STARTED_STATUSES.includes(visit.status)
     || LIVE_TRACK_STATES.includes(visit.track_state) || visit.track_state === 'complete') return null;

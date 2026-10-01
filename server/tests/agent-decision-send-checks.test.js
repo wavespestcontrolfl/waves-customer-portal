@@ -490,10 +490,14 @@ describe('open-loop commitments recheck', () => {
     const position = { visitId: 'v1', techId: 't1', stopsAhead: 2 };
     const fresh = () => new Date(Date.now() - 60000).toISOString();
     const withPos = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { position } }) });
-    const routeDb = ({ visit, ahead, recorded = null }) => (table) => {
-      const q = { where: () => q, whereNotIn: () => q, whereNotExists: () => q, count: () => q, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
-      if (table === 'service_records') return { where: () => ({ first: async () => recorded }) };
-      return table === 'scheduled_services' ? q : null;
+    const routeDb = ({ visit, ahead, recorded = null }) => {
+      const conn = (table) => {
+        const q = { where: () => q, whereNotIn: () => q, whereNotExists: () => q, modify: (fn) => { fn(q); return q; }, first: async (...cols) => (cols.includes('route_order') ? visit : { count: String(ahead) }) };
+        if (table === 'service_records') return { where: () => ({ first: async () => recorded }) };
+        return table === 'scheduled_services' ? q : null;
+      };
+      conn.raw = (sql) => ({ raw: sql });
+      return conn;
     };
     const visit = (over = {}) => ({ id: 'v1', technician_id: 't1', route_order: 5, scheduled_date: today, status: 'confirmed', ...over });
 

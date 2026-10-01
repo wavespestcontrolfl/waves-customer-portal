@@ -47,6 +47,7 @@ function fakeConn(handlers) {
     return chain;
   };
   conn.calls = calls;
+  conn.raw = (sql) => ({ raw: sql });
   return conn;
 }
 const hasOp = (ops, op, pred) => ops.some((o) => o.op === op && (!pred || pred(o.args)));
@@ -93,7 +94,7 @@ describe('techPosition', () => {
   const handlers = (extra = {}) => ({
     scheduled_services: (ops, kind) => {
       if (hasOp(ops, 'whereIn', (a) => a[0] === 'id')) return [todayRow(extra.visit)];
-      if (hasOp(ops, 'count')) return { count: extra.ahead ?? '2' };
+      if (hasOp(ops, 'where', (a) => a[0] === 'route_order')) return { count: extra.ahead ?? '2' };
       return kind === 'first' ? null : [];
     },
     tech_status: () => ('status' in extra ? extra.status : { status: 'en_route', current_job_id: 'other', location_updated_at: minutesAgo(2) }),
@@ -106,7 +107,9 @@ describe('techPosition', () => {
       techName: 'Jamie', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 2, atThisVisit: false,
       visitId: 'visit-1', techId: 'tech-1', visitType: 'Pest Control', windowDisplay: '9:00 AM–11:00 AM',
     });
-    const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'));
+    const count = conn.calls.find((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'));
+    // stops, not rows: a visit group counts once
+    expect(hasOp(count.ops, 'first', (a) => /COUNT\(DISTINCT COALESCE\(visit_id, id\)\)/.test(a[0]?.raw))).toBe(true);
     expect(hasOp(count.ops, 'whereNotIn', (a) => a[0] === 'status' && ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].every((s) => a[1].includes(s)))).toBe(true);
     expect(hasOp(count.ops, 'where', (a) => a[0] === 'route_order' && a[1] === '<' && a[2] === 3)).toBe(true);
     // finished-but-unclosed stops (tracker complete / service record) are not ahead
@@ -150,7 +153,7 @@ describe('techPosition', () => {
     const conn = fakeConn(handlers({ visit: { route_order: null } }));
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [todayEntry()], now: NOW, conn });
     expect(out.techPosition.stopsAhead).toBeNull();
-    expect(conn.calls.some((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'count'))).toBe(false);
+    expect(conn.calls.some((c) => c.table === 'scheduled_services' && hasOp(c.ops, 'where', (a) => a[0] === 'route_order'))).toBe(false);
   });
 
   test('no assigned tech: null', async () => {
