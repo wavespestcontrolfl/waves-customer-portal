@@ -445,6 +445,36 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
     } finally { await cleanup(f); }
   });
 
+  // Pre-push audit P1: an invoice already on the first visit (Charge Now, an
+  // office bill) keeps the completion mint from running, so the mint never
+  // consumes the queued fee. It must become the office's draft, never stay
+  // armed for a later visit (the fallback reads the stamp after the mint, so a
+  // reviewed 100% discount takes the same path).
+  test('a first performed visit that already has a fee-less invoice consumes the queued fee into a draft; the next visit does not bill it again', async () => {
+    const f = await seed();
+    try {
+      const existing = await require('../services/invoice').create({
+        customerId: f.customerId, scheduledServiceId: f.parentId, title: 'Office bill',
+        lineItems: [{ description: 'Visit', quantity: 1, unit_price: VISIT_PRICE }],
+      });
+      const first = await complete(f, f.parentId);
+      expect(first).toMatchObject({ status: 200 });
+      expect((await mockPg('scheduled_services').where({ id: f.parentId }).first('pending_setup_fee')).pending_setup_fee).toBeNull();
+      const drafts = (await mockPg('invoices').where({ customer_id: f.customerId }))
+        .filter((inv) => inv.id !== existing.id && setupLines(inv).length);
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0]).toMatchObject({ status: 'draft' });
+      expect(Number(drafts[0].total)).toBe(SETUP_FEE);
+      expect(await mockPg('setup_fee_claims').where({ invoice_id: drafts[0].id, scheduled_service_id: f.parentId })).toHaveLength(1);
+      expect(await mockPg('dispatch_alerts').where({ type: 'setup_fee_draft_review', job_id: f.parentId })).toHaveLength(1);
+
+      await makeDue(f.childIds[0]);
+      const next = await complete(f, f.childIds[0]);
+      expect(next).toMatchObject({ status: 200 });
+      expect((await mockPg('invoices').where({ customer_id: f.customerId })).flatMap(setupLines)).toHaveLength(1);
+    } finally { await cleanup(f); }
+  });
+
   // Reviewer P2-B/P2-D: a stamp on a customer whose lane never runs the
   // completion mint (monthly membership: dues cover the visit) can never be
   // consumed. The detector must not call it a deferral (the fee would be

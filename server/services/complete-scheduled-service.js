@@ -10403,34 +10403,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         logger.warn(`[dispatch] setup-fee claim failed for visit ${svc.id}: ${e.message}`);
       }
     }
-    // The FIRST PERFORMED visit of a series whose own price reads $0 (repriced
-    // to an authoritative $0, or unpriced) bills nothing, so the queued setup
-    // fee has no invoice of this visit to ride — and must neither slide to a
-    // later visit nor be lost. It is CONSUMED, in its own transaction, into a
-    // DRAFT "One-time setup fee" invoice + the immutable claim record (the
-    // same records the normal consumption writes), the stamp goes to its
-    // consumed state, and a setup_fee_draft_review alert carries the draft for
-    // the office. Only a performed, non-callback, non-always-free, live
-    // completion that declined to invoice for want of a price; a failure
-    // leaves the stamp queued (never lost).
-    if (!packetEffects && !shouldInvoice && !hasVisitPrice && visitPerformed && !isBackfillCompletion
-      && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
-      try {
-        const zeroParentId = svc.recurring_parent_id || svc.id;
-        const zeroParent = await db('scheduled_services').where({ id: zeroParentId }).first('pending_setup_fee');
-        if (Number(zeroParent?.pending_setup_fee) > 0) {
-          const { consumeSetupFeeStampIntoDraftInvoice } = require('../services/setup-fee-obligation');
-          const zeroDraft = await db.transaction((trx) => consumeSetupFeeStampIntoDraftInvoice(trx, {
-            parentId: zeroParentId, rawAmount: zeroParent.pending_setup_fee, customerId: svc.customer_id,
-            estimateId: svc.source_estimate_id || null, origin: `first performed visit ${svc.id} billed nothing`,
-            alertContext: { visitId: svc.id, serviceId: svc.id },
-          }));
-          if (zeroDraft) logger.warn(`[dispatch] visit ${svc.id} billed nothing — its queued setup fee ($${zeroDraft.amount}) was consumed into draft invoice ${zeroDraft.invoiceId} for office review`);
-        }
-      } catch (e) {
-        logger.warn(`[dispatch] zero-price setup-fee draft failed for visit ${svc.id} (the stamp stays queued): ${e.message}`);
-      }
-    }
     if (shouldInvoice) {
       try {
         // A REQUIRED resume mints the FROZEN amount or nothing (Codex P0,
@@ -11101,6 +11073,39 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Treat already-paid / prepaid pre-mint as the same SMS branch.
       if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
       else invoiceCreated = true;
+    }
+
+    // The FIRST PERFORMED visit carries a queued setup fee (scheduled_services
+    // .pending_setup_fee on its series parent). If this completion's billing
+    // did not consume it — the visit billed nothing (unpriced, an
+    // authoritative $0, or a reviewed 100% discount), or an invoice already on
+    // the visit (Charge Now, an office bill) kept the mint from running — the
+    // fee must neither slide to a later visit nor be lost. It is CONSUMED, in
+    // its own transaction, into a DRAFT "One-time setup fee" invoice + the
+    // immutable claim record (the same records the normal consumption
+    // writes), the stamp goes to its consumed state, and a
+    // setup_fee_draft_review alert carries the draft for the office. Read
+    // AFTER the mint: a stamp the mint consumed is null, and a negative stamp
+    // (a mint in flight) is never touched. Only a performed, non-callback,
+    // non-always-free, live completion; a failure leaves the stamp queued.
+    if (!packetEffects && visitPerformed && !isBackfillCompletion
+      && !recapReviewOnly && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      try {
+        const feeParentId = svc.recurring_parent_id || svc.id;
+        const feeParent = await db('scheduled_services').where({ id: feeParentId }).first('pending_setup_fee');
+        if (Number(feeParent?.pending_setup_fee) > 0) {
+          const { consumeSetupFeeStampIntoDraftInvoice } = require('../services/setup-fee-obligation');
+          const feeDraft = await db.transaction((trx) => consumeSetupFeeStampIntoDraftInvoice(trx, {
+            parentId: feeParentId, rawAmount: feeParent.pending_setup_fee, customerId: svc.customer_id,
+            estimateId: svc.source_estimate_id || null,
+            origin: `first performed visit ${svc.id} did not bill the fee`,
+            alertContext: { visitId: svc.id, serviceId: svc.id },
+          }));
+          if (feeDraft) logger.warn(`[dispatch] visit ${svc.id} did not bill its queued setup fee ($${feeDraft.amount}) — consumed into draft invoice ${feeDraft.invoiceId} for office review`);
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] setup-fee draft failed for visit ${svc.id} (the stamp stays queued): ${e.message}`);
+      }
     }
 
     // An annual-prepay-COVERED visit's invoice and its add-ons — the covered
