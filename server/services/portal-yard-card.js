@@ -118,11 +118,11 @@ async function loadPlan(customerId, knex, scope = null) {
 // customer_turf_profiles is 1:1 with the customer (no property_id), so a
 // SECONDARY saved property has no grass of its own: show every grass rather
 // than the primary house's (same call photo-id makes for its grass context).
-// Strict read: a failed lookup is `unavailable`, so the card never tells a
-// customer with a saved grass that theirs is "not set".
+// That is `secondary`, not an unset profile. Strict read: a failed lookup is
+// `unavailable`. Neither tells the customer their grass is "not set".
 async function loadGrass(customerId, scope, knex) {
   const every = { key: 'all', known: false, mixed: false, label: null };
-  if (isSecondarySelection(scope)) return every;
+  if (isSecondarySelection(scope)) return { ...every, secondary: true };
   try {
     const ctx = await loadCustomerGrassContext(customerId, knex, { strict: true });
     const key = GRASS_KEYS[ctx.grassType];

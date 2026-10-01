@@ -246,6 +246,12 @@ describe('mixed versus unset grass', () => {
     rerender(<YardMonthCard yard={{ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null }, hiddenCount: 0 }} onOpenPhotoId={null} />);
     expect(screen.getByText('Grass type not set. Showing every grass.')).toBeInTheDocument();
   });
+  it('a secondary property shows every grass without claiming the profile is unset', async () => {
+    await renderCard({ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null, secondary: true }, hiddenCount: 0 });
+    expect(screen.getByText('Showing every grass for this property.')).toBeInTheDocument();
+    expect(screen.queryByText(/not set/)).not.toBeInTheDocument();
+  });
+
   it('a failed grass lookup shows every grass without claiming the profile is unset', async () => {
     await renderCard({ ...YARD, grass: { key: 'all', known: false, mixed: false, label: null, unavailable: true }, hiddenCount: 0 });
     expect(screen.getByText('Showing every grass.')).toBeInTheDocument();

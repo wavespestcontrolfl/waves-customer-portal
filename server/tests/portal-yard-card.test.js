@@ -165,7 +165,7 @@ describe('grass mapping and hidden count', () => {
   test('a SECONDARY saved property gets every grass: the turf profile is the primary house\'s', async () => {
     const scope = { enabled: true, scoped: true, closed: false, property: { id: 'prop-b', is_primary: false } };
     const card = await build({ scope });
-    expect(card.grass).toEqual({ key: 'all', known: false, mixed: false, label: null });
+    expect(card.grass).toEqual({ key: 'all', known: false, mixed: false, label: null, secondary: true });
     expect(loaders.loadCustomerGrassContext).not.toHaveBeenCalled();
   });
 

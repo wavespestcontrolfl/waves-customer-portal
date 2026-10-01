@@ -281,9 +281,11 @@ export default function YardMonthCard({ yard, onOpenPhotoId, onOpenReport = null
   const byCategory = (category) => items.filter((i) => i.category === category);
 
   // Known grass: only the hidden-count note. Otherwise say why every grass
-  // shows; a failed lookup claims nothing about the customer's profile.
+  // shows; a secondary property (the turf profile is the primary house's) or
+  // a failed lookup claims nothing about the customer's profile.
   let grassNote = null;
   if (grass.known) grassNote = hiddenCount > 0 ? `${hiddenCount} more in season on other grasses, hidden for your ${grass.label} lawn.` : null;
+  else if (grass.secondary) grassNote = 'Showing every grass for this property.';
   else if (grass.unavailable) grassNote = 'Showing every grass.';
   else grassNote = grass.mixed ? 'Mixed lawn. Showing every grass.' : 'Grass type not set. Showing every grass.';
 
