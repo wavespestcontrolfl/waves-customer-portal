@@ -17,6 +17,11 @@
 
 const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detector');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+// The same exclusions the canonical customer-words readers use
+// (completion-comms-context.js CUSTOMER_WORDS_CHANNELS).
+const { isSmsReaction } = require('./sms-intent');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const ContextAggregator = require('./context-aggregator');
 
 const SUGGESTION_WINDOW_HOURS = 72;
 // Same cap as call-recording-processor's pain_points slice and the column's
@@ -32,7 +37,8 @@ const SCAN_PAGE = 25;
 // lane (the pest/lawn pickers' chips are the only other writers).
 const OFFICE_REQUEST_SERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 
-const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'processing_status', 'call_outcome', 'answered_by', 'created_at'];
+const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'processing_status', 'call_outcome', 'answered_by', 'created_at'];
+const SMS_COLUMNS = ['id', 'message_body', 'message_type', 'created_at'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -55,8 +61,10 @@ function windowFloor(now) {
 }
 
 // An inbound text's words, or null when it is not something to suggest: an
-// empty body, a STOP / opt-in keyword or natural-language opt-out, or HELP.
+// empty body, a tapback (it quotes a Waves text, never the customer's own
+// words), a STOP / opt-in keyword or natural-language opt-out, or HELP.
 function smsSuggestionText(row) {
+  if (row?.message_type === 'sms_reaction' || isSmsReaction(row?.message_body)) return null;
   const text = cleanRequestText(row?.message_body);
   if (!text) return null;
   if (detectSmsOptCommand(text).action) return null;
@@ -77,10 +85,12 @@ function callSuggestionText(row) {
   if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return null;
   // The voice pipeline records a voicemail in processing_status, call_outcome
   // or answered_by, so all three are checked.
-  if (['spam', 'voicemail'].includes(String(row.call_outcome || '').toLowerCase())) return null;
+  if (['spam', 'voicemail', 'wrong_number'].includes(String(row.call_outcome || '').toLowerCase())) return null;
   if (String(row.answered_by || '').toLowerCase() === 'voicemail') return null;
+  // Spam / misdial classifications, legacy and validated V2 (the canonical
+  // call reader's rule).
+  if (ContextAggregator.isExcludedCall(row)) return null;
   const extraction = parseExtraction(row.ai_extraction);
-  if (extraction.is_spam === true) return null;
   return cleanRequestText(extraction.pain_points) || cleanRequestText(row.call_summary);
 }
 
@@ -118,10 +128,10 @@ async function pickSuggestion(conn, customerId, { now = Date.now() } = {}) {
       .where({ customer_id: customerId, direction: 'inbound' })
       .where('created_at', '>=', floor)
       .modify(excludeUnresolvedSendReservations)
-      .select('id', 'message_body', 'created_at'), 'text', smsSuggestionText),
-    await newestEligible(() => conn('call_log')
+      .select(SMS_COLUMNS), 'text', smsSuggestionText),
+    await newestEligible(() => whereNotSandboxCall(conn('call_log')
       .where({ customer_id: customerId, direction: 'inbound' })
-      .where('created_at', '>=', floor)
+      .where('created_at', '>=', floor))
       .select(CALL_COLUMNS), 'call', callSuggestionText),
   ].filter(Boolean);
   if (!candidates.length) return null;
@@ -151,12 +161,12 @@ async function resolveCustomerRequest(conn, customerId, input, { now = Date.now(
         .where({ id, customer_id: customerId, direction: 'inbound' })
         .where('created_at', '>=', floor)
         .modify(excludeUnresolvedSendReservations)
-        .first('id', 'message_body', 'created_at');
+        .first(SMS_COLUMNS);
       suggested = row ? smsSuggestionText(row) : null;
     } else {
-      const row = await conn('call_log')
+      const row = await whereNotSandboxCall(conn('call_log')
         .where({ id, customer_id: customerId, direction: 'inbound' })
-        .where('created_at', '>=', floor)
+        .where('created_at', '>=', floor))
         .first(CALL_COLUMNS);
       suggested = row ? callSuggestionText(row) : null;
     }

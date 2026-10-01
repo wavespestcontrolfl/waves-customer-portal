@@ -53,6 +53,7 @@ function fakeDb(tables) {
       },
       offset(n) { rows = rows.slice(n); return q; },
       modify(fn) { return q; },
+      whereRaw() { return q; },
       limit(n) { rows = rows.slice(0, n); return q; },
       select() { return q; },
       first() { return Promise.resolve(rows[0]); },
@@ -247,5 +248,36 @@ describe('Codex r1 (#5518)', () => {
     const db = fakeDb({ sms_log: [...stops, sms(1, CUST, 'Ants are back in the kitchen', 40)], call_log: [] });
     const s = await pickSuggestion(db, CUST, { now: NOW });
     expect(s).toMatchObject({ kind: 'text', text: 'Ants are back in the kitchen' });
+  });
+});
+
+describe('terminal Codex pass 1 (#5518)', () => {
+  test('a tapback quoting a Waves text never hides the real request, and is never saved as the customer\'s words', async () => {
+    const tapback = 'Liked \u201cWe can come Tuesday to treat the ants.\u201d';
+    const db = fakeDb({
+      sms_log: [sms(2, CUST, tapback, 1), sms(1, CUST, 'Ants are back in the kitchen', 5)],
+      call_log: [],
+    });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toMatchObject({ id: id(1), text: 'Ants are back in the kitchen' });
+    expect(await resolveCustomerRequest(db, CUST, { text: tapback, suggestionId: id(2), suggestionKind: 'text' }, { now: NOW }))
+      .toEqual({ text: tapback, source: 'office' });
+  });
+
+  test('a row typed sms_reaction is skipped', async () => {
+    const db = fakeDb({ sms_log: [{ ...sms(1, CUST, 'thumbs', 1), message_type: 'sms_reaction' }], call_log: [] });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
+  });
+
+  test.each([
+    [{ call_outcome: 'wrong_number' }],
+    [{ ai_extraction: JSON.stringify({ call_type: 'spam', pain_points: 'Free cruise' }) }],
+    [{ ai_extraction: JSON.stringify({ call_type: 'wrong_number', pain_points: 'Wrong business' }) }],
+  ])('a call excluded as %j never replaces an older real request', async (extra) => {
+    const db = fakeDb({
+      sms_log: [sms(1, CUST, 'Ants are back in the kitchen', 10)],
+      call_log: [call(2, CUST, 1, { call_summary: 'Not a customer', ...extra })],
+    });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toMatchObject({ kind: 'text', id: id(1) });
+    expect((await resolveCustomerRequest(db, CUST, { text: 'Not a customer', suggestionId: id(2), suggestionKind: 'call' }, { now: NOW })).source).toBe('office');
   });
 });
