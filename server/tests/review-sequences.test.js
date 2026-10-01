@@ -5218,8 +5218,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const priorDraft = "It's Adam, thanks for waiting on me this morning. A Google review would really help: {review_url}";
     const fresh = "It's Adam, thanks again for Tuesday. A Google review would really help: {review_url}";
     mockDraftTechVoice.mockResolvedValue(fresh);
-    const fixture = (id, createdAt) => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
-      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt }],
+    const fixture = (id, createdAt, templateKey = 'soft_reminder_tech_voice') => makeMock(reminderStepFixture(`seq-${id}`, { id, first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: `rr-${id}`, sequence_id: `seq-${id}`, sequence_step: 1, customer_id: id, channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: createdAt, template_key: templateKey }],
     }));
 
     let mock = fixture('tvd-1', new Date(Date.now() - 2 * 86400000));
@@ -5235,6 +5235,15 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect((await ReviewService.processReviewSequences()).sent).toBe(1);
     expect(mockDraftTechVoice).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('waiting on me this morning');
+
+    // Same day, but persisted by the older drafter before the switch: never
+    // reused, since it skipped the fact check.
+    mockSendCustomerMessage.mockClear();
+    mock = fixture('tvd-3', new Date(), 'soft_reminder_personalized');
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockDraftTechVoice).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
   });
 
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {

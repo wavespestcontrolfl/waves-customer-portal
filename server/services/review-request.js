@@ -4686,7 +4686,10 @@ const ReviewService = {
           // "today"), so it is reused only on the ET calendar day it was
           // written; a retry that crosses midnight drafts afresh.
           const { etCalendarDayOf } = require("../utils/datetime-et");
-          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date()));
+          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
+            // and only a draft the tech-voice writer made (fact-checked), never
+            // one the older drafter persisted before the switch went on.
+            && /_tech_voice$/.test(String(prior.template_key || "")));
           if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
@@ -4744,7 +4747,10 @@ const ReviewService = {
             .first();
           // Same-day reuse only under tech voice (see the SMS path above).
           const { etCalendarDayOf } = require("../utils/datetime-et");
-          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date()));
+          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
+            // and only a draft the tech-voice writer made (fact-checked), never
+            // one the older drafter persisted before the switch went on.
+            && /_tech_voice$/.test(String(prior.template_key || "")));
           if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
