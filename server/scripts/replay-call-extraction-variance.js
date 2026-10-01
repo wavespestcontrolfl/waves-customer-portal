@@ -1353,6 +1353,10 @@ async function replayCall(call, context) {
     // bookable catalog (absent = the replay holds the call).
     bookableServices,
     ...(transcript !== undefined ? { transcript } : {}),
+    // A re-transcription has no matching V1 record (the replay never re-runs V1), so the
+    // persisted ai_extraction's service view does not describe it: the commercial quote
+    // check gets no V1 view and holds the call rather than mix the two (codex #5377 r19 P2).
+    ...(transcript !== undefined && transcript !== call.transcription ? { extracted: null } : {}),
   });
   const { knownCaller, options: failOpenContext } = contextFor(undefined);
   // The verdict was computed for the persisted (prior) extraction — it always
