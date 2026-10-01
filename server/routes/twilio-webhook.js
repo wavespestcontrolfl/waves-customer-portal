@@ -1020,7 +1020,9 @@ router.post('/sms', async (req, res) => {
     // awaited, and its result changes nothing. Reactions and every
     // non-customer/opt path are excluded inside the service (eligibleMessage),
     // and the previous Waves text is read there.
-    if (Body && !smsReaction && customer?.id && smsLogEntry?.id) {
+    // A message with an attachment is skipped: Jev and the reviewer see only
+    // the caption, while the attachment is what production's rules weighed.
+    if (Body && !smsReaction && inboundMedia.length === 0 && customer?.id && smsLogEntry?.id) {
       res.once('finish', () => {
         void Promise.resolve().then(() => require('../services/typed-decisions/sms-shadow').shadowInboundSms({
           smsLogId: smsLogEntry.id,

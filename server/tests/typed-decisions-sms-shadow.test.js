@@ -107,6 +107,8 @@ describe('twilio-webhook wiring', () => {
     expect(src.lastIndexOf('typed-decisions/sms-shadow')).toBe(hook + "require('../services/".length); // registered once
     expect(hook).toBeLessThan(src.indexOf('RescheduleSMS.handleRescheduleReply('));
     expect(hook).toBeLessThan(src.indexOf('LeadIntake.handleIntakeReply('));
+    // a message with an attachment is never shadowed (Jev would see only the caption)
+    expect(src.slice(hook - 600, hook)).toMatch(/if \(Body && !smsReaction && inboundMedia\.length === 0 && customer\?\.id && smsLogEntry\?\.id\)/);
     // and after the solicitation stop, which keeps no customer conversation
     expect(hook).toBeGreaterThan(src.indexOf('if (solicitationEnforced) return res.type('));
     expect(src.slice(hook - 400, hook)).toMatch(/res\.once\('finish'/);
