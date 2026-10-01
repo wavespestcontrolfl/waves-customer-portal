@@ -1003,6 +1003,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Annual-prepay re-stamp backstop: a paid, active term whose activation
+  // stamp pass threw (the Stripe webhook only logs) keeps canonical visits
+  // unstamped, and a visit that completes in that state bills normally on
+  // top of the prepay. The daily renewal-reminder run also does this before
+  // its pending-window reconcile; hourly keeps the window to under an hour.
+  // Idempotent: a fully stamped (or price-held) term is never refreshed.
+  cron.schedule('42 * * * *', async () => {
+    try {
+      await runExclusive('annual-prepay-restamp-sweep', async () => {
+        await require('./annual-prepay-renewals').restampUnstampedActiveTerms();
+      });
+    } catch (err) {
+      logger.error(`[annual-prepay-restamp] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Voice-filed re-service tickets whose owner page never went out (process
   // exit between the ticket commit and the alert). The page is the owner-ruled
   // escape hatch from the ticket queue's documented black hole, so a missing
