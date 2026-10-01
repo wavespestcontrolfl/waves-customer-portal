@@ -2698,8 +2698,15 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
   // The merged phone is V1's when V1 has one, else V2's.
   const v1GroundingCarries = !!v1.phone || samePerson;
   const v2GroundingCarries = !v1.phone || samePerson;
-  const grounded = (field) => (v1[field] === true && v1GroundingCarries)
-    || (v2[field] === true && v2GroundingCarries);
+  // ...and the flags are bound to the ROLE the same extractor assigned: a
+  // merged role (V1's unless 'unknown', else V2's) must never pair with the
+  // other extractor's flags to pass onSiteNotifyConsent — "V2 says
+  // spouse_partner, V1 says lender but 'text him'" is not an on-site spouse
+  // (pre-push codex P1, round 7). A flag carries only when its own
+  // extractor's role is an on-site role.
+  const onSiteRole = (r) => ON_SITE_NOTIFY_ROLES.has(String(r || '').trim().toLowerCase());
+  const grounded = (field) => (v1[field] === true && v1GroundingCarries && onSiteRole(v1.role))
+    || (v2[field] === true && v2GroundingCarries && onSiteRole(v2.role));
 
   return {
     first_name: v1.first_name || v2.first_name,

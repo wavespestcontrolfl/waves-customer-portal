@@ -967,6 +967,23 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(onSiteNotifyConsent(v2Only)).toBe(false);
   });
 
+  test('flags are bound to their own extractor\'s role — a V1 lender\'s "text him" never pairs with V2\'s spouse_partner role (pre-push codex P1, round 7)', () => {
+    const v1Lender = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', phone: '+15550100123', role: 'lender', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    const v2Spouse = { ...v2Base, role: 'spouse_partner' };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1Lender }, { secondary_contact: v2Spouse });
+    expect(merged.role).toBe('lender');
+    expect(merged.wants_appointment_texts).toBe(false);
+    expect(onSiteNotifyConsent(merged)).toBe(false);
+    // The mirror: V1 role unknown (so V2's spouse_partner is the merged role),
+    // flags from V1 only → still not grounded; flags from V2 (own role) → grounded.
+    const v1Unknown = normalizeV1({ ...v1Lender, role: 'unknown' });
+    const m2 = resolveCallSecondaryContact({ secondary_contact: v1Unknown }, { secondary_contact: v2Spouse });
+    expect(m2.role).toBe('spouse_partner');
+    expect(m2.wants_appointment_texts).toBe(false);
+    const m3 = resolveCallSecondaryContact({ secondary_contact: v1Unknown }, { secondary_contact: { ...v2Spouse, wants_appointment_texts: true, on_site: true } });
+    expect(onSiteNotifyConsent(m3)).toBe(true);
+  });
+
   test('V1 grounding never rides a V2-supplied phone unless V2 is positively the same person (pre-push codex P1)', () => {
     // Name-only V1 (no phone) with both grounding flags; V2 is phone-only.
     // Nothing conflicts, yet nothing proves they are one person — the merge
