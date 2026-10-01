@@ -23,6 +23,17 @@ describe('four-section report', () => {
     expect(parsed.violations).toEqual([]);
   });
 
+  test('takes titles written inline with their text', () => {
+    const inline = [
+      'WHAT WE FOUND: You mentioned ants by the dishwasher. Ghost ants were trailing along the counter.', '',
+      'WHAT WE DID AND WHY: We placed bait along the counter, because ants carry it back to the colony. Outside, we treated the foundation.', '',
+      'WHAT TO EXPECT: You may see a few more ants for a few days.', '',
+      "WHAT'S NEXT: If the ants are still trailing after about 1–2 weeks, let us know.",
+    ].join('\n');
+    expect(technicianReportCustomerCopy(inline)?.body).toBe(technicianReportCustomerCopy(REPORT).body);
+    expect(technicianReportCustomerCopy(inline.replace(/WHAT'S NEXT: .*$/, "WHAT'S NEXT: "))).toBeNull();
+  });
+
   test('takes a curly apostrophe in the last title', () => {
     expect(technicianReportCustomerCopy(REPORT.replace("WHAT'S NEXT", 'WHAT’S NEXT'))?.sections).toHaveLength(4);
   });

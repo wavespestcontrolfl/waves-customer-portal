@@ -192,8 +192,15 @@ const FOUR_SECTION_HEADERS = Object.freeze([
 const MAX_FOUR_SECTION_CHARS = 3200;
 const ANY_REPORT_HEADER_RE = /^\s*WHAT (?:WE DID(?: AND WHY)?|WE FOUND|TO EXPECT|['’]S NEXT):?\s*$/;
 
+// A title written inline ("WHAT WE FOUND: You mentioned…") is the same
+// shape as a title on its own line followed by its text.
+const INLINE_FOUR_SECTION_TITLE_RE = /^\s*(WHAT WE FOUND|WHAT WE DID AND WHY|WHAT TO EXPECT|WHAT['’]S NEXT):\s*(\S.*)$/;
+
 function parseFourSections(text) {
-  const lines = text.split(/\r?\n/);
+  const lines = text.split(/\r?\n/).flatMap((line) => {
+    const inline = INLINE_FOUR_SECTION_TITLE_RE.exec(line);
+    return inline ? [inline[1], inline[2]] : [line];
+  });
   const starts = FOUR_SECTION_HEADERS.map(([, , header]) => lines.findIndex((line) => header.test(line)));
   if (starts.some((index) => index === -1)) return null;
   if (starts.some((index, i) => i > 0 && index <= starts[i - 1])) return null;
