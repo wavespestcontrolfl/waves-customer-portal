@@ -142,7 +142,10 @@ function flatView(extraction) {
     secondary_contacts_consent_signature: (() => {
       const sig = (c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`;
       const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts);
-      return [...(secondary ? [`S=${sig(secondary)}`] : []), ...list.map(sig)].join('|');
+      // The RAW singleton (not the canonical merge, which falls back to the
+      // array mirror): its own drift is what the 'S=' entry watches.
+      const rawSingle = mapSecondaryContactToLegacy(extraction.secondary_contact);
+      return [...(rawSingle ? [`S=${sig(rawSingle)}`] : []), ...list.map(sig)].join('|');
     })(),
 
     appointment_confirmed: sched.status === 'confirmed',
@@ -241,7 +244,9 @@ function canonicalV2Secondary(extraction) {
   const single = mapSecondaryContactToLegacy(extraction?.secondary_contact);
   const first = extraction?.secondary_contacts?.[0];
   const mirror = mapSecondaryContactToLegacy(first);
-  if (!single || !mirror) return single;
+  // Array-only payload: the mirror IS the canonical contact (flags kept).
+  if (!single) return mirror;
+  if (!mirror) return single;
   // A singleton with NO phone / email of its own also pairs with a mirror of
   // the same (even one-word) name — nothing on it can conflict; otherwise the
   // strict same-person rule applies.

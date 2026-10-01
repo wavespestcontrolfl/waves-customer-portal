@@ -868,6 +868,9 @@ describe('on-site contact opt-in ask', () => {
     expect(src).toContain('keepConsentStamp: onSiteBlockedBeforeWrite,');
     // A phone that already confirmed on this account is not held again.
     expect(src).toContain('holdPhone: onSiteBlockedBeforeWrite && !onSiteAlreadyConfirmed,');
+    // The confirmed-status read runs for every on-site phone, on record or new.
+    const pre = src.slice(src.indexOf('if (newKey && !knownKeys.includes(newKey)) {'));
+    expect(pre.indexOf("onSiteAlreadyConfirmed = existing?.status === 'confirmed';")).toBeGreaterThan(pre.indexOf('onSiteBlockedBeforeWrite = true;\n          }'));
     const block = src.indexOf('if (newKey && !knownKeys.includes(newKey)) {');
     expect(block).toBeLessThan(src.indexOf('const result = await persistCallSecondaryContact(customerId, secondaryEntry, {', block));
     // The same-call fan-out gate is the original one.

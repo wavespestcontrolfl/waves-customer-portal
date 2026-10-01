@@ -1422,6 +1422,11 @@ describe('extraction compat adapter', () => {
     roleless.secondary_contact = entry('unknown', false, false, 'Sample Spouse', '+15550100123');
     roleless.secondary_contacts = [entry('tenant', false, true, 'Sample Spouse', '+15550100123')];
     expect(flatView(roleless).secondary_contact).toMatchObject({ role: 'tenant', on_site: true });
+    // Array-only payload (no singleton): the mirror is the canonical contact, flags kept.
+    const arrayOnly = validPersisted();
+    arrayOnly.secondary_contact = null;
+    arrayOnly.secondary_contacts = [entry('tenant', true, true, 'Sample Spouse', '+15550100123')];
+    expect(flatView(arrayOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));

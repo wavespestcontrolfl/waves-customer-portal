@@ -13765,11 +13765,12 @@ const CallRecordingProcessor = {
               requested_at: new Date(),
             }).onConflict(['customer_id', 'phone_key']).ignore();
             onSiteBlockedBeforeWrite = true;
-            // A phone that already said YES on this account (removed, now
-            // re-added) keeps its consent: no hold, and no new ask goes out.
-            const existing = await db('recipient_optin').where({ customer_id: customerId, phone_key: newKey }).first('status');
-            onSiteAlreadyConfirmed = existing?.status === 'confirmed';
           }
+          // A phone that already said YES on this account (on record now, or
+          // removed and re-added) keeps its consent: no hold, no new ask, and
+          // it stays in the same-call fan-out.
+          const existing = newKey ? await db('recipient_optin').where({ customer_id: customerId, phone_key: newKey }).first('status') : null;
+          onSiteAlreadyConfirmed = existing?.status === 'confirmed';
         }
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
           smsConsentExplicit: v2SmsConsentExplicit,
