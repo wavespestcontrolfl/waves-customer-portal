@@ -10,9 +10,8 @@
  *   - CTA label: "Leave a quick review" → "Leave a Google review".
  *
  * Same posture as 20260806002000: read-modify-write on the active version,
- * exact-match only (an operator-edited field is left untouched), idempotent,
- * and down restores the prior copy only where this migration's copy is still
- * in place.
+ * exact-match only (an operator-edited field is left untouched), idempotent;
+ * down is a documented no-op.
  */
 
 const TEMPLATE_KEY = 'review_request_email';
@@ -70,6 +69,8 @@ exports.up = async function up(knex) {
   await swap(knex, { preview: [OLD_PREVIEW, NEW_PREVIEW], closing: [OLD_CLOSING, NEW_CLOSING], cta: [OLD_CTA, NEW_CTA] });
 };
 
-exports.down = async function down(knex) {
-  await swap(knex, { preview: [NEW_PREVIEW, OLD_PREVIEW], closing: [NEW_CLOSING, OLD_CLOSING], cta: [NEW_CTA, OLD_CTA] });
-};
+// Documented no-op (waves-db rule for data corrections that keep admin
+// edits): matching this migration's copy does not prove it wrote it (an
+// operator may have typed the same words), so a revert could erase their
+// edit. Restore older copy by hand in the template editor if ever needed.
+exports.down = async function down() {};

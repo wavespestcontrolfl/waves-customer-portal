@@ -69,16 +69,12 @@ test('an operator-edited field is left untouched', async () => {
   expect(JSON.parse(rows.version.blocks)[2].label).toBe('Leave a Google review');
 });
 
-test('idempotent, and down() restores the prior copy', async () => {
+test('idempotent, and down() is a no-op (it cannot tell its own copy from an operator\'s)', async () => {
   const rows = seeded();
-  const before = JSON.parse(JSON.stringify(rows));
   await migration.up(createKnex(rows));
-  const once = JSON.parse(JSON.stringify(rows));
+  const once = JSON.stringify(rows);
   await migration.up(createKnex(rows));
-  expect(rows.version.blocks).toBe(once.version.blocks);
-  expect(rows.version.preview_text).toBe(once.version.preview_text);
+  expect(JSON.stringify(rows)).toBe(once);
   await migration.down(createKnex(rows));
-  expect(rows.version.preview_text).toBe(before.version.preview_text);
-  expect(JSON.parse(rows.version.blocks)).toEqual(JSON.parse(before.version.blocks));
-  expect(rows.template.default_cta_label).toBe('Leave a quick review');
+  expect(JSON.stringify(rows)).toBe(once);
 });

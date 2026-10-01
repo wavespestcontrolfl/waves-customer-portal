@@ -206,6 +206,9 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isAskOnlySentence('Marta, a Google review would really help: {review_url}', new Set(['marta']))).toBe(true);
     expect(isAskOnlySentence('A Google review would help us a lot.', new Set())).toBe(true);
     expect(isAskOnlySentence('Congrats on the baby, a Google review would help: {review_url}', new Set())).toBe(false);
+    // Terminal pass 3: ordinary request wording is still a bare request.
+    expect(isAskOnlySentence('Could you leave a Google review? {review_url}', new Set())).toBe(true);
+    expect(isAskOnlySentence('Can you please share a Google review? {review_url}', new Set())).toBe(true);
   });
 
   test('every verdict must judge the sentence actually being sent', async () => {

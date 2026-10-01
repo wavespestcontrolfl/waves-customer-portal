@@ -793,7 +793,8 @@ Return the sentences in the same order.`;
 
 // Words a pure review request may use besides the link and the name.
 const ASK_WORDS = new Set(`a an the google review reviews would will really also help helps mean means lot us
-  if you your get chance quick leave it much big great be appreciate appreciated thanks thank and so too`.split(/\s+/));
+  if you your get chance quick leave leaving it much big great be appreciate appreciated thanks thank and so too
+  could can please share sharing mind post posting give giving drop write writing time`.split(/\s+/));
 
 // Sentences as the checker sees them. A bare link ("Google review? {review_url}")
 // stays with the sentence before it, so the ask is judged whole.
