@@ -14,6 +14,8 @@ const { findBannedCustomerCopy } = require('../services/service-report/activity-
 const {
   checkLawnModelCopy,
   checkNumericWhitelist,
+  checkTimingLanguage,
+  checkSubDayDuration,
   checkWaterMowDeny,
   checkWeekdayClockDeny,
   checkProgressCoupling,
@@ -38,7 +40,8 @@ const accepts = (text, facts) => {
   expect(result.ok).toBe(true);
 };
 
-const ROW = { allowedText: ['Most turf shows a response in 3 to 7 days.'] };
+const APPROVED = 'Most turf shows a response in 3 to 7 days.';
+const ROW = { approvedSentences: [APPROVED] };
 
 describe('module purity', () => {
   test('requiring it does not load models/db.js', () => {
@@ -69,197 +72,6 @@ describe('module purity', () => {
   });
 });
 
-describe('numeric whitelist (G3)', () => {
-  test('accepts "3 to 7 days" only when a row carries it', () => {
-    accepts('Most turf shows a response in 3 to 7 days.', ROW);
-    rejects('Most turf shows a response in 3 to 7 days.', 'numeric', {});
-    rejects('Most turf shows a response in 3 to 7 days.', 'numeric', { allowedText: ['Turf responds in 2 to 4 weeks.'] });
-  });
-
-  test.each([
-    ['10 days', 'Expect a change in 10 days.'],
-    ['a couple of days', 'Expect a change in a couple of days.'],
-    ['a few days', 'You may notice it in a few days.'],
-    ['overnight', 'The color shift happens overnight.'],
-    ['within a week', 'You should see it within a week.'],
-  ])('rejects %s when no row carries it', (_, text) => {
-    rejects(text, 'numeric', ROW);
-  });
-
-  test('a row that carries a vague phrase licenses that same phrase', () => {
-    accepts('You may notice it in a few days.', { allowedText: ['Color can return in a few days.'] });
-    rejects('You may notice it in a few weeks.', 'numeric', { allowedText: ['Color can return in a few days.'] });
-  });
-
-  test('ranges: en dash, hyphen and "to" are the same token', () => {
-    ['3–7 days', '3-7 days', '3 to 7 days', '3 — 7 days'].forEach((r) => {
-      accepts(`Expect a response in ${r}.`, ROW);
-    });
-  });
-
-  test('no unit conversion and no range splitting', () => {
-    rejects('Expect a response in 7 days.', 'numeric', ROW);
-    rejects('Expect a response in 3 days.', 'numeric', ROW);
-    rejects('Expect a response in 5 days.', 'numeric', ROW);
-    rejects('Expect a response in 1 week.', 'numeric', { allowedText: ['Response in 7 days.'] });
-  });
-
-  test('spelled numbers next to a unit count the same as digits', () => {
-    rejects('Expect a change in two weeks.', 'numeric', ROW);
-    accepts('Expect a change in two weeks.', { allowedText: ['Turf responds in 2 weeks.'] });
-    accepts('Expect a change in 2 weeks.', { allowedText: ['Turf responds in two weeks.'] });
-    accepts('Expect a response in three to seven days.', ROW);
-    rejects('Expect a response in twenty-four hours.', 'numeric', ROW);
-  });
-
-  // Pre-push audit regressions: the allowlist key is the WHOLE normalized
-  // timing phrase (cadence + complete quantity + unit).
-  describe('allowlist keys keep the whole timing phrase', () => {
-    const allow = (row) => ({ allowedText: [row] });
-
-    test('every distinct vague word is its own key', () => {
-      const vague = ['several', 'a couple of', 'couple of', 'a few', 'few', 'a handful of', 'a number of'];
-      vague.forEach((licensed) => {
-        vague.forEach((used) => {
-          const result = checkNumericWhitelist(`Expect a change in ${used} days.`, allow(`Color can return in ${licensed} days.`));
-          expect(result.length).toBe(used === licensed ? 0 : 1);
-        });
-      });
-    });
-
-    test("'several days' does not license 'a couple of days' (and the reverse)", () => {
-      rejects('Expect a change in a couple of days.', 'numeric', allow('Color can return in several days.'));
-      rejects('Expect a change in several days.', 'numeric', allow('Color can return in a couple of days.'));
-      accepts('Expect a change in several days.', allow('Color can return in several days.'));
-    });
-
-    test("'every other week' does not license 'every week' (and the reverse)", () => {
-      rejects('We check every week.', 'numeric', allow('We check every other week.'));
-      rejects('We check every other week.', 'numeric', allow('We check every week.'));
-      rejects('We check each week.', 'numeric', allow('We check every week.'));
-      accepts('We check every other week.', allow('We check every other week.'));
-      accepts('We check every week.', allow('We check every week.'));
-    });
-
-    test('a cadence key is not a plain-quantity key', () => {
-      rejects('Expect a change in 2 weeks.', 'numeric', allow('We check every 2 weeks.'));
-      rejects('We check every 2 weeks.', 'numeric', allow('Expect a change in 2 weeks.'));
-      accepts('We check every 2 weeks.', allow('We check every two weeks.'));
-    });
-
-    test("'two hundred days' is not licensed by 'one hundred days' (no suffix match)", () => {
-      rejects('Expect a change in two hundred days.', 'numeric', allow('A change shows in one hundred days.'));
-      rejects('Expect a change in 200 days.', 'numeric', allow('A change shows in one hundred days.'));
-      accepts('Expect a change in two hundred days.', allow('A change shows in 200 days.'));
-      accepts('Expect a change in 100 days.', allow('A change shows in one hundred days.'));
-      accepts('Expect a change in a hundred days.', allow('A change shows in 100 days.'));
-    });
-
-    test("compound spelled numbers are read in full: 'twenty-one days' is 21, not 'one'", () => {
-      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in 1 day.'));
-      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in one day.'));
-      rejects('Expect a change in twenty-one days.', 'numeric', allow('A change shows in 20 days.'));
-      accepts('Expect a change in twenty-one days.', allow('A change shows in 21 days.'));
-      accepts('Expect a change in twenty one days.', allow('A change shows in twenty-one days.'));
-      accepts('Expect a change in one thousand two hundred and five days.', allow('A change shows in 1205 days.'));
-      accepts('Expect a change in two dozen days.', allow('A change shows in 24 days.'));
-    });
-
-    test('a spelled quantity the parser cannot read in full is rejected, even when a row repeats it', () => {
-      const unreadable = [
-        'twenty twenty days',
-        'one two days',
-        'twenty hundred days',
-        'a couple hundred days',
-        'several hundred days',
-        'one and a half hours',
-        'one and half hours',
-        'a three days',
-        'two dozen and one days',
-      ];
-      unreadable.forEach((phrase) => {
-        const sentence = `Expect a change in ${phrase}.`;
-        const tokens = guards.extractNumericTokens(sentence);
-        expect(tokens.some((t) => t.kind === 'unparsed')).toBe(true);
-        rejects(sentence, 'numeric', {});
-        // a row that repeats the same unreadable phrase still never licenses it
-        rejects(sentence, 'numeric', { allowedText: [sentence] });
-      });
-    });
-
-    test('the tail of a longer quantity is never matched on its own', () => {
-      rejects('Expect a change in one and a half hours.', 'numeric', allow('Check again in a half hour.'));
-      rejects('Expect a change in one and a half hours.', 'numeric', allow('Check again in half an hour.'));
-      rejects('Expect a change in 3 hundred days.', 'numeric', allow('A change shows in 100 days.'));
-    });
-
-    test('digits and spelled numbers are the only values normalized together', () => {
-      accepts('Expect a change in 3 to 7 days.', allow('A change shows in three to seven days.'));
-      accepts('Expect a change in 3–7 days.', allow('A change shows in 3 - 7 days.'));
-      // Sub-day units never pass the full check (sub_day_duration); the numeric
-      // normalization itself still keys them by value.
-      expect(checkNumericWhitelist('Expect a change in HALF AN HOUR.', allow('A change shows in half an hour.'))).toEqual([]);
-      rejects('Expect a change in 30 minutes.', 'numeric', allow('A change shows in half an hour.'));
-    });
-  });
-
-  test('a bare spelled number with no unit is not checked', () => {
-    accepts('Two spots near the fence look thin and one near the walk.', {});
-  });
-
-  test('article and cadence timing phrases need a row', () => {
-    rejects('We will look again in a week.', 'numeric', {});
-    rejects('It dries out every week.', 'numeric', { droughtFlagged: true });
-    rejects('Check back next week.', 'numeric', {});
-    rejects('Look for change over the next few days.', 'numeric', {});
-    accepts('We will look again in a week.', { allowedText: ['Recheck in a week.'] });
-  });
-
-  test('"this week" and "last week" are not number claims', () => {
-    accepts('The edges looked tidier this week than last week.', { progress: 'up' });
-  });
-
-  test('fractions and unit measures: ½ inch, 1/2 inch, half an inch', () => {
-    rejects('Thatch is about ½ inch deep.', 'numeric', {});
-    rejects('Thatch is about 1/2 inch deep.', 'numeric', {});
-    rejects('Thatch is about half an inch deep.', 'numeric', {});
-    accepts('Thatch is about ½ inch deep.', { allowedText: ['Thatch near 0.5 inch.'] });
-    accepts('Thatch is about 1/2 inch deep.', { allowedText: ['Thatch near ½ inch.'] });
-    accepts('Thatch is about half an inch deep.', { allowedText: ['Thatch near 0.5 inch.'] });
-    accepts('Thatch is about 1½ inches deep.', { allowedText: ['Thatch near 1 1/2 inches.'] });
-  });
-
-  test('scores license bare numbers and percents, never durations', () => {
-    const facts = { allowedNumbers: [72, 5] };
-    accepts('Your overall score is 72, up 5 points.', facts);
-    accepts('Your overall score is 72%.', facts);
-    rejects('Your overall score is 73.', 'numeric', facts);
-    rejects('Expect a response in 5 days.', 'numeric', facts);
-    rejects('Expect a response in 7 days.', 'numeric', { allowedNumbers: [7] });
-    accepts('Your overall score is 72.', { allowedNumbers: ['72'] });
-  });
-
-  test('a score written as a fraction splits into both numbers', () => {
-    accepts('Your score is 72/100.', { allowedNumbers: [72, 100] });
-    rejects('Your score is 72/100.', 'numeric', { allowedNumbers: [72] });
-  });
-
-  test('digits glued to words (H2O, v6, 3rd) are not read as claims', () => {
-    expect(checkNumericWhitelist('The v6 writer used the 3rd read.', {})).toEqual([]);
-  });
-
-  test('degrees and percent need the allowlist', () => {
-    rejects('Highs near 90° stress turf.', 'numeric', {});
-    rejects('Highs near 90 degrees stress turf.', 'numeric', {});
-    rejects('About 40% of the lawn looks thin.', 'numeric', {});
-    accepts('About 40% of the lawn looks thin.', { allowedNumbers: [40] });
-  });
-
-  test('the allowlist, not the model, decides: nothing supplied rejects every figure', () => {
-    expect(checkNumericWhitelist('3 days', {}).length).toBe(1);
-    expect(checkNumericWhitelist('3 days', undefined).length).toBe(1);
-  });
-});
 
 describe('water / rain / irrigation / mow deny (G7)', () => {
   test.each([
@@ -410,15 +222,15 @@ describe('progress-word coupling (G5)', () => {
 
   test('progress words are only judged outside approved sentences', () => {
     const sentence = 'Turf typically recovers in 3 to 7 days.';
-    accepts(sentence, { approvedSentences: [sentence], allowedText: [sentence] });
-    accepts(`${sentence}`, { approvedSentences: ['  turf typically recovers in 3 to 7 days  '], allowedText: [] });
+    accepts(sentence, { approvedSentences: [sentence] });
+    accepts(`${sentence}`, { approvedSentences: ['  turf typically recovers in 3 to 7 days  '] });
     // the sentence beside an approved one is still judged
-    rejects(`${sentence} Your lawn is improving.`, 'progress_coupling', { approvedSentences: [sentence], allowedText: [sentence] });
+    rejects(`${sentence} Your lawn is improving.`, 'progress_coupling', { approvedSentences: [sentence] });
   });
 
   test('an approved sentence is exempt from numeric and progress only', () => {
     const sentence = 'Water the lawn in 3 to 7 days.';
-    rejects(sentence, 'water_mow', { approvedSentences: [sentence], allowedText: [sentence] });
+    rejects(sentence, 'water_mow', { approvedSentences: [sentence] });
     const clock = 'Expect color by Thursday in 3 to 7 days.';
     rejects(clock, 'weekday_clock', { approvedSentences: [clock] });
   });
@@ -435,7 +247,7 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
       expect(findBannedCustomerCopy(text).length).toBeGreaterThan(0);
       expect(checkReentryPattern(text).length).toBeGreaterThan(0);
       expect(checkBannerCopy(text).length).toBeGreaterThan(0);
-      expect(checkLawnModelCopy(text, { allowedText: [text], allowedNumbers: [24, 2, 7], droughtFlagged: true }).ok).toBe(false);
+      expect(checkLawnModelCopy(text, { allowedNumbers: [24, 2, 7], droughtFlagged: true }).ok).toBe(false);
     });
   });
 
@@ -457,7 +269,7 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
 
   test('banner phrasings that carry water words are still model-copy rejects: the banner owns them', () => {
     BANNER_COPY_ACCEPT.filter((text) => /water|sprinkl|irrigat|zone/i.test(text)).forEach((text) => {
-      const result = checkLawnModelCopy(text, { allowedText: [text], allowedNumbers: [24, 40, 4, 12] });
+      const result = checkLawnModelCopy(text, { allowedNumbers: [24, 40, 4, 12] });
       expect(rules(result)).toContain('water_mow');
     });
   });
@@ -514,8 +326,8 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
     test('the audit case: fourteen minutes', () => {
       const text = 'Stay off the turf for fourteen minutes.';
       expect(checkReentryPattern(text).length).toBe(1);
-      expect(checkLawnModelCopy(text, { allowedText: ['14 minutes'] }).ok).toBe(false);
-      rejects(text, 'reentry_figure', { allowedText: ['14 minutes'] });
+      expect(checkLawnModelCopy(text, { approvedSentences: [] }).ok).toBe(false);
+      rejects(text, 'reentry_figure', { approvedSentences: [] });
     });
 
     test.each([
@@ -543,7 +355,7 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
       });
     });
 
-    test('no allowedText, allowedNumbers or approvedSentences entry can waive it', () => {
+    test('no allowedNumbers or approvedSentences entry can waive it (the removed allowedText is inert)', () => {
       SPELLED.slice(0, 24).concat(['thirty', 'forty-eight', 'seventy-two', 'a dozen']).forEach((figure) => {
         TRIGGERS.forEach((make) => {
           const sentence = make(figure, 'minutes');
@@ -552,7 +364,7 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
             { allowedText: [`${figure} minutes`] },
             { allowedNumbers: [1, 2, 3, 4, 5, 6, 7, 12, 14, 24, 30, 48, 72] },
             { approvedSentences: [sentence] },
-            { approvedSentences: [sentence], allowedText: [sentence], allowedNumbers: [14], droughtFlagged: true, progress: 'up' },
+            { approvedSentences: [sentence], allowedNumbers: [14], droughtFlagged: true, progress: 'up' },
           ];
           waivers.forEach((facts) => {
             const result = checkLawnModelCopy(sentence, facts);
@@ -565,13 +377,13 @@ describe('banned re-entry pattern and the keep-off regression list', () => {
 
     test('an approved sentence stays rejected beside clean sentences, and clean ones still pass', () => {
       const bad = 'Stay off the turf for fourteen minutes.';
-      const facts = { approvedSentences: [bad], allowedText: [bad] };
+      const facts = { approvedSentences: [bad] };
       rejects(`Your lawn looks even. ${bad}`, 'reentry_figure', facts);
       accepts('Your lawn looks even. Stay off the new sod.', facts);
     });
 
-    test('a bare cadence is not a figure', () => {
-      expect(checkReentryPattern('Please wait for your technician every hour.')).toEqual([]);
+    test('any time word counts, a bare cadence included', () => {
+      expect(checkReentryPattern('Please wait for your technician every hour.').length).toBe(1);
     });
 
     test('hours or minutes outside a trigger sentence are not re-entry figures', () => {
@@ -623,48 +435,6 @@ describe('shared banned list and lawn overpromise list (G1, G6)', () => {
   });
 });
 
-describe('decimal and fraction forms (pre-push audit)', () => {
-  test.each([
-    ['.5 days', '.5 days'],
-    ['0.5 days', '.5 days'],
-    ['\u00bd day', '0.5 day'],
-    ['1/2 day', '\u00bd day'],
-    ['1.5 days', '1\u00bd days'],
-    ['1 1/2 days', '1.5 days'],
-    ['\u00bc inch', '.25 inch'],
-    ['\u00be inch', '3/4 inch'],
-    ['\uff11\uff14 days', '14 days'],
-    ['2 wks', '2 weeks'],
-    ['3 mos', '3 months'],
-  ])('"%s" is a figure that needs a row, and equals "%s"', (used, licensed) => {
-    rejects(`Expect a change in ${used}.`, 'numeric', {});
-    accepts(`Expect a change in ${used}.`, { allowedText: [`Color can return in ${licensed}.`] });
-  });
-
-  test('a leading-dot decimal is never skipped (the audit case)', () => {
-    const result = checkLawnModelCopy('Expect a change in .5 days.', {});
-    expect(result.ok).toBe(false);
-    expect(result.reasons[0]).toMatchObject({ rule: 'numeric', match: '.5 days' });
-  });
-
-  test('different decimals are different keys', () => {
-    rejects('Expect a change in .5 days.', 'numeric', { allowedText: ['Change in 5 days.'] });
-    rejects('Expect a change in 1.5 days.', 'numeric', { allowedText: ['Change in 1 day.'] });
-    rejects('Expect a change in \u00bd day.', 'numeric', { allowedText: ['Change in 1 day.'] });
-  });
-
-  test('bare decimals and fractions need allowedNumbers', () => {
-    rejects('Thatch measures .5 here.', 'numeric', {});
-    accepts('Thatch measures .5 here.', { allowedNumbers: [0.5] });
-    accepts('Thatch measures 0.5 here.', { allowedNumbers: ['.5'] });
-  });
-
-  test('re-entry figure reads decimals, fractions and seconds-free units', () => {
-    ['.5 hours', '0.5 hours', '\u00bd hour', '1/2 hour', '1.5 hours', '1\u00bd hours', '\uff13 hours'].forEach((figure) => {
-      expect(checkReentryPattern(`Stay off the turf for ${figure}.`).length).toBe(1);
-    });
-  });
-});
 
 describe('pesticide safety claims (AGENTS.md compliance language)', () => {
   test.each([
@@ -724,7 +494,7 @@ describe('pesticide safety claims (AGENTS.md compliance language)', () => {
 
   test('no allowlist or approved sentence waives a safety claim', () => {
     const sentence = 'This treatment is pet-safe.';
-    rejects(sentence, 'safety_claim', { approvedSentences: [sentence], allowedText: [sentence] });
+    rejects(sentence, 'safety_claim', { approvedSentences: [sentence] });
   });
 });
 
@@ -761,13 +531,13 @@ describe('entry point', () => {
       {}
     );
     expect(result.ok).toBe(false);
-    expect(new Set(rules(result))).toEqual(new Set(['numeric', 'water_mow', 'weekday_clock', 'progress_coupling', 'overpromise']));
+    expect(new Set(rules(result))).toEqual(new Set(['timing', 'numeric', 'water_mow', 'weekday_clock', 'progress_coupling', 'overpromise']));
     result.reasons.forEach((r) => expect(typeof r.match).toBe('string'));
   });
 
   test('a clean, fully allowed field passes', () => {
     accepts(
-      'Your score is 72, up 5 points since March. Most turf shows a response in 3 to 7 days, so the thin edge is the thing to watch.',
+      `Your score is 72, up 5 points since March. ${APPROVED} The thin edge is the thing to watch.`,
       { ...ROW, allowedNumbers: [72, 5], progress: 'up' }
     );
   });
@@ -775,61 +545,242 @@ describe('entry point', () => {
   test('unicode quotes and curly apostrophes do not hide a violation', () => {
     rejects('We’ll be back “Thursday”.', 'weekday_clock', {});
     rejects('It’s about “3” to “7” days.', 'numeric', {});
+    rejects('It’s about “3” to “7” days.', 'timing', {});
   });
 
   test('facts may be missing or malformed', () => {
     expect(() => checkLawnModelCopy('Nice and even.', null)).not.toThrow();
-    expect(() => checkLawnModelCopy('Nice and even.', { allowedText: 'x', allowedNumbers: 'y', approvedSentences: 5 })).not.toThrow();
+    expect(() => checkLawnModelCopy('Nice and even.', { allowedNumbers: 'y', approvedSentences: 5 })).not.toThrow();
     expect(checkLawnModelCopy('Nice and even.', null).ok).toBe(true);
   });
 });
 
-describe('sub-day durations never appear in model copy', () => {
-  const { checkLawnModelCopy, checkSubDayDuration } = require('../services/service-report/lawn-copy-guards');
-  const ALL_FACTS = { allowedText: ['14 minutes', 'two hours', '30 minutes'], allowedNumbers: [14, 2, 30], approvedSentences: ['Return to the treated area after fourteen minutes.'], progress: 'up', droughtFlagged: true };
-  test.each([
-    'Return to the treated area after fourteen minutes.',
-    'You can enter the lawn in 2 hours.',
-    'Let the kids back out after half an hour.',
-    'Pets can go back on the grass in a few hours.',
-    'Results show within 30 minutes.',
-  ])('%s is rejected even with every fact allowing it', (line) => {
-    const out = checkLawnModelCopy(line, ALL_FACTS);
-    expect(out.ok).toBe(false);
-    expect(out.reasons.map((r) => r.rule)).toContain('sub_day_duration');
-  });
-  test('day and week windows are unaffected', () => {
-    expect(checkSubDayDuration('Weeds yellow in about 3–7 days and brown over 2–3 weeks.')).toEqual([]);
-  });
-});
+describe('closed-world timing rule (terminal review)', () => {
+  const CLEAN = 'The edge along the front looks thin and we will keep an eye on it.';
+  const inside = (sentence, extra = {}) => ({ approvedSentences: [sentence], ...extra });
 
-describe('fraction-of phrases are never read as their trailing article', () => {
-  const { checkLawnModelCopy } = require('../services/service-report/lawn-copy-guards');
+  // pass-1 reproductions
   test.each([
-    ['Expect a change in three quarters of a week.', '1 week'],
-    ['Expect a change in a quarter of a day.', '1 day'],
-    ['Expect a change in half of a day.', '1 day'],
-    ['Expect a change in most of a week.', '1 week'],
-  ])('%s is not licensed by %s', (line, allowed) => {
-    const out = checkLawnModelCopy(line, { allowedText: [allowed] });
-    expect(out.ok).toBe(false);
+    ['Return to the lawn in one short minute.', 'timing'],
+    ['Return to the lawn in one short minute.', 'sub_day_duration'],
+    ['Expect a change over the next few weeks.', 'timing'],
+    ['Expect a change over the following few weeks.', 'timing'],
+    ['Your score changed by -5 points.', 'numeric'],
+    ['The turf is behind the expected pace.', 'progress_coupling'],
+    ['Expect a change in 12½ days.', 'numeric'],
+  ])('%s is rejected by %s', (text, rule) => {
+    rejects(text, rule, { allowedNumbers: [5, 12], progress: 'up', progressStates: ['on_track'] });
   });
-  test('a plain "a week" still matches "1 week"', () => {
-    expect(checkLawnModelCopy('Expect a change in a week.', { allowedText: ['1 week'] }).ok).toBe(true);
-  });
-});
 
-describe('relative timing phrases keep their exact wording', () => {
-  const { checkLawnModelCopy } = require('../services/service-report/lawn-copy-guards');
-  test.each([
-    ['Expect a change in the coming weeks.', 'next week'],
-    ['Expect a change over the next few weeks.', 'next week'],
-    ['Expect a change over the following week.', 'next week'],
-    ['Expect a change next week.', 'the coming weeks'],
-  ])('%s is not licensed by %s', (line, allowed) => {
-    expect(checkLawnModelCopy(line, { allowedText: [allowed] }).ok).toBe(false);
+  test('"next" and "following" are both rejected; no prefix can be masked', () => {
+    ['next', 'coming', 'following'].forEach((w) => {
+      expect(checkTimingLanguage(`Look for a change over the ${w} few weeks.`).length).toBeGreaterThan(0);
+    });
   });
-  test('the same phrase still matches itself', () => {
-    expect(checkLawnModelCopy('Expect a change over the next few weeks.', { allowedText: ['Color can shift over the next few weeks.'] }).ok).toBe(true);
+
+  describe('every time word and number form: rejected outside an approved sentence, accepted inside one', () => {
+    const TIME_FORMS = [
+      'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years', 'season', 'seasons', 'night', 'nights',
+      'overnight', 'wk', 'wks', 'mo', 'mos', 'yr', 'yrs', 'daily', 'weekly', 'monthly', 'yearly', 'annually',
+      'biweekly', 'decade', 'fortnight',
+    ];
+    const RELATIVE_FORMS = ['next', 'coming', 'following', 'within', 'soon', 'shortly', 'later', 'ago', 'yesterday', 'eventually'];
+    const NUMBER_FORMS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+      'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty',
+      'fifty', 'sixty', 'seventy', 'eighty', 'ninety', 'hundred', 'thousand', 'dozen', 'half', 'quarter', 'zero'];
+    const DIGIT_FORMS = ['3', '14', '3-7', '3–7', '.5', '0.5', '1.5', '1/2', '1 1/2', '½', '1½', '12½', '¼',
+      '24/7', '3rd', 'H2O', '72%', '5 percent', '90°', '４', '٤'];
+
+    test.each([...TIME_FORMS, ...RELATIVE_FORMS])('time word "%s"', (w) => {
+      const sentence = `Color may shift ${w} along the edge.`;
+      const outside = checkLawnModelCopy(sentence, {});
+      expect(outside.ok).toBe(false);
+      expect(rules(outside)).toContain('timing');
+      expect(checkLawnModelCopy(sentence, inside(sentence)).reasons.filter((r) => r.rule === 'timing')).toEqual([]);
+    });
+
+    test('"a while" and "a few days" forms', () => {
+      ['Color may shift in a while.', 'Color may shift in a few days.'].forEach((sentence) => {
+        expect(checkLawnModelCopy(sentence, {}).ok).toBe(false);
+        expect(checkLawnModelCopy(sentence, inside(sentence)).ok).toBe(true);
+      });
+    });
+
+    test.each(NUMBER_FORMS)('spelled number "%s"', (w) => {
+      const sentence = `We saw ${w} thin spots along the edge.`;
+      const outside = checkLawnModelCopy(sentence, { allowedNumbers: [1, 2, 3] });
+      expect(outside.ok).toBe(false);
+      expect(rules(outside)).toContain('numeric');
+      expect(checkLawnModelCopy(sentence, inside(sentence)).ok).toBe(true);
+    });
+
+    test.each(DIGIT_FORMS)('digit form "%s"', (d) => {
+      const sentence = `We saw ${d} thin spots along the edge.`;
+      const outside = checkLawnModelCopy(sentence, {});
+      expect(outside.ok).toBe(false);
+      expect(rules(outside)).toContain('numeric');
+      expect(checkLawnModelCopy(sentence, inside(sentence)).ok).toBe(true);
+    });
+
+    test('a bare integer is only accepted when its value is a supplied score', () => {
+      ['3', '14', '\uff14', '\u0664'].forEach((d) => {
+        const sentence = `We saw ${d} thin spots along the edge.`;
+        const value = Number(String(d).replace(/[\uff10-\uff19]/g, (c) => c.charCodeAt(0) - 0xff10).replace(/[\u0660-\u0669]/g, (c) => c.charCodeAt(0) - 0x660));
+        expect(checkNumericWhitelist(sentence, { allowedNumbers: [value] })).toEqual([]);
+        expect(checkNumericWhitelist(sentence, { allowedNumbers: [value + 1] }).length).toBe(1);
+      });
+    });
+
+    test('a clean sentence passes with no facts', () => {
+      accepts(CLEAN, {});
+    });
+  });
+
+  describe('signed score allowance', () => {
+    test.each([
+      ['Your score is 72.', [72], true],
+      ['Your score is 72 points.', [72], true],
+      ['Your score changed by -5 points.', [-5], true],
+      ['Your score changed by -5 points.', [5], false],
+      ['Your score changed by -5 points.', [], false],
+      ['Your score changed by −5 points.', [-5], true],
+      ['Your score changed by −5 points.', [5], false],
+      ['Your score changed by minus 5 points.', [-5], true],
+      ['Your score changed by minus 5 points.', [5], false],
+      ['Your score changed by +5 points.', [5], true],
+      ['Your score changed by +5 points.', [-5], false],
+      ['Your score changed by plus 5 points.', [5], true],
+      ['Your score is up 5 points.', [5], true],
+      ['Your score is up by 5 points.', [5], true],
+      ['Your score is up 5 points.', [-5], false],
+      ['Your score is down 5 points.', [-5], true],
+      ['Your score is down 5 points.', [5], false],
+      ['Your score is down by 5 points.', [-5], true],
+      ['Your score is 5.', [5], true],
+      ['Your score is 5.', [-5], false],
+      ['Your score is 72%.', [72], false],
+      ['Your score is 72.5.', [72], false],
+      ['Your score is 72/100.', [72, 100], false],
+      ['Your score is 73.', [72], false],
+    ])('%s with allowedNumbers %j -> %s', (text, allowedNumbers, ok) => {
+      const result = checkNumericWhitelist(text, { allowedNumbers });
+      expect(result.length === 0).toBe(ok);
+    });
+
+    test('"-5" is not "5" and the sign is never dropped', () => {
+      rejects('Your score changed by -5 points.', 'numeric', { allowedNumbers: [5], progress: 'down' });
+      accepts('Your score changed by -5 points.', { allowedNumbers: [-5], progress: 'down' });
+    });
+
+    test('string and unicode-minus entries in allowedNumbers keep their sign', () => {
+      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['-5'] })).toEqual([]);
+      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['−5'] })).toEqual([]);
+      expect(checkNumericWhitelist('Down 5 points.', { allowedNumbers: ['5'] }).length).toBe(1);
+    });
+
+    test('a score never licenses a duration word', () => {
+      rejects('Your score is 7 days.', 'timing', { allowedNumbers: [7] });
+    });
+  });
+
+  describe('approved sentences', () => {
+    test('a verbatim approved row carries its window; the rest of the field is judged', () => {
+      accepts(`${APPROVED} ${CLEAN}`, ROW);
+      rejects(`${APPROVED} Check back in 2 weeks.`, 'timing', ROW);
+    });
+
+    test('matching ignores case, spacing and trailing punctuation', () => {
+      accepts('  most TURF shows a response in 3 to 7 days  ', ROW);
+    });
+
+    test('a changed number is not the approved sentence', () => {
+      rejects('Most turf shows a response in 3 to 8 days.', 'timing', ROW);
+    });
+
+    test('allowedText is gone: a licensed phrase no longer licenses anything', () => {
+      rejects('Most turf shows a response in 3 to 7 days.', 'timing', { allowedText: [APPROVED] });
+    });
+
+    test('sub-day and re-entry rules are absolute even inside an approved sentence', () => {
+      const hours = 'The color settles in 2 hours.';
+      rejects(hours, 'sub_day_duration', inside(hours));
+      const keepOff = 'Stay off the turf for 3 to 7 days.';
+      rejects(keepOff, 'reentry_figure', inside(keepOff));
+      const wait = 'Please wait a few days.';
+      rejects(wait, 'reentry_figure', inside(wait));
+    });
+
+    test('water, clock, banned, overpromise and safety rules still read approved sentences', () => {
+      const water = 'Water the lawn in 3 to 7 days.';
+      rejects(water, 'water_mow', inside(water));
+      const clock = 'Expect color at 4 PM in 3 to 7 days.';
+      rejects(clock, 'weekday_clock', inside(clock));
+      const safe = 'This treatment is pet-safe within 3 to 7 days.';
+      rejects(safe, 'safety_claim', inside(safe));
+    });
+  });
+
+  describe('re-entry rule takes any timing word or number', () => {
+    test.each([
+      'Stay off the turf for a while.',
+      'Please wait until later.',
+      'Wait a few days.',
+      'Keep the kids off the grass soon.',
+      'Stay off the turf for two.',
+      'Wait 5.',
+      'Keep off the lawn within the week.',
+    ])('rejects: %s', (text) => {
+      expect(checkReentryPattern(text).length).toBe(1);
+    });
+
+    test('trigger sentences with no timing or number pass the re-entry rule', () => {
+      expect(checkReentryPattern('Stay off the new sod.')).toEqual([]);
+      expect(checkReentryPattern('Please wait for your technician.')).toEqual([]);
+    });
+  });
+
+  describe('"behind" is a progress claim unless a spatial noun follows', () => {
+    const facts = { progressStates: ['on_track'] };
+    test.each([
+      'The turf is behind the expected pace.',
+      'The turf is behind schedule.',
+      'The turf is running behind.',
+      'The turf is behind where it should be.',
+      'The turf is behind the usual pace for this time.',
+    ])('claim, rejected without a behind state: %s', (text) => {
+      expect(checkProgressCoupling(text, facts).length).toBe(1);
+      expect(checkProgressCoupling(text, { progressStates: ['behind'] })).toEqual([]);
+    });
+
+    test.each([
+      'The thin patch is behind the house.',
+      'The thin patch is behind the back fence.',
+      'The weeds are behind the shed.',
+      'The thin patch is behind the pool.',
+      'The thin patch is behind your garage.',
+      'The thin patch is behind the driveway.',
+      'The thin patch is behind the patio.',
+      'The thin patch is behind the deck.',
+      'The thin patch is behind the hedge.',
+      'The thin patch is behind the trees.',
+      'The thin patch is behind the building.',
+      'The thin patch is behind the wall.',
+      'The thin patch is behind the gate.',
+      'The thin patch is behind the mailbox.',
+    ])('spatial, passes: %s', (text) => {
+      expect(checkProgressCoupling(text, facts)).toEqual([]);
+    });
+  });
+
+  test('the sub-day check reads second, minute and hour words and nothing else', () => {
+    ['a minute', 'two hours', 'half-hour', 'hourly', '30 secs', '5 mins'].forEach((w) => {
+      expect(checkSubDayDuration(`It settles in ${w}.`).length).toBeGreaterThan(0);
+    });
+    expect(checkSubDayDuration('Weeds yellow over days and weeks.')).toEqual([]);
+  });
+
+  test('"12½" is normalized to digits and rejected whole', () => {
+    expect(guards.normalizeCopy('12½ days')).toBe('12 1/2  days');
+    expect(checkNumericWhitelist('Expect 12½.', { allowedNumbers: [12, 1, 2] }).length).toBeGreaterThan(0);
   });
 });

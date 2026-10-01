@@ -7,30 +7,44 @@
  * (lawn-report-narrative.js safeText / the rain-window regexes) keeps running
  * untouched until P14 replaces it behind GATE_LAWN_REPORT_COPY_V6.
  *
- * The model owns prose only. It never writes numbers the facts did not hand it,
- * watering / rain / mowing text (the banner and the water card own those),
- * weekdays, dates or clock times (the server prints those), progress words that
- * contradict the progress engine, or a stay-off / wait / dry sentence carrying
- * an hours or minutes figure (banned re-entry pattern, SCOPE s3).
+ * The model owns prose only, and the timing rule is a CLOSED WORLD: model copy
+ * contains no time language and no numbers of its own. Day and week windows
+ * reach a customer only through approved expectation-row sentences copied
+ * verbatim (facts.approvedSentences). It also never writes watering / rain /
+ * mowing text (the banner and the water card own those), weekdays, dates or
+ * clock times (the server prints those), progress words that contradict the
+ * progress engine, pesticide safety claims, or efficacy guarantees.
  *
  * No DB: this module requires only activity-indicators (findBannedCustomerCopy,
  * a pure regex list) and nothing that loads models/db.js. The tests pin that.
  *
  * Rules (each exported as a check returning an array of reasons; a reason is
- * { rule, match, detail? }):
- *   numeric            G3: number+unit / range / spelled / vague timing phrases
- *                      must appear in facts.allowedText; bare numbers and
- *                      non-time measures (inches, %, degrees) in
- *                      facts.allowedNumbers.
+ * { rule, match, detail? }). Everything except sub_day_duration, reentry_figure
+ * and the checks that read no facts runs on the text with approved sentences
+ * removed (timing, numeric, progress_coupling):
+ *   timing             any time-unit word (second ... year, season, night,
+ *                      overnight, wk/hr/min/mo/yr, daily/weekly ...) or
+ *                      relative-time word (next, coming, following, within, soon,
+ *                      shortly, later, "a while", ago, yesterday, eventually).
+ *   numeric            any spelled number word, and any digit or fraction except
+ *                      the score allowance: a bare signed integer or "<n>
+ *                      points" whose value, sign included, is in
+ *                      facts.allowedNumbers ("-5", "minus 5", "down 5 points"
+ *                      are -5; "+5", "plus 5", "up 5 points" are 5).
+ *   sub_day_duration   any second / minute / hour word anywhere, approved
+ *                      sentences included. Absolute.
+ *   reentry_figure     keep ... off / stay off / wait / dry in a sentence with ANY
+ *                      time word, relative-time word, number word or digit.
+ *                      Absolute: approved sentences are not exempt.
  *   water_mow          G7: water, irrigation, sprinkler, zone, rain, moisture,
  *                      damp, mow, run time. dry / drier / drought only when
  *                      facts.droughtFlagged (a technician drought flag).
  *   weekday_clock      G9: weekdays, tomorrow / tonight / noon / weekend, dates,
  *                      clock times (4 PM, 4pm, 16:00).
- *   progress_coupling  G5: improving / worse / on track ... only when the
- *                      supplied progress state says so.
- *   reentry_figure     SCOPE s3: keep ... off / stay off / wait / dry in the same
- *                      sentence as an hours or minutes figure.
+ *   progress_coupling  G5: improving / worse / on track / behind ... only when
+ *                      the supplied progress state says so. "behind" is a
+ *                      progress claim unless a spatial noun follows ("behind the
+ *                      house").
  *   banned_copy        G1/G6: the shared findBannedCustomerCopy list (cleared,
  *                      resolved, gone, guarantee, fixed re-entry figures ...).
  *   safety_claim       AGENTS.md: no pesticide is "safe" (pet-safe, safe for kids,
@@ -40,27 +54,22 @@
  *                      cure, permanent, ordinance, blackout, county ...).
  *
  * facts = {
- *   allowedText:       string[]  approved sentences / windows whose number+unit
- *                      phrases the model may repeat ("3 to 7 days").
- *   allowedNumbers:    number[]  score values etc. (licenses bare numbers and
- *                      non-time units; never licenses "7 days").
  *   approvedSentences: string[]  sentences the writer was told to copy verbatim
- *                      from approved rows; exempt from numeric and progress
- *                      rules only (every other rule still applies).
+ *                      from approved rows; exempt from timing, numeric and
+ *                      progress rules only (every other rule still applies).
+ *   allowedNumbers:    number[]  score values, signed.
  *   progress:          'up' | 'down' | 'flat' | 'unknown'  overall direction.
  *   progressStates:    string[]  per-item states (on_track, ahead, behind,
  *                      too_early, unclear).
  *   droughtFlagged:    boolean   a technician drought flag exists.
  * }
  *
+ * allowedText is REMOVED (it fed the old whole-phrase allowlist). A window the
+ * writer may quote is an approved sentence, not a licensed phrase.
+ *
  * Judgment calls (documented, tested):
- *  - Spelled numbers count only next to a unit: "two weeks" is the same token as
- *    "2 weeks"; a bare "two issues" is not checked (too many false positives).
- *  - "2 weeks" never matches a "14 days" row, and "7 days" never matches a
- *    "3 to 7 days" row: no unit conversion, no range splitting. Fail closed.
- *  - "a week", "an hour", "every week", "next week", "overnight", "within the
- *    week", "a few days", "a couple of hours" are timing claims and need a row.
- *    "this week" and "last week" are not.
+ *  - Over-rejection is deliberate: "next visit", "warm-season turf", "one area",
+ *    "half of the front" fall back to deterministic copy.
  *  - "coverage" is NOT denied (lead's WATERING_WORDS denies it for sprinkler
  *    coverage; "thin coverage" is ordinary turf talk). Sprinkler coverage is
  *    caught by "sprinkler".
@@ -71,11 +80,8 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // ---------------------------------------------------------------------------
 // Normalization
 
-const VULGAR_FRACTIONS = {
-  '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅕': 0.2, '⅖': 0.4, '⅗': 0.6, '⅘': 0.8,
-  '⅙': 1 / 6, '⅚': 5 / 6, '⅐': 1 / 7, '⅛': 0.125, '⅜': 0.375, '⅝': 0.625, '⅞': 0.875, '⅑': 1 / 9, '⅒': 0.1,
-};
-const VULGAR_CLASS = Object.keys(VULGAR_FRACTIONS).join('');
+// Vulgar fractions become " 1/2 " (any digits keep the digit detector honest).
+const VULGAR_CLASS = '½¼¾⅓⅔⅕⅖⅗⅘⅙⅚⅐⅛⅜⅝⅞⅑⅒';
 
 function normalizeCopy(text) {
   let t = String(text == null ? '' : text);
@@ -87,13 +93,11 @@ function normalizeCopy(text) {
     .replace(/[‐-―−]/g, '-')
     .replace(/′/g, "'")
     .replace(/″/g, '"');
-  // "1½" / "1 ½" -> 1.5 ; "½" -> 0.5
   // fullwidth and Arabic-Indic digits read as ASCII digits
   t = t.replace(/[\uff10-\uff19]/g, (d) => String(d.charCodeAt(0) - 0xff10))
     .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
     .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
-  t = t.replace(new RegExp(`(\\d)\\s*([${VULGAR_CLASS}])`, 'g'), (_, whole, f) => ` ${round(Number(whole) + VULGAR_FRACTIONS[f])}`);
-  t = t.replace(new RegExp(`[${VULGAR_CLASS}]`, 'g'), (f) => ` ${round(VULGAR_FRACTIONS[f])}`);
+  t = t.replace(new RegExp(`[${VULGAR_CLASS}]`, 'g'), ' 1/2 ');
   // 1,000 -> 1000
   t = t.replace(/(\d),(?=\d{3}\b)/g, '$1');
   // a.m. / p.m. -> am / pm so the period does not split a sentence
@@ -113,287 +117,62 @@ function sentenceKey(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Numeric whitelist (G3)
+// Closed-world timing and number rule (G3)
+//
+// Model copy carries NO timing language and NO numbers of its own. Day and week
+// windows reach a customer only through approved expectation-row sentences
+// copied verbatim (facts.approvedSentences), which this rule never reads. In
+// everything else the model writes it rejects, with no quantity parsing:
+//   - any time-unit word (second ... year, season, night, overnight, wk/hr/min/
+//     mo/yr, and the daily/weekly/monthly forms),
+//   - any relative-time phrase (next, coming, following, within, soon, shortly,
+//     later, "a while", ago, yesterday, eventually),
+//   - any spelled number word (one ... ninety, hundred, dozen, half, quarter),
+//   - any digit or fraction, except the score allowance below.
+// Over-rejection ("the next visit", "warm-season turf", "one area") is
+// deliberate: the writer falls back to the deterministic copy.
 
-// Number words. A spelled quantity is tokenized as a WHOLE phrase and parsed
-// by parseNumberWords; a phrase the parser cannot read in full is an
-// "unparsed" token that is always rejected, never partially matched (so "two
-// hundred days" can never be licensed by "one hundred days", and "twenty-one"
-// is read as 21, not as the suffix "one").
-const ONES = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
-};
-const TEENS = {
-  ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16,
-  seventeen: 17, eighteen: 18, nineteen: 19,
-};
-const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
-const FRACTIONS = { half: 0.5, quarter: 0.25, quarters: 0.25 };
-const NUMBER_WORDS = new Set([
-  ...Object.keys(ONES), ...Object.keys(TEENS), ...Object.keys(TENS), ...Object.keys(FRACTIONS),
-  'hundred', 'thousand', 'dozen',
-]);
+const TIME_WORD_RE = /\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|months?|mos?|years?|yrs?|seasons?|nights?|overnight|decades?|fortnights?|hourly|nightly|daily|weekly|biweekly|monthly|yearly|annual(?:ly)?)\b/i;
+const RELATIVE_TIME_RE = /\b(?:next|coming|following|within|soon|shortly|later|ago|yesterday|eventually)\b|\ba\s+while\b/i;
+const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|halves|quarters?|thirds?)\b/i;
+// any time word, relative phrase, number word or digit
+const ANY_TIMING_RE = new RegExp([TIME_WORD_RE, RELATIVE_TIME_RE, NUMBER_WORD_RE].map((re) => re.source).concat('\\d').join('|'), 'i');
 
-const NUMWORD_SRC = `(?:${[...NUMBER_WORDS].sort((a, b) => b.length - a.length).join('|')})`;
-// integers, decimals with or without a leading digit (".5", "0.5", "1.5"),
-// fractions ("1/2") and mixed numbers ("1 1/2")
-const DIGIT_SRC = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d*\\.\\d+|\\d+)';
-// One whole number phrase: digits, or a run of number words joined by space,
-// hyphen or "and" ("twenty-one", "two hundred and five"). Greedy, so the phrase
-// is never cut at its tail.
-const NUMRUN_SRC = `(?:${DIGIT_SRC}|${NUMWORD_SRC}(?![a-z])(?:(?:[-\\s]+(?:and\\s+)?)${NUMWORD_SRC}(?![a-z]))*)`;
-const VAGUE_SRC = '(?:a\\s+few|a\\s+couple(?:\\s+of)?|couple(?:\\s+of)?|several|a\\s+handful(?:\\s+of)?|a\\s+number\\s+of|few)';
-// A quantity: a vague word (optionally glued to number words, which is
-// unparsed), an article plus a number phrase ("a hundred"), a number phrase,
-// or a bare article ("a week").
-const QTY_SRC = `(?:${VAGUE_SRC}(?:[-\\s]+${NUMRUN_SRC})?|(?:an?[-\\s]+)?${NUMRUN_SRC}|an?(?![a-z]))`;
-const CADENCE_SRC = '(?:every\\s+other|every|each\\s+other|each|per)';
-const RANGE_SEP_SRC = '(?:\\s*-\\s*|\\s+to\\s+|\\s+or\\s+|\\s+through\\s+|\\s+thru\\s+)';
-const UNIT_SRC = '(days?|weeks?|wks?|hours?|hrs?|minutes?|mins?|seconds?|secs?|months?|mos?|years?|yrs?|inch(?:es)?|in\\.|"|%|percent|per\\s?cent|degrees?|°|feet|foot|ft)';
-
-function unitKey(raw) {
-  const u = raw.toLowerCase().replace(/\s+/g, '');
-  if (/^days?$/.test(u)) return 'day';
-  if (/^(?:weeks?|wks?)$/.test(u)) return 'week';
-  if (/^(?:hours?|hrs?)$/.test(u)) return 'hour';
-  if (/^(?:minutes?|mins?)$/.test(u)) return 'minute';
-  if (/^(?:seconds?|secs?)$/.test(u)) return 'second';
-  if (/^(?:months?|mos?)$/.test(u)) return 'month';
-  if (/^(?:years?|yrs?)$/.test(u)) return 'year';
-  if (/^(?:inch(?:es)?|in\.|")$/.test(u)) return 'inch';
-  if (/^(?:%|percent)$/.test(u)) return 'percent';
-  if (/^(?:degrees?|°)$/.test(u)) return 'degree';
-  if (/^(?:feet|foot|ft)$/.test(u)) return 'foot';
-  return u;
-}
-const TIME_UNITS = new Set(['day', 'week', 'hour', 'minute', 'second', 'month', 'year']);
-
-// Whole-phrase parse of spelled numbers. Returns NaN for any phrase that is not
-// a complete, well-formed number ("one two", "twenty twenty", "twenty hundred",
-// "one and half").
-function parseNumberWords(phrase) {
-  const tokens = phrase.toLowerCase().split(/[-\s]+/).filter(Boolean);
-  if (!tokens.length) return NaN;
-  let total = 0;
-  let group = 0;
-  let last = 'start'; // start | O (1-9) | E (10-19) | T (20-90) | H (hundred) | K (thousand) | Z | END
-  let pendingAnd = false;
-  for (let i = 0; i < tokens.length; i += 1) {
-    const w = tokens[i];
-    if (last === 'END' || last === 'Z') return NaN;
-    if (w === 'and') {
-      if (!(last === 'H' || last === 'K') || pendingAnd || i === tokens.length - 1) return NaN;
-      pendingAnd = true;
-      continue;
-    }
-    const startsGroup = last === 'start' || last === 'H' || last === 'K';
-    if (w === 'zero') {
-      if (last !== 'start' || tokens.length !== 1) return NaN;
-      last = 'Z';
-    } else if (w in ONES) {
-      if (!(startsGroup || last === 'T')) return NaN;
-      group += ONES[w];
-      last = 'O';
-    } else if (w in TEENS) {
-      if (!startsGroup) return NaN;
-      group += TEENS[w];
-      last = 'E';
-    } else if (w in TENS) {
-      if (!startsGroup) return NaN;
-      group += TENS[w];
-      last = 'T';
-    } else if (w === 'hundred') {
-      if (!(last === 'start' || last === 'O' || last === 'E')) return NaN;
-      group = (group || 1) * 100;
-      last = 'H';
-    } else if (w === 'thousand') {
-      if (last === 'K') return NaN;
-      total += (group || 1) * 1000;
-      group = 0;
-      last = 'K';
-    } else if (w === 'dozen') {
-      if (!(last === 'start' || last === 'O') || total) return NaN;
-      group = (group || 1) * 12;
-      last = 'END';
-    } else if (w in FRACTIONS) {
-      if (!(last === 'start' || last === 'O') || total) return NaN;
-      if (w === 'quarters' && last === 'start') return NaN;
-      group = (group || 1) * FRACTIONS[w];
-      last = 'END';
-    } else {
-      return NaN;
-    }
-    if (pendingAnd && last !== 'END') pendingAnd = false;
-  }
-  if (pendingAnd) return NaN;
-  return total + group;
-}
-
-function atomValue(raw) {
-  const a = raw.trim();
-  let m = a.match(/^(\d+)\s+(\d+)\/(\d+)$/);
-  if (m) return Number(m[1]) + Number(m[2]) / Number(m[3]);
-  m = a.match(/^(\d+)\/(\d+)$/);
-  if (m) return Number(m[1]) / Number(m[2]);
-  if (/^\d*\.?\d+$/.test(a)) return Number(a);
-  return parseNumberWords(a);
-}
-
-const round = (n) => Math.round(n * 1000) / 1000;
-
-// Reads one quantity (no cadence, no unit) as
-//   { kind: 'num', value } | { kind: 'vague', phrase } | { kind: 'unparsed' }.
-// A vague word is its own exact phrase ("several", "a couple of", "a few" and
-// "few" are four distinct keys); a vague word glued to number words
-// ("a couple hundred") is unparsed.
-function readQuantity(raw) {
-  const q = raw.toLowerCase().trim().replace(/\s+/g, ' ');
-  if (/^an?$/.test(q)) return { kind: 'num', value: 1 };
-  const vague = q.match(new RegExp(`^(${VAGUE_SRC})(?:[-\\s]+(.+))?$`));
-  if (vague) return vague[2] ? { kind: 'unparsed' } : { kind: 'vague', phrase: vague[1].replace(/\s+/g, ' ') };
-  const art = q.match(/^an?[-\s]+(.+)$/);
-  if (art) {
-    // "a hundred", "a thousand", "a dozen", "a half", "a quarter" only
-    return /^(?:hundred|thousand|dozen|half|quarter)$/.test(art[1])
-      ? { kind: 'num', value: parseNumberWords(art[1]) }
-      : { kind: 'unparsed' };
-  }
-  const value = atomValue(q);
-  return Number.isNaN(value) ? { kind: 'unparsed' } : { kind: 'num', value };
-}
-
-// The word before a match. A match that starts right after a number word, a
-// digit, an article or "number and" means the regex caught only the tail of a
-// longer quantity ("one and a half hours" -> "half hours"): unparsed.
-function startsMidQuantity(src, start) {
-  const before = src.slice(0, start);
-  const m = before.match(/([a-z0-9./]+)[\s-]*$/);
-  if (!m) return false;
-  const w = m[1];
-  if (/^\d/.test(w) || NUMBER_WORDS.has(w) || /^(?:an?|few|couple|several|handful)$/.test(w)) return true;
-  if (w === 'and') {
-    const p = before.match(/([a-z0-9./]+)\s+and[\s-]*$/);
-    return Boolean(p && (/^\d/.test(p[1]) || NUMBER_WORDS.has(p[1])));
-  }
-  // "three quarters of a week", "a quarter of a day", "half of a day", "part
-  // of a week", "most of a day": the "a week" tail is not the quantity
-  // (codex pre-push P1).
-  if (w === 'of') {
-    const p = before.match(/([a-z0-9./]+)\s+of[\s-]*$/);
-    return Boolean(p && (/^\d/.test(p[1]) || NUMBER_WORDS.has(p[1]) || /^(?:quarters?|halves|half|thirds?|fifths?|eighths?|parts?|portions?|fractions?|most|much|some|all|bulk|rest|remainder|majority|share)$/.test(p[1])));
-  }
-  return false;
-}
-
-// Every number-ish claim in the text as { key, kind, unit, values[], match }.
-// The key is the FULL normalized timing phrase: cadence ("every", "every
-// other", "each"), the complete quantity (parsed number, range, or the exact
-// vague phrase) and the unit. Case, whitespace, dashes, "to" vs "-" in ranges
-// and digits vs spelled numbers are the only things normalized away.
-function extractNumericTokens(text) {
-  // "half an hour" is the quantity "half" and the unit "hour"
-  const src = normalizeCopy(text).toLowerCase().replace(/\bhalf\s+an?\b/g, 'half');
-  const tokens = [];
-  const masked = src.split('');
-  const mask = (start, end) => { for (let i = start; i < end; i += 1) masked[i] = ' '; };
-
-  // 1. [cadence] [quantity [range end]] unit
-  const quantRe = new RegExp(
-    `(?<![\\w.])(?:(?<cad>${CADENCE_SRC})[-\\s]+)?(?:(?<q1>${QTY_SRC})(?:${RANGE_SEP_SRC}(?<q2>${QTY_SRC}))?[-\\s]*(?:(?:more|full|whole|additional|extra)[-\\s]+)?)?${UNIT_SRC}(?![a-z])`,
-    'g'
-  );
-  let m;
-  while ((m = quantRe.exec(src)) !== null) {
-    const { cad, q1, q2 } = m.groups;
-    const full = m[0];
-    const unitRaw = m[4];
-    if (!cad && !q1) { quantRe.lastIndex = m.index + 1; continue; }
-    const unit = unitKey(unitRaw);
-    // cadence alone needs a time unit ("every 3 feet" is not a timing claim)
-    if (cad && !q1 && !TIME_UNITS.has(unit)) { quantRe.lastIndex = m.index + 1; continue; }
-    const cadence = cad ? cad.replace(/\s+/g, ' ') : '';
-    const a = q1 ? readQuantity(q1) : null;
-    const b = q2 ? readQuantity(q2) : null;
-    let token;
-    if (startsMidQuantity(src, m.index) || (a && a.kind === 'unparsed') || (b && b.kind === 'unparsed')
-      || (b && (a.kind !== 'num' || b.kind !== 'num'))) {
-      token = { key: `unparsed:${full.trim()}`, kind: 'unparsed', unit, values: [] };
-    } else if (a && a.kind === 'vague') {
-      token = { key: `${cadence}|v:${a.phrase}|${unit}`, kind: 'vague', unit, values: [] };
-    } else if (a) {
-      const vals = b ? [round(Math.min(a.value, b.value)), round(Math.max(a.value, b.value))] : [round(a.value)];
-      token = { key: `${cadence}|n:${vals.join('-')}|${unit}`, kind: cadence ? 'cadence' : 'num', unit, values: vals };
-    } else {
-      token = { key: `${cadence}||${unit}`, kind: 'cadence', unit, values: [] };
-    }
-    token.match = full.trim();
-    tokens.push(token);
-    mask(m.index, m.index + full.length);
-  }
-
-  // 2. overnight / next|coming|following unit / within the unit
-  const relRe = new RegExp(
-    `\\bovernight\\b|\\b(?:next|coming|following)\\s+(?:(?:few|couple\\s+of|several)\\s+)?${UNIT_SRC}|\\bwithin\\s+the\\s+(day|week|month|hour)\\b`,
-    'g'
-  );
-  while ((m = relRe.exec(masked.join(''))) !== null) {
-    const full = m[0];
-    const unit = m[1] ? unitKey(m[1]) : (m[2] ? unitKey(m[2]) : null);
-    if (/^overnight$/.test(full)) tokens.push({ key: 'overnight', kind: 'vague', unit: 'night', values: [], match: full });
-    else if (/^within/.test(full)) tokens.push({ key: `within:${unit}`, kind: 'vague', unit, values: [], match: full });
-    // The whole relative phrase is the key: "the coming weeks" (plural, open
-    // span) never licenses "next week" (singular), and the word itself
-    // (next / coming / following, plus any few / couple of / several) is kept
-    // (codex pre-push P1).
-    else if (TIME_UNITS.has(unit)) tokens.push({ key: `rel:${full.replace(/\s+/g, ' ').trim()}`, kind: 'vague', unit, values: [], match: full });
-    else continue;
-    mask(m.index, m.index + full.length);
-  }
-
-  // 3. bare numbers left over (scores, "up 5 points", fractions without a unit)
-  const rest = masked.join('');
-  const bareRe = new RegExp(`(?<![\\w.])${DIGIT_SRC}(?![\\w])`, 'g');
-  while ((m = bareRe.exec(rest)) !== null) {
-    const raw = m[0];
-    const pieces = /^\d+\s+\d+\/\d+$/.test(raw) ? raw.split(/[\s/]+/)
-      : /^\d+\/\d+$/.test(raw) ? raw.split('/')
-        : [raw];
-    pieces.forEach((p) => {
-      const v = round(Number(p));
-      tokens.push({ key: `${v}`, kind: 'num', unit: '', values: [v], match: p });
-    });
-  }
-  return tokens;
-}
+// The score allowance: a bare signed integer or "<n> points". The sign is "-",
+// "minus", "+", "plus", or "up"/"down" ("up 5 points" is +5, "down 5" is -5).
+// Decimals, fractions, percents and degrees never match, so they stay digits
+// in the remainder and reject.
+const SCORE_TOKEN_RE = /(?<![\w.])(?:(?<sign>[+-]|minus\s+|plus\s+|(?:up|down)\s+(?:by\s+)?)\s*)?(?<n>\d+)(?:\s+(?:points?|pts))?(?!\w|\.\d|\/\d|\s*(?:%|°|percent\b|degrees?\b))/gi;
 
 function toNumberSet(list) {
   const set = new Set();
   (Array.isArray(list) ? list : []).forEach((n) => {
-    const v = typeof n === 'number' ? n : Number(String(n).replace(/[^\d.\-]/g, ''));
-    if (Number.isFinite(v)) set.add(round(v));
+    const v = typeof n === 'number' ? n : Number(String(n).replace(/−/g, '-').replace(/[^\d.-]/g, ''));
+    if (Number.isFinite(v)) set.add(v);
   });
   return set;
 }
 
+const isNegativeSign = (sign) => /^(?:-|minus|down)/i.test(sign || '');
+
 function checkNumericWhitelist(text, facts = {}) {
-  const allowedKeys = new Set();
-  (Array.isArray(facts.allowedText) ? facts.allowedText : []).forEach((row) => {
-    extractNumericTokens(row).forEach((t) => { if (t.unit && t.kind !== 'unparsed') allowedKeys.add(t.key); });
-  });
-  const allowedNumbers = toNumberSet(facts.allowedNumbers);
+  const allowed = toNumberSet(facts.allowedNumbers);
   const reasons = [];
-  extractNumericTokens(text).forEach((t) => {
-    if (t.kind === 'unparsed') {
-      reasons.push({ rule: 'numeric', match: t.match, detail: 'quantity could not be read in full' });
-      return;
-    }
-    if (allowedKeys.has(t.key)) return;
-    // Scores and other supplied numbers license bare numbers and non-time
-    // measures. They never license a duration: a score of 7 is not "7 days".
-    if (t.kind === 'num' && !TIME_UNITS.has(t.unit) && t.values.length && t.values.every((v) => allowedNumbers.has(v))) return;
-    reasons.push({ rule: 'numeric', match: t.match, detail: 'not in the facts allowlist' });
+  const rest = normalizeCopy(text).replace(SCORE_TOKEN_RE, (full, ...args) => {
+    const { sign, n } = args[args.length - 1];
+    const value = (isNegativeSign(sign) ? -1 : 1) * Number(n);
+    if (!allowed.has(value)) reasons.push({ rule: 'numeric', match: full.trim(), detail: 'not a supplied score value' });
+    return ' ';
   });
+  (rest.match(/\S*\d\S*/g) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'digits outside the score allowance' }));
+  (rest.match(new RegExp(NUMBER_WORD_RE.source, 'gi')) || []).forEach((m) => reasons.push({ rule: 'numeric', match: m, detail: 'spelled number' }));
   return reasons;
+}
+
+function checkTimingLanguage(text) {
+  const t = normalizeCopy(text);
+  return [TIME_WORD_RE, RELATIVE_TIME_RE].flatMap((re) => (t.match(new RegExp(re.source, 'gi')) || [])
+    .map((m) => ({ rule: 'timing', match: m, detail: 'no time language outside approved sentences' })));
 }
 
 // ---------------------------------------------------------------------------
@@ -443,10 +222,14 @@ function checkWeekdayClockDeny(text) {
 
 const UP_WORDS_RE = /\bimprov\w*|\brecover\w*|\bbetter\b|\brespond(?:s|ed|ing)?\b|\brebound\w*|\bbounc\w*\s+back|\bon\s+the\s+mend\b|\bturn(?:ed|ing)?\s+the\s+corner\b|\bgaining\s+ground\b|\bheal(?:s|ed|ing)?\b/i;
 const DOWN_WORDS_RE = /\bworse\w*|\bworsen\w*|\bdeclin\w*|\bdeteriorat\w*|\bregress\w*|\bslipp\w*|\bslid\b|\bdropp\w*|\bgetting\s+worse\b|\bgone\s+downhill\b/i;
+// "behind" is a progress claim ("behind schedule", "behind the expected pace")
+// unless a spatial noun follows ("behind the house", "behind the back fence").
+const SPATIAL_NOUNS = '(?:house|home|fence|shed|pool|garage|driveway|patio|deck|hedge|tree|building|wall|gate|mailbox|lanai)s?';
+const BEHIND_PROGRESS_RE = new RegExp(`\\bbehind\\b(?!\\s+(?:(?:the|your|our|a|an|this|that|each|every)\\s+)?(?:[\\w'-]+\\s+){0,2}?${SPATIAL_NOUNS}\\b)`, 'i');
 const ITEM_PHRASES = [
   { state: 'on_track', re: /\bon[- ]track\b/i },
   { state: 'ahead', re: /\bahead\s+of\s+(?:schedule|pace|expectations?|where)\b/i },
-  { state: 'behind', re: /\bbehind\b(?!\s+(?:the|your|our|a|an|this|that|each|every|them|it)\b)/i },
+  { state: 'behind', re: BEHIND_PROGRESS_RE },
   { state: 'too_early', re: /\btoo\s+early\b/i },
   { state: 'flat', re: /\bhold(?:s|ing)?\s+steady\b|\bheld\s+steady\b|\bunchanged\b|\bno\s+(?:real\s+)?change\b/i },
 ];
@@ -475,20 +258,15 @@ function checkProgressCoupling(text, facts = {}) {
 // Banned re-entry pattern (SCOPE s3) and the keep-off regression lists
 
 const REENTRY_TRIGGER_RE = /\bkeep(?:ing)?\b[^.!?]{0,40}\boff\b|\bstay(?:ing|s)?\s+off\b|\bwait(?:ing|s|ed)?\b|\bdr(?:y|ies|ied|ying|ier)\b/i;
-// The figure is ANY hours or minutes quantity the numeric grammar reads: digits,
-// every spelled number (thirteen through nineteen included, "a dozen"), ranges,
-// "an hour", "half an hour", the vague forms (a few, a couple of, several), and
-// any number phrase the parser cannot read in full. A bare cadence ("every
-// hour") carries no figure. Nothing in `facts` can allow it.
-const isReentryFigure = (t) => (t.unit === 'hour' || t.unit === 'minute')
-  && !(t.kind === 'cadence' && !t.values.length);
-
+// Any time word, relative-time phrase, spelled number or digit in the same
+// sentence as the trigger is a violation, whatever the facts say. Absolute:
+// takes no facts, and approved sentences are NOT exempt.
 function checkReentryPattern(text) {
   const reasons = [];
   splitSentences(text).forEach((s) => {
     const trig = s.match(REENTRY_TRIGGER_RE);
-    const fig = trig && extractNumericTokens(s).find(isReentryFigure);
-    if (trig && fig) reasons.push({ rule: 'reentry_figure', match: s, detail: `"${trig[0]}" with "${fig.match}"` });
+    const fig = trig && s.match(ANY_TIMING_RE);
+    if (trig && fig) reasons.push({ rule: 'reentry_figure', match: s, detail: `"${trig[0]}" with "${fig[0]}"` });
   });
   return reasons;
 }
@@ -597,15 +375,11 @@ function stripApprovedSentences(text, approved) {
 
 // Sub-day durations (hours, minutes, seconds) in MODEL copy. Every lawn
 // expectation window is in days or weeks, and anything shorter is re-entry or
-// watering timing, which the banner owns. So no hour/minute figure is allowed
-// in model copy at all, whatever the facts list says or which verb sits beside
-// it ("return after fourteen minutes"). Absolute: no allowlist, no approved
-// sentence waives it (codex pre-push P1 on #5527-era guards).
-const SUB_DAY_UNITS = new Set(['hour', 'minute', 'second']);
+// watering timing, which the banner owns. So no hour/minute/second word is
+// allowed anywhere, approved sentences included. Absolute: takes no facts.
+const SUB_DAY_RE = /\b(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|hourly)\b|\bhalf[- ]hours?\b/gi;
 function checkSubDayDuration(text) {
-  return extractNumericTokens(text)
-    .filter((t) => SUB_DAY_UNITS.has(t.unit))
-    .map((t) => ({ rule: 'sub_day_duration', match: t.key }));
+  return (normalizeCopy(text).match(SUB_DAY_RE) || []).map((match) => ({ rule: 'sub_day_duration', match }));
 }
 
 function checkLawnModelCopy(text, facts = {}) {
@@ -613,10 +387,11 @@ function checkLawnModelCopy(text, facts = {}) {
     return { ok: false, reasons: [{ rule: 'empty', match: '' }] };
   }
   const f = facts && typeof facts === 'object' ? facts : {};
-  // Sentences copied verbatim from approved rows keep their own numbers and
-  // state words; every other rule still reads the full text.
+  // Sentences copied verbatim from approved rows keep their own windows,
+  // numbers and state words; every other rule still reads the full text.
   const unapproved = stripApprovedSentences(text, f.approvedSentences);
   const reasons = [
+    ...checkTimingLanguage(unapproved),
     ...checkNumericWhitelist(unapproved, f),
     ...checkWaterMowDeny(text, f),
     ...checkWeekdayClockDeny(text),
@@ -632,6 +407,7 @@ function checkLawnModelCopy(text, facts = {}) {
 
 module.exports = {
   checkLawnModelCopy,
+  checkTimingLanguage,
   checkNumericWhitelist,
   checkWaterMowDeny,
   checkWeekdayClockDeny,
@@ -642,7 +418,6 @@ module.exports = {
   checkOverpromise,
   checkSafetyClaim,
   checkBannerCopy,
-  extractNumericTokens,
   normalizeCopy,
   KEEP_OFF_REJECT,
   BANNER_COPY_ACCEPT,
