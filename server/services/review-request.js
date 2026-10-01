@@ -3033,7 +3033,11 @@ const ReviewService = {
 
   // skipClickGuard: the staff composer's Quick Links ask only (owner ruling:
   // the Quick Links link is the "send anytime" link, so its email leg is not
-  // suppressed by an earlier tap either). Default false.
+  // suppressed by an earlier tap either). Default false. Deliberately NOT
+  // threaded into findInlineAwaitingEmail / _claimInlineEmailDispatch: their
+  // redirected_at fences are about THIS request's own link. Once the customer
+  // taps the link this ask already texted them, the ask has done its job and
+  // the owed email copy of it is dropped; staff can still start a fresh ask.
   async sendInlineEmailCopy(requestId, { skipClickGuard = false } = {}) {
     if (!requestId) return { sent: false, reason: "no_request" };
     let request = null;
