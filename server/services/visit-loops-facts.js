@@ -1,6 +1,6 @@
 /**
  * Visit status and open loops: the READ-ONLY facts the texting AI was missing
- * in the 2026-09-30 blind bake-off (live tech position / lateness, a missed
+ * in the 2026-09-30 blind bake-off (lateness, a passed window, a missed
  * visit, promises we owe, asks the customer is still waiting on). Everything
  * here is already in Postgres; nothing writes, nothing sends.
  *
@@ -34,9 +34,7 @@ const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { calendarDay } = require('./live-eta-destination');
 const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
 const { gateEnvValue } = require('../config/feature-gates');
-const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('./customer-tracking-eta');
 
-const FRESH_LOCATION_MS = 5 * 60 * 1000;
 const DESCRIPTION_MAX = 120;
 const LIST_MAX = 5;
 const MISSED_LOOKBACK_DAYS = 7;
@@ -44,17 +42,14 @@ const LATE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
 // A visit nobody has performed or started: the only statuses a "window passed"
 // or a "never completed" reading is true of.
 const NOT_STARTED_STATUSES = ['pending', 'confirmed'];
-const LIVE_TRACK_STATES = ['en_route', 'on_property', 'on_site'];
 // The tracker can lead a lagging status column (customer-lifecycle-guard): a row
 // only reads as not-started — missed, or past its window — while its tracker is
 // unset or still 'scheduled' (never live, complete, cancelled or skipped).
 const NOT_STARTED_TRACK_STATES = ['scheduled'];
 const trackNotStarted = (state) => state == null || NOT_STARTED_TRACK_STATES.includes(state);
-const ON_SITE_STATUSES = ['on_site', 'on_property'];
 
 function emptyVisitLoops() {
   return {
-    techPosition: null,
     lateAlert: null,
     pastWindow: null,
     missedVisit: null,
@@ -97,7 +92,6 @@ const nowEtMinutes = (now) => {
   const p = etParts(now);
   return p.hour * 60 + p.minute;
 };
-const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 
 // Coarse service family for "was a later visit of the same service booked":
 // the same buckets the customer would use, never a price or plan rule.
@@ -163,54 +157,6 @@ function crossesIntoNow(row, nowMin) {
   return end != null && end > 1440 && nowMin < end - 1440;
 }
 
-// Stops before this visit: ONLY the customer tracker's own count (stops-ahead.js
-// computeStopsAhead — dispatch sort order, sibling state, GATE_STOPS_AWAY, the
-// three-stop cap, the never-increase floor), read-only: a number is used only when
-// it is already the durable floor the tracker shows; otherwise none. An SMS never
-// states a count the tracker would not, and this module never writes.
-async function trackerStopsAhead(conn, visit, now, strict) {
-  // strict (send-time rebuild): an outage throws instead of reading as "no count"
-  const result = await require('./stops-ahead').computeStopsAhead(conn, String(visit.id), { readOnly: true, today: etDateString(now), throwOnError: Boolean(strict) });
-  return Number.isInteger(result?.stopsAhead) ? result.stopsAhead : null;
-}
-
-async function loadTechPosition(todayRows, { conn, now, deriveWindow, strict }) {
-  const visit = todayRows.find((r) => r.technician_id);
-  if (!visit) return null;
-  const status = await conn('tech_status').where({ tech_id: visit.technician_id })
-    .first('status', 'current_job_id', 'location_updated_at');
-  const updatedAt = toDate(status?.location_updated_at);
-  const ageMs = updatedAt ? now.getTime() - updatedAt.getTime() : null;
-  // The tracker stores the provider's fix time and accepts it slightly in the
-  // future (tech-status.js), so a small negative age is a fresh fix.
-  const fresh = ageMs != null && ageMs >= -FUTURE_TIMESTAMP_TOLERANCE_MS && ageMs <= FRESH_LOCATION_MS;
-
-  // A started visit (by status or tracker) has no stops "before" it — and the send
-  // recount rejects started visits — so only a not-started visit carries a count.
-  // ...and a fresh tech_status whose current job is this visit (on site, or driving
-  // to it) leads a lagging 'confirmed' row the same way.
-  const currentJob = fresh && String(status?.current_job_id ?? '') === String(visit.id);
-  const notStarted = NOT_STARTED_STATUSES.includes(visit.status) && !currentJob
-    && !LIVE_TRACK_STATES.includes(visit.track_state) && visit.track_state !== 'complete';
-  const stopsAhead = notStarted ? await trackerStopsAhead(conn, visit, now, strict) : null;
-  return {
-    techName: firstName(visit.technician_name),
-    status: fresh ? String(status.status) : 'stale',
-    minutesSinceUpdate: ageMs == null ? null : Math.max(0, Math.floor(ageMs / 60000)),
-    stopsAhead,
-    // current_job_id is set from en_route on, so "at this visit" also needs an
-    // on-site status; driving to it is "en route", not "at this visit now".
-    atThisVisit: currentJob && ON_SITE_STATUSES.includes(String(status.status)),
-    // Which of today's visits this is about (a customer can have two today).
-    visitId: String(visit.id),
-    techId: String(visit.technician_id),
-    windowStart: visit.window_start || null,
-    scheduledDate: calendarDay(visit.scheduled_date),
-    visitType: visit.service_type || null,
-    windowDisplay: windowLabel(visit, deriveWindow),
-  };
-}
-
 // Does an alert's own record of the window (tech-late-detector: scheduled_date +
 // window_start; no-show-detector: promised_window.start_at) still describe the
 // visit's current occurrence? An alert that records NONE is rejected: reschedules
@@ -253,28 +199,40 @@ async function loadLateAlert(todayRows, { conn, deriveWindow }) {
   // no-show-detector raises the same two types on missing tracking alone (stage 1
   // is 45 min into an open window): that is a tracking gap, not confirmed lateness.
   if (payload?.evidence === 'missing_tracking') {
-    return { type: alert.type, severity: alert.severity || null, minutesLate: null, missingTracking: true, ...where };
+    return { type: alert.type, severity: alert.severity || null, missingTracking: true, ...where };
   }
-  const minutes = Number(payload?.delay_minutes);
+  // No minutes: payload.delay_minutes is frozen at insert and measured from the
+  // internal job block (GREATEST(window_end, start + 2h)), never the customer's
+  // promised window, so it is not customer-facing lateness.
   return {
     type: alert.type,
     severity: alert.severity || null,
-    minutesLate: Number.isFinite(minutes) && minutes >= 0 ? Math.round(minutes) : null,
     missingTracking: false,
     ...where,
   };
 }
 
-async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
+// One physical stop = the same tech, day, customer and window start (the sibling
+// group stops-ahead.js uses): a lagging row is not "passed" when a sibling is
+// already underway or done.
+const stopKey = (r) => `${r.technician_id}|${calendarDay(r.scheduled_date)}|${r.window_start}`;
+async function findPastWindow(todayRows, { conn, now, deriveWindow, customerId }) {
   const nowMin = nowEtMinutes(now);
   // the same not-started rule loadMissedVisit honors (tracker unset or
-  // 'scheduled'), plus the service-record check below
+  // 'scheduled'), plus the service-record and sibling checks below
   const candidates = todayRows.filter((row) => NOT_STARTED_STATUSES.includes(row.status) && trackNotStarted(row.track_state));
   if (!candidates.length) return null;
-  const recorded = await conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id');
+  const [recorded, advanced] = await Promise.all([
+    conn('service_records').whereIn('scheduled_service_id', candidates.map((r) => r.id)).select('scheduled_service_id'),
+    conn('scheduled_services').where({ customer_id: customerId })
+      .whereIn('scheduled_date', [...new Set(candidates.map((r) => calendarDay(r.scheduled_date)))])
+      .where((b) => b.whereIn('status', ['en_route', 'on_site', 'completed']).orWhereIn('track_state', ['en_route', 'on_property', 'complete']))
+      .select('technician_id', 'scheduled_date', 'window_start'),
+  ]);
   const done = new Set((recorded || []).map((r) => String(r.scheduled_service_id)));
+  const startedStops = new Set((advanced || []).map(stopKey));
   for (const row of candidates) {
-    if (done.has(String(row.id))) continue;
+    if (done.has(String(row.id)) || startedStops.has(stopKey(row))) continue;
     const endMin = customerWindowEndMinutes(row);
     if (endMin == null || endMin >= nowMin) continue;
     return { visitId: String(row.id), windowStart: row.window_start || null, scheduledDate: calendarDay(row.scheduled_date), type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin };
@@ -517,14 +475,12 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const todayRows = await read('today visits', [], () => loadTodayRows(customerId, ctx));
   const pastWindow = await read('past window', null, () => findPastWindow(todayRows, ctx));
 
-  const [techPosition, lateAlert, missedVisit, commitments] = await Promise.all([
-    read('tech position', null, () => loadTechPosition(todayRows, ctx)),
+  const [lateAlert, missedVisit, commitments] = await Promise.all([
     read('late alert', null, () => loadLateAlert(todayRows, ctx)),
     read('missed visit', null, () => loadMissedVisit(ctx)),
     strict ? { weOwe: [], customerWaiting: [] } : safely('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
   ]);
 
-  out.techPosition = techPosition;
   out.lateAlert = lateAlert;
   out.pastWindow = pastWindow;
   out.missedVisit = missedVisit;
@@ -534,25 +490,18 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
 }
 
 // The time-sensitive VISIT STATUS facts a reply can restate, as one comparable
-// string (null when none): a fresh tech position (its visit, window, tech, status,
-// at-this-visit, stop count), a delay or tracking gap (its visit, window and kind),
-// a passed window (its visit and window), a missed visit (type, day, reason) — each
-// with the service name the line renders, so a staff correction shows up too. Raw
-// window_start, never the display label (the rebuild has no deriveWindow). The send boundary rebuilds the facts
-// for the customer and refuses when this changed — a reschedule, a completion, a
-// resolved alert or a moved route all show up here, with no recheck per fact.
+// string (null when none): a delay or tracking gap (its visit occurrence, service
+// and kind), a passed window (its occurrence and service), a missed visit (type,
+// day, window, reason). The send boundary rebuilds the facts for the customer and
+// refuses when this changed — a reschedule, a completion or a resolved alert all
+// show up here, with no recheck per fact. Raw window_start, never the display
+// label (the rebuild has no deriveWindow).
 function visitStatusSignature(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
   // the occurrence: visit + date + window start (a same-hour move to another day changes it)
   const at = (f) => `${f.visitId}@${f.scheduledDate ?? ''}T${f.windowStart ?? ''}`;
-  const tp = v.techPosition;
   const parts = [
-    // a stale position still renders a line about this occurrence: its identity is
-    // durable (no location TTL), so a completion / cancel / move invalidates it too
-    tp && (tp.status === 'stale'
-      ? `stalepos:${key(at(tp), tp.visitType, tp.techId)}`
-      : `pos:${key(at(tp), tp.visitType, tp.techId, tp.status, tp.atThisVisit === true, tp.stopsAhead)}`),
     v.lateAlert && `late:${key(at(v.lateAlert), v.lateAlert.visitType, v.lateAlert.type, v.lateAlert.missingTracking === true)}`,
     v.pastWindow && `past:${key(at(v.pastWindow), v.pastWindow.type)}`,
     v.missedVisit && `missed:${key(v.missedVisit.type, `${v.missedVisit.date}@${v.missedVisit.windowStart ?? ''}`, v.missedVisit.reason)}`,

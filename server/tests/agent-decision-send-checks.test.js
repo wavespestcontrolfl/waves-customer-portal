@@ -560,7 +560,9 @@ describe('open-loop commitments recheck', () => {
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBeNull();
     // the readers are asked for THIS customer, Waves-owned call promises
     expect(listOpenCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', party: 'waves' }));
-    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1' }));
+    // each rendered SMS/email lane on its own page, as the facts loader reads them
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', lane: 'promise' }));
+    expect(listSmsCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ customerId: 'c1', lane: 'request' }));
     // closed, dismissed, superseded by a reprocess, or relinked to another customer: absent from the lists
     openFor({ calls: [{ id: 'cc-1' }] });
     await expect(openLoopsBlockReason({ decision: withIds(['cc-1', 'cc-2']) })).resolves.toBe('commitment_closed');
@@ -625,36 +627,37 @@ describe('open-loop commitments recheck', () => {
       .resolves.toEqual({ ok: false, code: 'OPEN_LOOPS_CHECK_FAILED_AT_BOUNDARY', reason: 'open-loop facts stale (open_loops_recheck_failed)', retryable: true });
   });
 
-  describe('visit status (visit_loop_status): freshness window + rebuilt-facts signature', () => {
+  describe('visit status (visit_loop_status): rebuilt-facts signature', () => {
     const facts = require('../services/visit-loops-facts');
-    const fresh = () => new Date(Date.now() - 60000).toISOString();
-    const loops = (over = {}) => ({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [], ...over });
-    const drafted = loops({ techPosition: { visitId: 'v1', status: 'en_route', atThisVisit: false, stopsAhead: 2 } });
+    const loops = (over = {}) => ({ lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [], ...over });
+    const lateAlert = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', visitType: 'Pest Control', type: 'tech_late', missingTracking: false };
+    const drafted = loops({ lateAlert });
     const signature = facts.visitStatusSignature(drafted);
-    const withStatus = (over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { signature } }), ...over });
+    // durable facts: no TTL, however long the card waited
+    const withStatus = (over = {}) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - 3 * 3600000).toISOString(), visit_loop_status: { signature } }), ...over });
     let spy;
     afterEach(() => spy && spy.mockRestore());
     const nowFacts = (v) => { spy = jest.spyOn(facts, 'loadVisitLoops').mockResolvedValue(v); };
 
-    test('unchanged facts pass; any change (stop count, a started visit, a new delay, a resolved miss) refuses, whatever the wording', async () => {
+    test('unchanged facts pass (no TTL); any change (resolved, moved, reclassified, a new fact) refuses, whatever the wording', async () => {
       nowFacts(drafted);
       await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBeNull();
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1' }));
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', strict: true }));
       for (const changed of [
-        loops({ techPosition: { visitId: 'v1', status: 'en_route', atThisVisit: false, stopsAhead: 1 } }),
-        loops({ techPosition: { visitId: 'v1', status: 'on_site', atThisVisit: true, stopsAhead: null } }),
-        loops({ techPosition: drafted.techPosition, lateAlert: { visitId: 'v1', type: 'tech_late', missingTracking: false } }),
         loops(),
+        loops({ lateAlert: { ...lateAlert, windowStart: '13:00:00' } }),
+        loops({ lateAlert: { ...lateAlert, missingTracking: true } }),
+        loops({ lateAlert, pastWindow: { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'Pest Control' } }),
       ]) {
+        spy.mockRestore();
         nowFacts(changed);
         await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBe('visit_status_changed');
-        spy.mockRestore();
       }
     });
 
     test('a missed visit that was rebooked or completed since drafting refuses', async () => {
-      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', reason: 'not_completed' } });
-      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: fresh(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
+      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } });
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date().toISOString(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
       nowFacts(missed);
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
       spy.mockRestore();
@@ -663,14 +666,8 @@ describe('open-loop commitments recheck', () => {
     });
 
     test('a real read failure during the rebuild is a retryable recheck failure, not "changed"', async () => {
-      await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('tech_status down'); } }))
+      await expect(openLoopsBlockReason({ decision: withStatus(), dbh: () => { throw new Error('dispatch_alerts down'); } }))
         .resolves.toBe('open_loops_recheck_failed');
-    });
-
-    test('the rebuild runs strict', async () => {
-      nowFacts(drafted);
-      await openLoopsBlockReason({ decision: withStatus() });
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true }));
     });
 
     test('no customer: refused (the facts cannot be rebuilt)', async () => {
@@ -682,22 +679,6 @@ describe('open-loop commitments recheck', () => {
       const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
       expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
       expect(blockReasonIsEtaInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
-    });
-
-    test('durable facts (missed visit, passed window, delay) do not expire with the ETA window; they are rebuilt', async () => {
-      const missed = loops({ missedVisit: { type: 'Pest Control', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } });
-      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - 60 * 60000).toISOString(), visit_loop_status: { signature: facts.visitStatusSignature(missed) } }) });
-      nowFacts(missed);
-      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
-    });
-
-    test('visit status is held to the 15-minute freshness window; no stamp = expired', async () => {
-      nowFacts(drafted);
-      const at = (msAgo) => decision({ input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: new Date(Date.now() - msAgo).toISOString(), visit_loop_status: { signature } }) });
-      await expect(openLoopsBlockReason({ decision: at(14 * 60000) })).resolves.toBeNull();
-      await expect(openLoopsBlockReason({ decision: at(16 * 60000) })).resolves.toBe('visit_status_expired');
-      const noStamp = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature } }) });
-      await expect(openLoopsBlockReason({ decision: noStamp })).resolves.toBe('visit_status_expired');
     });
 
     test('the provider-boundary form rebuilds from the in-memory status for the claim\'s customer', async () => {

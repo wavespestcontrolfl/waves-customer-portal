@@ -4297,8 +4297,8 @@ LABEL FACTS (product timing from the label):
 `
     : '';
   // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1), gate-on only: rules that act
-  // on the per-draft VISIT STATUS & OPEN LOOPS section (live tech position,
-  // lateness, missed visit, open promises). Static text — the section's content is
+  // on the per-draft VISIT STATUS & OPEN LOOPS section (a flagged delay, a passed
+  // window, a missed visit, open promises). Static text — the section's content is
   // per-draft data (buildFactsBlock), never interpolated here, so this stays
   // time-invariant. The tightened voice bans live HERE, not in the shared
   // CUSTOMER_SMS_HOUSE_VOICE constant other agents use. '' gate-off (byte-identical).
@@ -4306,7 +4306,7 @@ LABEL FACTS (product timing from the label):
     ? `
 VISIT STATUS & OPEN LOOPS:
 - When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok — never go silent on a customer who is still waiting on something we owe; state the status, or the FOLLOW-UP SLA RIGHT NOW phrase. A reply of "" is allowed ONLY when none of those lines is listed.
-- Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on today's visit."). From a fresh Tech position you may say how many stops come before theirs. When Tech position says the location is stale, do not promise an arrival time.
+- Never promise an arrival time, or say the tech is "on time", unless a LIVE ETA fact supports it. This section never licenses status words: say the tech is late, behind, ahead, on the way, en route, coming, nearby or arriving ONLY under the LIVE STATUS rule above. With DELAY FLAGGED or WINDOW PASSED, apologize for the delay in one plain sentence (for example "Sorry for the delay on today's visit.").
 - With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and offer a specific time from OPEN TIMES (declared in offered_times); if OPEN TIMES is absent, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW and add {"type":"escalate","note":"followup_promised"} to intended_actions.
 - Voice bans, on top of the house voice: never write "Good question", "Great question", "I hear you", "Totally fine", or "Good news", and never write a sentence that only performs empathy. Outside scheduling offers a reply is at most TWO sentences; a scheduling offer may use a third sentence for the times.
 `
@@ -4503,11 +4503,6 @@ function visitLoopText(value, cap) {
   if (!text || EXEMPLAR_INJECTION_RE.test(text)) return '';
   return text;
 }
-function visitLoopMinutes(value) {
-  if (value == null || value === '') return null; // Number(null) is 0 — never a fake "0 min"
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
-}
 // " (today's Lawn Care visit, 9-11 AM)" — which of today's visits a line is about.
 function visitLoopWhich(item) {
   const type = visitLoopText(item && item.visitType, 60);
@@ -4515,46 +4510,20 @@ function visitLoopWhich(item) {
   if (!type && !win) return '';
   return ` (today's ${type ? `${type} ` : ''}visit${win ? `, ${win}` : ''})`;
 }
-function visitLoopTechLine(tp) {
-  if (!tp || typeof tp !== 'object') return null;
-  const mins = visitLoopMinutes(tp.minutesSinceUpdate);
-  const ago = mins == null ? '' : `${mins} min ago`;
-  if (tp.status === 'stale') {
-    return `- Tech position${visitLoopWhich(tp)}: location stale${ago ? ` (last update ${ago})` : ''} — do not promise an arrival time`;
-  }
-  const name = visitLoopText(tp.techName, 60) || 'The tech';
-  const status = visitLoopText(String(tp.status || '').replace(/_/g, ' '), 30);
-  const stops = Number(tp.stopsAhead);
-  let where = '';
-  if (tp.atThisVisit === true) where = 'at this visit now';
-  else if (tp.stopsAhead != null && Number.isFinite(stops) && stops >= 0) where = `${Math.round(stops)} stop(s) before this visit`;
-  if (!status && !where) return null;
-  return `- Tech position${visitLoopWhich(tp)}: ${name}${status ? ` is ${status}` : ''}${ago ? ` (updated ${ago})` : ''}${where ? `, ${where}` : ''}`;
-}
 function visitLoopLateLine(late) {
   if (!late || typeof late !== 'object') return null;
   if (late.missingTracking === true) {
     return `- Tracking gap${visitLoopWhich(late)}: no departure or arrival is recorded yet for this visit — this is not confirmed lateness; do not say the tech is late or on time, and do not promise an arrival time`;
   }
-  const mins = visitLoopMinutes(late.minutesLate);
-  return mins != null
-    ? `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit ${mins} min past its window — apologize once for the delay; never say "on time"`
-    : `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit past its window — apologize once for the delay; never say "on time"`;
+  return `- DELAY FLAGGED${visitLoopWhich(late)}: dispatch flagged this visit past its window — apologize once for the delay; never say "on time"`;
 }
-function visitLoopPastWindowLine(past, techPosition) {
+// Where the tech is comes only from the canonical LIVE STATUS / LIVE ETA facts on
+// the visit line; this line never restates position, so it is always a hand-off.
+function visitLoopPastWindowLine(past) {
   if (!past || typeof past !== 'object') return null;
   const type = visitLoopText(past.type, 60) || 'scheduled';
   const win = visitLoopText(past.windowDisplay, 40);
-  const head = `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete`;
-  // A fresh Tech position line for THIS visit is the real answer; otherwise
-  // (none, stale, or about another of today's visits) it is a hand-off.
-  // ...and only with a stop count to quote (no route order = no count on the line)
-  const located = techPosition && typeof techPosition === 'object' && techPosition.status && techPosition.status !== 'stale'
-    && past.visitId != null && String(techPosition.visitId) === String(past.visitId)
-    && techPosition.stopsAhead != null && Number.isFinite(Number(techPosition.stopsAhead));
-  return located
-    ? `${head} — apologize for the delay and say how many stops come before theirs (Tech position); no arrival time unless a LIVE ETA fact gives one`
-    : `${head}, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
+  return `- WINDOW PASSED: today's ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised`;
 }
 function visitLoopMissedLine(missed) {
   if (!missed || typeof missed !== 'object') return null;
@@ -4591,8 +4560,7 @@ function visitLoopCommitmentIds(context, factsBlock) {
   return [...new Set(ids)];
 }
 // The lines a reply must address even when the customer only said thanks (the
-// VISIT STATUS & OPEN LOOPS rule): a tech position alone is information, not a
-// loop. false gate-off.
+// VISIT STATUS & OPEN LOOPS rule); a tracking gap alone is not one. false gate-off.
 function visitLoopsNeedAnswer(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return false;
   const v = context && context.visitLoops && typeof context.visitLoops === 'object' ? context.visitLoops : {};
@@ -4619,10 +4587,10 @@ function validateOpenLoopAnswer({ reply, factsBlock }) {
   if (!factsListOpenLoop(factsBlock) || String(reply || '').trim()) return { ok: true, violations: [] };
   return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
 }
-// Marks a draft whose section showed time-sensitive VISIT STATUS (a fresh tech
-// position, a delay, a passed window, a missed visit): { signature } from
-// visit-loops-facts visitStatusSignature. The send boundary holds it to the LIVE
-// ETA freshness window AND rebuilds the facts, refusing if the signature changed.
+// Marks a draft whose section showed time-sensitive VISIT STATUS (a delay, a
+// passed window, a missed visit): { signature } from visit-loops-facts
+// visitStatusSignature. The send boundary rebuilds the facts and refuses if the
+// signature changed.
 // null when the section showed none of these, or gate-off.
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
@@ -4635,9 +4603,8 @@ function visitLoopStatus(context, factsBlock) {
 function renderVisitLoopsSection(visitLoops) {
   const v = visitLoops && typeof visitLoops === 'object' ? visitLoops : {};
   const lines = [
-    visitLoopTechLine(v.techPosition),
     visitLoopLateLine(v.lateAlert),
-    visitLoopPastWindowLine(v.pastWindow, v.techPosition),
+    visitLoopPastWindowLine(v.pastWindow),
     visitLoopMissedLine(v.missedVisit),
     // the day it was asked, never a deadline (visit-loops-facts: no due time is restated)
     ...visitLoopItemLines(v.weOwe, 'WE OWE THEM', (i) => {

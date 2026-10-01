@@ -24,8 +24,7 @@ const NOW = new Date('2026-06-10T15:00:00Z');
 const baseContext = { summary: 'Test customer', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-06-19', window: '8-10am' }] };
 
 const fullLoops = () => ({
-  techPosition: { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: 3, atThisVisit: false, visitId: 'v1', visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
-  lateAlert: { type: 'tech_late', severity: 'warning', minutesLate: 25, visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
+  lateAlert: { type: 'tech_late', severity: 'warning', visitType: 'Quarterly Pest', windowDisplay: '8-10am' },
   pastWindow: { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 },
   missedVisit: { type: 'Lawn Care', date: '2026-06-08', windowDisplay: '10am-12pm', status: 'confirmed', reason: 'not_completed' },
   weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the wasp nest quote', since: '2026-06-10', source: 'call' }],
@@ -42,10 +41,11 @@ describe('renderVisitLoopsSection', () => {
     const out = renderVisitLoopsSection(fullLoops());
     expect(out.startsWith(`${HEADER}\n`)).toBe(true);
     expect(out.endsWith('\n')).toBe(true);
-    expect(out).toContain("- Tech position (today's Quarterly Pest visit, 8-10am): Sam is en route (updated 2 min ago), 3 stop(s) before this visit\n");
-    expect(out).toContain('- DELAY FLAGGED (today\'s Quarterly Pest visit, 8-10am): dispatch flagged this visit 25 min past its window — apologize once for the delay; never say "on time"\n');
-    // a fresh Tech position line is the answer: no "no tech location" hand-off
-    expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay and say how many stops come before theirs (Tech position); no arrival time unless a LIVE ETA fact gives one\n");
+    // no tech position line: where the tech is comes only from LIVE STATUS / LIVE ETA on the visit line
+    expect(out).not.toContain('Tech position');
+    // no minutes: the alert's figure is frozen and measured from the internal job block
+    expect(out).toContain('- DELAY FLAGGED (today\'s Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
+    expect(out).toContain("- WINDOW PASSED: today's Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
     expect(out).not.toContain('no tech location');
     expect(out).toContain('- MISSED VISIT: Lawn Care on Monday, Jun 8 (10am-12pm) was not completed — apologize once, offer the earliest OPEN TIMES slot (if OPEN TIMES is absent, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised); never point them to a visit weeks out without an apology\n');
     expect(out).not.toContain('live note');
@@ -54,38 +54,17 @@ describe('renderVisitLoopsSection', () => {
     expect(out).not.toContain('- none');
   });
 
-  test.each([undefined, null, {}, { techPosition: null, lateAlert: null, weOwe: [], customerWaiting: [] }, 'oops'])('empty input %p renders "- none"', (input) => {
+  test.each([undefined, null, {}, { lateAlert: null, weOwe: [], customerWaiting: [] }, 'oops'])('empty input %p renders "- none"', (input) => {
     expect(renderVisitLoopsSection(input)).toBe(`${HEADER}\n- none\n`);
   });
 
-  test('tech position variants', () => {
-    expect(renderVisitLoopsSection({ techPosition: { techName: 'Sam', status: 'on_site', minutesSinceUpdate: 1, stopsAhead: 0, atThisVisit: true } }))
-      .toContain('- Tech position: Sam is on site (updated 1 min ago), at this visit now');
-    expect(renderVisitLoopsSection({ techPosition: { techName: 'Sam', status: 'stale', minutesSinceUpdate: 18, stopsAhead: null, atThisVisit: false } }))
-      .toContain('- Tech position: location stale (last update 18 min ago) — do not promise an arrival time');
-    // unknown route order → no stops clause, never "null stop(s)"
-    const unknown = renderVisitLoopsSection({ techPosition: { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 2, stopsAhead: null, atThisVisit: false } });
-    expect(unknown).toContain('- Tech position: Sam is en route (updated 2 min ago)\n');
-    expect(unknown).not.toContain('stop(s)');
-  });
-
-  test('WINDOW PASSED without a fresh tech position (none, or stale) hands off to the SLA', () => {
-    const pastWindow = { visitId: 'v1', type: 'Quarterly Pest', windowDisplay: '8-10am', minutesPast: 40 };
-    const otherVisit = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v2', stopsAhead: 1 };
-    const noCount = { techName: 'Sam', status: 'en_route', minutesSinceUpdate: 1, visitId: 'v1', stopsAhead: null };
-    for (const techPosition of [null, { techName: 'Sam', status: 'stale', minutesSinceUpdate: 30, visitId: 'v1' }, otherVisit, noCount]) {
-      expect(renderVisitLoopsSection({ pastWindow, techPosition }))
-        .toContain("has passed and the visit is not marked complete, no tech location — say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised");
-    }
-  });
-
   test('late alert without minutes still renders', () => {
-    expect(renderVisitLoopsSection({ lateAlert: { type: 'unassigned_overdue', severity: 'high', minutesLate: null } }))
+    expect(renderVisitLoopsSection({ lateAlert: { type: 'unassigned_overdue', severity: 'high' } }))
       .toContain('- DELAY FLAGGED: dispatch flagged this visit past its window');
   });
 
   test('a missing-tracking alert renders as a tracking gap, never DELAY FLAGGED', () => {
-    const out = renderVisitLoopsSection({ lateAlert: { type: 'tech_late', severity: 'warn', minutesLate: null, missingTracking: true } });
+    const out = renderVisitLoopsSection({ lateAlert: { type: 'tech_late', severity: 'warn', missingTracking: true } });
     expect(out).toContain('- Tracking gap: no departure or arrival is recorded yet for this visit');
     expect(out).not.toContain('DELAY FLAGGED');
   });
@@ -131,7 +110,7 @@ describe('buildFactsBlock', () => {
 
   test('gate on: fixed header always present, "- none" when undefined or empty', () => {
     process.env[GATE] = 'true';
-    for (const ctx of [baseContext, { ...baseContext, visitLoops: undefined }, { ...baseContext, visitLoops: { techPosition: null, weOwe: [], customerWaiting: [] } }]) {
+    for (const ctx of [baseContext, { ...baseContext, visitLoops: undefined }, { ...baseContext, visitLoops: { lateAlert: null, weOwe: [], customerWaiting: [] } }]) {
       expect(buildFactsBlock(ctx, { now: NOW })).toContain(`${HEADER}\n- none\n`);
     }
   });
@@ -139,7 +118,7 @@ describe('buildFactsBlock', () => {
   test('gate on: renders the fixture lines, before BILLING and clear of the SLA/RE-SERVICE/COMPANY tail', () => {
     process.env[GATE] = 'true';
     const facts = buildFactsBlock({ ...baseContext, visitLoops: fullLoops() }, { now: NOW });
-    expect(facts).toContain("- Tech position (today's Quarterly Pest visit, 8-10am): Sam is en route");
+    expect(facts).toContain("- DELAY FLAGGED (today's Quarterly Pest visit, 8-10am)");
     expect(facts).toContain('- WE OWE THEM: callback');
     const at = facts.indexOf(HEADER);
     expect(at).toBeGreaterThan(facts.indexOf('UPCOMING SERVICES:'));
@@ -238,7 +217,7 @@ describe('visitLoopsNeedAnswer', () => {
     process.env[GATE] = 'true';
     expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: false } } })).toBe(true);
     expect(visitLoopsNeedAnswer({ visitLoops: { lateAlert: { type: 'tech_late', missingTracking: true } } })).toBe(false);
-    expect(visitLoopsNeedAnswer({ visitLoops: { techPosition: { status: 'en_route' } } })).toBe(false);
+    expect(visitLoopsNeedAnswer({ visitLoops: {} })).toBe(false);
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(true);
     delete process.env[GATE];
     expect(visitLoopsNeedAnswer({ visitLoops: { weOwe: [{ id: 'c1' }] } })).toBe(false);
@@ -256,7 +235,6 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
       expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(false);
     }
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
-    expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tech position: Sam is en route']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tracking gap: x']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: 'UPCOMING SERVICES:\n- none\nBILLING:\n' }).ok).toBe(true); // gate-off facts
   });
@@ -272,11 +250,9 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
 describe('visitLoopStatus', () => {
   const WITH = `UPCOMING SERVICES:\n- none\n${HEADER}\n- none\nBILLING:\n`;
   test('facts with the section: the visit-status signature when a time-sensitive line shows; otherwise null', () => {
-    const tp = { techName: 'Sam', status: 'en_route', stopsAhead: 2, visitId: 'v1', techId: 't1', windowStart: '09:00:00', atThisVisit: false };
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull();
-    expect(visitLoopStatus({ visitLoops: { techPosition: tp } }, WITH)).toEqual({ signature: 'pos:v1@T09:00:00::t1:en_route:false:2' });
-    // a stale position is still about this occurrence: durable identity, no location TTL
-    expect(visitLoopStatus({ visitLoops: { techPosition: { ...tp, status: 'stale' } } }, WITH)).toEqual({ signature: 'stalepos:v1@T09:00:00::t1' });
+    const late = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'tech_late', missingTracking: false };
+    expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull(); // facts without the section
+    expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false' });
     expect(visitLoopStatus({ visitLoops: { missedVisit: { type: 'Lawn', date: '2026-09-30', windowStart: '09:00:00', reason: 'not_completed' } } }, WITH))
       .toEqual({ signature: 'missed:Lawn:2026-09-30@09:00:00:not_completed' });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))

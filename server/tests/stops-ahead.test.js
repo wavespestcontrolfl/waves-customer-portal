@@ -238,12 +238,6 @@ describe('computeStopsAhead', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('a compute failure is null by default, rethrown with throwOnError (SMS send-time recheck)', async () => {
-    const broken = { raw: () => Promise.reject(new Error('db down')) };
-    expect(await computeStopsAhead(broken, 'svc-self', { today: TODAY })).toBeNull();
-    await expect(computeStopsAhead(broken, 'svc-self', { today: TODAY, throwOnError: true })).rejects.toThrow('db down');
-  });
-
   test('zero-row RETURNING with no same-day floor on re-read → null', async () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 1, rawFloor: null });
     // fallback re-read returns baseSvc (no floor fields) → null

@@ -387,22 +387,11 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // rendered call_commitments row as "id:rev" (rev = visit-loops-facts
 // commitmentRevision of what it restated); every one must still be open, live and
 // unedited at send time.
-// VISIT STATUS (visit_loop_status): a draft that showed a fresh tech position, a
-// delay, a passed window or a missed visit is held to the LIVE ETA freshness window
-// (15 min from facts_generated_at; missing = expired), and within it the facts are
-// rebuilt for the customer: any change to that signature (a reschedule, a
-// completion, a resolved alert, a moved route) refuses — one check for every
-// time-sensitive line, whatever wording the reply used.
+// VISIT STATUS (visit_loop_status): a draft that showed a delay, a passed window or
+// a missed visit has its facts rebuilt for the customer at send: any change to that
+// signature (a reschedule, a completion, a resolved alert) refuses — one check for
+// every such line, whatever wording the reply used.
 // Fails closed on a read error. Returns null or a reason code.
-// The hard 15-minute TTL is for the location-derived line only (a tech position
-// moves by the minute); durable facts (a delay, a passed window, a missed visit)
-// are revalidated by the rebuilt signature however long the card waited.
-function visitStatusExpired(snapshot, signature, nowMs) {
-  if (!String(signature || '').split('|').some((part) => part.startsWith('pos:'))) return false;
-  const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
-  const at = Date.parse(snapshot?.facts_generated_at || '');
-  return !Number.isFinite(at) || nowMs - at > ETA_FRESHNESS_WINDOW_MS;
-}
 // A commitment line's relative wording ("later today") means the ET day the facts
 // were built: past that day the reply is refused rather than sent with a shifted
 // meaning. No stamp = refused.
@@ -420,11 +409,13 @@ async function commitmentsChanged(conn, refs, customerId) {
   const { listOpenCommitments } = require('./call-commitments');
   const { listSmsCommitments } = require('./sms-operational-actions');
   const { commitmentRevision } = require('./visit-loops-facts');
-  const [calls, texts] = await Promise.all([
+  // each rendered SMS/email lane on its own page, as the facts loader reads them
+  const [calls, promises, requests] = await Promise.all([
     listOpenCommitments(conn, { customerId, party: 'waves', limit: 200 }),
-    listSmsCommitments(conn, { customerId, limit: 201 }),
+    listSmsCommitments(conn, { customerId, limit: 201, lane: 'promise' }),
+    listSmsCommitments(conn, { customerId, limit: 201, lane: 'request' }),
   ]);
-  const live = new Map([...(calls || []), ...(texts || [])].map((r) => [String(r.id), r]));
+  const live = new Map([...(calls || []), ...(promises || []), ...(requests || [])].map((r) => [String(r.id), r]));
   return refs.some(({ id, rev }) => !live.has(id) || (rev && commitmentRevision(live.get(id)) !== rev));
 }
 // The same question for VISIT STATUS: rebuild the facts for the customer (strict —
@@ -442,7 +433,6 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
     .filter((ref) => typeof ref === 'string' && ref)
     .map((ref) => { const [id, rev = null] = ref.split(':'); return { id, rev }; });
   const signature = objectOrNull(snapshot.visit_loop_status)?.signature || null;
-  if (visitStatusExpired(snapshot, signature, now.getTime())) return 'visit_status_expired';
   if (refs.length && commitmentDayChanged(snapshot, now)) return 'commitment_day_changed';
   if (!refs.length && !signature) return null;
   try {
