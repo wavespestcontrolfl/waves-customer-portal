@@ -153,6 +153,31 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ details: [{ text: 'your new deck', source_quote: 'I need to go to work' }] })).toBe('detail_not_in_body');
   });
 
+  test('a cited line must back its own detail (pre-push audit P1: unrelated citation)', () => {
+    const body = "It's Adam, I fixed the roof leak. A Google review would really help: {review_url}";
+    expect(verify({ body, details: [{ text: 'fixed the roof leak', source_quote: 'I need to go to work' }] })).toBe('detail_not_supported');
+    // A paraphrase that shares the key word still passes.
+    expect(verify({})).toBeNull();
+  });
+
+  test('an uncited pest, property or repair claim must still be in the record', () => {
+    const body = 'I know you had to get to work, and I fixed the roof leak too. A Google review would really help: {review_url}';
+    expect(verify({ body })).toBe('ungrounded_term');
+    expect(verify({ body: 'I know you had to get to work. The ants were busy. Google review: {review_url}' })).toBe('ungrounded_term');
+    // "Roach" is grounded by "cockroach" in the record; loose words like "spot" are not checked.
+    const c = { corpus: `${corpus} German cockroaches.` };
+    expect(verify({ body: 'I know you had to get to work. Roaches near the spot I flagged. Google review: {review_url}' }, c)).toBeNull();
+  });
+
+  test('stems: plural, -ing/-ed and short words', () => {
+    const { ungroundedTerm, detailSupportedByQuote } = Drafter.__private;
+    expect(ungroundedTerm('the lanai and pool cages', 'lanai and pool cage')).toBeNull();
+    expect(ungroundedTerm('we wed', '')).toBeNull();
+    expect(ungroundedTerm('checked the attic', 'garage')).toBe('attic');
+    expect(detailSupportedByQuote('thanks for waiting this morning', "can't wait too long this morning")).toBe(true);
+    expect(detailSupportedByQuote('your new puppies', 'I need to go to work')).toBe(false);
+  });
+
   test('a capitalized name the customer never used is rejected (street / car / rental misreads)', () => {
     const body = "It's Adam. How is Nutmeg doing since I had to get to work? A Google review would really help: {review_url}";
     expect(verify({ body })).toBe('unknown_proper_noun');

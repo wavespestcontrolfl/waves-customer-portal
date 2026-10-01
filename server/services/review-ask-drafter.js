@@ -578,6 +578,62 @@ function unknownProperNoun(body, { firstName, techName, ownWords }) {
   return null;
 }
 
+// Pests, parts of the property, problems and repair work: a claim about any
+// of these must come from the record. A draft that says "I fixed the roof
+// leak" is rejected unless "roof" and "leak" appear in the data it was given.
+// Words used loosely in normal speech ("spot", "window", "fix") stay out.
+// Termites have their own rule (termite visits only), so they are not listed.
+const GROUNDED_TERM_WORDS = `ant roach cockroach spider flea tick mosquito rodent rat mice mouse
+  wasp bee hornet centipede millipede silverfish scorpion earwig cricket beetle moth fly gnat bedbug chinch
+  grub armyworm webworm mole snake lizard gecko frog squirrel raccoon possum armadillo weed dollarweed
+  doveweed sedge pusley crabgrass fungus mold mildew egg nest mound hive colony dropping larva
+  roof attic garage kitchen bathroom bedroom closet pantry cabinet sink drain pipe plumbing appliance
+  laundry basement crawlspace lanai pool cage deck patio porch driveway fence shed eave soffit door wall
+  baseboard foundation slab gutter irrigation sprinkler tree shrub palm hedge mulch flower garden yard
+  lawn turf ornamental perimeter leak moisture crack hole damage rot stain flood
+  repair replace install seal caulk kill eliminate trap bait exclusion inspect fumigate`;
+const TERM_ALIAS = { roach: "cockroach" };
+const DETAIL_STOP = new Set(`the and but for from with that this you your yours our its his her him she they them their
+  was were are have has had get got just also very really some any all can could would should will about
+  into over then than there here what when where which who how not too out off one two`.split(/\s+/));
+
+// Crude stem shared by both checks: plural, -ing/-ed, trailing e. Short
+// stems are ignored so "we" / "wed" never match anything.
+function termStem(word) {
+  let w = String(word || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (/ies$/.test(w)) w = `${w.slice(0, -3)}y`;
+  else if (/[^s]s$/.test(w)) w = w.slice(0, -1);
+  w = w.replace(/(?:ing|ed)$/, "").replace(/e$/, "");
+  w = TERM_ALIAS[w] || w;
+  return w.length >= 3 ? w : "";
+}
+const GROUNDED_TERMS = new Set(GROUNDED_TERM_WORDS.split(/\s+/).map(termStem).filter(Boolean));
+
+function stemSet(text) {
+  return new Set((String(text || "").match(/[A-Za-z]+/g) || []).map(termStem).filter(Boolean));
+}
+
+// First pest/property/problem/repair word in the body that the record never
+// mentions, or null.
+function ungroundedTerm(body, corpus) {
+  const known = stemSet(corpus);
+  for (const word of String(body || "").match(/[A-Za-z]+/g) || []) {
+    const s = termStem(word);
+    if (s && GROUNDED_TERMS.has(s) && !known.has(s)) return word;
+  }
+  return null;
+}
+
+// A cited source line must actually back its detail: they share at least one
+// content word, and at least a third of the detail's content words.
+function detailSupportedByQuote(text, quote) {
+  const words = [...stemSet(text)].filter((s) => !DETAIL_STOP.has(s));
+  if (!words.length) return false;
+  const quoteWords = stemSet(quote);
+  const shared = words.filter((s) => quoteWords.has(s)).length;
+  return shared >= 1 && shared * 3 >= words.length;
+}
+
 /**
  * Deterministic checks for a tech-voice draft. Returns null when clean, else
  * a short reject reason (logged by id only, never content).
@@ -615,7 +671,11 @@ function verifyTechVoiceDraft(draft, { channel, firstName, techName, termite, co
     const text = normalizeForMatch(d?.text);
     if (quote.length < 3 || !normCorpus.includes(quote)) return "ungrounded_detail";
     if (!text || !normBody.includes(text)) return "detail_not_in_body";
+    if (!detailSupportedByQuote(d.text, d.source_quote)) return "detail_not_supported";
   }
+  // Uncited claims: a pest, part of the property, problem or repair named
+  // anywhere in the body must be in the record, cited or not.
+  if (ungroundedTerm(body, corpus)) return "ungrounded_term";
   if (unknownProperNoun(body, { firstName, techName, ownWords })) return "unknown_proper_noun";
   return null;
 }
@@ -792,7 +852,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, buildTechVoiceFacts, customerOwnWords },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;
