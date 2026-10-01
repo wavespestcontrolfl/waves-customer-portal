@@ -429,7 +429,7 @@ async function postOverflow(conn, owed, { raise, canRing } = {}) {
   if (!owed.length) return retireStanding(conn, [OVERFLOW_ID], RESOLVED_FIXED);
   const raiseAdminAlert = raise || require('./admin-alert-compose').raiseAdminAlert;
   const ids = owed.map((entry) => entry.id);
-  await raiseAdminAlert(CATEGORY, {
+  const row = await raiseAdminAlert(CATEGORY, {
     area: AREA,
     action: `fix ${ids.length} more combined booking${ids.length === 1 ? '' : 's'}`,
     why: 'Past the daily alert budget, so these bookings are listed here until each gets its own alert.',
@@ -447,6 +447,9 @@ async function postOverflow(conn, owed, { raise, canRing } = {}) {
     ringOnRefresh: canRing ? ringOnNewProblem(ids) : () => false,
     metadata: { opsKey: OPS_KEY, alertClass: OPS_KEY, count: ids.length, itemKeys: ids },
   });
+  // This row is the only record of what is owed: a lost write fails the
+  // sweep loudly (the watchdog logs COMBINED-BOOKING-CHECK-FAILED).
+  if (!row) throw new Error(`overflow bell write failed; ${ids.length} owed booking(s) unrecorded`);
   return 0;
 }
 

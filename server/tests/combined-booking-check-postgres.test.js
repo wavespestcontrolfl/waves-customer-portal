@@ -286,6 +286,10 @@ postgres('combined-booking check through the real conversion', () => {
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10, raise: failing })).toMatchObject({ failed: 1, overflow: 1 });
       expect(await owedIds()).toEqual([est.estimateId]);
 
+      // The overflow bell's own write fails: the sweep fails loudly, never silently.
+      const lost = jest.fn(async () => null);
+      await expect(runCombinedBookingCheck({ conn: trx, ringBudget: 0, raise: lost })).rejects.toThrow(/overflow bell write failed/);
+
       // With budget: it rings, and nothing is owed.
       expect(await runCombinedBookingCheck({ conn: trx, ringBudget: 10 })).toMatchObject({ problems: 1, overflow: 0 });
       const [after] = await alertsOf(trx, est.estimateId);
