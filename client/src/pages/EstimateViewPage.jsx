@@ -57,6 +57,7 @@ import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
   ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT,
   consentAttestation, CONSENT_VERSION_STALE_CODE, CONSENT_VERSION_STALE_MESSAGE,
+  clearLatchedConsentVersion, latchConsentVersion, latchedConsentVersionIsCurrent,
 } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
@@ -3173,6 +3174,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
         onSuccess(existing.setupIntent.id);
         return;
       }
+      // The consent text version this capture is authorized under, latched
+      // for a redirect return (codex #5434 r2 P1).
+      latchConsentVersion();
       const result = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
         confirmParams: { return_url: window.location.href },
@@ -5960,7 +5964,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // accept sends each in its own field and the server pins trust to the
         // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
-        recurringCardSetupIntentIdRef.current = siFromRedirect;
+        // The Auto Pay capture is restored ONLY when the consent text version
+        // it was authorized under (latched before confirmSetup) is this
+        // bundle's (codex #5434 r2 P1): a return into a newer bundle, or from
+        // a bundle that latched nothing, re-authorizes under the current text
+        // — this bundle never attests its version for a capture consented
+        // under older copy. The hold is not a consent-text capture.
+        if (latchedConsentVersionIsCurrent()) {
+          recurringCardSetupIntentIdRef.current = siFromRedirect;
+        } else {
+          recurringCardSetupIntentIdRef.current = null;
+          recurringCardForceRef.current = true;
+        }
+        clearLatchedConsentVersion();
       }
       if (piFromRedirect || siFromRedirect) {
         ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']

@@ -16,6 +16,30 @@ export function consentAttestation() {
   return { consentTextVersion: CONSENT_VERSION };
 }
 
+// Redirect-return latch (codex #5434 r2 P1): a Stripe confirm that redirects
+// (3DS, bank authorization) unloads the tab that rendered the consent, and
+// the return may load a NEWER bundle whose text the customer never saw. The
+// version the customer actually authorized under is latched here right
+// before confirmSetup and read on the return: a restored capture whose
+// latched version is not this bundle's (or has none — a bundle from before
+// the latch) is NOT restored, so the customer re-authorizes under the current
+// text instead of this bundle attesting its own version for that capture.
+// Keyed by page path (one capture flow per page), sessionStorage so it dies
+// with the tab; every access is guarded (private mode, blocked storage).
+const CONSENT_LATCH_PREFIX = 'waves-ccv:';
+function consentLatchKey(scope) {
+  return `${CONSENT_LATCH_PREFIX}${scope || (typeof window !== 'undefined' ? window.location.pathname : '')}`;
+}
+export function latchConsentVersion(scope) {
+  try { sessionStorage.setItem(consentLatchKey(scope), CONSENT_VERSION); } catch { /* storage unavailable — the return re-authorizes */ }
+}
+export function clearLatchedConsentVersion(scope) {
+  try { sessionStorage.removeItem(consentLatchKey(scope)); } catch { /* nothing latched */ }
+}
+export function latchedConsentVersionIsCurrent(scope) {
+  try { return sessionStorage.getItem(consentLatchKey(scope)) === CONSENT_VERSION; } catch { return false; }
+}
+
 // The refresh prompt the capture UIs show for that 409 (the server's own
 // message when it sent one).
 export const CONSENT_VERSION_STALE_MESSAGE = 'The payment authorization text was updated. Please refresh the page and try again.';
