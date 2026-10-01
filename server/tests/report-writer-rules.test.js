@@ -263,6 +263,8 @@ describe('writerRulesRejection', () => {
     ["It's on the house.", 'price'],
     ["The follow-up's on the house.", 'price'],
     ['We treated twelve square yards around the building.', 'footage'],
+    ['Another treatment is on the house.', 'price'],
+    ['We treated twelve LF along the fence.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -360,6 +362,8 @@ describe('writerRulesRejection', () => {
     // Many unclosed curly quotes: each span ends at the next opener.
     writerRulesRejection('“ants '.repeat(20000));
     writerRulesRejection(`'${'ants are back '.repeat(6000)}`);
+    // Many apostrophes inside words never open a quote.
+    writerRulesRejection("a'a".repeat(16000));
     expect(Date.now() - started).toBeLessThan(1000);
   });
 

@@ -226,7 +226,7 @@ function activeIngredientsMentioned(text, value) {
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gals?|gallons?|qts?|ozs|pts?|tsps|tbsps|lbs?|pounds?|grams?|kilograms?|kgs?)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
-const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft|yards?|yds?)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
+const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft|yards?|yds?)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot|lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:lf|sf|lin\.?\s*ft|sq\.?\s*yds?)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
@@ -277,8 +277,9 @@ const TIMEFRAME_RE = new RegExp(
 const ATTRIBUTED_QUOTE_RE = /\b(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b[^.!?]{0,30}?(?:[:,]\s*|\s+)["“‘']\w/i;
 // The same attribution after a quotation ("‘Roaches again by the sink,’ you
 // said"), however long; an apostrophe between letters ("it's") stays inside
-// the quote, and any other quote mark ends the scan, so it stays linear.
-const REVERSE_ATTRIBUTED_QUOTE_RE = /[‘'"“]\w(?:[^"“”‘’'\n]|(?<=\w)['’](?=\w)){2,}?[’'"”]\s*,?\s*(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b/i;
+// the quote, any other quote mark ends the scan, and a quote mark right
+// after a letter never opens one, so it stays linear.
+const REVERSE_ATTRIBUTED_QUOTE_RE = /(?<!\w)[‘'"“]\w(?:[^"“”‘’'\n]|(?<=\w)['’](?=\w)){2,}?[’'"”]\s*,?\s*(?:you|they|the\s+(?:customer|homeowner|owner|tenant))\s+(?:said|wrote|texted|emailed|mentioned|told|reported|asked|noted)\b/i;
 // A span ends at the next opening quote too, so many unclosed quotes still
 // cost one linear pass.
 const QUOTED_SPAN_RE = /["“]([^"“”\n]*)["”]/g;
@@ -295,7 +296,7 @@ const GAUGE_RE = /\b(?:rat(?:ed|ing)|scored?|gauge|level)\s+(?:(?:was|is|of|at|r
 // forms ("the next check is free", "the follow-up is included") but not a
 // physical state ("covered by mulch", "free of standing water").
 const ENTITLEMENT_RE = /\b(?:is|are|was|were|be|comes?)\s+(?:(?:completely|totally|also|fully)\s+)?(?:free|included|covered)\b(?!\s+(?:by|with|in|under|of|from|on)\b)/i;
-const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?|complimentary)\b|\b(?:visit|follow-?up|recheck|re-?treatment|re-?service|service|inspection|call-?back|trip|it|this|that)(?:['’]s|\s+(?:is|was|will\s+be|comes|came))\s+on\s+the\s+house\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
+const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]?|pricing|fees?|invoice[ds]?|billing|payments?|complimentary)\b|\b(?:visit|follow-?up|recheck|re-?treatment|treatment|application|re-?service|service|inspection|call-?back|check|trip|it|this|that)(?:['’]s|\s+(?:is|was|will\s+be|comes|came))\s+on\s+the\s+house\b|(?<!\bin\s)\bcharg(?:e|es|ed|ing)\b|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Next-visit dates, days and times (rule 11): the report prints the
 // appointment itself. "October 7", "next Tuesday", "10 AM".
 // "May" only capitalized, so "activity may 2…" is not a date. A date is

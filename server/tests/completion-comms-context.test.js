@@ -317,6 +317,7 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(9.9), direction: 'inbound', message_body: 'blue gets me through the side gate where ants are' },
           { created_at: mk(9.95), direction: 'inbound', message_body: 'blue lets her through the side gate where ants are' },
           { created_at: mk(9.97), direction: 'inbound', message_body: 'blue gets me into the garage where mice are' },
+          { created_at: mk(9.98), direction: 'inbound', message_body: 'sunflower gets us into the house where mice are' },
           // The pests getting through is pest talk, not access.
           { created_at: mk(10), direction: 'inbound', message_body: 'Ants use the hole that gets them through the wall' },
           // "Gets me through" counts only when a gate or door is what it gets
