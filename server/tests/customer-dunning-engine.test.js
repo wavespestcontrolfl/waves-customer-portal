@@ -3595,3 +3595,43 @@ describe('#5475 r3: removed channels and the shared link follow the legs actuall
     expect(send.mock.calls[0][2]).toEqual(['email']);
   });
 });
+
+describe('#5475 r4: link attribution drops legs whose standing reservation will not be claimed', () => {
+  const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+  const standing = (channel, metadata) => mockLedger.push({
+    id: `t-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(0.5),
+    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(key, channel),
+    metadata: { notificationEventKey: key, selectedChannels: ['email', 'sms'], ...metadata },
+  });
+
+  test('email has an AMBIGUOUS standing reservation, SMS is fresh, both policy-permitted: the email is held REMINDER_OUTCOME_UNCONFIRMED, the SMS is sent, the link is minted for sms alone', async () => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    standing('email', {}); // reserved, never confirmed: claimAttempt refuses it (held)
+    const out = await run();
+    expect(out.outcome).toBe('told'); // the text reached the customer, the email waits
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    expect(mockShorten).toHaveBeenCalledTimes(1);
+    expect(mockShorten.mock.calls[0][1].channel).toBe('sms');
+    expect(ContactLedger.claimAttempt).toHaveBeenCalledTimes(2); // the send loop itself is unchanged: both legs still claimed in order
+  });
+
+  test('a REOPENED (send_failed) standing reservation will be claimed: it stays among the legs, the link is neutral', async () => {
+    prefs = { invoice_channels: ['email', 'sms'] };
+    standing('email', { send_failed: true });
+    await run();
+    expect(mockShorten.mock.calls[0][1]).not.toHaveProperty('channel');
+  });
+
+  test('per-invoice style callers (no unwindowed flag) gain no lookup and no filtering', async () => {
+    const { sendReminderChannels } = require('../services/billing-reminder-delivery');
+    standing('email', {});
+    const send = jest.fn(async () => ({ sent: true, ok: true, deliveryOutcome: 'accepted' }));
+    await sendReminderChannels({
+      customerId: CUSTOMER_ID, invoiceId: null, invoiceIds: ['inv-a'], source: 'invoice_followups_customer', purpose: 'late_payment',
+      eventKey: key, channels: ['email', 'sms'], metadata: {}, send,
+    });
+    expect(send.mock.calls.map((c) => c[0])).toEqual(['sms']); // the email's ambiguous reservation held it, as before
+    expect(send.mock.calls[0][2]).toEqual(['email', 'sms']); // attribution input: unfiltered (windowed callers ignore it)
+  });
+});

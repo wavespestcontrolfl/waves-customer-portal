@@ -252,6 +252,18 @@ async function restoreSettledLeg(claim, entry, channel, { delivered, resolved, r
   return false;
 }
 
+// Attribution only (no query, no claim): of the policy-permitted legs, those whose standing keyed reservation (already
+// loaded, repaired, in the episode's entries) would still be claimed. A leg that reuses an ambiguous reservation - or is
+// already delivered / resolved - will not dispatch, so it must not count among the legs that carry a shared link. A leg
+// with no standing reservation proceeds. The send loop itself is unchanged.
+function proceedingLegs(customerId, eventKey, legs, entries) {
+  return legs.filter((channel) => {
+    const key = reminderReservationKey(customerId, eventKey, channel);
+    const row = entries.find((entry) => entry.idempotency_key === key);
+    return !row || ContactLedger.claimVerdict({ id: row.id, reused: true, metadata: metadataOf(row) }).allowed === true;
+  });
+}
+
 async function episodeProgress(customerId, source, channels, eventKey, unwindowed) {
   const progress = await reminderProgress(customerId, source, channels, unwindowed ? { eventKey } : undefined);
   return progress.find((event) => event.metadata.notificationEventKey === eventKey)
@@ -298,7 +310,9 @@ async function sendReminderChannels({
     }
     return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
-  const dispatchable = pending.filter((_channel, index) => verdictAllows(permitted[index]));
+  const dispatchable = unwindowed
+    ? proceedingLegs(customerId, eventKey, pending.filter((_channel, index) => verdictAllows(permitted[index])), entries)
+    : pending.filter((_channel, index) => verdictAllows(permitted[index]));
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const reservation = {
