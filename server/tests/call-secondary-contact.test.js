@@ -873,4 +873,26 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     const v2Only = resolveCallSecondaryContact({}, { secondary_contact: v2Base });
     expect(onSiteNotifyConsent(v2Only)).toBe(false);
   });
+
+  test('V1 grounding never rides a V2-supplied phone unless V2 is positively the same person (pre-push codex P1)', () => {
+    // Name-only V1 (no phone) with both grounding flags; V2 is phone-only.
+    // Nothing conflicts, yet nothing proves they are one person — the merge
+    // may take V2's phone for the slot, but NOT carry V1's text consent onto it.
+    const v1NoPhone = normalizeV1({ first_name: 'Sample', last_name: 'Spouse', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: true });
+    const v2PhoneOnly = { ...v2Base, name_full: null, first_name: null, last_name: null, email: null, phone_e164: '+15550100777' };
+    const merged = resolveCallSecondaryContact({ secondary_contact: v1NoPhone }, { secondary_contact: v2PhoneOnly });
+    expect(merged.phone).toBe('+15550100777');
+    expect(merged.wants_appointment_texts).toBe(false);
+    expect(merged.on_site).toBe(false);
+    expect(onSiteNotifyConsent(merged)).toBe(false);
+
+    // Same full name on both sides = positively the same person: V2's phone
+    // may carry V1's consent.
+    const v2SameName = { ...v2PhoneOnly, name_full: 'Sample Spouse', first_name: 'Sample', last_name: 'Spouse' };
+    const same = resolveCallSecondaryContact({ secondary_contact: v1NoPhone }, { secondary_contact: v2SameName });
+    expect(same.phone).toBe('+15550100777');
+    expect(same.wants_appointment_texts).toBe(true);
+    expect(same.on_site).toBe(true);
+    expect(onSiteNotifyConsent(same)).toBe(true);
+  });
 });

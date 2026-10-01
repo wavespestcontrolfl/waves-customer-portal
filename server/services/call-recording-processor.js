@@ -2678,6 +2678,22 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
   if (conflicts) return v1;
 
+  // POSITIVE same-person evidence (shared email, phone, or full name). The
+  // conflict check above only proves the two extractions do not DISAGREE —
+  // an email-only V1 and a phone-only V2 never conflict, yet may be two
+  // different people. Anything that authorizes action on the OTHER
+  // extractor's identifier (billing V1's inbox for V2's payer; texting V2's
+  // phone on V1's consent) needs this, not just the absence of conflict.
+  const samePerson = (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+    || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+    || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+      && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name));
+  // On-site text consent is V1's statement about V1's person. It may ride a
+  // phone V2 supplied ONLY when V2 is positively the same person — otherwise
+  // a name-only V1 "he'll be there, text him" would authorize texting whatever
+  // number V2 attached to a possibly different contact (pre-push codex P1).
+  const groundingCarries = !!v1.phone || samePerson;
+
   return {
     first_name: v1.first_name || v2.first_name,
     last_name: v1.last_name || v2.last_name,
@@ -2691,8 +2707,8 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // no such fields — it fails closed). The identity-conflict check above
     // already returned V1 unmerged for a different person, so a V2 partner
     // can never inherit them.
-    wants_appointment_texts: v1.wants_appointment_texts === true,
-    on_site: v1.on_site === true,
+    wants_appointment_texts: v1.wants_appointment_texts === true && groundingCarries,
+    on_site: v1.on_site === true && groundingCarries,
     // Billing flag: V1's own flag always stands. A V2 flag is only inherited
     // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
     // full name. The identity-conflict check above can't see this gap: if V1
@@ -2701,13 +2717,7 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // bill V1's inbox for V2's payer. Requiring a positive shared identifier
     // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
     // to carry an "owner pays" flag onto an unrelated contact's email.
-    is_billing_party: v1.is_billing_party === true
-      || (v2.is_billing_party === true && (
-        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
-        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
-        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
-          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
-      )),
+    is_billing_party: v1.is_billing_party === true || (v2.is_billing_party === true && samePerson),
     notes: v1.notes || v2.notes,
   };
 }
