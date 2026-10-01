@@ -1,5 +1,15 @@
 const db = require('../models/db');
 const logger = require('./logger');
+
+// A failure log line for the notification writers carries only a fixed code /
+// constraint — never err.message: a Knex error echoes the SQL and its bound
+// values, which for a bell is the notification body (customer names and
+// addresses). Behavior (return value / throw) at every call site is unchanged.
+function safeErrorSummary(err) {
+  const bits = [err ? (err.code || err.name || 'error') : 'error'];
+  if (err && err.constraint) bits.push(`constraint=${err.constraint}`);
+  return bits.filter(Boolean).join(' ');
+}
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
@@ -455,7 +465,7 @@ const NotificationService = {
         } catch (err) {
           // Policy failure must never break notifications — fall through
           // and insert (fail-open matches gate-off behavior).
-          logger.warn(`[notifications] bell policy check failed: ${err.message}`);
+          logger.warn(`[notifications] bell policy check failed: ${safeErrorSummary(err)}`);
         }
       }
       // A title that was ONLY emoji falls back to the original rather than
@@ -494,7 +504,7 @@ const NotificationService = {
       }).returning('*');
       return notif;
     } catch (err) {
-      logger.error(`[notifications] Create failed: ${err.message}`);
+      logger.error(`[notifications] Create failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -670,7 +680,7 @@ const NotificationService = {
       if (receipt) relayFailureCall.onCommitted?.(receipt);
       return shape(persisted);
     } catch (err) {
-      logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
+      logger.warn(`[notifications] Admin notification dedupe failed: ${safeErrorSummary(err)}`);
       return null;
     }
   },
@@ -764,7 +774,7 @@ const NotificationService = {
       } catch (err) {
         // A failed lock/read cannot safely prove this event is new. Fail closed
         // instead of risking a duplicate bell + native push.
-        logger.warn(`[notifications] Customer notification dedupe failed: ${err.message}`);
+        logger.warn(`[notifications] Customer notification dedupe failed: ${safeErrorSummary(err)}`);
         return null;
       }
     } else {
@@ -1074,6 +1084,7 @@ function getCategoryIcon(category) {
 }
 
 module.exports = NotificationService;
+module.exports.safeErrorSummary = safeErrorSummary;
 module.exports._private = {
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,
