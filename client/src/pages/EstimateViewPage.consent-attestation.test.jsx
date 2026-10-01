@@ -24,7 +24,8 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/noteRenderedRecurringConsent = useCallback\(\(tender\) => \{[\s\S]{0,500}variant: afterVisit \? 'after_visit_card' : null,[\s\S]{0,200}version: afterVisit \? cur\.version : CONSENT_VERSION,/);
     expect(src).toMatch(/noteRenderedRecurringConsent\(renderedTender\);/);
     expect(src).toMatch(/noteRenderedRecurringConsent\(cardResult\.methodType\);/);
-    expect(src).toMatch(/if \(paymentPreference === 'prepay_annual' \|\| data\?\.recurringCardPolicy\?\.afterVisitConsent !== true\) return \{\};/);
+    // r7: every after-visit cohort attests, the held ones included.
+    expect(src).toMatch(/!\(pol\?\.afterVisitConsent === true \|\| pol\?\.afterVisitPaused === true \|\| pol\?\.afterVisitAutopayOff === true\)\) return \{\};/);
     expect(src).toMatch(/recurringCardConsentVariant: afterVisit \? 'after_visit_card' : undefined,/);
     expect(src).toMatch(/recurringCardConsentVersion: \(afterVisit \|\| recurringCardSetupIntentIdRef\.current\) \? version : undefined,/);
     // r5: the base card / ACH text's version is attested too, and a newer
@@ -51,11 +52,13 @@ describe('EstimateViewPage accept consent attestation', () => {
   });
 
   it('r5 audit: the payment-timing copy reads the same server answer as the capture text, is attested, and a PAYMENT_TIMING_REFRESH 409 records the answer for this selection', () => {
-    expect(src).toMatch(/const payAfterFirstVisitEffective = data\?\.recurringCardPolicy\?\.afterVisitExisting === true\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
+    expect(src).toMatch(/const payAfterFirstVisitEffective = \(data\?\.recurringCardPolicy\?\.afterVisitExisting === true \|\| afterVisitForced\)\s*&& afterVisitDeniedKey !== afterVisitSelectionKey;/);
+    // r7: a deferred:true refresh forces the after-visit timing for the selection.
+    expect(src).toMatch(/if \(body\.afterVisitDeferred === true\) \{\s*setAfterVisitForcedKey\(afterVisitSelectionKeyRef\.current\);/);
     expect(src.match(/payAfterFirstVisit=\{payAfterFirstVisitEffective\}\s*paymentTimingDenied=\{afterVisitDeniedKey === afterVisitSelectionKey\}/g)).toHaveLength(2);
-    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'\s*&& afterVisitInvoiceShape\.hasFirstVisitInvoice;/);
+    expect(src).toMatch(/afterVisitTimingShownRef\.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'\s*&& \(afterVisitInvoiceShape\.hasFirstVisitInvoice \|\| afterVisitForced\);/);
     expect(src).toMatch(/afterVisitTimingShown: \(paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef\.current\) \? true : undefined,/);
-    expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{\s*(?:\/\/[^\n]*\n\s*)*setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
+    expect(src).toMatch(/if \(body\.code === 'PAYMENT_TIMING_REFRESH'\) \{[\s\S]{0,600}setAfterVisitDeniedKey\(afterVisitSelectionKeyRef\.current\);/);
   });
 
   it('r3 P2: the held cohorts (Auto Pay paused / explicitly off) get a save-only modal title, not "Set up Auto Pay"', () => {

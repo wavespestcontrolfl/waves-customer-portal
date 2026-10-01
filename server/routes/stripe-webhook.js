@@ -5157,6 +5157,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         && typeof estimateData.acceptedRecurringCardConsent.version === 'string'
         ? { renderedConsent: { text: estimateData.acceptedRecurringCardConsent.text, version: estimateData.acceptedRecurringCardConsent.version } }
         : {}),
+      // The committed acceptance time (GitHub Codex #5481 r7): an opt-out the
+      // customer made AFTER accepting must stop this recovery from enrolling the
+      // capture (enrollConsentedMethod's opted_out_after_authorization guard),
+      // exactly as the accept's own inline enrollment passes acceptAuthorizedAt.
+      ...(boundToAccept && estimate.accepted_at ? { authorizedAt: new Date(estimate.accepted_at) } : {}),
       ...(boundToAccept && estimateData?.acceptedRecurringCardSkipEnrollment === true
         ? { skipEnrollment: true }
         : {}),

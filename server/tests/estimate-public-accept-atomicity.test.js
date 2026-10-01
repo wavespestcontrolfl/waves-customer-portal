@@ -2597,6 +2597,8 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       recurringCardConsentVariant: 'after_visit_card',
       recurringCardConsentVersion: AFTER_VISIT_CONSENT_VERSION,
       recurringCardConsentTender: 'card',
+      // A current tab attests the "billed after your first visit" timing it shows.
+      afterVisitTimingShown: true,
     };
     function verification(methodType) {
       verifySpy.mockResolvedValue({
@@ -2642,7 +2644,9 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
 
     test('an UNATTACHED standard invoice (setup-only shape / no first visit: pay link at accept) is not the after-visit promise — 409, nothing recorded, dropped intent retired', async () => {
       conversion(null);
-      const res = await putAccept(TOKEN, AFTER_VISIT);
+      // A setup-only page shows no first-visit timing, so it attests none.
+      const { afterVisitTimingShown: _shown, ...noTiming } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, noTiming);
       expect(res.status).toBe(409);
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
       expect(storedEstimate().status).toBe('sent');
@@ -2672,7 +2676,7 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     test('ACH tender, tab attests the tender-specific base text: accepted, no after-visit variant stamped or recorded', async () => {
       verification('us_bank_account');
       conversion('ss-first');
-      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: BASE_VERSION });
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: BASE_VERSION, afterVisitTimingShown: true });
       expect(res.status).toBe(200);
       expect(acceptedData().acceptedRecurringCardConsentVariant).toBeUndefined();
       expect(enrollSpy.mock.calls[0][0].consentVariant).toBeNull();
@@ -2713,7 +2717,7 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     test('r5: a bank capture whose tab attests an OLDER base ACH version is refused (the newer wording is never recorded)', async () => {
       verification('us_bank_account');
       conversion('ss-first');
-      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01' });
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'us_bank_account', recurringCardConsentVersion: 'v10_2026-01-01', afterVisitTimingShown: true });
       expect(res.status).toBe(409);
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
       expect(res.data.collectionPromise).toEqual({ variant: null, tender: 'us_bank_account', version: BASE_VERSION });
@@ -2734,16 +2738,27 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
     test('a tab that attests a tender different from the verified one is refused even with no variant', async () => {
       verification('us_bank_account');
       conversion('ss-first');
-      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card' });
+      const res = await putAccept(TOKEN, { recurringCardSetupIntentId: 'seti_captured_1', recurringCardConsentTender: 'card', afterVisitTimingShown: true });
       expect(res.status).toBe(409);
       expect(res.data.code).toBe('CONSENT_VARIANT_STALE');
     });
 
     test('an old tab with no tender attestation keeps working for a CARD capture (tender defaults to card)', async () => {
       conversion('ss-first');
-      const { recurringCardConsentTender, ...legacy } = AFTER_VISIT;
+      const { recurringCardConsentTender: _tender, ...legacy } = AFTER_VISIT;
       const res = await putAccept(TOKEN, legacy);
       expect(res.status).toBe(200);
+    });
+
+    test('r7: an after-visit accept that WILL defer its attached invoice but carries no timing attestation (a tab from before the gate) is refused for a refresh', async () => {
+      conversion('ss-first');
+      const { afterVisitTimingShown: _shown, ...unattested } = AFTER_VISIT;
+      const res = await putAccept(TOKEN, unattested);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('PAYMENT_TIMING_REFRESH');
+      expect(res.data.afterVisitDeferred).toBe(true);
+      expect(storedEstimate().status).toBe('sent');
+      expect(retireSpy).toHaveBeenCalledWith(expect.objectContaining({ setupIntentId: 'seti_captured_1' }));
     });
   });
 

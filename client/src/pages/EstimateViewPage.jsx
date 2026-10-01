@@ -5789,6 +5789,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // attested on /accept, which refuses (PAYMENT_TIMING_REFRESH) when the
   // standard invoice would actually go out payable at accept.
   const afterVisitTimingShownRef = useRef(false);
+  // The converse answer (PAYMENT_TIMING_REFRESH afterVisitDeferred:true): the
+  // server WILL defer this selection's first invoice, so the page shows and
+  // attests the after-visit timing for it.
+  const [afterVisitForcedKey, setAfterVisitForcedKey] = useState(null);
   const noteRenderedRecurringConsent = useCallback((tender) => {
     const t = tender === 'us_bank_account' ? 'us_bank_account' : 'card';
     const cur = afterVisitRenderedRef.current;
@@ -7238,7 +7242,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // otherwise. The server recomputes the promise in the accept
           // transaction and 409s CONSENT_VARIANT_STALE on any difference.
           ...(() => {
-            if (paymentPreference === 'prepay_annual' || data?.recurringCardPolicy?.afterVisitConsent !== true) return {};
+            // Every after-visit cohort attests what its capture rendered — the
+            // held ones (Auto Pay paused / off) their base card / ACH text too
+            // (GitHub Codex #5481 r7). Gate-off policies carry none of these.
+            const pol = data?.recurringCardPolicy;
+            if (paymentPreference === 'prepay_annual'
+              || !(pol?.afterVisitConsent === true || pol?.afterVisitPaused === true || pol?.afterVisitAutopayOff === true)) return {};
             const rendered = recurringCardSetupIntentIdRef.current ? recurringCardRenderedConsentRef.current : null;
             const cur = afterVisitRenderedRef.current;
             const tender = rendered ? rendered.tender : 'card';
@@ -7348,10 +7357,15 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         }
         if (r.status === 409) {
           if (body.code === 'PAYMENT_TIMING_REFRESH') {
-            // The server bills this selection now, not after the visit: show
-            // today's wording for it, drop the captured intent (its checkbox
-            // was for the after-visit terms) and refetch.
-            setAfterVisitDeniedKey(afterVisitSelectionKeyRef.current);
+            // The server bills this selection now (afterVisitDeferred false) or
+            // after the visit (true): show that timing for it, drop the
+            // captured intent (its checkbox was for the other terms) and refetch.
+            if (body.afterVisitDeferred === true) {
+              setAfterVisitForcedKey(afterVisitSelectionKeyRef.current);
+              setAfterVisitDeniedKey(null);
+            } else {
+              setAfterVisitDeniedKey(afterVisitSelectionKeyRef.current);
+            }
             recurringCardSetupIntentIdRef.current = null;
             setInlineCardIntent(null);
             await loadEstimate({ preserveSelection: true });
@@ -8411,10 +8425,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     && !afterVisitInvoiceShape.setupOnly
     && afterVisitDeniedKey !== afterVisitSelectionKey;
   // The payment-timing copy reads the SAME server answer as the capture text.
-  const payAfterFirstVisitEffective = data?.recurringCardPolicy?.afterVisitExisting === true
+  const afterVisitForced = afterVisitForcedKey === afterVisitSelectionKey;
+  const payAfterFirstVisitEffective = (data?.recurringCardPolicy?.afterVisitExisting === true || afterVisitForced)
     && afterVisitDeniedKey !== afterVisitSelectionKey;
   afterVisitTimingShownRef.current = payAfterFirstVisitEffective && serviceMode !== 'one_time'
-    && afterVisitInvoiceShape.hasFirstVisitInvoice;
+    && (afterVisitInvoiceShape.hasFirstVisitInvoice || afterVisitForced);
   afterVisitRenderedRef.current = {
     afterVisit: afterVisitRendered,
     // The version of the text THIS BUNDLE renders (AFTER_VISIT_CARD_CONSENT_TEXT

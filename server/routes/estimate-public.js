@@ -12855,6 +12855,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         err.afterVisitDeferred = false;
         throw err;
       }
+      // The converse (GitHub Codex #5481 r7): an after-visit cohort accept that
+      // WILL defer its attached first invoice (no pay link now, charged or
+      // linked after the visit) needs the tab's positive attestation that it
+      // showed that timing. A tab that loaded before the sub-gate turned on
+      // showed "invoice after you confirm" and sends none — refused for a
+      // refresh rather than silently suppressing the pay link it promised.
+      if (!afterVisitTimingAttested && recurringCardPolicy.afterVisitCard === true && !annualPrepaySelected
+        && !treatAsOneTime && invoiceModeResult !== true
+        && RecurringCards.standardInvoiceDelivery({
+          laneActive: recurringCardLaneActive, minted: standardInvoiceMinted, attached: standardInvoiceAttached,
+        }).suppressed) {
+        if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+          await retireOrDenyDroppedCapture(estimate, recurringCardVerification.setupIntentId);
+        }
+        const err = new Error('Your payment terms were just updated. Please review them and confirm again.');
+        err.status = 409;
+        err.code = 'PAYMENT_TIMING_REFRESH';
+        err.afterVisitDeferred = true;
+        throw err;
+      }
 
       if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId && !annualPrepaySelected) {
         const delivery = RecurringCards.standardInvoiceDelivery({
@@ -28432,17 +28452,13 @@ async function composeEstimateDataPayload(estimate, {
           ? { afterVisitAutopayOff: true } : {}),
         // The collection promise's best case for a CARD tender (GitHub Codex
         // #5481 r3): the SAME function the accept re-runs in its transaction
-        // with the verified tender and the real invoice outcome. The version
-        // is emitted so the client attests exactly what the server would
-        // record; a bank tender or a setup-only invoice (resolved per plan
-        // selection on the client) narrows it, and the accept 409s on any
-        // difference.
-        ...(() => {
-          const promise = RecurringCards.resolveCollectionPromise({ policy: recurringCardPolicyForData, tender: 'card' });
-          return promise.variant
-            ? { afterVisitConsent: true, afterVisitConsentVersion: promise.version }
-            : {};
-        })(),
+        // with the verified tender and the real invoice outcome. A bank tender
+        // or a setup-only invoice (resolved per plan selection on the client)
+        // narrows it, and the accept 409s on any difference. The tab attests
+        // the version of the text its own bundle renders, so no version is
+        // emitted here.
+        ...(RecurringCards.resolveCollectionPromise({ policy: recurringCardPolicyForData, tender: 'card' }).variant
+          ? { afterVisitConsent: true } : {}),
       },
       estimate: {
         id: estimate.id,

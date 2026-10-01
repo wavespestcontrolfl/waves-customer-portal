@@ -303,7 +303,13 @@ export default function PaymentPreferenceButtons({
     // Same first-visit-invoice predicate (GitHub Codex #5481 r5 P1): a
     // setup-only invoice goes out with a pay link at accept, so "nothing due
     // today" would be the opposite timing.
-    : (prepayCardCapture && hasFirstVisitInvoice && !paymentTimingDenied ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
+    : (hasFirstVisitInvoice && !paymentTimingDenied
+      ? (prepayCardCapture
+        ? 'Nothing due today — Auto Pay bills your card after your first application.'
+        // A saved consented method satisfies the after-visit rail (no fresh
+        // capture): say when it is charged (GitHub Codex #5481 r7).
+        : (payAfterFirstVisit ? 'Nothing due today — your saved payment method is charged after your first application.' : ''))
+      : '');
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0

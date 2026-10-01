@@ -415,6 +415,11 @@ describe('PaymentPreferenceButtons', () => {
         expect(screen.queryByText(/Nothing due today/)).not.toBeInTheDocument();
       });
 
+      it('r7: a saved-method customer on the after-visit rail is told when the saved method is charged', () => {
+        renderButtons({ payAfterFirstVisit: true, prepayCardCapture: false, annualPrepayEligible: true });
+        expect(screen.getByText(/Nothing due today — your saved payment method is charged after your first application\./)).toBeInTheDocument();
+      });
+
       it('r6: after the server denied after-visit timing for this selection, the capture customer sees no deferred-payment claim', () => {
         const props = { payAfterFirstVisit: false, prepayCardCapture: true };
         const { unmount } = renderButtons(props);

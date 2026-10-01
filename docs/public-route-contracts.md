@@ -1342,7 +1342,11 @@ the sub-gate is off. The sub-gate is live only when BOTH `GATE_PAY_AFTER_FIRST_V
 `GATE_PAF_EXISTING_CUSTOMERS` are exactly `'true'` and the card lane is on. Then the policy
 resolver (`resolveRecurringCardPolicyForEstimate`) no longer returns those two exemptions
 for an ELIGIBLE customer: per-application / per-visit / one-time-lane customers and
-non-member profiles whose customer row loaded. Monthly-membership-lane customers
+non-member profiles whose customer row loaded, when they would otherwise have received one of
+those two exemptions (a plan member not on Auto Pay, or a paused customer). An existing customer
+who never had either exemption (no plan, not paused) was already on the new-customer card rail
+before this gate and is unchanged by it (no `afterVisitCard` marker, base consent).
+Monthly-membership-lane customers
 (`billing_mode` `monthly_membership`, or NULL with a positive `monthly_rate`) and
 annual-prepay-lane customers stay on `existing_plan_customer` / `autopay_paused`: their add-on
 joins `monthly_rate` (billed by the monthly cron) or is covered by the prepay term. An
@@ -1362,8 +1366,9 @@ up to four keys, each OMITTED (never `false`) unless it applies, so gate-off res
 byte-identical: `afterVisitExisting: true` (an existing customer moved onto the rail by this
 sub-gate, any lane state), `afterVisitConsent: true` (that customer must capture a card and is
 shown the `after_visit_card` v12 authorization, which the accept then records; never set for a
-paused or Auto-Pay-off customer), and `afterVisitPaused: true` (the paused cohort: the page says the card is
-kept and a pay link follows each service; the base consent is recorded, not `after_visit_card`).
+paused or Auto-Pay-off customer), `afterVisitPaused: true` (the paused cohort: the page says the card is
+kept and a pay link follows each service; the base consent is recorded, not `after_visit_card`),
+and `afterVisitAutopayOff: true` (below).
 The estimate-accepted notification for this cohort says nothing is charged today and the saved
 payment method (tender-neutral: a bank capture is not "a card") is billed after the first visit (a
 pay link follows the visit when Auto Pay is paused or off) instead of "our team will follow up with
@@ -1397,18 +1402,42 @@ Commercial manual billing now clears every card-rail shape of this cohort (inclu
 accept, through one helper, so the two agree: `required: false`, `exemptReason:
 'commercial_manual_billing'`, no saved-method auto-enroll, no after-visit markers.
 
-`PUT /:token/accept` request fields `recurringCardConsentVariant` (`'after_visit_card'`) and
-`recurringCardConsentVersion` (the v12 label `v12_2026-09-30`) attest the authorization text the
-tab RENDERED (sent only when `/data` `afterVisitConsent` is true and the preference is not prepay;
-absent otherwise, so every other client is unchanged). When a card is captured at accept the server
-recomputes the variant it would record from live pause / opt-out state and answers `409 { code:
-'CONSENT_VARIANT_STALE' }` when it differs from the attestation in either direction (an absent
-attestation when `after_visit_card` would be recorded, or an `after_visit_card` attestation when the
-base text would be recorded) — nothing is recorded or committed and the client reloads `/data`. The
-accept also re-judges the moved cohort under the transaction's customer lock: if `billing_mode`
-moved into an ineligible lane, the pause or opt-out state changed, or the accept landed on no
-existing customer, it aborts with `409 { code: 'ACCEPT_BILLING_CHANGED' }` (nothing suppressed,
-charged or enrolled on the stale decision; the client reloads `/data`).
+`PUT /:token/accept` request fields (all optional; sent only by a tab whose `/data` carried one of
+the after-visit markers above, never for annual prepay, so every other client is unchanged):
+- `recurringCardConsentVariant` (`'after_visit_card'` when that text was rendered, else absent),
+  `recurringCardConsentVersion` (the version of the text the tab's own bundle RENDERED for the
+  captured method: `v12_2026-09-30` for `after_visit_card`, the global card / ACH version for the
+  base text) and `recurringCardConsentTender` (`'card'` | `'us_bank_account'`, the tender the
+  rendered text was for). The paused / Auto-Pay-off cohorts send the tender and base version too.
+- `afterVisitTimingShown: true` when the page showed "billed after your first visit" payment
+  timing for the selection (a first-application invoice, not one-time).
+
+The accept decides ONE collection promise inside its transaction from the verified tender and the
+real invoice outcome (an UNATTACHED first invoice, e.g. setup-only or an existing customer whose
+series already exists, is paid by link at accept and is never the after-visit promise) and
+answers:
+- `409 { code: 'CONSENT_VARIANT_STALE', collectionPromise: { variant, tender, version } }` when the
+  attested variant / tender / version differs from what it would record (a pre-transaction check
+  returns the card best case the same way). Nothing is recorded or committed and the dropped
+  SetupIntent is retired. The page drops the captured intent and refetches `/data`; when the
+  returned version differs from the one its bundle renders it reloads the page, and when a card
+  promise comes back without the after-visit variant it shows the base text for that selection.
+- `409 { code: 'PAYMENT_TIMING_REFRESH', afterVisitDeferred: false }` when the tab attested the
+  after-visit timing but the selection's first invoice goes out payable now (unattached, one-time,
+  invoice mode, or the cohort marker gone), and `afterVisitDeferred: true` when an after-visit
+  cohort accept WILL defer its attached invoice but the tab attested no timing (a tab from before
+  the sub-gate). The page shows the answered timing for that selection and refetches.
+- `409 { code: 'ACCEPT_BILLING_CHANGED' }` when the transaction's customer lock finds the moved
+  cohort drifted: `billing_mode` moved into an ineligible lane, the pause or opt-out state changed,
+  Auto Pay was turned on since the policy was resolved, or the accept landed on another / no
+  customer. Nothing is suppressed, charged or enrolled on the stale decision.
+
+On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
+tender, text }` (the exact authorization recorded as shown) beside the existing
+`acceptedRecurringCardConsentVariant` stamp. The inline enrollment and the `setup_intent.succeeded`
+recovery record that text and version verbatim (never re-derived from current copy), and the
+recovery passes the committed `accepted_at` as the authorization time so an Auto Pay opt-out made
+after accepting is honored.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and

@@ -116,6 +116,16 @@ describe('estimate_recurring_card recovery records the accepted consent variant'
     }));
   });
 
+  test('r7: recovery of the accepted intent carries the committed acceptance time (an opt-out after accepting is honored)', async () => {
+    const row = estimateRow({ acceptedRecurringCardSetupIntentId: 'seti_1', acceptedRecurringCardSkipEnrollment: true });
+    row.accepted_at = '2026-10-01T05:00:00.000Z';
+    wireDb(row);
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockCompleteEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      authorizedAt: new Date('2026-10-01T05:00:00.000Z'), skipEnrollment: true,
+    }));
+  });
+
   test('r5: an unbound intent never borrows the accept\'s persisted text', async () => {
     wireDb(estimateRow({
       acceptedRecurringCardSetupIntentId: 'seti_OTHER',
