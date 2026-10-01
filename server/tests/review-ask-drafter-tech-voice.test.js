@@ -177,7 +177,7 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
   });
 
   test('an invented personal detail is refused: redraft once, then the template', async () => {
-    const baby = { body: "It's Adam, I know you had to get to work. Congratulations on your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
+    const baby = { body: "It's Adam, I know you had to get to work. So happy about your new baby! A Google review would really help: {review_url}", details: GOOD.details.slice(0, 1) };
     mockDispatch.mockResolvedValue(reply(baby));
     judge([{ ask_only: false, supported: true, quote: 'I need to go to work' }, { ask_only: false, supported: false, quote: null }, { ask_only: true, supported: false, quote: null }]);
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
@@ -211,6 +211,36 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
         : approveAll(req).json.sentences[i])) },
     }));
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
+  });
+
+  test('Codex r1: the checker rules ride the system channel; the user message is data only', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    const req = mockFactCheck.mock.calls[0][1];
+    expect(req.system).toContain('ask_only');
+    expect(req.text).not.toContain('ask_only');
+    expect(req.text.startsWith('FACT CHECK DATA')).toBe(true);
+  });
+
+  test('a bare link after a question stays with its sentence', () => {
+    const { techVoiceSentences } = Drafter.__private;
+    expect(techVoiceSentences("It's Adam. Would you leave a Google review? {review_url}")).toEqual(["It's Adam.", 'Would you leave a Google review? {review_url}']);
+  });
+
+  test('Codex r1: the customer email evidence drops quoted Waves history', async () => {
+    mockTables.emails = [{ id: 'e1', subject: null, body_text: 'Sounds good, see you Sunday.\n\nOn Tue, Sep 29, 2026 at 9:00 AM Waves <contact@wavespestcontrol.com> wrote:\n> We sealed every gap in the garage.', received_at: new Date() }];
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice(INPUT);
+    expect(mockDispatch.mock.calls[0][1].text).toContain('Sounds good, see you Sunday.');
+    expect(mockDispatch.mock.calls[0][1].text).not.toContain('sealed every gap');
+  });
+
+  test('Fable P2: a Day-0 email is prompted as the same day, never "a week after"', async () => {
+    const email = { body: 'Marta, thanks for waiting this morning when you had to get to work. A Google review would help us a lot.', details: GOOD.details.slice(0, 1) };
+    mockDispatch.mockResolvedValueOnce(reply(email));
+    await Drafter.draftTechVoice({ ...INPUT, sequenceStep: 0, channel: 'email' });
+    expect(mockDispatch.mock.calls[0][1].system).toContain('sent the same day as the visit');
+    expect(mockDispatch.mock.calls[0][1].system).not.toContain('a week');
   });
 
   test('a wrong-length answer or an unavailable checker never sends the draft', async () => {
@@ -255,7 +285,7 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body })).toBe('ungrounded_term');
     expect(verify({ body: 'I know you had to get to work. The ants were busy. Google review: {review_url}' })).toBe('ungrounded_term');
     // "Roach" is grounded by "cockroach" in the record; loose words like "spot" are not checked.
-    const c = { corpus: `${corpus} German cockroaches.` };
+    const c = { corpus: `${corpus} German cockroaches.`, ownWords: `${corpus} German cockroaches.` };
     expect(verify({ body: 'I know you had to get to work. Roaches near the spot I flagged. Google review: {review_url}' }, c)).toBeNull();
   });
 
@@ -281,6 +311,24 @@ describe('verifyTechVoiceDraft — the auto-send safety net', () => {
     expect(verify({ body: 'I know you had to get to work. I will be back tomorrow for the next treatment. Google review: {review_url}' })).toBe('commitment');
     expect(verify({ body: "I know you had to get to work. I'll keep an eye on it. Google review: {review_url}" })).toBe('commitment');
     expect(verify({ body: 'I know you had to get to work. Your second visit is set. Google review: {review_url}' })).toBe('commitment');
+  });
+
+  test('Codex r1: health and money stay out even when the record holds them', () => {
+    const c = { corpus: `${corpus} Back from surgery last week. Rent is due.`, ownWords: `${corpus} Back from surgery last week. Rent is due.` };
+    expect(verify({ body: 'I know you had to get to work so soon after surgery. Google review: {review_url}' }, c)).toBe('sensitive_topic');
+    expect(verify({ body: 'I know you had to get to work with rent due. Google review: {review_url}' }, c)).toBe('sensitive_topic');
+  });
+
+  test('Codex r1: outcome wording is a result claim even when the report says it', () => {
+    for (const phrase of ['activity is reduced', 'the lawn looks better', 'things are settling down', 'it is working', 'no more ants']) {
+      expect(verify({ body: `I know you had to get to work, and ${phrase}. Google review: {review_url}` })).toBe('result_claim');
+    }
+  });
+
+  test('Codex r1: an invented name at the start of a sentence is still caught', () => {
+    expect(verify({ body: 'I know you had to get to work. Nutmeg was great to meet. Google review: {review_url}' })).toBe('unknown_proper_noun');
+    // An ordinary opener is fine.
+    expect(verify({ body: 'I know you had to get to work. Thanks again. Google review: {review_url}' })).toBeNull();
   });
 
   test('stems: plural, -ing/-ed and short words', () => {

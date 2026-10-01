@@ -5246,6 +5246,16 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('thanks again for Tuesday');
   });
 
+  test('Fable P2: with tech voice OFF, a deferred tech-voice draft is never reused (it may say "today")', async () => {
+    const priorDraft = "It's Adam, thanks for waiting on me this morning. A Google review would really help: {review_url}";
+    const mock = makeMock(reminderStepFixture('seq-tvo', { id: 'tvo-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
+      review_requests: [{ id: 'rr-tvo', sequence_id: 'seq-tvo', sequence_step: 1, customer_id: 'tvo-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(), template_key: 'soft_reminder_tech_voice' }],
+    }));
+    db.mockImplementation(mock);
+    expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toContain('waiting on me this morning');
+  });
+
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
     const mock = makeMock(reminderStepFixture('seq-rc', {

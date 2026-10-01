@@ -4686,10 +4686,14 @@ const ReviewService = {
           // "today"), so it is reused only on the ET calendar day it was
           // written; a retry that crosses midnight drafts afresh.
           const { etCalendarDayOf } = require("../utils/datetime-et");
-          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
-            // and only a draft the tech-voice writer made (fact-checked), never
-            // one the older drafter persisted before the switch went on.
-            && /_tech_voice$/.test(String(prior.template_key || "")));
+          // Reused only in the mode that wrote it: under tech voice, a draft
+          // the tech-voice writer made (fact-checked) on this same ET day;
+          // with the switch off, never a tech-voice draft (it may say
+          // "today" and would be recorded as personalized).
+          const priorTechVoice = /_tech_voice$/.test(String(prior?.template_key || ""));
+          const sameDay = techVoice
+            ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
+            : !priorTechVoice;
           if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
       }
@@ -4747,10 +4751,14 @@ const ReviewService = {
             .first();
           // Same-day reuse only under tech voice (see the SMS path above).
           const { etCalendarDayOf } = require("../utils/datetime-et");
-          const sameDay = !techVoice || (prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
-            // and only a draft the tech-voice writer made (fact-checked), never
-            // one the older drafter persisted before the switch went on.
-            && /_tech_voice$/.test(String(prior.template_key || "")));
+          // Reused only in the mode that wrote it: under tech voice, a draft
+          // the tech-voice writer made (fact-checked) on this same ET day;
+          // with the switch off, never a tech-voice draft (it may say
+          // "today" and would be recorded as personalized).
+          const priorTechVoice = /_tech_voice$/.test(String(prior?.template_key || ""));
+          const sameDay = techVoice
+            ? priorTechVoice && !!prior?.created_at && etCalendarDayOf(prior.created_at) === etCalendarDayOf(new Date())
+            : !priorTechVoice;
           if (prior?.custom_body && sameDay) persistedBody = prior.custom_body;
         } catch { /* reuse is best-effort; a fresh draft is still verified */ }
         if (!persistedBody) {
