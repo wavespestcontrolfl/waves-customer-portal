@@ -7086,6 +7086,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:40 AM ET — Estimated AI spend check (dark, GATE_LLM_COST_TRACKING,
+  // checked inside the service). Refreshes the OpenRouter list prices when
+  // the stored ones are a week old, then raises ONE admin item when a lane's
+  // estimated spend yesterday jumped well above its own recent average, and
+  // closes it once spend is back to normal. Throws on failure so job_health
+  // records it.
+  // =========================================================================
+  cron.schedule('40 7 * * *', async () => {
+    try {
+      await runExclusive('llm-cost-check', async () => {
+        const { runLlmCostCheck } = require('./llm-cost');
+        const result = await runLlmCostCheck();
+        if (result.raised) logger.info(`[llm-cost] spend spike item raised: ${result.spikes} lane(s)`);
+        if (result.reason === 'alert_not_persisted') throw new Error('spend spike item was not persisted');
+      });
+    } catch (e) { logger.error(`[llm-cost] daily spend check failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 8:05 AM ET — Typed-decisions review item (shadow lane, dark).
   // Refreshes unknown outcome evidence, then raises ONE admin item for
   // yesterday's unreviewed shadow decisions (up to 8 Jev-vs-baseline

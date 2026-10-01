@@ -92,6 +92,7 @@
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI service report, owner "go" 2026-09-30, four-section report owner "ok go" 2026-10-01: WHAT WE FOUND / WHAT WE DID AND WHY / WHAT TO EXPECT / WHAT'S NEXT, length by the record, timeframes only from approved expectation wording, the reach-out date on one-time services and re-services, no booking state in the text (the report shows the next visit live); four-section notes are read only while this switch is on; one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
+ *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer display, plus the "How it works" line as grounding for the AI report writer under GATE_REPORT_WRITER_RULES (owner "ok go" 2026-10-01: the writer explains why the work fits, never where it was applied). Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
@@ -748,6 +749,9 @@ const gates = {
   // TypeSafe Jev typed decisions: ships DARK. CALL-TIME reader is
   // typedDecisionsLive() below; this entry is for logGateStatus only.
   typedDecisions: gateEnvValue('GATE_TYPED_DECISIONS'),
+  // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
+  // below; this entry is for logGateStatus only.
+  llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
 
   // Portal "Your yard this month" card. Map entry for logGateStatus only; the
   // canonical CALL-TIME reader is portalYardCalendarLive() below.
@@ -4600,6 +4604,14 @@ function zoneRouteDaysLive() {
 // (routes/feed.js); the portal client learns the gate from that endpoint's
 // {available} answer, like the property-score card. Off = the endpoint answers
 // {available:false} and the Learn tab's Local Conditions card is untouched.
+// GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
+// price pull and the daily spend check; agent-control/hub-read.js: the
+// Control center's cost numbers). Off = no price fetch, no cost on the hub.
+function llmCostTrackingLive() {
+  return process.env.GATE_LLM_COST_TRACKING === 'true';
+}
+
 function portalYardCalendarLive() {
   return process.env.GATE_PORTAL_YARD_CALENDAR === 'true';
 }
@@ -4655,3 +4667,5 @@ module.exports.portalYardCalendarLive = portalYardCalendarLive;
 // never touch this one.
 module.exports.typedDecisionsLive = typedDecisionsLive;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
+// GATE_LLM_COST_TRACKING reader, on its own line.
+module.exports.llmCostTrackingLive = llmCostTrackingLive;
