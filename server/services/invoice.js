@@ -3538,25 +3538,20 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
     // time, so the ordinary "waits, then sends after the release" defer would be a lie. Never return
     // it: surface a distinct held + manual-recovery outcome and raise a durable office alert.
     if (!restored) {
-      // A false restore does not prove the claim is stuck (Codex #5459 r1 P2): a concurrent payment, void
-      // or other transition can legitimately have moved the row, and those writers do not keep this send
-      // claim. Re-read it; only a row STILL 'sending' under OUR claim token is stranded. An answer that
-      // cannot be read is treated as stranded (fail toward telling the office).
-      let current = null;
-      let readFailed = false;
-      try {
-        current = await db("invoices").where({ id: invoiceId }).first("status", "send_claim_token");
-      } catch { readFailed = true; }
-      const stillOurs = readFailed
-        || (current && current.status === "sending" && current.send_claim_token === invoice.send_claim_token);
-      if (stillOurs) {
-        await alertHoldClaimStranded(invoiceId, row, invoice.send_claim_token);
-        return holdClaimStrandedOutcome();
+      // A false restore does not prove the claim is stuck (Codex #5459 r1 P2): a concurrent payment, void,
+      // delivery or other transition can legitimately have moved the row, and those writers do not keep this
+      // send claim. Re-read it; only a row STILL 'sending' under OUR claim token is stranded.
+      let verdict = await classifyClaimAfterFailedRestore(invoiceId, invoice.send_claim_token);
+      if (verdict.kind === "stranded") {
+        // The marker's compare-and-set can lose the same race (Codex #5459 r5 P2): it reports whether the claim was
+        // still ours, and a zero-row result is re-classified before any alert goes out.
+        const marked = await alertHoldClaimStranded(invoiceId, row, invoice.send_claim_token);
+        if (marked && marked.kind !== "stranded") verdict = marked;
       }
+      if (verdict.kind === "stranded") return holdClaimStrandedOutcome();
       // The claim is gone and the invoice is not stuck: nothing to recover, no alert.
-      if (!current || SETTLED_AFTER_HOLD_STATUSES.has(String(current.status || "").toLowerCase())) {
-        return holdInvoiceAlreadySettledOutcome(current?.status);
-      }
+      if (verdict.kind === "delivered") return holdInvoiceAlreadyDeliveredOutcome(verdict.status);
+      if (verdict.kind === "settled") return holdInvoiceAlreadySettledOutcome(verdict.status);
       // Handed back by someone else (draft / scheduled again): the ordinary hold refusal is accurate.
     }
   }
@@ -3564,8 +3559,38 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
 }
 
 const HOLD_CLAIM_STRANDED_CODE = "COLLECTION_HOLD_CLAIM_STRANDED";
-// Statuses a concurrent writer can move an invoice to while its send claim is being handed back.
-const SETTLED_AFTER_HOLD_STATUSES = new Set(["paid", "prepaid", "void", "voided", "refunded", "canceled", "cancelled", "sent", "viewed", "overdue"]);
+// Statuses a concurrent writer can move an invoice to while its send claim is being handed back (Codex #5459 r5 P2):
+// DELIVERED (a concurrent markDeliverySent finalized it - accepted, never "not sent": an automated caller that read
+// it as a failed delivery would resend the pay link after the release) versus paid / void terminal states.
+const DELIVERED_AFTER_HOLD_STATUSES = new Set(["sent", "viewed", "overdue"]);
+const TERMINAL_AFTER_HOLD_STATUSES = new Set(["paid", "prepaid", "void", "voided", "refunded", "canceled", "cancelled"]);
+// Re-reads the invoice after a failed claim restore and says what became of it:
+// stranded (still 'sending' under OUR token, or unreadable: fail toward telling the office) | delivered |
+// settled (paid / void / gone) | handed_back (draft / scheduled again, or another claimant's).
+async function classifyClaimAfterFailedRestore(invoiceId, claimToken) {
+  let current = null;
+  try {
+    current = await db("invoices").where({ id: invoiceId }).first("status", "send_claim_token", "scheduled_send_error");
+  } catch { return { kind: "stranded" }; }
+  if (current && current.status === "sending" && current.send_claim_token === claimToken) {
+    return { kind: "stranded", marked: String(current.scheduled_send_error || "").includes(HOLD_CLAIM_STRANDED_MARKER) };
+  }
+  const status = String(current?.status || "").toLowerCase();
+  if (DELIVERED_AFTER_HOLD_STATUSES.has(status)) return { kind: "delivered", status };
+  if (!current || TERMINAL_AFTER_HOLD_STATUSES.has(status)) return { kind: "settled", status };
+  return { kind: "handed_back", status };
+}
+// The invoice was DELIVERED on its own while the hold refused this send: the delivery is accepted, nothing to resend.
+function holdInvoiceAlreadyDeliveredOutcome(status) {
+  return {
+    code: "INVOICE_ALREADY_DELIVERED",
+    reason: `The invoice was already delivered (${status || "sent"}); nothing more to send`,
+    alreadyDelivered: true,
+    retryable: false,
+    deferred: false,
+    deliveryOutcome: "accepted",
+  };
+}
 // The invoice settled on its own (paid, voided, ...) while the hold refused the send: not stranded, not a wait.
 function holdInvoiceAlreadySettledOutcome(status) {
   return {
@@ -3652,10 +3677,21 @@ async function alertHoldClaimStranded(invoiceId, row, claimToken = null) {
   let markerRecorded = false;
   if (claimToken) {
     try {
-      await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
+      const marked = await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
         .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
         .update({ scheduled_send_error: db.raw("CASE WHEN COALESCE(scheduled_send_error, '') = '' THEN ?::text ELSE scheduled_send_error || ' | ' || ?::text END", [HOLD_CLAIM_STRANDED_MARKER, HOLD_CLAIM_STRANDED_MARKER]) });
-      markerRecorded = true;
+      if (Number(marked) > 0) {
+        markerRecorded = true;
+      } else {
+        // Zero rows: the claim moved after the caller's re-read (paid / voided / delivered / restored), or it already
+        // carries the marker. Re-read; only a claim that is really still ours and 'sending' gets the alert, and its
+        // marker, if present, is the one an earlier attempt wrote.
+        const verdict = await classifyClaimAfterFailedRestore(invoiceId, claimToken);
+        if (verdict.kind !== "stranded") return verdict;
+        // Still ours: the marker an earlier attempt wrote makes it confirmed; without one (the write was lost) the
+        // claim cannot be tied to a pre-provider refusal, so the neutral alert goes out instead.
+        markerRecorded = verdict.marked === true;
+      }
     } catch (err) {
       logger.error(`[invoice] hold-claim-stranded marker NOT recorded for ${invoiceId}; raising the neutral maybe-stuck alert instead: ${err.message}`);
     }
@@ -3666,6 +3702,7 @@ async function alertHoldClaimStranded(invoiceId, row, claimToken = null) {
   } catch (err) {
     logger.error(`[invoice] hold-claim alert failed for ${invoiceId} (${markerRecorded ? "the stale-claim sweep retries it" : "no marker: only the sweep's active-hold check can still surface it"}): ${err.message}`);
   }
+  return null;
 }
 
 // The stale-claim sweep's half (Codex #5459 r2/r4 P2). A stale 'sending' row is a hold-claim candidate when it
@@ -3677,7 +3714,7 @@ async function alertHoldClaimStranded(invoiceId, row, claimToken = null) {
 function strandedHoldClaimCandidate(q) {
   return q.where((c) => c
     .whereRaw("COALESCE(scheduled_send_error, '') LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
-    .orWhere((held) => held.whereNull("payer_id").whereExists(function activeHold() {
+    .orWhere((held) => held.whereNull("payer_id").whereNull("payer_statement_id").whereExists(function activeHold() {
       require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
     })));
 }
@@ -6212,6 +6249,7 @@ const InvoiceService = {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
         const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, pre, packetClaim, holdExempt);
+        if (holdRefusal?.alreadyDelivered) return { sent: true, ...holdRefusal }; // accepted: delivered concurrently (Codex #5459 r5 P2)
         if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
         claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
       } else {
@@ -7082,6 +7120,12 @@ const InvoiceService = {
     if (!allowClaimed) {
       const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, accrualPre, packetClaim, holdExempt);
       if (holdRefusal) {
+        // A concurrently DELIVERED invoice is an accepted result (Codex #5459 r5 P2): callers that read ok:false as a
+        // failed delivery would retry and resend the pay link after the hold is released.
+        if (holdRefusal.alreadyDelivered) {
+          return { ok: true, ...holdRefusal,
+            sms: { ok: true, code: holdRefusal.code, alreadyDelivered: true }, email: { ok: true, code: holdRefusal.code, alreadyDelivered: true } };
+        }
         return { ok: false, ...holdRefusal, error: holdRefusal.reason,
           sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
       }

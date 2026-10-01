@@ -123,7 +123,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       await db('customers').whereIn('id', customers).del();
     }
     await db.destroy();
-  });
+  }, 60000); // ~100 synthetic customers: the cascading deletes outgrew jest's 5 s default hook timeout
 
   async function packetInvoiceFor(customerId, { payer = false } = {}) {
     const [visit] = await db('service_visits').insert({
@@ -254,6 +254,17 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         expect(await Hold.queueHeldInvoiceForSender(id, undefined, { rearmExhausted: true })).toMatchObject({ queued: false, settled: true });
         expect({ name, row: await invoice(id) }).toEqual({ name, row: before });
       }
+    });
+
+    // Codex #5459 r5 P2: a recordless hand-over (a deferred replay with no service_record_id) has no marker to
+    // persist and runs once per row, so it counts as the first hand-over: an exhausted scheduled invoice is re-armed,
+    // not silently reported settled while the sender never selects it.
+    test('a RECORDLESS hand-over re-arms an exhausted scheduled invoice (never silently settled)', async () => {
+      const Deferred = require('../services/dispatch-completion-deferred');
+      const c = await newCustomer();
+      const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000), scheduled_send_attempts: 5 });
+      expect(await Deferred.handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: null })).toMatchObject({ queued: true, rearmed: true });
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
     });
 
     test('end to end: a completion hand-over (handOverHeldInvoiceToSender) of an exhausted scheduled invoice records the sender as owner AND the invoice is delivered by the first tick after the release', async () => {
@@ -518,6 +529,31 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
           } finally { notify.mockRestore(); }
         });
 
+        // Codex #5459 r5 P2: the marker's compare-and-set can lose the race too. A trigger stands in for a payment that
+        // lands between the re-read and the marker write: the CAS then affects zero rows, and the claim is re-read.
+        test('a marker CAS that affects zero rows (the invoice was paid meanwhile) re-reads: no stranded alert, an accurate settled outcome', async () => {
+          const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+          try {
+            const c = await newCustomer();
+            await placeHold(c);
+            const { inv } = await packetInvoiceFor(c);
+            await db.raw(`CREATE OR REPLACE FUNCTION b10_pay_before_marker() RETURNS trigger AS $$ BEGIN
+              UPDATE invoices SET status = 'paid', paid_at = now(), send_claim_token = NULL WHERE id = OLD.id; RETURN NULL; END $$ LANGUAGE plpgsql`);
+            await db.raw(`CREATE TRIGGER b10_pay_before_marker_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id = '${inv}' AND NEW.scheduled_send_error LIKE '%HOLD_CLAIM_STRANDED%') EXECUTE FUNCTION b10_pay_before_marker()`);
+            const spy = failRestoreAfterHoldLookup();
+            let out;
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {})); } finally {
+              spy.mockRestore(); db.__failTables.clear();
+              await db.raw('DROP TRIGGER IF EXISTS b10_pay_before_marker_trg ON invoices');
+              await db.raw('DROP FUNCTION IF EXISTS b10_pay_before_marker()');
+            }
+            expect(await invoice(inv)).toMatchObject({ status: 'paid' });
+            expect(out).toMatchObject({ code: 'INVOICE_ALREADY_SETTLED', retryable: false, deliveryOutcome: 'not_sent' });
+            expect(out.code).not.toBe('COLLECTION_HOLD_CLAIM_STRANDED');
+            expect(notify).not.toHaveBeenCalled();
+          } finally { notify.mockRestore(); }
+        });
+
         // Codex #5459 r1 P2: a false restore does not prove the invoice is stuck. Re-read: only a row still
         // 'sending' under OUR claim token is stranded.
         test('a false restore on an invoice that was paid / voided / handed back meanwhile is NOT stranded: an accurate outcome and no alert', async () => {
@@ -525,6 +561,23 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
           try {
             const c = await newCustomer();
             await placeHold(c);
+            // A concurrently DELIVERED invoice is an accepted result, never "not sent" (Codex #5459 r5 P2): an automated
+            // caller that read it as a failed delivery would resend the pay link after the release.
+            for (const delivered of ['sent', 'viewed', 'overdue']) {
+              const { inv } = await packetInvoiceFor(c);
+              const spy = stealClaimBeforeRestore(inv, { status: delivered, sent_at: new Date(), send_claim_token: null });
+              let out;
+              try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {})); } finally { spy.mockRestore(); }
+              expect(out).toMatchObject({ ok: true, code: 'INVOICE_ALREADY_DELIVERED', alreadyDelivered: true, deliveryOutcome: 'accepted', retryable: false, deferred: false });
+              expect(out.sms).toMatchObject({ ok: true, alreadyDelivered: true });
+              // the prepay sweep's classifier reads it as DELIVERED (resolves; never resends)
+              expect(require('../services/recurring-card-on-file')._private.classifyDeliveryOutcome(out)).toMatchObject({ delivered: true, settled: false });
+              const { inv: inv2 } = await packetInvoiceFor(c);
+              const spy2 = stealClaimBeforeRestore(inv2, { status: delivered, sent_at: new Date(), send_claim_token: null });
+              let smsOut;
+              try { smsOut = await Invoices.sendViaSMS(inv2, {}); } finally { spy2.mockRestore(); }
+              expect(smsOut).toMatchObject({ sent: true, code: 'INVOICE_ALREADY_DELIVERED', alreadyDelivered: true });
+            }
             for (const settled of [{ status: 'paid', paid_at: new Date() }, { status: 'void' }]) {
               const { inv } = await packetInvoiceFor(c);
               const spy = stealClaimBeforeRestore(inv, { ...settled, send_claim_token: null });
@@ -688,6 +741,28 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
               expect(`${headline} ${why} ${opts.detail}`).not.toMatch(/did not (go|send)|was not sent|not delivered/i);
               expect((await invoice(inv)).scheduled_send_error || '').not.toContain('HOLD_CLAIM_STRANDED');
             } finally { notify.mockRestore(); }
+          });
+
+          // Codex #5459 r5 P2: a NET-terms child invoice (payer_statement_id, null payer_id) is never delivered
+          // individually; its stale claim must neither be held back from the park nor alerted as a customer pay link.
+          test('a stale claim on a payer-statement invoice under a hold parks as before with NO alert (the active-hold fallback is self-pay only)', async () => {
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+            let statementId;
+            try {
+              const c = await newCustomer();
+              await placeHold(c);
+              const [payer] = await db('payers').insert({ display_name: 'Synthetic Net Terms Payer', ap_email: 'ap@example.invalid' }).returning('id');
+              packetFixtures.payers.push(payer.id);
+              [{ id: statementId }] = await db('payer_statements').insert({ payer_id: payer.id, period_start: '2040-01-01', period_end: '2040-01-31', terms_snapshot: 'net30', token: randomUUID() }).returning('id');
+              const inv = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID(), payer_statement_id: statementId });
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).not.toHaveBeenCalled();
+              expect((await invoice(inv)).status).toBe('scheduled');
+            } finally {
+              notify.mockRestore();
+              if (statementId) { await db('invoices').where({ payer_statement_id: statementId }).del(); await db('payer_statements').where({ id: statementId }).del(); }
+            }
           });
 
           test('an alert that already LANDED (the standing notification for the key) is not raised again by the sweep', async () => {

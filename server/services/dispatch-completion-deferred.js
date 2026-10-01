@@ -332,12 +332,16 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
 // completion's service record (the marker handOverInvoiceToSender writes), so a terminal
 // report-only replay followed by a retried closeout sees the sender owns the pay link and
 // sends report-only instead of texting a second one.
-// Returns true only when THIS call newly recorded the ownership (Codex #5459 r4 P2): the first hand-over alone may
+// Returns true when this hand-over is the FIRST for the invoice (Codex #5459 r4/r5 P2): the first hand-over alone may
 // re-arm an exhausted scheduled invoice (queueHeldInvoiceForSender rearmExhausted), so an idempotent re-run of the
-// same closeout / replay never resets the sender's attempt cap again. No service record = no durable ownership =
-// never "newly".
+// same closeout / replay never resets the sender's attempt cap again. With a service record that is "this call newly
+// recorded the ownership marker". A RECORDLESS hand-over (a deferred replay with no service_record_id, e.g. the dead
+// decline notice) has no marker to persist, and its terminal hook runs once per row (the sms_log row transition that
+// guards it is in the same transaction), so it counts as first: silently reporting an exhausted invoice "settled"
+// would leave the sender never selecting it, with no alert.
 async function markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId) {
-  if (!serviceRecordId || !invoiceId) return false;
+  if (!invoiceId) return false;
+  if (!serviceRecordId) return true;
   const newly = await trx('service_records').where({ id: serviceRecordId })
     .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'invoiceSenderOwnsPayLinkFor' IS DISTINCT FROM ?", [String(invoiceId)])
     .forUpdate()
