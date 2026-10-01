@@ -621,14 +621,16 @@ async function dueScheduleIds(now) {
 }
 
 /** Every due schedule, one at a time; one failure never stops the rest. */
-async function runCustomerSchedules(now = new Date()) {
+async function runCustomerSchedules(now = new Date(), { clockStartedAt = Date.now() } = {}) {
   const tally = { processed: 0, failed: 0, outcomes: {} };
   const ids = await dueScheduleIds(now);
   // A sequential batch can outlive CLAIM_TTL_MS: each claim is stamped at the
   // time it is TAKEN (batch clock + elapsed wall time), never the batch start,
   // or later claims would be born expired to admin controls and
-  // InvoiceService's edit fence.
-  const wallStart = Date.now();
+  // InvoiceService's edit fence. `clockStartedAt` is the wall time `now` was
+  // read: runPending passes its own start, so the time its per-invoice loop
+  // spent before this call counts too.
+  const wallStart = clockStartedAt;
   for (const id of ids) {
     try {
       const claimAt = new Date(now.getTime() + (Date.now() - wallStart));

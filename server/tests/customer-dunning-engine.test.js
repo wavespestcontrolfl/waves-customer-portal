@@ -2734,6 +2734,22 @@ describe('runCustomerSchedules: each claim is stamped when it is TAKEN, not at b
   });
 });
 
+describe('runCustomerSchedules: time spent before the call counts toward the claim stamp', () => {
+  test('runPending hands its start clock: 10 minutes of per-invoice loop advance the FIRST claim by 10 minutes', async () => {
+    require('../models/db').mockImplementationOnce(() => ({
+      whereIn() { return this; }, where() { return this; }, orderBy() { return this; },
+      select: async () => [{ id: 's1', customer_id: 'c1' }],
+    }));
+    const wall = 1_000_000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => wall);
+    try {
+      Schedule.claim.mockResolvedValueOnce(null);
+      await Runner.runCustomerSchedules(NOW, { clockStartedAt: wall - 10 * 60 * 1000 });
+    } finally { spy.mockRestore(); }
+    expect(Schedule.claim.mock.calls[0][1].getTime()).toBe(NOW.getTime() + 10 * 60 * 1000);
+  });
+});
+
 describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
   const logger = require('../services/logger');
   const shadowLines = () => logger.info.mock.calls.map(([m]) => m).filter((m) => String(m).includes('SHADOW would'));

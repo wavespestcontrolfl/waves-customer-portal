@@ -130,7 +130,8 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     expect(order).toEqual(['releaseIfDark', 'promote', 'batch', 'runCustomerSchedules']);
     expect(Wiring.releaseIfDark).toHaveBeenCalledWith(NOW);
     expect(Schedule.promote).toHaveBeenCalledWith(NOW);
-    expect(Runner.runCustomerSchedules).toHaveBeenCalledWith(NOW);
+    // claims count the per-invoice loop's wall time: the engine's clock starts at runPending's start
+    expect(Runner.runCustomerSchedules).toHaveBeenCalledWith(NOW, { clockStartedAt: NOW.getTime() });
   });
 
   test('shadow only: the kill switch still runs first, no promotion, shadowRun after the batch', async () => {

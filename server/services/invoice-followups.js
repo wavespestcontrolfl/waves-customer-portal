@@ -1051,7 +1051,10 @@ async function runCustomerScheduleEngine(now) {
   if (!live && !gatesModule.dunningCustomerScheduleShadowLive()) return;
   try {
     const Runner = require('./customer-dunning/runner');
-    if (live) await Runner.runCustomerSchedules(now);
+    // `now` is runPending's start (read from the wall clock): claims are
+    // stamped from it plus all time elapsed since, including the per-invoice
+    // loop above, so none is born expired. Cadence still uses `now`.
+    if (live) await Runner.runCustomerSchedules(now, { clockStartedAt: now.getTime() });
     else await Runner.shadowRun(now);
   } catch (err) {
     logger.error(`[invoice-followups] customer-dunning ${live ? 'run' : 'shadow run'} failed: ${err.message}`);
