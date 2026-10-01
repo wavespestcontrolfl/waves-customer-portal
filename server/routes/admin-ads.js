@@ -332,15 +332,24 @@ router.post('/sync', requireAdmin, async (req, res, next) => {
 
     const campaigns = await getGoogleAds().syncCampaigns();
     const performance = await getGoogleAds().syncDailyPerformance(7);
-    const searchTerms = await getGoogleAds().syncSearchTerms(30);
+    // Search terms throw here so a rolled-back snapshot (e.g. rows for a
+    // campaign missing locally) is reported, not counted as a success.
+    let searchTerms = [];
+    let searchTermsError = null;
+    try {
+      searchTerms = await getGoogleAds().syncSearchTerms(30, { throwOnError: true });
+    } catch (err) {
+      searchTermsError = err.message;
+    }
 
-    res.json({
-      success: true,
+    res.status(searchTermsError ? 502 : 200).json({
+      success: !searchTermsError,
       synced: {
         campaigns: campaigns.length,
         performanceRows: performance.length,
         searchTerms: searchTerms.length,
       },
+      ...(searchTermsError ? { error: `Search terms not synced: ${searchTermsError}` } : {}),
     });
   } catch (err) { next(err); }
 });

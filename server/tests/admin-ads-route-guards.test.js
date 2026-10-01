@@ -235,3 +235,31 @@ describe('POST /advisor/generate when the AI is unavailable (Codex r10 on #5486)
     expect(res.body.report.grade).toBe('B');
   });
 });
+
+describe('POST /sync reports a rolled-back search-term snapshot (Codex r13 on #5486)', () => {
+  const googleAds = require('../services/ads/google-ads');
+  afterEach(() => jest.restoreAllMocks());
+  const stubSyncs = (searchTerms) => {
+    jest.spyOn(googleAds, 'isConfigured').mockReturnValue(true);
+    jest.spyOn(googleAds, 'syncCampaigns').mockResolvedValue([{}]);
+    jest.spyOn(googleAds, 'syncDailyPerformance').mockResolvedValue([{}, {}]);
+    return jest.spyOn(googleAds, 'syncSearchTerms').mockImplementation(searchTerms);
+  };
+
+  test('incomplete search terms: 502, success false, error names it', async () => {
+    const st = stubSyncs(() => Promise.reject(Object.assign(new Error('1 search-term row(s) belong to campaigns missing locally'), { code: 'search_terms_incomplete' })));
+    const res = await call('post', '/api/admin/ads/sync', {});
+    expect(st).toHaveBeenCalledWith(30, { throwOnError: true });
+    expect(res.status).toBe(502);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(/Search terms not synced: .*missing locally/);
+    expect(res.body.synced).toEqual({ campaigns: 1, performanceRows: 2, searchTerms: 0 });
+  });
+
+  test('complete sync: 200 success', async () => {
+    stubSyncs(() => Promise.resolve([{}, {}, {}]));
+    const res = await call('post', '/api/admin/ads/sync', {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, synced: { campaigns: 1, performanceRows: 2, searchTerms: 3 } });
+  });
+});

@@ -384,21 +384,23 @@ class CampaignAdvisor {
     const last7days = await db('ad_performance_daily').where('date', '>=', d7);
     const last30days = await db('ad_performance_daily').where('date', '>=', d30);
 
-    // syncSearchTerms rewrites every row each run (terms that left Google's
-    // rolling 30-day snapshot are zeroed), so a recent stamp means current
-    // totals; nothing stamped recently means the sync is not running.
-    const searchTerms = await db('ad_search_terms')
-      .where('updated_at', '>=', new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS))
-      .where('cost', '>', 0)
-      .orderBy('cost', 'desc')
-      .limit(ADVISOR_MAX_SEARCH_TERMS + 1);
     // Search terms count as current only when a COMPLETE sync ran recently:
     // syncSearchTerms records that per run (an empty snapshot included) and
-    // rolls back a run with rows it couldn't store, so a partial snapshot is
-    // never written, let alone read as every term that cost money.
+    // rolls back a run with rows it couldn't store. The record is read FIRST
+    // and the rows bound to it: a complete run restamps every row (terms that
+    // left Google's window are zeroed), so rows at or after the recorded run
+    // are that snapshot, or a newer complete one that committed in between.
     const freshCutoff = new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS);
     const syncMark = await db('system_settings').where({ key: SEARCH_TERMS_SYNCED_KEY }).first();
-    const searchTermsAvailable = Boolean(syncMark?.value) && new Date(syncMark.value) >= freshCutoff;
+    const syncedAt = syncMark?.value ? new Date(syncMark.value) : null;
+    const searchTermsAvailable = Boolean(syncedAt) && syncedAt >= freshCutoff;
+    const searchTerms = searchTermsAvailable
+      ? await db('ad_search_terms')
+        .where('updated_at', '>=', syncedAt)
+        .where('cost', '>', 0)
+        .orderBy('cost', 'desc')
+        .limit(ADVISOR_MAX_SEARCH_TERMS + 1)
+      : [];
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);

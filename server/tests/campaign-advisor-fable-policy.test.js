@@ -173,15 +173,25 @@ describe('provenance and recent-change context (Codex r1 on #5486)', () => {
 });
 
 describe('Codex r4 on #5486', () => {
-  test('search terms are limited to rows refreshed by a recent sync (aged-out rows never reach the prompt)', async () => {
+  test('search terms are bound to the recorded complete sync, read first (Codex r4, r13)', async () => {
     mockWhereCalls.length = 0;
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    const fresh = mockWhereCalls.find((c) => c.table === 'ad_search_terms' && c.args[0] === 'updated_at');
+    const markIdx = mockWhereCalls.findIndex((c) => c.table === 'system_settings');
+    const rowsIdx = mockWhereCalls.findIndex((c) => c.table === 'ad_search_terms' && c.args[0] === 'updated_at');
+    expect(markIdx).toBeGreaterThanOrEqual(0);
+    expect(rowsIdx).toBeGreaterThan(markIdx);
+    const fresh = mockWhereCalls[rowsIdx];
     expect(fresh.args[1]).toBe('>=');
-    const ageMs = Date.now() - fresh.args[2].getTime();
-    expect(ageMs).toBeGreaterThanOrEqual(47 * 3600 * 1000);
-    expect(ageMs).toBeLessThanOrEqual(49 * 3600 * 1000);
+    expect(fresh.args[2].toISOString()).toBe(mockFirstRows.system_settings.value);
+  });
+
+  test('no recent complete sync: the term rows are not read at all', async () => {
+    mockWhereCalls.length = 0;
+    mockFirstRows = {};
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockWhereCalls.some((c) => c.table === 'ad_search_terms')).toBe(false);
   });
 
   test('recent budget changes are identified by campaign_id, not just the (non-unique) name', async () => {
