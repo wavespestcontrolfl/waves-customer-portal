@@ -81,10 +81,10 @@ describe('recipient double opt-in', () => {
   // returning the count would let the webhook's fail-loud guard pass while
   // COMMIT resolves as a rollback. Must return FALSE so the caller retries
   // under its locked fallback. A fire-and-forget dbh keeps best-effort null.
-  function markerRecoveryQueues({ smsLogFails }) {
+  function markerRecoveryQueues({ smsLogFails, transactional = false }) {
     function chain({ rows = [], firstRejects = false } = {}) {
       const q = {};
-      ['where', 'whereNot', 'whereRaw', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy'].forEach((m) => {
+      ['where', 'whereNot', 'whereRaw', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy', 'select'].forEach((m) => {
         q[m] = jest.fn((arg) => {
           if (typeof arg === 'function') arg.call(q);
           return q;
@@ -97,10 +97,18 @@ describe('recipient double opt-in', () => {
       q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       return q;
     }
-    return {
-      recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] })],
-      sms_log: [chain({ firstRejects: smsLogFails })],
-    };
+    // On a transaction a YES first locks its customers (lock order, #5467):
+    // the customer_id read, then customers FOR UPDATE.
+    return transactional
+      ? {
+        recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] }), chain({ rows: [{ customer_id: 'c1' }] })],
+        customers: [Object.assign(chain({ rows: [{ id: 'c1' }] }), { whereIn: jest.fn(function whereIn() { return this; }), forUpdate: jest.fn(function forUpdate() { return this; }), select: jest.fn(async () => [{ id: 'c1' }]) })],
+        sms_log: [chain({ firstRejects: smsLogFails })],
+      }
+      : {
+        recipient_optin: [chain(), chain({ rows: [{ customer_id: 'c1' }] })],
+        sms_log: [chain({ firstRejects: smsLogFails })],
+      };
   }
   function queuedDbh(queues) {
     return jest.fn((table) => {
@@ -111,10 +119,14 @@ describe('recipient double opt-in', () => {
   }
 
   test('marker-recovery sms_log error on a transactional dbh returns FALSE', async () => {
-    const dbh = queuedDbh(markerRecoveryQueues({ smsLogFails: true }));
+    const queues = markerRecoveryQueues({ smsLogFails: true, transactional: true });
+    const dbh = queuedDbh(queues);
     dbh.isTransaction = true;
     const updated = await markRecipientOptin('+19415550123', 'confirmed', { dbh });
     expect(updated).toBe(false);
+    // It failed on the sms_log read (consumed), not on the customer lock.
+    expect(queues.customers).toHaveLength(0);
+    expect(queues.sms_log).toHaveLength(0);
   });
 
   test('marker-recovery sms_log error on a fire-and-forget dbh stays best-effort (returns the count)', async () => {
@@ -268,12 +280,16 @@ describe('recipient YES / NO: consent stamp, unconsented hold, review card', () 
     expect(src).toContain('optin_visit_id: claim.visitId || null,');
     // An on-site visit ask is tagged on the row, and the undispatched-ask
     // recovery sweep releases it instead of re-sending it without its visit.
-    expect(src).toContain("requested_by: visitId ? ON_SITE_VISIT_ASK : 'portal_contact_save',");
-    expect(src).toContain('...(visitId ? { requested_by: ON_SITE_VISIT_ASK } : {}),');
+    // The visit is stored on the row (fresh claim and re-claim alike).
+    expect(src.split('visit_id: visitId || null,').length - 1).toBe(2);
     // ...but only AFTER the accepted-send reconcile: a delivered ask is marked
     // dispatched (the YES can confirm it), never released.
+    // The recovery sweep re-sends an on-site ask for its own visit while that
+    // visit is still askable, else releases it — only after the accepted-send
+    // reconcile found nothing went out.
     const sweepSrc = src.slice(src.indexOf('async function sweepUndispatchedOptins'));
-    expect(sweepSrc.indexOf("if (row.requested_by === ON_SITE_VISIT_ASK) {")).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
+    expect(sweepSrc.indexOf('const visit = row.visit_id ? await askableVisit(row.visit_id, row.customer_id) : null;')).toBeGreaterThan(sweepSrc.indexOf('const priorSend = priorSendRow'));
+    expect(sweepSrc).toContain('visitId: row.visit_id || null }],');
     // An unreadable reconcile leaves the row pending (never released or re-sent on a guess).
     expect(sweepSrc).toContain('if (priorSendRow && priorSendRow.readFailed) continue;');
   });

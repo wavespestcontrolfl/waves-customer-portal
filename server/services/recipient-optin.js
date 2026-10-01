@@ -247,6 +247,15 @@ async function markRecipientOptin(phone, status, { dbh = db } = {}) {
     // but can never unblock their appointment texts. An explicit inbound
     // YES from an already-declined person supersedes the carrier verdict,
     // exactly as it does for the callback path's dispatched declines.
+    // Lock order (#5467): a YES writes the customer rows (consent stamp,
+    // unconsented hold) after the recipient_optin rows, while a portal
+    // contact save locks the customer first and then claims opt-in rows.
+    // Take the customers FIRST, in id order, so the two never deadlock.
+    if (status === 'confirmed' && dbh && dbh.isTransaction) {
+      const customerIds = (await dbh('recipient_optin').where({ phone_key: key }).whereNotNull('customer_id').select('customer_id'))
+        .map((r) => r.customer_id).sort();
+      if (customerIds.length) await dbh('customers').whereIn('id', customerIds).orderBy('id').forUpdate().select('id');
+    }
     if (status === 'confirmed') {
       q.whereNot({ status: 'ask_failed' }).where(function confirmable() {
         this.whereNotNull('dispatched_at').orWhere({ status: 'declined' });
@@ -348,14 +357,10 @@ async function filterRecipientsByOptin(contacts = [], customerId = null) {
 // lands before the contact becomes visible to any fanout, there is no
 // window where a brand-new phone reads as grandfathered (no row). Returns
 // the claims for phase 2; template dark → no claims, nothing pends.
-// visitId (optional): the booked visit an on-site ask is about (#5467). It
-// rides the claim into a send-window-deferred ask, whose replay recheck sends
-// it only while that visit is still confirmed and ahead. The row records only
-// that it is an on-site visit ask (requested_by ON_SITE_VISIT_ASK): the
-// undispatched-ask recovery sweep cannot re-check a visit it never stored, so
-// it releases such a row to ask_failed instead of re-sending it blind (the
-// next booking re-asks with a fresh visit check).
-const ON_SITE_VISIT_ASK = 'call_onsite_visit';
+// visitId (optional): the booked visit an on-site ask is about (#5467). It is
+// stored on the row (recipient_optin.visit_id) and rides the claim into a
+// send-window-deferred ask: both the deferred replay and the undispatched-ask
+// recovery sweep send it only while that visit is still confirmed and ahead.
 async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '', trx = null, visitId = null }) {
   if (!isDoubleOptinEnabled()) return [];
   const dbc = trx || db;
@@ -401,7 +406,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
         })
         .update({
           status: 'pending', requested_at: new Date(), dispatched_at: null, provider_sid: null, updated_at: new Date(),
-          ...(visitId ? { requested_by: ON_SITE_VISIT_ASK } : {}),
+          visit_id: visitId || null,
         });
       const retryClaim = reclaimed > 0;
       if (templateDark) continue;
@@ -420,8 +425,9 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
           phone_e164: String(contact.phone || '').trim(),
           status: 'pending',
           customer_id: customer?.id || null,
-          requested_by: visitId ? ON_SITE_VISIT_ASK : 'portal_contact_save',
+          requested_by: 'portal_contact_save',
           template_version: OPTIN_TEMPLATE_VERSION,
+          visit_id: visitId || null,
           requested_at: new Date(),
         }).onConflict(['customer_id', 'phone_key']).ignore().returning('phone_key');
         if (!claimed || !claimed.length) continue; // row already exists — never re-text
@@ -557,6 +563,19 @@ async function requestRecipientOptins(args) {
 // the fire-and-forget dispatch) get their ask sent now. Renders per row's
 // customer; a dark template or send failure releases the row to ask_failed
 // via the normal dispatch path. Bounded batch; no-op when the gate is off.
+// The visit an on-site ask is about, when it is still confirmed (not
+// customer-unconfirmed) and its canonical arrival is ahead; else null.
+// Throws on a read failure (the caller's catch leaves the row pending).
+async function askableVisit(visitId, customerId) {
+  const visit = await db('scheduled_services')
+    .where({ id: visitId, customer_id: customerId, status: 'confirmed' })
+    .where((q) => q.whereNull('customer_confirmed').orWhere('customer_confirmed', true))
+    .first('id', 'service_address_line1', 'service_address_city');
+  if (!visit) return null;
+  const at = await require('./appointment-reminders').scheduledServiceApptTime(visitId, { throwOnError: true });
+  return at && at.getTime() > Date.now() ? visit : null;
+}
+
 async function sweepUndispatchedOptins({ limit = 25 } = {}) {
   if (!isDoubleOptinEnabled()) return { swept: 0 };
   let rows = [];
@@ -622,25 +641,27 @@ async function sweepUndispatchedOptins({ limit = 25 } = {}) {
           }).catch(() => {});
         continue;
       }
-      // An on-site visit ask whose dispatch died before it went out (the
-      // reconcile above found no accepted send): its visit is not stored, so
-      // it is never re-sent blind — released to ask_failed (the next booking
-      // re-asks with a fresh visit check).
-      if (row.requested_by === ON_SITE_VISIT_ASK) {
+      // An on-site visit ask (visit_id) whose dispatch died before it went
+      // out: re-sent for that same visit while it is still confirmed and
+      // ahead (quoting its address), else released to ask_failed — never
+      // sent for a visit that is gone.
+      const visit = row.visit_id ? await askableVisit(row.visit_id, row.customer_id) : null;
+      if (row.visit_id && !visit) {
         await db('recipient_optin')
           .where({ phone_key: row.phone_key, customer_id: row.customer_id, status: 'pending' })
           .update({ status: 'ask_failed', updated_at: new Date() }).catch(() => {});
         continue;
       }
       const { renderSmsTemplate } = require('./sms-template-renderer');
+      const visitAddress = visit ? [visit.service_address_line1, visit.service_address_city].filter(Boolean).join(', ') : '';
       const body = await renderSmsTemplate(OPTIN_TEMPLATE_KEY, {
         recipient_first_name: String(idx >= 0 ? slots[idx] || '' : '').trim().split(/\s+/)[0] || 'there',
         account_first_name: String(customer.first_name || '').trim() || 'Your account holder',
-        property_address: [customer.address_line1, customer.city].filter(Boolean).join(', ') || 'your service property',
+        property_address: visitAddress || [customer.address_line1, customer.city].filter(Boolean).join(', ') || 'your service property',
       });
       if (!body) continue; // template dark — leave pending-undispatched (held either way)
       const { requested } = await dispatchRecipientOptins(
-        [{ key: row.phone_key, customerId: row.customer_id, phone: row.phone_e164 || row.phone_key, body }],
+        [{ key: row.phone_key, customerId: row.customer_id, phone: row.phone_e164 || row.phone_key, body, visitId: row.visit_id || null }],
         customer
       );
       swept += requested;
