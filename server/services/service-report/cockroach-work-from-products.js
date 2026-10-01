@@ -27,6 +27,11 @@
  *                   row whose method is not a spot/crack method reads
  *                   perimeter only)
  *   other pesticide with an exterior application area → "Exterior perimeter"
+ *                   (only when nothing above matched)
+ *
+ * A row keeps every action it matches: a combination product does more than
+ * one job (Vendetta Plus is a bait carrying pyriproxyfen, an IGR → "Bait
+ * placement" and "Insect growth regulator").
  *
  * Exterior evidence is the row's application AREA (a controlled chip the tech
  * picks), never the stored method: the completion path stores 'perimeter_spray'
@@ -76,13 +81,15 @@ function workKeysForProductRow(row = {}) {
   if (NOT_ROACH_TREATMENT_RE.test(identity)) return [];
   const exterior = isExteriorApplicationArea(row.applicationArea);
   const classText = `${category} ${productType}`;
-  if (method === 'bait_placement' || BAIT_ROW_RE.test(classText) || BAIT_NAME_RE.test(name)) return ['bait'];
-  if (IGR_ROW_RE.test(classText) || IGR_ACTIVE_RE.test(activeIngredient) || IGR_NAME_RE.test(name)) return ['igr'];
-  if (DUST_ROW_RE.test(identity)) return ['dust'];
+  const keys = [];
+  if (method === 'bait_placement' || BAIT_ROW_RE.test(classText) || BAIT_NAME_RE.test(name)) keys.push('bait');
+  if (IGR_ROW_RE.test(classText) || IGR_ACTIVE_RE.test(activeIngredient) || IGR_NAME_RE.test(name)) keys.push('igr');
+  if (DUST_ROW_RE.test(identity)) keys.push('dust');
   if (ALPINE_ROW_RE.test(`${name} ${activeIngredient}`)) {
-    if (!exterior) return ['crack'];
-    return SPOT_METHOD_RE.test(method) ? ['crack', 'exterior'] : ['exterior'];
+    if (!exterior) keys.push('crack');
+    else keys.push(...(SPOT_METHOD_RE.test(method) ? ['crack', 'exterior'] : ['exterior']));
   }
+  if (keys.length) return keys;
   // Any other pesticide row speaks only through a recorded exterior area.
   return exterior && PESTICIDE_CLASS_RE.test(classText) ? ['exterior'] : [];
 }

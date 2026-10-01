@@ -50,6 +50,13 @@ describe('deriveCockroachWorkChips — classification from the recorded row', ()
       .toEqual(['Bait placement', 'Insect growth regulator', 'Crack & crevice treatment']);
   });
 
+  test('a combination product keeps every action it matches (codex P2, #5365)', () => {
+    // The catalog's Vendetta Plus: a bait carrying pyriproxyfen, an IGR.
+    const vendettaPlus = row({ name: 'Vendetta Plus', category: 'bait', activeIngredient: 'Abamectin + Pyriproxyfen', method: '' });
+    expect(workKeysForProductRow(vendettaPlus)).toEqual(['bait', 'igr']);
+    expect(deriveCockroachWorkChips([vendettaPlus])).toEqual(['Bait placement', 'Insect growth regulator']);
+  });
+
   test('an unrecognised product derives NOTHING; adjuvants and other pest classes\' devices too', () => {
     expect(deriveCockroachWorkChips([row({ name: 'Atticus Talak', category: 'insecticide', activeIngredient: 'bifenthrin' })])).toEqual([]);
     expect(deriveCockroachWorkChips([row({ name: 'Taurus SC', category: 'insecticide', method: 'perimeter_spray' })])).toEqual([]);
