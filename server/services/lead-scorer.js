@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 class LeadScorer {
@@ -50,9 +51,10 @@ class LeadScorer {
     if (parseInt(referrals?.count || 0) > 0) score += 5;
 
     // Risk deductions
-    const failedPay = await db('payments').where({ customer_id: customerId, status: 'failed' })
+    // B10: hold deferrals (never attempted) are not failed payments.
+    const failedPay = await excludeNeverAttemptedHoldDeferrals(db('payments').where({ customer_id: customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .where('payment_date', '>', etDateString(addETDays(new Date(), -90)))
+      .where('payment_date', '>', etDateString(addETDays(new Date(), -90))))
       .count('* as count').first();
     score -= parseInt(failedPay?.count || 0) * 5;
 

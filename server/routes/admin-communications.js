@@ -1973,7 +1973,7 @@ router.get('/log', async (req, res, next) => {
       .select(
         'messages.id', 'messages.conversation_id', 'messages.direction', 'messages.body',
         'messages.delivery_status as status', 'messages.message_type',
-        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at',
+        'messages.created_at', 'messages.media', 'messages.metadata', 'messages.is_read', 'messages.read_at', 'messages.twilio_sid',
         'conversations.customer_id', 'conversations.our_endpoint_id',
         'conversations.contact_phone',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone'
@@ -2007,8 +2007,30 @@ router.get('/log', async (req, res, next) => {
 
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
-    if (req.query.phone !== undefined) {
-      const phones = phoneMatchDigits(req.query.phone);
+    // `twilioSid` anchors the read on one message (an alert's deep link, which
+    // must not carry a phone number), under the same visibility scoping as every
+    // other read here. Alone it resolves to that message's contact; with
+    // `customerId` it leaves the customer scope as it is and only guarantees the
+    // anchor row is in the response — a sid that is not that customer's is not
+    // found, so it never pulls in a foreign row. Either way the row is added to
+    // page 1 below when the newest-first cap would leave it out.
+    let contactFilter = req.query.phone;
+    let anchorSid = null;
+    if (req.query.twilioSid !== undefined) {
+      const sid = typeof req.query.twilioSid === 'string' ? req.query.twilioSid.trim() : '';
+      const anchor = sid && await query.clone().clearSelect().clearOrder()
+        .where('messages.twilio_sid', sid)
+        .modify((q) => { if (customerId) q.where('conversations.customer_id', customerId); })
+        .first(db.raw(`${addressProjection.contactPhoneSql} as contact`));
+      if (anchor?.contact) {
+        anchorSid = sid;
+        if (!customerId) contactFilter = anchor.contact;
+      } else if (!customerId) {
+        return res.json({ messages: [], page: 1, limit: DEFAULT_SMS_LOG_LIMIT, hasMore: false, nextPage: null });
+      }
+    }
+    if (contactFilter !== undefined) {
+      const phones = phoneMatchDigits(contactFilter);
       if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
       query = query.whereRaw(`regexp_replace(${addressProjection.contactPhoneSql}, '[^0-9]', '', 'g') = ANY (?::text[])`, [phones]);
     }
@@ -2053,6 +2075,8 @@ router.get('/log', async (req, res, next) => {
       }
     }
 
+    // Every filter applied, before paging: the anchor row is read through it.
+    const filtered = anchorSid ? query.clone() : null;
     query = query.orderBy('messages.created_at', 'desc').orderBy('messages.id', 'desc');
 
     const requestedPage = parsePositiveInt(page) || 1;
@@ -2062,7 +2086,15 @@ router.get('/log', async (req, res, next) => {
       .limit(effectiveLimit + 1)
       .offset((requestedPage - 1) * effectiveLimit);
     const hasMore = rowsPlusOne.length > effectiveLimit;
-    const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    const pageRows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
+    // The anchored message is older than a full newest-first page: add it (same
+    // projection and scoping) rather than page around it. hasMore / nextPage
+    // still describe the ordinary pages; a later page repeats the row harmlessly
+    // (clients merge by id).
+    const anchorRow = anchorSid && requestedPage === 1 && !pageRows.some((r) => r.twilio_sid === anchorSid)
+      ? await filtered.where('messages.twilio_sid', anchorSid).first()
+      : null;
+    const rows = anchorRow ? [...pageRows, anchorRow] : pageRows;
     const priorOutboundBodies = await loadPriorOutboundBodies(db, rows, { customerScoped: !!customerId });
     for (const row of rows) {
       if (priorOutboundBodies.has(String(row.id))) {
@@ -2104,7 +2136,7 @@ router.get('/log', async (req, res, next) => {
         replyToMessageId: m.response_reply_to_message_id,
       });
       return {
-        id: m.id, conversationId: m.conversation_id, direction: m.direction, from, to,
+        id: m.id, conversationId: m.conversation_id, twilioSid: m.twilio_sid || null, direction: m.direction, from, to,
         body: m.body, status: m.status, messageType: m.message_type,
         responseMessageType,
         responseStatus,

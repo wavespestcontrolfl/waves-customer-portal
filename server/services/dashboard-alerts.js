@@ -13,6 +13,7 @@
 // mark-as-read flow.
 
 const db = require('../models/db');
+const { excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
@@ -174,10 +175,11 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
 
   // 2. Failed payments today. Operator should see these every login.
   try {
-    const failed = await db('payments')
+    // B10: dues deferred under a dispute hold were never attempted — not failures.
+    const failed = await excludeNeverAttemptedHoldDeferrals(db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .where('payment_date', today)
+      .where('payment_date', today))
       .count('* as count').first();
     const count = parseInt(failed?.count || 0);
     if (count > 0) {

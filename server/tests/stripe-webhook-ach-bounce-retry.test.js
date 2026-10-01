@@ -99,6 +99,7 @@ function mockMakeBuilder(table, sink) {
   };
   ['where', 'andWhere', 'orWhere', 'whereNot', 'whereIn', 'whereNotIn',
     'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'select'].forEach(chain);
+  b.modify = (fn) => { fn(b); return b; };
   b.count = () => { b._counted = true; return b; };
   b.columnInfo = async () => ({ stripe_event_id: {} });
   b.first = async () => {
@@ -272,6 +273,19 @@ describe('async monthly-autopay bounce arming', () => {
     const arms = armUpdates();
     expect(arms).toHaveLength(1);
     expect(arms[0].patch.retry_count).toBe(2);
+  });
+
+  test('a never-attempted collections-hold placeholder does not count toward the ladder position', async () => {
+    const hold = require('../services/collections/collection-hold');
+    const spy = jest.spyOn(hold, 'excludeNeverAttemptedHoldDeferrals');
+    try {
+      mockState.priorFailedCount = 0;
+      await armMonthlyAutopayRetryForAsyncFailure(achBouncePI(), processingRow());
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(armUpdates()[0].patch.retry_count).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('3 prior attempts = ladder exhausted (mirrors the sweep\'s retry_count < 3 bound) — no re-arm', async () => {

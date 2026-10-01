@@ -18,7 +18,7 @@ import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { isMlUnit } from '../lib/measure-units';
-import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
@@ -51,16 +51,9 @@ function catalogRatePrefill(p, serviceType) {
   const resolved = resolveRatePrefill(p, { applicationMethod, serviceLine: 'pest' });
   const rate = Number(resolved.rate);
   if (!Number.isFinite(rate) || rate <= 0 || !resolved.rateUnit) return null;
-  // The label ceiling for the inline high-rate warning (codex P1 r18):
-  // per-basis bands carry their upper bound from the resolver; per-1,000
-  // rates use the verified catalog max. Neither applies to the 4-oz house
-  // default (its 'oz' unit is not the catalog rate's basis).
-  const maxRaw = resolved.perBasisUnit
-    ? resolved.labelMaxRate
-    : resolved.usePestSprayDefault
-      ? null
-      : parseFloat(String(p.max_label_rate_per_1000 ?? ''));
-  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  // The label ceiling for the inline high-rate warning (codex P1 r18); none
+  // for the 4-oz house default (prefillRateCeiling).
+  const max = prefillRateCeiling(resolved, p);
   return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
 }
 

@@ -358,3 +358,51 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(prefsTable.first).not.toHaveBeenCalled();
   });
 });
+
+describe('visit summary carried Text leg', () => {
+  const { TEXT_CARRIED_BY_SUMMARY } = ReceiptDeliveryQueue;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('an invoice read failure keeps the carried marker on the retry row', async () => {
+    const jobs = tableStub(null);
+    const invoices = tableStub(null);
+    invoices.first = jest.fn(() => Promise.reject(new Error('connection reset')));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoices;
+      if (table === 'receipt_delivery_jobs') return jobs;
+      return tableStub(null);
+    });
+    const job = {
+      id: 'job1', invoice_id: 'inv1', attempts: 1, max_attempts: 5,
+      sms_result: { sent: false, reason: TEXT_CARRIED_BY_SUMMARY },
+    };
+
+    const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+
+    expect(result.ok).toBe(false);
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    const written = jobs.update.mock.calls.map(([patch]) => patch).find((patch) => 'sms_result' in patch);
+    const sms = typeof written.sms_result === 'string' ? JSON.parse(written.sms_result) : written.sms_result;
+    expect(sms).toEqual({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY });
+  });
+
+  test('only a job with no recorded SMS outcome (or already carried) can be folded', async () => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.whereIn = jest.fn(() => q);
+    q.update = jest.fn(() => Promise.resolve(0));
+    db.mockImplementation(() => q);
+
+    await ReceiptDeliveryQueue.markTextCarriedBySummary('inv1');
+
+    const guard = q.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(guard).toBeDefined();
+    const inner = { whereNull: jest.fn(() => inner), orWhereRaw: jest.fn(() => inner) };
+    guard(inner);
+    expect(inner.whereNull).toHaveBeenCalledWith('sms_result');
+    expect(inner.orWhereRaw).toHaveBeenCalledWith("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY]);
+  });
+});
