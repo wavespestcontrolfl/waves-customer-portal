@@ -37,6 +37,31 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   const stamp = (reason, at) => ({ retired: { by: 'alert-relevance', reason, at: at.toISOString() } });
   const get = (id) => db('notifications').where({ id }).first();
 
+  test('takes over a person\'s Done once its subject moved on (no Reopen), fenced on that exact close; one still relevant stays theirs', async () => {
+    const now = new Date();
+    const customer = await insert('customers', { first_name: 'Takeover', phone: '+15555557009' });
+    const pastDay = etDateString(new Date(now.getTime() - 3 * DAY));
+    const done = await insert('scheduled_services', { customer_id: customer.id, scheduled_date: pastDay, service_type: 'General Pest Control', status: 'completed' });
+    const stuck = await insert('scheduled_services', { customer_id: customer.id, scheduled_date: pastDay, service_type: 'General Pest Control', status: 'on_site' });
+    const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    const at = new Date(now.getTime() - 60 * 60 * 1000);
+    const movedOn = await bell({ category: 'alert', read_at: at, done_at: at, done_by: person, resolution: 'Called the tech',
+      metadata: { dedupeKey: `stale-visit:${done.id}:takeover`, scheduled_service_id: done.id } });
+    const stillStale = await bell({ category: 'alert', read_at: at, done_at: at, done_by: person, resolution: 'On it',
+      metadata: { dedupeKey: `stale-visit:${stuck.id}:takeover`, scheduled_service_id: stuck.id } });
+
+    await relevance.runAdminAlertRelevanceSweep({ now });
+
+    const a = await get(movedOn.id);
+    expect(a.done_by).toBe('relevance');
+    expect([a.done_at.getTime(), a.resolution, a.read_at.getTime()]).toEqual([at.getTime(), 'Called the tech', at.getTime()]);
+    expect(JSON.parse(JSON.stringify(a.metadata)).retired).toBeUndefined();
+    const NotificationService = require('../services/notification-service');
+    const token = (await db('notifications').where({ id: movedOn.id }).first(db.raw('done_at::text AS t'))).t;
+    expect(await NotificationService.reopenAdminDone(movedOn.id, { expectedDoneAt: token })).toBe('not_reopenable');
+    expect((await get(stillStale.id)).done_by).toBe(person);
+  });
+
   test('puts back what it retired in the window once the subject is relevant again (keeping a person\'s read); older retirements, and a person\'s own reopen, are final', async () => {
     const now = new Date();
     // As the sweep writes it: millisecond-exact, and the stamp's `at` is that same done_at (and, on an unread row, read_at).

@@ -396,15 +396,32 @@ function retiredQuery(cursor, since) {
 // No retired stamp: the row is already out of the bell, so there is nothing
 // for the re-arm pass to put back — it only stops a stale Reopen.
 async function takeOverPersonDone(row, cls, todayET) {
+  // The exact completion and content judged: done_at at full precision (text,
+  // microseconds) plus category / link / metadata. A refresh and a newer Done
+  // in between never match, so only the close that was judged is taken over.
   const current = await db('notifications').where({ id: row.id, recipient_type: 'admin', done_by: row.done_by })
-    .whereNotNull('done_at').first('id', 'category', 'link', 'metadata', 'created_at');
+    .whereNotNull('done_at').first('id', 'category', 'link', 'metadata', 'created_at', db.raw('done_at::text AS done_at_token'));
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
-  const updated = await db('notifications').where({ id: row.id, recipient_type: 'admin', done_by: row.done_by })
-    .whereNotNull('done_at').update({ done_by: 'relevance', resolution: db.raw('COALESCE(resolution, ?)', [reason]) });
+  const exact = (q, by) => sameVersion(q.where({ id: row.id, recipient_type: 'admin', done_by: by })
+    .whereRaw('done_at = ?::timestamptz', [current.done_at_token]), current);
+  const updated = await exact(db('notifications'), row.done_by).update({ done_by: 'relevance', resolution: db.raw('COALESCE(resolution, ?)', [reason]) });
+  if (!updated) return null;
+  // Judged once more after the write, like a retire: a subject that came back
+  // in between hands the close back to the person (their Reopen returns).
+  let stillMovedOn = false;
+  try {
+    stillMovedOn = !!cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
+  } catch (err) {
+    logger.warn(`[alert-relevance] notification ${row.id}: the check after a takeover failed, handing it back: ${err.message}`);
+  }
+  if (!stillMovedOn) {
+    await exact(db('notifications'), 'relevance').update({ done_by: row.done_by });
+    return null;
+  }
   // Not counted as a retire: the row was already out of the bell.
-  if (updated) logger.info(`[alert-relevance] notification ${row.id}: took over a person's Done (${reason})`);
+  logger.info(`[alert-relevance] notification ${row.id}: took over a person's Done (${reason})`);
   return null;
 }
 
