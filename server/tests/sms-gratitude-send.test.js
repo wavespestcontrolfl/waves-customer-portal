@@ -319,6 +319,17 @@ test('dark gratitude delivery resolution remains shadow and never falls back to 
   })).resolves.toBe('shadow');
 });
 
+// PR #5499: a "thanks" with an open loop must reach a person — requireReview never
+// auto-sends, even on an auto_send rung with the general gate live (suggest gate off here → shadow).
+test('requireReview never resolves to auto-send', async () => {
+  mockState.generalGate = true;
+  mockState.intentMode = 'auto_send';
+  await expect(actualSuggestMode.resolveDeliveryMode({
+    reply: 'We still owe you that callback.', customerId: ID.customer, smsLogId: ID.inbound,
+    intent: 'no_reply_needed', schedulingIntent: false, requireReview: true,
+  })).resolves.toBe('shadow');
+});
+
 test.each([
   ['before activation', -1, null, 'before_activation'],
   ['future inbound', null, 1, 'future_inbound'],

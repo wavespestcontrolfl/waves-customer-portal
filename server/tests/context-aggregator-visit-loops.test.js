@@ -60,16 +60,14 @@ describe('getContextForCustomer visitLoops', () => {
     expect(context.visitLoops).toEqual({ techPosition: null, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] });
   });
 
-  test('attaches the loader result, passing customer id, the mapped upcoming rows and the aggregator deriveWindow', async () => {
+  test('attaches the loader result, passing customer id and the aggregator deriveWindow (the loader reads all of today itself)', async () => {
     const loops = { techPosition: { techName: 'Jamie', status: 'stale', minutesSinceUpdate: null, stopsAhead: 1, atThisVisit: false }, lateAlert: null, pastWindow: null, missedVisit: null, weOwe: [], customerWaiting: [] };
     loadVisitLoops.mockResolvedValue(loops);
     const context = await ContextAggregator.getContextForCustomer(customer);
     expect(context.visitLoops).toBe(loops);
     const args = loadVisitLoops.mock.calls[0][0];
     expect(args.customerId).toBe(customer.id);
-    expect(args.upcomingServices).toBe(context.upcomingServices);
-    expect(args.upcomingServices[0]).toMatchObject({ isToday: true, tech: 'Jamie Rivera' });
-    expect(args.upcomingServices[0].scheduledServiceId).toBe('visit-1');
+    expect(args).not.toHaveProperty('upcomingServices');
     expect(args.deriveWindow({ window_start: '09:00:00' })).toBe('9:00 AM–11:00 AM');
   });
 

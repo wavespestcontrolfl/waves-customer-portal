@@ -286,8 +286,12 @@ async function getIntentMode(intent) {
  * The executor independently re-verifies all of this before sending; this is
  * the drafter-side resolution, not the security boundary.
  */
-async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent }) {
+// requireReview (PR #5499): a draft that must reach a person whatever its intent's
+// rung — a "thanks" that arrived while something is still owed. Suggest when the
+// suggestion surface is on, never auto-send.
+async function resolveDeliveryMode({ reply, customerId, smsLogId, intent, schedulingIntent, requireReview = false }) {
   if (!suggestionEligible({ reply, customerId, smsLogId, intent, schedulingIntent })) return 'shadow';
+  if (requireReview) return isEnabled('smsSuggestMode') ? 'suggest' : 'shadow';
   const mode = await getIntentMode(intent); // 'shadow' | 'suggest' | 'auto_send'; escalation forced shadow
   // Gratitude is always inert shadow storage for the drafter, whatever its
   // rung or gate: never an immediate send (the quiet window forbids it) and

@@ -230,8 +230,8 @@ describe('live-webhook gratitude drafter boundary', () => {
     const stored = result.insertedRows[0];
     expect(stored.intent).toBe('general_customer_sms_needs_review');
     expect(JSON.parse(stored.intended_actions)).not.toHaveProperty('gratitude');
-    // routed as an operational suggestion, carrying the commitment it was grounded on
-    expect(result.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ intent: 'general_customer_sms_needs_review' }));
+    // routed to a person whatever the classified intent's rung, carrying the commitment it was grounded on
+    expect(result.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ intent: 'general_customer_sms_needs_review', requireReview: true }));
     expect(result.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ visitLoopCommitmentIds: ['cc-1'] }));
   });
 

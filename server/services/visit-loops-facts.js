@@ -70,7 +70,6 @@ async function safely(field, fallback, fn) {
   }
 }
 
-const rowId = (s) => s?.scheduledServiceId ?? s?.id ?? null;
 const clip = (value, max) => {
   const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
@@ -144,20 +143,18 @@ const formatEtStamp = (value) => {
 };
 
 // ── today's visits ──────────────────────────────────────────────────────────
-async function loadTodayRows(upcomingServices, conn) {
-  const ids = (upcomingServices || []).filter((s) => s && s.isToday).map(rowId).filter(Boolean);
-  if (!ids.length) return [];
-  const rows = await conn('scheduled_services')
-    .whereIn('id', ids)
-    .select('id', 'visit_id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state', 'window_start',
-      'window_end', 'window_display', 'time_window', 'service_type');
-  // Keep the aggregator's order (earliest-first upcoming list) and carry the
-  // tech name it already resolved.
-  const byId = new Map((rows || []).map((r) => [String(r.id), r]));
-  return upcomingServices.filter((s) => s && s.isToday && byId.has(String(rowId(s)))).map((s) => ({
-    ...byId.get(String(rowId(s))),
-    technician_name: s.tech || null,
-  }));
+// ALL of the customer's live visits today (ET), earliest first — not the
+// aggregator's upcoming list, which caps at three rows (a four-service day exists).
+async function loadTodayRows(customerId, { conn, now }) {
+  const rows = await conn('scheduled_services as ss')
+    .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+    .where('ss.customer_id', customerId)
+    .where('ss.scheduled_date', etDateString(now))
+    .whereIn('ss.status', UPCOMING_SERVICE_STATUSES)
+    .orderByRaw('ss.window_start ASC NULLS LAST, ss.route_order ASC NULLS LAST, ss.id ASC')
+    .select('ss.id', 'ss.visit_id', 'ss.technician_id', 'ss.route_order', 'ss.scheduled_date', 'ss.status', 'ss.track_state',
+      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
+  return rows || [];
 }
 
 // Live STOPS on the tech's route today before this visit; null with no route order.
@@ -277,13 +274,20 @@ async function findPastWindow(todayRows, { conn, now, deriveWindow }) {
 }
 
 // ── missed visit ────────────────────────────────────────────────────────────
+const MISSED_SCAN_MAX = 10;
+function missedWindowLabel(originalWindow, deriveWindow) {
+  const start = /^\s*(\d{1,2}:\d{2})/.exec(String(originalWindow || ''));
+  if (!start) return null;
+  const startHms = start[1].length === 4 ? `0${start[1]}:00` : `${start[1]}:00`;
+  return windowLabel({ window_start: startHms }, deriveWindow);
+}
 async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   const today = etDateString(now);
   // ET calendar days, not fixed 24h periods (a DST week would reach an 8th day back)
   const since = etDateString(addETDays(now, -MISSED_LOOKBACK_DAYS));
   const candidates = [];
 
-  const unfinished = await conn('scheduled_services')
+  const unfinishedRows = await conn('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
     .whereIn('status', NOT_STARTED_STATUSES)
@@ -296,7 +300,15 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
       this.select(1).from('service_records as sr').whereRaw('sr.scheduled_service_id = scheduled_services.id');
     })
     .orderBy('scheduled_date', 'desc')
-    .first('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
+    .limit(MISSED_SCAN_MAX)
+    .select('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
+  // Yesterday's late visit whose window runs past midnight (23:00-01:00) is
+  // still open, not missed, until that window ends.
+  const yesterday = etDateString(addETDays(now, -1));
+  const nowMin = nowEtMinutes(now);
+  const stillOpen = (row) => calendarDay(row.scheduled_date) === yesterday
+    && (customerWindowEndMinutes(row) ?? 0) > 1440 && nowMin < customerWindowEndMinutes(row) - 1440;
+  const unfinished = (unfinishedRows || []).find((row) => !stillOpen(row));
   if (unfinished) {
     candidates.push({
       type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date),
@@ -304,14 +316,16 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     });
   }
 
-  const noshow = await conn('reschedule_log as rl')
+  const noshows = await conn('reschedule_log as rl')
     .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
     .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
     .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
     .orderBy('rl.original_date', 'desc')
-    .first('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.service_type',
+    .limit(MISSED_SCAN_MAX)
+    .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'ss.service_type',
       'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status');
-  if (noshow) {
+  // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
+  for (const noshow of noshows || []) {
     const date = calendarDay(noshow.original_date);
     const family = familyKey(noshow.service_type);
     const liveOrDone = [...UPCOMING_SERVICE_STATUSES, 'completed'];
@@ -331,11 +345,14 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
     if (!followedUp) {
       candidates.push({
         type: noshow.service_type || null, date,
-        // The window that was MISSED: the logged original, not the joined
+        // The window that was MISSED, as the customer was promised it: the logged
+        // original START through the arrival-window formatter (writers store
+        // "start-end" with the internal job block as the end), never the joined
         // row's current (possibly moved) window.
-        windowDisplay: String(noshow.original_window || '').trim() || windowLabel(noshow, deriveWindow) || null,
+        windowDisplay: missedWindowLabel(noshow.original_window, deriveWindow),
         status: noshow.status || 'no_show', reason: 'customer_noshow',
       });
+      break;
     }
   }
   if (!candidates.length) return null;
@@ -429,12 +446,12 @@ async function loadCommitments({ conn, customerId, now }) {
  * @param {Function} [args.deriveWindow]  row -> customer-facing window label (the aggregator's own deriveWindow)
  * @param {Function} [args.conn]          knex handle (tests)
  */
-async function loadVisitLoops({ customerId, upcomingServices = [], now = new Date(), deriveWindow = null, conn = db } = {}) {
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
   const ctx = { conn, now, deriveWindow, customerId };
 
-  const todayRows = await safely('today visits', [], () => loadTodayRows(upcomingServices, conn));
+  const todayRows = await safely('today visits', [], () => loadTodayRows(customerId, ctx));
   const pastWindow = await safely('past window', null, () => findPastWindow(todayRows, ctx));
 
   const [techPosition, lateAlert, missedVisit, commitments] = await Promise.all([

@@ -511,10 +511,16 @@ describe('open-loop commitments recheck', () => {
     };
     const visit = (over = {}) => ({ id: 'v1', technician_id: 't1', route_order: 5, scheduled_date: today, status: 'confirmed', ...over });
 
-    test('a reply that does not mention stops is never recounted', async () => {
-      const dbh = jest.fn();
-      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: 'Sorry for the delay on today\'s visit.', dbh })).resolves.toBeNull();
-      expect(dbh).not.toHaveBeenCalled();
+    test('the count is recounted whatever the wording (a paraphrase carries it too)', async () => {
+      const body = 'Sorry for the delay. Jamie has two jobs ahead of yours.';
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 2 }) })).resolves.toBeNull();
+      await expect(openLoopsBlockReason({ decision: withPos, outgoingBody: body, dbh: routeDb({ visit: visit(), ahead: 1 }) })).resolves.toBe('stop_count_stale');
+    });
+
+    test('an unreadable recheck reads as infrastructure, so the composer keeps the card', () => {
+      const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
+      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (open_loops_recheck_failed)')).toBe(true);
+      expect(blockReasonIsEtaInfrastructure('open-loop facts stale (commitment_closed)')).toBe(false);
     });
 
     test('same count passes; a moved count, a started visit, or a reassignment refuses', async () => {

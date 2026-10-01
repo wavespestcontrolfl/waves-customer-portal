@@ -87,7 +87,10 @@ function isEtaInfrastructureFailure(reason) {
 }
 // Does an agentDecisionSendBlockReason string ('live ETA unsendable (<reason>)') carry an
 // infrastructure failure rather than a verdict about the message?
+// The open-loop recheck's unreadable read (PR #5499) is infrastructure too: the
+// composer keeps the card for a retry instead of superseding it.
 function blockReasonIsEtaInfrastructure(blockReason) {
+  if (String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)') return true;
   const m = /^live ETA unsendable \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && isEtaInfrastructureFailure(m[1]);
 }
@@ -308,8 +311,8 @@ async function reserviceBlock({ decision, outgoingBody }) {
 // delay, a passed window or a missed visit is held to the LIVE ETA freshness window
 // (15 min from facts_generated_at; missing = stale) — one rule for every
 // time-sensitive line instead of a recheck per fact — and a fresh position's stop
-// count is recounted when the reply mentions stops (pre-push audit P1s).
-const MENTIONS_STOPS_RE = /\bstops?\b/i;
+// count is recounted on every send within it: a paraphrase ("two jobs ahead of
+// yours") can carry the count without any one keyword (pre-push audit + Codex r3).
 function visitStatusExpired(snapshot, nowMs) {
   const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness');
   const at = Date.parse(snapshot?.facts_generated_at || '');
@@ -323,7 +326,7 @@ async function openLoopsBlockReason({ decision, outgoingBody = null, dbh, now = 
   const status = snapshot?.visit_loop_status && typeof snapshot.visit_loop_status === 'object' ? snapshot.visit_loop_status : null;
   if (status && visitStatusExpired(snapshot, now.getTime())) return 'visit_status_expired';
   const position = status && status.position && typeof status.position === 'object' ? status.position : null;
-  const recount = Boolean(position) && MENTIONS_STOPS_RE.test(String(outgoingBody || ''));
+  const recount = Boolean(position);
   if (!ids.length && !recount) return null;
   try {
     const conn = dbh || require('../models/db');

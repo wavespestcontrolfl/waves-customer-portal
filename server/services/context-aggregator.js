@@ -1451,7 +1451,7 @@ class ContextAggregator {
     let visitLoops = emptyVisitLoops();
     if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
-        visitLoops = await loadVisitLoops({ customerId: customer.id, upcomingServices: context.upcomingServices, deriveWindow: (row) => this.deriveWindow(row) });
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row) });
       } catch (err) {
         logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
         visitLoops = emptyVisitLoops();

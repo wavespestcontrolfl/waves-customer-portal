@@ -5670,9 +5670,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // gratitude lane's fixed reply cannot. It takes the ordinary operational path
     // under its classified intent (context stays without LIVE ETA, so the reply
     // cannot make a live-status claim).
+    let openLoopThanks = false;
     if (gratitudeCandidate && visitLoopsNeedAnswer(context)) {
       gratitudeCandidate = false;
       intent = classifiedIntent;
+      // A plain "Thanks!" classifies no_reply_needed (a shadow rung): route it to a
+      // person explicitly so the open loop is never answered with silence.
+      openLoopThanks = true;
     }
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
@@ -5717,6 +5721,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       smsLogId: smsLogId || null,
       intent: intentName,
       schedulingIntent,
+      requireReview: openLoopThanks,
     });
 
     // Deterministic comms-lint verdict for this draft, computed once and
