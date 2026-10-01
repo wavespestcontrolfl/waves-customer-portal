@@ -505,8 +505,12 @@ function validateTreeShrubCloseout({
     }
     if (label?.table?.pick) {
       const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : '';
-      if (!label.table.bands.some((band) => band.key === bandKey)) {
+      const band = label.table.bands.find((option) => option.key === bandKey);
+      if (!band) {
         pushBlock(blocks, 'tree_shrub_injection_band_required', `Pick the ${label.table.pick.toLowerCase()} for the injection dose.`, 'injectionRecord.labelBand');
+      } else if (label.basis === 'palm' && injection.sizeClassOrDbh && injection.sizeClassOrDbh.toLowerCase() !== band.label.toLowerCase()) {
+        // A palm label's band is the palm's size; the record never holds two answers.
+        pushBlock(blocks, 'tree_shrub_injection_palm_size_mismatch', `Palm size must match the picked band (${band.label}).`, 'injectionRecord.sizeClassOrDbh');
       }
     }
     if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');

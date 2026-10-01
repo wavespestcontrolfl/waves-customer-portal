@@ -225,8 +225,10 @@ describe('the injection record', () => {
     render(<Block injectionProducts={[{ name: PALM_JET.name, rate: PALM_RATE }]} />);
     await waitFor(() => expect(record().product).toBe(PALM_JET.name));
     expect(screen.queryByLabelText('Trunk (inches across, chest high)')).toBeNull();
-    expect(screen.getByPlaceholderText('DBH / palm size')).toBeTruthy();
+    // The palm-size band is the record's size: no second size field.
+    expect(screen.queryByPlaceholderText('DBH / palm size')).toBeNull();
     fireEvent.change(screen.getByLabelText('Palm size'), { target: { value: 'medium' } });
+    expect(record().sizeClassOrDbh).toBe('Medium palm');
     expect(screen.getByText('Dose per palm')).toBeTruthy();
     expect(screen.getByText(injectionDoseText(PALM_RATE, '', 'medium'))).toBeTruthy();
     expect(screen.getByText('Dose you put in, per palm')).toBeTruthy();
@@ -353,6 +355,12 @@ describe('the closeout check against the product label', () => {
     expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: 'Other', key: 'low' } })).toEqual(['Pick the label rate for the injection dose.']);
     expect(blocksFor(IMA_JET.name, IMA_RATE, { labelBand: { product: IMA_JET.name, key: 'low' } })).toEqual([]);
     expect(blocksFor(PHOSPHO_JET.name, PHOSPHO_RATE, {})).toEqual([]);
+  });
+
+  it('needs the palm size to be the picked palm band', () => {
+    const band = { product: PALM_JET.name, key: 'small' };
+    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Small palm' })).toEqual([]);
+    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Large palm' })).toEqual(['Palm size must match the picked band (Small palm).']);
   });
 
   it('needs a per-inch trunk in inches above zero', () => {

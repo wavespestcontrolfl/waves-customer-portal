@@ -11001,8 +11001,11 @@ export function treeShrubCloseoutBlocksClient({
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
     else if (labelRate?.basis === "inch" && !(Number(inches) > 0)) push("Enter the trunk in inches.", "injectionRecord.sizeClassOrDbh");
     const bandKey = injection.labelBand?.product === injection.product ? injection.labelBand.key : "";
-    if (labelRate?.pick && !injectionBand(labelRate, inches, bandKey)) {
+    const pickedBand = labelRate?.pick ? injectionBand(labelRate, inches, bandKey) : null;
+    if (labelRate?.pick && !pickedBand) {
       push(`Pick the ${labelRate.pick.toLowerCase()} for the injection dose.`, "injectionRecord.labelBand");
+    } else if (labelRate?.basis === "palm" && pickedBand && String(injection.sizeClassOrDbh || "").trim().toLowerCase() !== pickedBand.label.toLowerCase()) {
+      push(`Palm size must match the picked band (${pickedBand.label}).`, "injectionRecord.sizeClassOrDbh");
     }
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
@@ -11293,7 +11296,13 @@ export function TreeShrubCloseoutBlock({
               <select
                 aria-label={labelRate.pick}
                 value={pickKey}
-                onChange={(e) => setInjectionField("labelBand", { product: record.product, key: e.target.value })}
+                onChange={(e) => {
+                  const labelBand = { product: record.product, key: e.target.value };
+                  // A palm label's band is the palm's size: the record's size
+                  // is that band, never a second answer that can disagree.
+                  const palmSize = labelRate.basis === "palm" ? labelRate.bands.find((option) => option.key === labelBand.key)?.label : null;
+                  onChange({ ...value, injectionRecord: { ...record, labelBand, ...(palmSize ? { sizeClassOrDbh: palmSize } : {}) } });
+                }}
                 style={select}
               >
                 <option value="" disabled>{`Pick the ${labelRate.pick.toLowerCase()}`}</option>
@@ -11323,7 +11332,7 @@ export function TreeShrubCloseoutBlock({
                 style={input}
               />
             </label>
-          ) : (
+          ) : labelRate?.basis === "palm" && labelRate.bands ? null : (
             <input
               value={record.sizeClassOrDbh || ""}
               onChange={(e) => setInjectionField("sizeClassOrDbh", e.target.value)}
