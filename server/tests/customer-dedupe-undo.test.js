@@ -1540,13 +1540,20 @@ describe('revertMerge', () => {
     // (utils/customer-comms-lock.js) — the undo must hold it before ANY of
     // its probes so an uncommitted insert can never hide; no other path
     // takes comms-then-case, so this order cannot invert.
-    expect(state.rawCalls.length).toBeGreaterThanOrEqual(3);
+    // Codex #5503 r2: both customers' dunning keys (customer-dunning/merge.js,
+    // sorted) come first of all, as in executeMerge — every dunning path takes
+    // that key first in a fresh transaction, so the order cannot invert.
+    expect(state.rawCalls.length).toBeGreaterThanOrEqual(5);
     const sortedParties = [WINNER, LOSER].map(String).sort();
     state.rawCalls.slice(0, 2).forEach(([sql, bindings], i) => {
+      expect(String(sql)).toContain('pg_advisory_xact_lock(hashtext(?))');
+      expect(bindings).toEqual([`customer-dunning:${sortedParties[i]}`]);
+    });
+    state.rawCalls.slice(2, 4).forEach(([sql, bindings], i) => {
       expect(String(sql)).toContain('pg_advisory_xact_lock');
       expect(bindings).toEqual(['collections_case', sortedParties[i]]);
     });
-    const [sql, bindings] = state.rawCalls[2];
+    const [sql, bindings] = state.rawCalls[4];
     expect(String(sql)).toContain('pg_advisory_xact_lock');
     expect(bindings).toEqual([`customer-comms:${WINNER}`]);
   });

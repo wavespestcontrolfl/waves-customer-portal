@@ -32,6 +32,9 @@ const CLOSED_REASONS = Object.freeze([
   'released_gate_off',
   'released_prereq_off',
   'released_admin',
+  // A customer merge (customer-dedupe.js) released the open schedule of either party before repointing
+  // it; the next run promotes the merged customer as one (customer-dunning/merge.js).
+  'released_merge',
   'customer_missing',
 ]);
 

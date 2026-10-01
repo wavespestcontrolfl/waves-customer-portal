@@ -1952,7 +1952,23 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   // post-commit contact audit event.
   let winnerBeforeMerge = null;
   let mergeLockedAt = null;
+  // Customer-level overdue reminders (customer-dunning/merge.js): an OPEN
+  // schedule on either side is released through the engine's own release
+  // BEFORE the transaction (it reads delivery evidence, which must not run
+  // under the merge's locks); a refused release aborts the merge here,
+  // before anything moved. The next run promotes the merged customer as one.
+  const DunningMerge = require('./customer-dunning/merge');
+  await DunningMerge.releaseOpenSchedulesForMerge([winnerId, loserId]);
+  let dunningEpisodeRenumbers = [];
   const result = await db.transaction(async (trx) => {
+    // FIRST, before every other lock: both customers' dunning keys
+    // (EXCLUSIVE, sorted) — every engine path takes that key first in a
+    // fresh transaction, so waiting on it here holds nothing. Under them, an
+    // open schedule that appeared since the release refuses the merge, and
+    // the loser's closed episodes are renumbered above the winner's so the
+    // FK sweep's repoint keeps UNIQUE (customer_id, episode) — Codex #5503
+    // r2 P1: two episode-1 histories raised 23505 and aborted the merge.
+    dunningEpisodeRenumbers = await DunningMerge.reconcileInMergeTransaction(trx, { winnerId, loserId });
     // The collections case lock for BOTH parties, before anything moves
     // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
     // while the dial surfaces promote/rotate under this same customer lock —
@@ -3005,6 +3021,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // Winner values the merge deliberately NULLED (consent stamps) —
         // the prior values, keyed by column, for the undo to restore.
         winner_prior_values: winnerPriorValues,
+        // Loser customer_dunning_schedules episodes renumbered above the
+        // winner's ([{ id, from, to }]; absent when none were). Audit only:
+        // the undo moves those rows back by id and keeps the new numbers.
+        dunning_episode_renumbers: dunningEpisodeRenumbers.length ? dunningEpisodeRenumbers : undefined,
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
@@ -3783,6 +3803,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
+    // Both customers' dunning keys (EXCLUSIVE, sorted), before the case
+    // locks as in the forward merge: no promotion, claim or release of a
+    // customer-level overdue reminder schedule runs while the journaled
+    // invoices and sequences move back (customer-dunning/merge.js).
+    await require('./customer-dunning/merge').lockForMergeUndo(trx, { winnerId, loserId });
     // The collections case lock for BOTH parties, same as the forward
     // merge (codex gh-r11): the undo repoints collection_cases back to the
     // restored customer while the dial surfaces promote/claim under this

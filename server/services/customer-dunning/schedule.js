@@ -536,7 +536,7 @@ async function releaseMembers(trx, schedule, now, delivery = null) {
 
 // ── close / release ──────────────────────────────────────────────────────
 
-const RELEASED_REASONS = new Set(['released_gate_off', 'released_prereq_off', 'released_admin', 'customer_missing']);
+const RELEASED_REASONS = new Set(['released_gate_off', 'released_prereq_off', 'released_admin', 'released_merge', 'customer_missing']);
 const terminalStatusFor = (reason) => (RELEASED_REASONS.has(reason) ? 'released' : 'completed');
 
 async function alertPastFinal(schedule, landed) {

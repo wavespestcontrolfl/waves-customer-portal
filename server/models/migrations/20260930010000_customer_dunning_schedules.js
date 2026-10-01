@@ -45,7 +45,7 @@ exports.up = async function up(knex) {
     t.text('paused_reason');
     t.uuid('paused_by_admin_id');
     // balance_cleared | final_notice_delivered | released_gate_off |
-    // released_prereq_off | released_admin | customer_missing
+    // released_prereq_off | released_admin | released_merge | customer_missing
     t.string('closed_reason', 40);
     t.timestamp('closed_at');
     t.timestamp('final_notice_at');
