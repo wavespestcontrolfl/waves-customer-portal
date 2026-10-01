@@ -296,6 +296,9 @@ const RESEED_IN_TERM_MIN_SPACING_DAYS = 14;
 // Never auto-book a replacement sooner than a week out — the office and the
 // route need notice; the reseed runs unattended.
 const RESEED_IN_TERM_LEAD_DAYS = 7;
+// The cancelled visit's own day (and the days around it) are what the
+// customer or office just turned down — never re-book onto them.
+const RESEED_IN_TERM_AVOID_CANCELLED_DAYS = 3;
 
 function addDays(dateStr, days) {
   const [y, m, d] = String(dateStr).split('-').map(Number);
@@ -307,9 +310,12 @@ function daysBetween(fromStr, toStr) {
 }
 
 function pickInTermReseedDate({
-  rows, window, todayStr, shift = (d) => d, takenDates = null,
+  rows, window, todayStr, shift = (d) => d, takenDates = null, cancelledDate = null,
   minSpacingDays = RESEED_IN_TERM_MIN_SPACING_DAYS, leadDays = RESEED_IN_TERM_LEAD_DAYS,
+  avoidCancelledDays = RESEED_IN_TERM_AVOID_CANCELLED_DAYS,
 }) {
+  const avoid = dateOnly(cancelledDate);
+  const tooNearCancelled = (d) => !!avoid && Math.abs(daysBetween(avoid, d)) <= avoidCancelledDays;
   if (!window?.start || !window?.end || !todayStr) return null;
   const lower = [addDays(todayStr, leadDays), dateOnly(window.start)].sort()[1];
   const upper = addDays(dateOnly(window.end), -1);
@@ -353,7 +359,7 @@ function pickInTermReseedDate({
       const candidate = addDays(gap.ideal, offset);
       if (candidate < gap.lo || candidate > gap.hi) continue;
       const placed = shift(candidate);
-      if (placed && placed >= gap.lo && placed <= gap.hi && !(takenDates && takenDates.has(placed))) return placed;
+      if (placed && placed >= gap.lo && placed <= gap.hi && !(takenDates && takenDates.has(placed)) && !tooNearCancelled(placed)) return placed;
     }
   }
   return null;
@@ -503,6 +509,7 @@ module.exports = {
   pickInTermReseedDate,
   RESEED_IN_TERM_MIN_SPACING_DAYS,
   RESEED_IN_TERM_LEAD_DAYS,
+  RESEED_IN_TERM_AVOID_CANCELLED_DAYS,
   NON_COUNTING_STATUSES,
   COUNTING_SOURCE_STATUSES,
   UPCOMING_STATUSES,

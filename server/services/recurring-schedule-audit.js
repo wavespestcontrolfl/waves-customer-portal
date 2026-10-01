@@ -82,12 +82,17 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           -- in-term placement) sits in the gap the cancel left, off the
           -- cadence by design; checking it against its neighbours would flag
           -- every one. Its neighbours are still checked against each other.
-          AND NOT EXISTS (
+          -- Only while it still sits where the reseed put it: any later move
+          -- re-stamps date_exception_source, and the row is audited again.
+          AND NOT (
+            COALESCE(s.date_exception_source, '') = 'cancel_reseed'
+            AND EXISTS (
             SELECT 1 FROM activity_log al
             WHERE al.customer_id = s.customer_id
               AND al.action = 'recurring_cancel_reseed'
               AND al.metadata->>'placement' = 'in_term'
               AND al.metadata->'added_service_ids' @> to_jsonb(s.id::text)
+            )
           )
       ),
       active_series AS (

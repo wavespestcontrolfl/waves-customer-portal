@@ -20399,7 +20399,7 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
   const { cancelReseedInTermLive } = require('../config/feature-gates');
   const placementPicker = cancelReseedInTermLive()
     ? ({ shift, takenDates }) => require('../services/recurring-series-cancel-reseed').pickInTermReseedDate({
-      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates,
+      rows: term.seriesRows, window: term.window, todayStr: term.todayET, shift, takenDates, cancelledDate: cancelled.scheduled_date,
     })
     : null;
   const add = await addOneReseedVisit(trx, {

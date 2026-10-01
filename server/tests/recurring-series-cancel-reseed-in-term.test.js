@@ -97,6 +97,22 @@ describe('pickInTermReseedDate', () => {
     expect(date).toBe('2026-10-05');
   });
 
+  test('never re-books the day just cancelled, or the days around it', () => {
+    // Codex P1 repro: quarterly Jan 1 / Apr 1 / Jul 1, Apr 1 cancelled on
+    // Feb 1 — the gap's middle IS Apr 1.
+    const rows = [
+      row('root', '2026-01-01', 'completed'), row('c1', '2026-04-01', 'cancelled'), row('c2', '2026-07-01'),
+      row('c3', '2026-10-01'), row('c4', '2027-01-01'),
+    ];
+    const w = { start: '2026-01-01', end: '2027-01-01' };
+    const plain = pickInTermReseedDate({ rows, window: w, todayStr: '2026-02-01' });
+    expect(plain).toBe('2026-04-01');
+    const date = pickInTermReseedDate({ rows, window: w, todayStr: '2026-02-01', cancelledDate: '2026-04-01' });
+    const dist = Math.abs(Date.parse(date) - Date.parse('2026-04-01')) / 86400000;
+    expect(dist).toBeGreaterThan(3);
+    expect(date > '2026-01-15' && date < '2026-06-17').toBe(true);
+  });
+
   test('never returns a date the series already occupies', () => {
     const plain = pickInTermReseedDate({ rows: quarterly, window, todayStr: '2026-09-30' });
     const other = pickInTermReseedDate({ rows: quarterly, window, todayStr: '2026-09-30', takenDates: new Set([plain]) });
@@ -138,6 +154,7 @@ describe('wiring (source guards)', () => {
 
   test('the reseed builds a picker only when the gate is on', () => {
     expect(schedule).toMatch(/const placementPicker = cancelReseedInTermLive\(\)\n\s+\? /);
+    expect(schedule).toMatch(/shift, takenDates, cancelledDate: cancelled\.scheduled_date,/);
     expect(schedule).toMatch(/: null;\n\s+const add = await addOneReseedVisit\(trx, \{/);
   });
 
@@ -193,8 +210,10 @@ describe('spacing audit skips in-term replacements', () => {
     expect(sql).toMatch(/al\.action = 'recurring_cancel_reseed'/);
     expect(sql).toMatch(/al\.metadata->>'placement' = 'in_term'/);
     expect(sql).toMatch(/al\.metadata->'added_service_ids' @> to_jsonb\(s\.id::text\)/);
+    // A replacement moved later (re-stamped source) is audited again.
+    expect(sql).toMatch(/COALESCE\(s\.date_exception_source, ''\) = 'cancel_reseed'\n\s+AND EXISTS \(/);
     // No bare `?` in the new clause (knex.raw would read it as a binding).
-    const clause = sql.slice(sql.indexOf('AND NOT EXISTS'), sql.indexOf('active_series AS'));
+    const clause = sql.slice(sql.indexOf('AND NOT ('), sql.indexOf('active_series AS'));
     expect(clause).not.toMatch(/\?/);
   });
 });
