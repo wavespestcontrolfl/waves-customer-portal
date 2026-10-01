@@ -105,11 +105,14 @@ async function planRiderOverride(ctx, conn, rider, { family, pattern, seedOpts }
     weekendShift: seedOpts.weekendShift,
     blackoutDates,
   }).slice(0, wanted);
-  if (wanted < 1 || overrideDates.length < wanted) {
-    logger.warn(`[rider-accept] rider ${rider.id} planned ${overrideDates.length}/${wanted} rider dates (seeding the quarterly walk)`);
+  // Every rider date must BE a lawn date: the rule's own +84 fallback (no lawn
+  // date near) is a valid cadence but not a ride, so it is not linked.
+  const hostSet = new Set(hostFollowUps.map(dateOnly));
+  if (wanted < 1 || overrideDates.length < wanted || !overrideDates.every((d) => hostSet.has(d))) {
+    logger.warn(`[rider-accept] rider ${rider.id} has ${overrideDates.filter((d) => hostSet.has(d)).length}/${wanted} lawn dates to ride (seeding the quarterly walk)`);
     return null;
   }
-  return { overrideDates, hostParentId: lawn.id };
+  return { overrideDates, hostParentId: lawn.id, projected: !ctx.lawn.seededDates };
 }
 
 // After the seeder ran: remember a seeded lawn's real dates for a later rider,
@@ -118,14 +121,35 @@ async function afterSeed(ctx, conn, parentRow, rider, seedResult) {
   if (!ctx) return;
   if (ctx.lawn && String(ctx.lawn.parent.id) === String(parentRow.id)) {
     ctx.lawn.seededDates = (seedResult?.insertedRows || []).map((r) => dateOnly(r.scheduled_date)).filter(Boolean);
+    await settleProjectedRiders(ctx, conn);
   }
   if (!rider?.hostParentId) return;
+  if (rider.projected) (ctx.lawn.projectedRiders = ctx.lawn.projectedRiders || []).push({ id: parentRow.id, dates: rider.overrideDates });
   try {
     // One savepoint for the whole optional write: any failure (including a
     // schema without the column) rolls back to it and the accept continues.
     await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: parentRow.id }).update({ rides_parent_id: rider.hostParentId }));
   } catch (err) {
     logger.warn(`[rider-accept] could not link rider ${parentRow.id} to lawn ${rider.hostParentId}: ${err.message}`);
+  }
+}
+
+// Riders planned from the lawn's PROJECTED dates (a reserved lawn seeds after
+// them): once the lawn has really seeded, any rider whose dates are not all
+// real lawn dates is unlinked — its rows keep their valid 84-day dates, they
+// just are not a ride. Also covers a lawn that seeded nothing.
+async function settleProjectedRiders(ctx, conn) {
+  const pending = ctx.lawn.projectedRiders || [];
+  ctx.lawn.projectedRiders = [];
+  const actual = new Set(ctx.lawn.seededDates);
+  for (const r of pending) {
+    if (r.dates.every((d) => actual.has(d))) continue;
+    logger.warn(`[rider-accept] lawn ${ctx.lawn.parent.id} did not seed the dates rider ${r.id} planned on — unlinking it`);
+    try {
+      await inSavepoint(conn, (sp) => sp('scheduled_services').where({ id: r.id }).update({ rides_parent_id: null }));
+    } catch (err) {
+      logger.warn(`[rider-accept] could not unlink rider ${r.id}: ${err.message}`);
+    }
   }
 }
 

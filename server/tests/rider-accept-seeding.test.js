@@ -151,6 +151,61 @@ describe('rider context fall-backs', () => {
       expect(rider.overrideDates).toEqual(['2098-03-30', '2098-06-22', '2098-09-14']);
     } finally { spy.mockRestore(); }
   });
+
+  const lawnDates = (n) => Array.from({ length: n }, (_, k) => {
+    const d = new Date(Date.UTC(2098, 0, 5, 12));
+    d.setUTCDate(d.getUTCDate() + 42 * (k + 1));
+    return d.toISOString().slice(0, 10);
+  });
+
+  test.each([
+    ['no lawn follow-ups at all', 0],
+    ['too few lawn follow-ups (the rule would fall back to its own +84 dates)', 3],
+  ])('%s: not a ride, the normal walk seeds and nothing links', async (_, n) => {
+    const ctx = RiderAccept.createContext();
+    await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'lawn' }), lawnPlan);
+    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(n));
+    try {
+      expect(await RiderAccept.beforeSeed(ctx, {}, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan)).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+
+  test('a rider planned on PROJECTED lawn dates is unlinked when the lawn seeds different dates', async () => {
+    const updates = [];
+    const conn = (table) => ({
+      where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }),
+    });
+    const ctx = RiderAccept.createContext();
+    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
+    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
+    let rider;
+    try {
+      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
+    } finally { spy.mockRestore(); }
+    expect(rider.projected).toBe(true);
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
+    expect(updates).toEqual([{ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: 'lawn' } }]);
+    // The lawn then seeds nothing (e.g. its series was kept elsewhere).
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, { insertedRows: [] });
+    expect(updates[1]).toEqual({ table: 'scheduled_services', w: { id: 'pest' }, u: { rides_parent_id: null } });
+  });
+
+  test('a rider planned on projected dates stays linked when the lawn seeds exactly those dates', async () => {
+    const updates = [];
+    const conn = (table) => ({ where: (w) => ({ update: async (u) => { updates.push({ table, w, u }); return 1; } }) });
+    const ctx = RiderAccept.createContext();
+    RiderAccept.noteLawn(ctx, parent({ id: 'lawn' }), lawnPlan);
+    const spy = jest.spyOn(Seeder, 'planFollowUpSeedDates').mockResolvedValue(lawnDates(8));
+    let rider;
+    try {
+      rider = await RiderAccept.beforeSeed(ctx, conn, parent({ id: 'pest', service_type: 'Quarterly Pest Control' }), pestPlan);
+    } finally { spy.mockRestore(); }
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'pest' }), rider, { insertedRows: [] });
+    await RiderAccept.afterSeed(ctx, conn, parent({ id: 'lawn' }), null, {
+      insertedRows: lawnDates(8).map((d) => ({ scheduled_date: d })),
+    });
+    expect(updates).toHaveLength(1);
+  });
 });
 
 describe('gate reader', () => {
