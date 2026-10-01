@@ -255,9 +255,13 @@ describe('cited-page pitches', () => {
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', notes: expect.stringMatching(/cited page could not be read/) }));
   });
 
-  test('an HTML-encoded space never hides an existing listing', () => {
-    expect(WAVES_LISTED_RE.test('3. Waves&nbsp;Pest&nbsp;Control — Lakewood Ranch')).toBe(true);
-    expect(WAVES_LISTED_RE.test('waves pest  control')).toBe(true);
+  test('an HTML-encoded space never hides an existing listing (fetchPageText decodes entities)', async () => {
+    const { fetchPageText } = require('../services/seo/contact-finder');
+    const html = '<html><title>Best Pest Control</title><body>3. Waves&#32;Pest&nbsp;Control &mdash; Lakewood Ranch</body></html>';
+    const fetchFn = jest.fn(async () => ({ ok: true, status: 200, headers: { get: (n) => (n === 'content-type' ? 'text/html' : null) }, body: null, text: async () => html }));
+    const page = await fetchPageText('https://8.8.8.8/best', { fetchFn, withText: true });
+    expect(page && page.text).toMatch(/Waves Pest Control — Lakewood Ranch/);
+    expect(WAVES_LISTED_RE.test(page.text)).toBe(true);
     expect(WAVES_LISTED_RE.test('Gulf waves and pest control tips')).toBe(false);
   });
 

@@ -71,9 +71,14 @@ function displayUrl(urlString) {
 }
 
 // A roundup of service providers, by its own path: companies, exterminators,
-// pros, or a service Waves offers named as a service. A product roundup
-// ("best ant killer", "top mosquito repellents") never matches.
+// pros, or a service Waves offers named as a service.
 const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|providers?|services?|pest control|lawn care|mosquito control|termite control|rodent control)\b/;
+// …and never a product roundup, even one naming a service ("best lawn care
+// products", "top pest control sprays").
+const PRODUCT_PATH_RE = /\b(products?|killers?|sprays?|repellents?|traps?|baits?|granules|fertilizers?|herbicides?|insecticides?|pesticides?|seeds?|mowers?|spreaders?|tools|equipment|devices?|gear|kits?|brands?|reviews?)\b/;
+function isProviderListPath(words) {
+  return PROVIDER_LIST_PATH_RE.test(words) && !PRODUCT_PATH_RE.test(words);
+}
 function pathWords(urlString) {
   try {
     const u = new URL(urlString);
@@ -177,7 +182,7 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
     // a directory is joined by signing up, not by a pitch), never a listicle
     // candidate on a place name alone, never a cost guide cited for "who
     // should I hire".
-    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)) && PROVIDER_LIST_PATH_RE.test(pathWords(topUrl)),
+    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)) && isProviderListPath(pathWords(topUrl)),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),

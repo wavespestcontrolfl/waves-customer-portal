@@ -130,8 +130,8 @@ describe('rankCitedPages', () => {
     const more = rankCitedPages([row({ query: Q1, urls: ['https://www.yelp.com/biz/best-pest-control-sarasota', 'https://www.bobvila.com/articles/pest-control-cost/?utm_campaign=best'] })], []);
     expect(more.map((p) => p.listPage)).toEqual([false, false]);
     // a product roundup is not a list of service providers
-    const [product] = rankCitedPages([row({ query: Q1, urls: ['https://www.bobvila.com/articles/best-ant-killer/'] })], []);
-    expect(product.listPage).toBe(false);
+    const products = rankCitedPages([row({ query: Q1, urls: ['https://www.bobvila.com/articles/best-ant-killer/', 'https://www.bobvila.com/articles/best-lawn-care-products/'] })], []);
+    expect(products.map((p) => p.listPage)).toEqual([false, false]);
     // a heuristic listicle candidate on a place name alone is not proof of a list
     const [guide] = rankCitedPages([row({ query: Q1, urls: ['https://someblog.example/sarasota-pest-guide'] })], []);
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });

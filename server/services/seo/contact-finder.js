@@ -14,6 +14,7 @@
  * bad domain can't crash a harvest of hundreds.
  */
 
+const { decodeHTML } = require('entities');
 const net = require('net');
 const dns = require('dns');
 const http = require('http');
@@ -363,13 +364,13 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
   const html = page.html && page.status >= 200 && page.status < 300 ? page.html : null;
   if (!html) return null;
   const title = (html.match(/<title[^>]*>([\s\S]{1,200}?)<\/title>/i) || [])[1]?.replace(/\s+/g, ' ').trim() || null;
-  const text = html
+  const stripped = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ') // hidden fallback, not page content
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/<[^>]+>/g, ' ');
+  // entities decoded (&nbsp;, &#32;, &amp; …) so the text reads as displayed
+  const text = decodeHTML(stripped).replace(/\s+/g, ' ').trim();
   const out = { title, snippet: text.slice(0, 400) || null };
   if (withText) Object.assign(out, { text: page.truncated ? null : text, finalUrl: page.finalUrl || null });
   return out;
