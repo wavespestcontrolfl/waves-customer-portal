@@ -235,3 +235,29 @@ describe('photo notes and Turf Health sub-line in lead mode', () => {
     expect(detailsOf(screen.getByText('One summary line.'))).not.toBeNull();
   });
 });
+
+// The live page's own print pass (Report Tools "Print", Cmd+P) keeps
+// PrintContext false, so the expanders open on beforeprint too: a closed
+// <details> prints without its contents (codex P1 #5517 r1).
+describe('lead-mode expanders open for the browser print pass', () => {
+  it('findings, water and technician-notes details open once printing begins', () => {
+    const { container } = render(
+      <>
+        <LawnInsightCards insights={[URGENT, WATCH]} lead={LEAD} />
+        <WaterIntakeBar lead water={{ status: 'balanced', rainInches: 0.4, irrigationInches: 0.6, targetInches: 1, explanation: 'Rain plus your sprinklers met the target.' }} aftercare={{ watering: 'Skip turf watering until Thu 3 PM.', reentry: 'Keep pets off until dry.' }} />
+        <LawnPhotoStrip lead photos={[{ url: 'https://example.test/a.jpg', label: 'Front' }]} summary="A few thin tan patches along the driveway edge." />
+      </>,
+    );
+    const details = () => [...container.querySelectorAll('details')];
+    expect(details().length).toBeGreaterThanOrEqual(3);
+    expect(details().every((d) => !d.open)).toBe(true);
+    const prevActEnv = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      window.dispatchEvent(new Event('beforeprint'));
+      expect(details().every((d) => d.open)).toBe(true);
+    } finally {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = prevActEnv;
+    }
+  });
+});

@@ -435,6 +435,10 @@ function SliderArrow({ dir, onClick, disabled }) {
 
 export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false }) {
   const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   const pics = (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
   const [idx, setIdx] = useState(0);
@@ -499,7 +503,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
         </div>
       ) : null}
       {summary && lead ? (
-        <details open={print} style={{ marginTop: 12 }}>
+        <details open={printOpen} style={{ marginTop: 12 }}>
           <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Technician notes</summary>
           <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p>
         </details>
@@ -635,6 +639,10 @@ const sameText = (a, b) => {
 
 export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
   const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   const top = [...insights.filter(Boolean)]
     .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
     .slice(0, limit);
@@ -685,7 +693,7 @@ export function LawnInsightCards({ insights = [], limit = 3, lead = null }) {
                   {showPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} size={16} /> : null}
                 </div>
                 {more.length || confidenceLabel ? (
-                  <details open={print} style={{ marginTop: 10 }}>
+                  <details open={printOpen} style={{ marginTop: 10 }}>
                     <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>More about this</summary>
                     <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                       {more}
@@ -858,6 +866,10 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
 export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null, lead = false }) {
   const mounted = useMounted();
   const print = usePrint();
+  // The browser print pass (Report Tools "Print", Cmd+P) over the live page
+  // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
   if (!water) return null;
   // Missing readings stay missing card-wide: Number(null)/Number('') are a
   // finite 0, and a rain-unknown payload must not render a false `Rain 0"`
@@ -991,7 +1003,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           watch" callout is gone there: the coverage finding and the balanced
           explanation already say it. */}
       {lead && (explanationShown || afterNote) ? (
-        <details open={print} style={{ marginTop: 12 }}>
+        <details open={printOpen} style={{ marginTop: 12 }}>
           <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
           {explanationShown ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
           {afterNote ? (
