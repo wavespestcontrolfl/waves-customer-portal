@@ -53,7 +53,7 @@ function scriptedDb(scenario) {
   const db = jest.fn((table) => {
     switch (table) {
       case 'rate_review_config':
-        return chain({ first: () => scenario.config || null });
+        return chain({ first: () => { if (scenario.configError) throw scenario.configError; return scenario.config || null; } });
       case 'rate_review_snapshots':
       case 'rate_review_snapshots as r':
         return chain({

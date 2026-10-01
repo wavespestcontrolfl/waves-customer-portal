@@ -900,6 +900,39 @@ describe('engine replay guards', () => {
     const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === customer.id);
     expect(row.anniversary_date).toBe('2025-12-05'); // first completed visit after the EARLIEST acceptance (2025-11-28)
   });
+  test('held lanes never feed the cadence mode: three per_visit accounts cannot become a clean account\'s list rate', async () => {
+    const perVisit = [20, 21, 22].map((n) => fixture.customer(n, { member_since: '2024-11-0' + (n - 19), billing_mode: 'per_visit', last_name: 'PV ' + n }));
+    const clean = fixture.customer(23, { member_since: '2024-12-09', last_name: 'Clean No Estimate' });
+    const scenario = {
+      // only the per_visit accounts and the clean account share pest/bimonthly — no estimate anywhere on this cadence
+      planLines: [...perVisit.map((c) => fixture.planLine(c.id, 'pest_control', 'bimonthly', 95)), fixture.planLine(clean.id, 'pest_control', 'bimonthly', 90)],
+      customers: [...perVisit, clean], firstVisits: [], completedVisits: [], estimates: [], terms: [], ledger: [], priorReviews: [], sentRowCount: 0, signals: {},
+    };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async () => fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: [] }));
+    await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+    const row = scripted.writes.snapshotInserts.find((r) => r.customer_id === clean.id);
+    expect(row.list_rate_source).toBe('none');
+    expect(row.status).toBe('skipped');
+    expect(JSON.parse(row.flags)).toContain('no_list_rate');
+  });
+  test('a config read that FAILS fails the batch; a missing row still defaults', async () => {
+    const failing = fixture.scriptedDb({ planLines: [], customers: [], configError: new Error('relation unavailable') });
+    db.mockImplementation((table) => failing(table));
+    db.raw.mockImplementation((...args) => failing.raw(...args));
+    await expect(rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW })).rejects.toThrow('relation unavailable');
+    expect(failing.writes.snapshotInserts).toHaveLength(0);
+    expect(failing.writes.batchUpserts).toHaveLength(0);
+    const missing = fixture.scriptedDb({ planLines: [], customers: [], config: null });
+    db.mockImplementation((table) => missing(table));
+    db.raw.mockImplementation((...args) => missing.raw(...args));
+    db.transaction.mockImplementation((fn) => missing.transaction(fn));
+    expect((await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-12-01', anniversaryTo: '2026-12-31', now: NOW })).config).toMatchObject(DEFAULT_CONFIG);
+  });
   test('an unclassified family never borrows a list rate from other unclassified lines and is held', async () => {
     const others = [16, 17, 18].map((n) => fixture.customer(n, { member_since: '2024-12-0' + (n - 15), last_name: 'Other ' + n }));
     const scenario = {
@@ -920,9 +953,28 @@ describe('engine replay guards', () => {
       expect(JSON.parse(row.flags)).toContain('unsupported_family');
     }
   });
-  test('the plan-line query takes live accounts only and visit revenue is net of recorded refunds', () => {
+  test('the book and history loaders mirror the canonical purchased-plan row predicate', () => {
+    const { isPlanSeriesRow, isCountingSourceStatus, COUNTING_SOURCE_STATUSES } = require('../services/recurring-series-cancel-reseed');
+    // the SQL says what isPlanSeriesRow says: recurring root or legacy child, never a booster, callback or included follow-up
+    expect(P.PLAN_ROW_SQL).toMatch(/s\.is_recurring = true OR \(s\.is_recurring IS NULL AND s\.recurring_parent_id IS NOT NULL\)/);
+    expect(P.PLAN_ROW_SQL).toMatch(/COALESCE\(s\.is_callback, false\) = false/);
+    expect(P.PLAN_ROW_SQL).toMatch(/COALESCE\(s\.followup_included, false\) = false/);
+    expect(isPlanSeriesRow({ is_recurring: false, recurring_parent_id: 'root' })).toBe(false); // booster
+    expect(isPlanSeriesRow({ is_recurring: true, is_callback: true })).toBe(false);
+    expect(isPlanSeriesRow({ is_recurring: null, recurring_parent_id: 'root' })).toBe(true);
+    // live statuses = the reconciler's counting statuses (no 'rescheduled' placeholder)
+    expect(P.LIVE_STATUS_SQL).toBe(`(s.status IS NULL OR s.status IN (${COUNTING_SOURCE_STATUSES.map((st) => `'${st}'`).join(', ')}))`);
+    expect(isCountingSourceStatus('rescheduled')).toBe(false);
+    expect(P.LIVE_STATUS_SQL).not.toMatch(/rescheduled/);
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
+    expect(planQuery).toMatch(/\$\{LIVE_STATUS_SQL\}/);
+    expect(planQuery).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    for (const fn of ['loadFirstCompletedVisits', 'loadCompletedVisitRows']) {
+      const body = src.slice(src.indexOf(`async function ${fn}`), src.indexOf('`, [', src.indexOf(`async function ${fn}`)));
+      expect(body).toMatch(/\$\{PLAN_ROW_SQL\}/);
+    }
+    expect(src).not.toMatch(/RECURRING_SQL/);
     expect(planQuery).toMatch(/c\.active = true/);
     expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);
     const revenue = src.slice(src.indexOf('AS paid_revenue') - 900, src.indexOf('AS paid_revenue'));
@@ -972,7 +1024,7 @@ describe('gate off is a no-op', () => {
     const fs = require('fs');
     const path = require('path');
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-    const start = scheduler.indexOf("cron.schedule('20 6 1 * *'");
+    const start = scheduler.indexOf("cron.schedule('20 6 1-7 * *'");
     expect(start).toBeGreaterThan(0);
     const tick = scheduler.slice(start, scheduler.indexOf('cron.schedule(', start + 10));
     expect(tick).toMatch(/rateReviewLive\(\)\) return;/);
@@ -1374,6 +1426,23 @@ describe('runMonthlyRateReview', () => {
     expect(retry.window).toEqual({ from: '2026-12-06', to: '2027-01-05' });
     expect(retry.emailed).toBe(true);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(2);
+  });
+  test('a digest delivery failure is thrown to the cron runner after the batch is persisted (job_health records it; the day 2–7 tick retries)', async () => {
+    const book = fixture.decemberBook();
+    const scenario = { planLines: book.planLines, customers: book.customerRows, firstVisits: book.firstVisits, completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+    const scripted = fixture.scriptedDb(scenario);
+    db.mockImplementation((table) => scripted(table));
+    db.raw.mockImplementation((...args) => scripted.raw(...args));
+    db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+    mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+    mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+    const sendgrid = require('../services/sendgrid-mail');
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('sendgrid 503'), { status: 503 }));
+    await expect(rateReview.runMonthlyRateReview({ now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } })).rejects.toThrow('sendgrid 503');
+    expect(scripted.writes.batchUpserts).toHaveLength(1); // the batch itself landed
+    expect(scripted.writes.batchUpdates.some((p) => p.email_sent_at)).toBe(false); // nothing stamped → the next tick retries
+    const scheduler = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/cron\.schedule\('20 6 1-7 \* \*'/);
   });
   test('an external recipient fails closed — the body names customers', async () => {
     const scripted = fixture.scriptedDb({ priorReviews: [], batchRow: { batch_key: '2026-12' } });

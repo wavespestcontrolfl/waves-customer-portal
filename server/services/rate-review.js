@@ -80,6 +80,7 @@ const { resolveActualMinutes } = require('./pricing-reality-check');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+const { COUNTING_SOURCE_STATUSES } = require('./recurring-series-cancel-reseed');
 
 const SNAPSHOTS = 'rate_review_snapshots';
 const BATCHES = 'rate_review_batches';
@@ -992,13 +993,12 @@ async function replayEstimate(estimate, { familyKey, cadence, activeFamilies }, 
 
 // ── data loaders ────────────────────────────────────────────────────────
 
+// The admin-editable knobs. A MISSING row defaults (the seed migration
+// guarantees one); a read that FAILS propagates — a batch ranked, persisted
+// and emailed on DEFAULT_CONFIG while the owner's edited caps were
+// unreadable would be a valid-looking batch under the wrong rules.
 async function loadConfig(dbh = db) {
-  let row = null;
-  try {
-    row = await dbh(CONFIG).where({ id: 1 }).first();
-  } catch (err) {
-    logger.warn(`[rate-review] config read failed, using defaults: ${err.message}`);
-  }
+  const row = await dbh(CONFIG).where({ id: 1 }).first();
   const config = { ...DEFAULT_CONFIG };
   if (row) {
     for (const key of Object.keys(DEFAULT_CONFIG)) {
@@ -1033,10 +1033,22 @@ const CADENCE_SQL = `CASE WHEN sv.frequency LIKE 'seasonal%' OR s.recurring_patt
   WHEN (s.recurring_pattern = 'custom' OR s.recurring_pattern IS NULL) AND s.recurring_interval_days IS NULL AND sv.frequency IN ('monthly','quarterly','every_6_weeks','semiannual') THEN sv.frequency
   ELSE 'other' END`;
 
-const RECURRING_SQL = '(COALESCE(s.is_recurring, false) OR s.recurring_parent_id IS NOT NULL)';
+// SQL mirror of recurring-series-cancel-reseed.js#isPlanSeriesRow — the
+// purchased-plan row predicate: the recurring root or a child (explicitly
+// recurring, or a legacy null-flagged child of a root), never an explicit
+// booster (is_recurring = false + parent), a free re-service callback or an
+// included follow-up. One rule for the book and the history loaders.
+const PLAN_ROW_SQL = `((s.is_recurring = true OR (s.is_recurring IS NULL AND s.recurring_parent_id IS NOT NULL))
+  AND COALESCE(s.is_callback, false) = false AND COALESCE(s.followup_included, false) = false)`;
+// Live upcoming rows = the same statuses the plan-count reconciler counts
+// (isCountingSourceStatus: NULL or COUNTING_SOURCE_STATUSES) — a
+// 'rescheduled' placeholder is not an application on the books.
+const LIVE_STATUS_SQL = `(s.status IS NULL OR s.status IN (${COUNTING_SOURCE_STATUSES.map((st) => `'${st}'`).join(', ')}))`;
 
-// Every active recurring plan line in the book: real customer × line ×
-// cadence with ≥1 open future recurring visit (pre-read definition).
+// Every active recurring plan line in the book: real, live customer × line
+// × cadence with ≥1 upcoming purchased-plan row (PLAN_ROW_SQL ×
+// LIVE_STATUS_SQL; the pre-read definition narrowed to the canonical
+// plan-row predicate).
 async function loadActivePlanLines(dbh, { today }) {
   const { rows } = await dbh.raw(`
     WITH ov AS (
@@ -1047,8 +1059,8 @@ async function loadActivePlanLines(dbh, { today }) {
       LEFT JOIN services sv ON sv.id = s.service_id
       JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date >= ?
-        AND s.status IN ('pending', 'confirmed', 'rescheduled')
-        AND ${RECURRING_SQL}
+        AND ${LIVE_STATUS_SQL}
+        AND ${PLAN_ROW_SQL}
         AND c.deleted_at IS NULL
         AND c.active = true
         AND c.pipeline_stage IN ('active_customer', 'won', 'at_risk')
@@ -1094,8 +1106,7 @@ async function loadFirstCompletedVisits(dbh, customerIds) {
     LEFT JOIN services sv ON sv.id = s.service_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND COALESCE(s.is_callback, false) = false
-      AND ${RECURRING_SQL}
+      AND ${PLAN_ROW_SQL}
     GROUP BY 1, 2
   `, [customerIds]);
   const map = new Map();
@@ -1182,8 +1193,7 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
     LEFT JOIN annual_prepay_terms apt ON apt.id = s.annual_prepay_term_id
     WHERE s.customer_id = ANY(?::uuid[])
       AND s.status = 'completed'
-      AND COALESCE(s.is_callback, false) = false
-      AND ${RECURRING_SQL}
+      AND ${PLAN_ROW_SQL}
       AND s.scheduled_date >= ?
   `, [...notSettled, customerIds, sinceYmd]);
   return rows;
@@ -1636,9 +1646,13 @@ function computeLineReferences(book) {
   const modeByGroup = new Map();
   const rphByFamily = new Map();
   for (const entry of book) {
-    // An unclassified family ('other') has no shared identity — its lines
-    // never establish each other's list rate.
-    if (entry.current.cents > 0 && entry.current.unit === 'application' && entry.familyKey !== 'other') {
+    // Only a lane that represents ORDINARY list pricing feeds the mode: a
+    // per_application account priced off its visits / fee. Prepaid lines
+    // (discounted term pricing), per_visit / one_time / NULL lanes (cleanup)
+    // and unclassified families never establish another line's list rate.
+    if (entry.current.cents > 0 && entry.current.unit === 'application' && entry.familyKey !== 'other'
+      && ['visit_median', 'per_application_fee'].includes(entry.current.source) && !entry.current.prepayMidTerm
+      && entry.customer.billing_mode === 'per_application') {
       const key = `${entry.familyKey}|${entry.cadence}`;
       if (!modeByGroup.has(key)) modeByGroup.set(key, []);
       modeByGroup.get(key).push(entry.current.cents);
@@ -2067,12 +2081,17 @@ async function runMonthlyRateReview({ now = new Date(), dbh = db, mailer = null,
     logger.warn(`[rate-review] monthly build skipped for ${batchKey}: ${built.reason}`);
     return { skipped: built.reason, batchKey };
   }
+  // The batch is persisted either way. A delivery failure is RE-THROWN so
+  // runExclusive records the job as failed (job_health) instead of a quiet
+  // success with email_sent_at still null; the tick runs on days 1–7 and is
+  // idempotent (an emailed batch is skipped above, an unsent one rebuilds
+  // inside its stored window), so the digest is retried the next morning.
   let email;
   try {
     email = await sendBatchEmail({ batchKey, dbh, mailer });
   } catch (err) {
-    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${Number.isInteger(err && err.status) ? err.status : 'network'})`);
-    return { ...built, emailed: false, error: true };
+    logger.error(`[rate-review] batch email failed for ${batchKey} (status ${Number.isInteger(err && err.status) ? err.status : 'network'}) — batch persisted, delivery will retry`);
+    throw err;
   }
   return { ...built, emailed: !!email.sent, email };
 }
@@ -2091,6 +2110,7 @@ module.exports = {
   _private: {
     trimmedMedian, median, quartiles, modeCents, monthsBetween, monthsAgoYmd, monthKeyMinus, anniversaryInWindow, reviewWindowFor, dateColumn, etDay,
     isBatchKey, assertBatchKey, assertYmd, firstCompletedVisitFor, selectReviewEntries, loadLatestSnapshots, engineItemLowConfidence, windowLabel, syncPricingConstants, daysAgoYmd,
+    PLAN_ROW_SQL, LIVE_STATUS_SQL,
     CARRY_FORWARD_STATUSES, CARRY_FORWARD_MAX_DAYS_PAST, REVIEW_WINDOW_FROM_DAYS, REVIEW_WINDOW_TO_DAYS,
     visitsPerYearFor,
     conversationMinutesFor, interactionFor, wallMinutesFor, treatmentMinutesFor, computeLineAllowances, allowanceFor, lineDurationStats, visitRevenueCents,
