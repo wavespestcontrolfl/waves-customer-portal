@@ -1321,9 +1321,11 @@ true` ONLY when the gate is exactly `'true'`, the recurring card-on-file lane is
 and the policy the accept would resolve puts this customer on the card rail
 (a card is captured at accept, or a consented method is already saved/Auto Pay is
 active). It is OMITTED (never `false`) in every other case, so a gate-off response is
-byte-identical to before; plan members, payer-billed, invoice-mode, commercial manual
-billing, one-time, paused-Auto-Pay, and the annual-prepay legacy carve-out never carry
-it. It is a boolean about the viewer's own estimate only: no customer, payer, or
+byte-identical to before. A plan member whose Auto Pay is already active DOES carry it
+(that policy resolves to `autopay_already_active`, an on-rail state: the saved method is
+charged after the visit). Plan members NOT on Auto Pay (`existing_plan_customer`),
+payer-billed, invoice-mode, commercial manual billing, one-time, paused-Auto-Pay, and
+the annual-prepay legacy carve-out never carry it. It is a boolean about the viewer's own estimate only: no customer, payer, or
 payment-method data rides it. Informational only for now: no client reads it, and it
 moves no money and sends no message.
 
