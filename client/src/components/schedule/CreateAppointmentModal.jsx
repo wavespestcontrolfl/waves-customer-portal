@@ -3133,6 +3133,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Placed AFTER the cadence-grouping helpers below: these read them
   // during render, so they must not run before those consts initialize.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  // "Customer's words" shows only when the words would actually be saved: the
+  // server stamps a group's PRIMARY row, and grouping can promote a recurring
+  // service ahead of a one-time re-service, so a re-service line riding as an
+  // add-on has no row to hold them. Same predicate the submit loop uses.
+  const reserviceRequestShown = reserviceRequestActive
+    && appointmentSubmitGroups.some((g) => isOfficeRequestLine(g.lines[0]));
   const submitGroupLinesFor = (svc) => submitGroupLinesForService(appointmentSubmitGroups, svc, services);
   const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
     appointmentSubmitGroups, services,
@@ -4172,7 +4178,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             // primary line is a pest/lawn re-service (the server stamps the
             // primary row and decides the source itself).
             ...(group === firstOfficeRequestGroup
-              ? customerRequestBodyField({ active: reserviceRequestActive, text: customerWords, usedSuggestion })
+              ? customerRequestBodyField({ active: reserviceRequestShown, text: customerWords, usedSuggestion })
               : {}),
             // Only the FIRST created group of a booking asks for the customer
             // confirmation text and carries the card-link flag — a split
@@ -6414,7 +6420,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         {/* Section 4: Notes & Confirm */}
         <div style={sectionStyle}>
           <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B', marginBottom: 10 }}>Notes</div>
-          {reserviceRequestActive && (
+          {reserviceRequestShown && (
             <div style={{ marginBottom: 10 }} data-testid="customer-words-section">
               <label style={labelStyle} htmlFor="customer-words-input">Customer's words</label>
               {reserviceRequestProbe.suggestion && (

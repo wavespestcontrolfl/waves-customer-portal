@@ -37,11 +37,15 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 }
 
-function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', probe = { enabled: true, suggestion: SUGGESTION }, probeFails = false } = {}) {
+function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-Service', services: catalog = null, probe = { enabled: true, suggestion: SUGGESTION }, probeFails = false } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
     if (url.includes('/admin/services?')) {
+      if (catalog) {
+        const q = (new URL(url, 'http://test').searchParams.get('search') || '').toLowerCase();
+        return Promise.resolve(json({ services: catalog.filter((c) => c.name.toLowerCase().includes(q)) }));
+      }
       return Promise.resolve(json({ services: [{ id: 'svc-1', service_key: serviceKey, name: serviceName, billing_type: 'one_time', base_price: 0, default_duration_minutes: 30 }] }));
     }
     if (url.includes('/reservice-request-suggestion')) {
@@ -164,6 +168,51 @@ describe('Customer\'s words section', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body)).not.toHaveProperty('customerRequest');
+  });
+});
+
+describe('mixed booking: words show only where they would be saved', () => {
+  const CATALOG = [
+    { id: 'svc-q', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control', billing_type: 'recurring', frequency: 'quarterly', base_price: 100, default_duration_minutes: 30 },
+    { id: 'svc-re', service_key: 'pest_re_service', name: 'Pest Re-Service', billing_type: 'one_time', base_price: 0, default_duration_minutes: 30 },
+  ];
+  async function addLine(placeholder, query, name) {
+    fireEvent.change(screen.getByPlaceholderText(placeholder), { target: { value: query } });
+    fireEvent.click(await screen.findByRole('button', { name: new RegExp(name, 'i') }));
+  }
+  function mount() {
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+  }
+
+  it('hides the box when a recurring service is promoted to primary ahead of the one-time re-service, and posts no customerRequest', async () => {
+    const fetcher = installFetch({ services: CATALOG });
+    mount();
+    await addLine('Search services', 'Quarterly', 'Quarterly Pest Control');
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    await addLine('Search to add service', 'Re-Service', 'Pest Re-Service');
+    await waitFor(() => expect(suggestionCalls(fetcher)).toHaveLength(1));
+    // The probe may have answered; the box still stays hidden because the
+    // re-service rides as an add-on of the recurring group's primary row.
+    expect(screen.queryByText("Customer's words")).toBeNull();
+    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(JSON.parse(schedulePosts(fetcher)[0][1].body)).not.toHaveProperty('customerRequest');
+  });
+
+  it('a re-service alone is its own primary, so the box shows', async () => {
+    installFetch({ services: CATALOG });
+    mount();
+    await addLine('Search services', 'Re-Service', 'Pest Re-Service');
+    expect(await screen.findByText("Customer's words")).toBeTruthy();
   });
 });
 

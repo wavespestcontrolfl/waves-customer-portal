@@ -96,7 +96,7 @@ async function pickSuggestion(conn, customerId, { now = Date.now() } = {}) {
     .limit(SCAN_LIMIT)
     .select('id', 'message_body', 'created_at');
   const callRows = await conn('call_log')
-    .where({ customer_id: customerId })
+    .where({ customer_id: customerId, direction: 'inbound' })
     .where('created_at', '>=', floor)
     .orderBy('created_at', 'desc')
     .limit(SCAN_LIMIT)
@@ -143,7 +143,7 @@ async function resolveCustomerRequest(conn, customerId, input, { now = Date.now(
       suggested = row ? smsSuggestionText(row) : null;
     } else {
       const row = await conn('call_log')
-        .where({ id, customer_id: customerId })
+        .where({ id, customer_id: customerId, direction: 'inbound' })
         .where('created_at', '>=', floor)
         .first('id', 'call_summary', 'ai_extraction', 'processing_status', 'call_outcome', 'created_at');
       suggested = row ? callSuggestionText(row) : null;

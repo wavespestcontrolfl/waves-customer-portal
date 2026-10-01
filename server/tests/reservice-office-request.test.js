@@ -56,7 +56,7 @@ const sms = (n, customer, body, h, direction = 'inbound') => ({
   id: id(n), customer_id: customer, direction, message_body: body, created_at: hoursAgo(h),
 });
 const call = (n, customer, h, extra = {}) => ({
-  id: id(n), customer_id: customer, created_at: hoursAgo(h), call_summary: null, ai_extraction: null, processing_status: 'processed', call_outcome: 'info_given', ...extra,
+  id: id(n), customer_id: customer, direction: 'inbound', created_at: hoursAgo(h), call_summary: null, ai_extraction: null, processing_status: 'processed', call_outcome: 'info_given', ...extra,
 });
 
 describe('pickSuggestion', () => {
@@ -117,6 +117,14 @@ describe('pickSuggestion', () => {
     },
   );
 
+  test('an outbound office call is never suggested', async () => {
+    const db = fakeDb({
+      sms_log: [],
+      call_log: [call(1, CUST, 1, { direction: 'outbound', call_summary: 'Office called to confirm Tuesday.' })],
+    });
+    expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
+  });
+
   test('skips spam / voicemail call rows', async () => {
     const db = fakeDb({
       sms_log: [],
@@ -173,6 +181,13 @@ describe('resolveCustomerRequest — the server decides the source', () => {
     expect((await run({ text: 'Ants are back in the kitchen', suggestionId: id(1), suggestionKind: 'call' })).source).toBe('office');
     expect((await run({ text: 'Ants are back in the kitchen', suggestionId: 'not-a-uuid', suggestionKind: 'text' })).source).toBe('office');
     expect((await run({ text: 'Ants are back in the kitchen', suggestionId: id(99), suggestionKind: 'text' })).source).toBe('office');
+  });
+
+  test('an outbound call never keeps source call', async () => {
+    const t = tables();
+    t.call_log.push(call(12, CUST, 4, { direction: 'outbound', call_summary: 'Office called to confirm Tuesday.' }));
+    const r = await resolveCustomerRequest(fakeDb(t), CUST, { text: 'Office called to confirm Tuesday.', suggestionId: id(12), suggestionKind: 'call' }, { now: NOW });
+    expect(r.source).toBe('office');
   });
 
   test('a client-sent source is never read', async () => {
