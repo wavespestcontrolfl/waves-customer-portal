@@ -725,3 +725,16 @@ describe('buildLawnExpectations', () => {
     });
   });
 });
+
+describe('timestamp strings at exactly UTC midnight', () => {
+  const { buildLawnExpectations } = require('../services/service-report/lawn-expectations');
+  test("'2026-11-01T00:00:00Z' is October 31 ET: 14-day gap to Nov 14 and no seasonal dip", () => {
+    const out = buildLawnExpectations({ applications: [], issues: ['seasonal_dip'], visitDate: '2026-11-01T00:00:00Z', nextVisitDate: '2026-11-14' }, { includeUnapproved: true });
+    expect(out.gapDays).toBe(14);
+    expect(out.rows.map((r) => r.id)).not.toContain('issue_seasonal_dip');
+  });
+  test('control: a November 2 visit does get the seasonal dip row', () => {
+    const out = buildLawnExpectations({ applications: [], issues: ['seasonal_dip'], visitDate: '2026-11-02', nextVisitDate: '2026-11-14' }, { includeUnapproved: true });
+    expect(out.rows.map((r) => r.id)).toContain('issue_seasonal_dip');
+  });
+});
