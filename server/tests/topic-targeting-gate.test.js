@@ -1159,8 +1159,25 @@ describe('retired topics', () => {
     expect(codes(gate.evaluate(blog({ slug: '/get-rid-of-earwigs/', query: 'earwig facts', flatWrite: true }), { requireCorpus: false }))).toContain(gate.CODES.RETIRED_TOPIC);
   });
 
+  test('generic service words or framing added to a retired topic do not evade it (codex r1)', () => {
+    for (const [query, url] of [
+      ['paper wasp pest control', '/pest-control/get-rid-of-paper-wasps/'],
+      ['paper wasps removal tips', '/pest-control/get-rid-of-paper-wasps/'],
+      ['what do exterminators get rid of', '/pest-control/what-do-exterminators-get-rid-of/'],
+    ]) {
+      const r = gate.evaluate(blog({ query }), { requireCorpus: false });
+      expect(r.findings.find((f) => f.code === gate.CODES.RETIRED_TOPIC)).toMatchObject({ url });
+    }
+  });
+
+  test('only the deliberately generic retirements have no topic (URL protection only)', () => {
+    const { topicKey, RETIRED_POSTS } = gate._internals;
+    const empty = RETIRED_POSTS.filter((p) => !topicKey(p.url.split('/').filter(Boolean).pop().replace(/-/g, ' '))).map((p) => p.url).sort();
+    expect(empty).toEqual(['/lawn-care/get-rid-of-lawn-pest/', '/pest-control/get-rid-of-pests/', '/pest-control/pest-control-in-lakewood-ranch/']);
+  });
+
   test('a different topic in the same family still passes', () => {
-    for (const query of ['german cockroach identification', 'how to get rid of wasps', 'drywood termite frass', 'pest control sarasota']) {
+    for (const query of ['german cockroach identification', 'how to get rid of wasps', 'drywood termite frass', 'pest control sarasota', 'lawn treatment sarasota', 'termite cost']) {
       expect(gate.evaluate(blog({ query }), { requireCorpus: false }).findings.filter((f) => f.code === gate.CODES.RETIRED_TOPIC)).toEqual([]);
     }
   });

@@ -1094,10 +1094,12 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
 // Static data (no fetch): the check can never fail open on an outage.
 const RETIRED_POSTS = require('../../data/retired-blog-topics-v1.json').posts;
 
-// Words that frame a "get rid of" post without naming its topic.
+// Words that frame a "get rid of" post without naming its topic. Dropped
+// from both sides, with GENERIC_TOKENS, so "paper wasp pest control tips"
+// still reduces to the retired "paper wasp".
 const RETIRED_FILLER = new Set([
   'rid', 'remove', 'removal', 'removing', 'kill', 'killing', 'control', 'treatment',
-  'service', 'company', 'exterminator', 'best', 'guide', 'near',
+  'service', 'company', 'best', 'guide', 'near', 'lawn',
 ]);
 
 function stem(w) {
@@ -1113,7 +1115,10 @@ function stem(w) {
 // both reduce to "paper wasp".
 function topicKey(text) {
   const cities = cityTokens();
-  const words = tokenize(text).filter((w) => !GEO_TOKENS.has(w) && !cities.has(w)).map(stem).filter((w) => !RETIRED_FILLER.has(w));
+  const words = tokenize(text)
+    .filter((w) => !GEO_TOKENS.has(w) && !cities.has(w) && !GENERIC_TOKENS.has(w))
+    .map(stem)
+    .filter((w) => !RETIRED_FILLER.has(w) && !GENERIC_TOKENS.has(w));
   return [...new Set(words)].sort().join(' ');
 }
 
@@ -1127,10 +1132,11 @@ function retiredIndex() {
     const url = normalizeSlug(post.url);
     byUrl.set(url, post);
     byLeaf.set(slugLeaf(url), post);
-    // A topic made only of generic words ("pest" from get-rid-of-pests) would
-    // block every "pest control <city>" idea: URL protection only.
+    // A post made only of generic words (get-rid-of-pests) has an empty key:
+    // matching it would block every "pest control <city>" idea, so it keeps
+    // URL protection only.
     const key = topicKey(slugWords(url));
-    if (key && !key.split(' ').every((w) => GENERIC_TOKENS.has(w)) && !byTopic.has(key)) byTopic.set(key, post);
+    if (key && !byTopic.has(key)) byTopic.set(key, post);
   }
   retiredIndexCache = { byUrl, byLeaf, byTopic };
   return retiredIndexCache;
