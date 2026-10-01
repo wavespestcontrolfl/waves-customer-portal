@@ -35,6 +35,14 @@ const LEAD_WORD_BUDGET = 250;
 // r4); what was applied is still listed in full under "What Waves did today"
 // and Products Applied further down, so it goes last of the three.
 const BUDGET_DROP_ORDER = ['progress', 'why', 'applied'];
+// Per-field word caps. Model-written copy (the narrative overlay, a generated
+// treatment narrative) reaches these fields unbounded, so any one field over
+// its cap is left out of the lead rather than cut mid-sentence; the same
+// text still prints on its own card below (codex P2 #5496 r5). With every
+// field capped and the drop order above, the region fits the budget for any
+// banner of up to about 85 words: after the drops the most that remains is
+// headline 12 + yourPart 2 x 30 + next 30 + visit date ~9 + labels 24.
+const FIELD_WORD_CAPS = { headline: 12, why: 40, progress: 35, applied: 60, yourPart: 30, next: 30 };
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -132,6 +140,10 @@ function deriveLawnLead(reportV2) {
     yourPart: deriveYourPart(reportV2, topIssue, bannerPresent),
     next: deriveNext(reportV2, topIssue, bannerPresent),
   };
+  for (const field of ['headline', 'why', 'progress', 'applied', 'next']) {
+    if (countWords(lead[field]) > FIELD_WORD_CAPS[field]) lead[field] = null;
+  }
+  lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;
     lead[field] = null;
@@ -173,4 +185,4 @@ function leadWords(reportV2) {
   return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + STATIC_LABEL_WORDS;
 }
 
-module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS, LEAD_WORD_BUDGET };
+module.exports = { deriveLawnLead, leadWords, STATIC_LABEL_WORDS, WATERING_WORDS, LEAD_WORD_BUDGET, FIELD_WORD_CAPS };

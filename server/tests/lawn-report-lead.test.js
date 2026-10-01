@@ -232,9 +232,10 @@ describe('lead word budget', () => {
     r.snapshot.treatmentSummary = longSummary;
     const lead = deriveLawnLead(r);
     expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
-    expect(lead.progress).toBeNull();
-    expect(lead.why).toBeNull();
+    // Over its own 60-word cap, the narrative alone is left out; the short
+    // fields beside it stay.
     expect(lead.applied).toBeNull();
+    expect(lead.progress).toBe('Your overall score is up 5 points since August.');
     expect(lead.headline).not.toBeNull();
   });
 
@@ -246,6 +247,33 @@ describe('lead word budget', () => {
     expect(lead.progress).toBeNull();
     expect(lead.applied).toBe('Today we applied a broadleaf herbicide.');
     expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+  });
+
+  test('an oversized model-written step or plan is left out of the lead (it stays on its card)', () => {
+    const long = Array.from({ length: 300 }, () => 'word').join(' ');
+    const r = reportOf({ insights: [issue({ customerAction: long, nextVisitPlan: long })] });
+    r.snapshot.customerAction = long;
+    r.snapshot.statusHeadline = long;
+    const lead = deriveLawnLead(r);
+    expect(lead.yourPart).toEqual([]);
+    expect(lead.next).toBeNull();
+    expect(lead.headline).toBeNull();
+    expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+  });
+
+  test('every field at its cap with a long banner and visit date still fits the budget', () => {
+    const words = (n) => Array.from({ length: n }, () => 'word').join(' ');
+    const banner = { state: 'hold', lines: [words(40), words(30), words(14)], mowHold: null };
+    const r = reportOf({ banner, insights: [issue({ customerAction: words(30), nextVisitPlan: words(30) })], followUp: null });
+    Object.assign(r.snapshot, {
+      statusHeadline: words(12), rootCause: words(40), progress: words(35), treatmentSummary: words(60),
+      nextVisit: { label: 'Tuesday, October 13', source: 'estimated', cadenceWeeks: 4 },
+    });
+    const lead = deriveLawnLead(r);
+    expect(leadWords({ ...r, lead })).toBeLessThanOrEqual(250);
+    expect(lead.headline).not.toBeNull();
+    expect(lead.yourPart).toHaveLength(1);
+    expect(lead.next).not.toBeNull();
   });
 
   test('a lead inside the budget keeps every field', () => {
