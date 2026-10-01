@@ -8,7 +8,7 @@ describe('paymentMethodConsentText client mirror: after-visit variants', () => {
   it('versions match (global and after-visit labels are both v12)', () => {
     expect(client.CONSENT_VERSION).toBe(serverConsent.CONSENT_VERSION);
     expect(client.AFTER_VISIT_CONSENT_VERSION).toBe(serverConsent.AFTER_VISIT_CONSENT_VERSION);
-    expect(client.AFTER_VISIT_CONSENT_VERSION).toBe('v12_2026-09-30');
+    expect(client.AFTER_VISIT_CONSENT_VERSION).toBe('v13_2026-10-01');
   });
 
   it('every text is byte-identical to the server canonical', () => {

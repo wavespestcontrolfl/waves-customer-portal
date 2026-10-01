@@ -53,8 +53,9 @@ export const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then 
 
 // Mirror of the server's AFTER_VISIT_CONSENT_VERSION (GATE_PAY_AFTER_FIRST_VISIT):
 // the after-visit variants carry RATE_IN_EFFECT_SENTENCE like every other
-// variant and share the v12 label.
-export const AFTER_VISIT_CONSENT_VERSION = CONSENT_VERSION;
+// variant; the revised copy has its own label (#5481 shipped v12 without
+// the sentence).
+export const AFTER_VISIT_CONSENT_VERSION = 'v13_2026-10-01';
 
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',

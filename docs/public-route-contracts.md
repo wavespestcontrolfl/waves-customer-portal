@@ -631,8 +631,9 @@ saved-payment-method consent): the client bundles its own copy of the consent
 text (`client/src/lib/paymentMethodConsentText.js`), so a tab left open across
 a copy change keeps rendering the older text. (The v12 copy family — base
 card/ACH, the immediate-charge prepay variants and the after-visit variants of
-GATE_PAY_AFTER_FIRST_VISIT — all carry the rate-review sentence and share the
-one `v12_2026-09-30` label; a one-time card HOLD snapshots its own disclosure
+GATE_PAY_AFTER_FIRST_VISIT — all carry the rate-review sentence; the base and prepay
+variants are `v12_2026-09-30`, the revised after-visit variants
+`v13_2026-10-01` (#5481's v12 after-visit rows carry the text without it); a one-time card HOLD snapshots its own disclosure
 under `hold_v1_2026-10-01`, which never qualifies for enrollment.) Every save-the-method capture
 therefore carries `consentTextVersion`, the `CONSENT_VERSION` the tab
 rendered beside its checkbox. `/setup`, `/update-amount` and `/finalize`

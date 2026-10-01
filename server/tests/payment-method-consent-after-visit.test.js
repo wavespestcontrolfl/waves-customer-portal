@@ -1,7 +1,8 @@
 // Pay-after-first-visit consent variants (GATE_PAY_AFTER_FIRST_VISIT, owner
 // ruling 2026-09-30). They landed beside the v12 rate-review sentence
 // (#5434): every after-visit text carries RATE_IN_EFFECT_SENTENCE and is
-// recorded under the shared v12_2026-09-30 label.
+// recorded under their own v13_2026-10-01 label (#5481's v12 rows carry the
+// text without it).
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => sql);
@@ -19,9 +20,12 @@ const {
 const { recordConsent, consentVersionQualifiesForEnrollment } = require('../services/payment-method-consents');
 
 describe('after-visit consent variants', () => {
-  test('the after-visit label is the shared v12_2026-09-30 (every variant carries the rate sentence)', () => {
+  test('the revised after-visit copy carries its own label (v13), the base copy stays v12', () => {
     expect(CONSENT_VERSION).toBe('v12_2026-09-30');
-    expect(AFTER_VISIT_CONSENT_VERSION).toBe(CONSENT_VERSION);
+    // #5481 recorded the after-visit text WITHOUT the rate sentence under v12;
+    // the revised text must not share that label.
+    expect(AFTER_VISIT_CONSENT_VERSION).toBe('v13_2026-10-01');
+    expect(AFTER_VISIT_CONSENT_VERSION).not.toBe(CONSENT_VERSION);
     // payment_method_consents.consent_text_version is varchar(20)
     expect(AFTER_VISIT_CONSENT_VERSION.length).toBeLessThanOrEqual(20);
     expect(consentVersionQualifiesForEnrollment(AFTER_VISIT_CONSENT_VERSION)).toBe(true);

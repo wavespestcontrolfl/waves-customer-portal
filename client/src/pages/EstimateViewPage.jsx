@@ -6025,7 +6025,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           recurringCardForceRef.current = true;
         }
         clearLatchedConsentVersion();
-        recurringCardSetupIntentIdRef.current = siFromRedirect;
+        // (The restore above is the latch's decision alone — never
+        // unconditional, or recurringCardForceRef could not force a fresh
+        // authorization after a copy change; pre-push Codex on the merge.)
         // The tender the customer rendered is unknown after a redirect; the
         // attestation falls back to the current render (card) and the server
         // verifies it against the intent's real tender.

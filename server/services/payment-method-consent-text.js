@@ -46,14 +46,15 @@ const CONSENT_VERSION = 'v12_2026-09-30';
 const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then in effect, including rates changed on at least 30 days’ written notice.';
 
 // The AFTER-VISIT variants (GATE_PAY_AFTER_FIRST_VISIT, owner ruling
-// 2026-09-30, #5469) authorize the first charge AFTER the first visit is
-// completed instead of at approval. They landed the same day as v12 and,
-// like every other variant, carry RATE_IN_EFFECT_SENTENCE — so they are
-// recorded under the one v12 label (consentVersionForVariant): one label,
-// one meaning ("this copy family discloses the rate review"). Label length
-// is capped by payment_method_consents.consent_text_version (varchar 20).
-// v12 clears the v8+ enrollment bar (consentVersionQualifiesForEnrollment).
-const AFTER_VISIT_CONSENT_VERSION = CONSENT_VERSION;
+// 2026-09-30, #5469 / #5481) authorize the first charge AFTER the first
+// visit is completed instead of at approval. #5481 shipped them under
+// 'v12_2026-09-30' WITHOUT the rate sentence; this revision adds
+// RATE_IN_EFFECT_SENTENCE to them like every other variant, so the revised
+// copy carries its own label — a row's version must name exactly one text
+// (pre-push Codex on the merge). Label length is capped by
+// payment_method_consents.consent_text_version (varchar 20); v13 clears
+// the v8+ enrollment bar (consentVersionQualifiesForEnrollment).
+const AFTER_VISIT_CONSENT_VERSION = 'v13_2026-10-01';
 
 const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
