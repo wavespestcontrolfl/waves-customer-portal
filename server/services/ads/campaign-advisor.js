@@ -211,7 +211,7 @@ function searchTermsSection(searchTerms, available = true) {
   // No row refreshed within the freshness window means the sync is down or
   // unconfigured: say the data is missing so an outage never reads as zero spend.
   if (!available) {
-    return `(UNAVAILABLE: no search-term sync in the last ${ADVISOR_SEARCH_TERM_FRESH_MS / 3600000} hours. Search-term data is missing, not zero; draw no conclusions about search-term waste.)`;
+    return `(UNAVAILABLE: no complete search-term sync in the last ${ADVISOR_SEARCH_TERM_FRESH_MS / 3600000} hours. Search-term data is missing, not zero; draw no conclusions about search-term waste.)`;
   }
   const spent = searchTerms.filter((t) => Number(t.cost) > 0);
   const rows = JSON.stringify(spent.slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
@@ -392,14 +392,13 @@ class CampaignAdvisor {
       .where('cost', '>', 0)
       .orderBy('cost', 'desc')
       .limit(ADVISOR_MAX_SEARCH_TERMS + 1);
-    // An empty list is only "no spend" if a recent sync actually ran. The
-    // sync records each successful run (even one with zero terms); a recently
-    // stamped row also counts, for rows written before that record existed.
+    // Search terms count as current only when a COMPLETE sync ran recently:
+    // syncSearchTerms records that per run (an empty snapshot included) and
+    // skips the record when Google returned rows it couldn't store, so a
+    // partial snapshot never reads as every term that cost money.
     const freshCutoff = new Date(now - ADVISOR_SEARCH_TERM_FRESH_MS);
     const syncMark = await db('system_settings').where({ key: SEARCH_TERMS_SYNCED_KEY }).first();
-    const searchTermsAvailable = searchTerms.length > 0
-      || (syncMark?.value && new Date(syncMark.value) >= freshCutoff)
-      || Boolean(await db('ad_search_terms').where('updated_at', '>=', freshCutoff).first('updated_at'));
+    const searchTermsAvailable = Boolean(syncMark?.value) && new Date(syncMark.value) >= freshCutoff;
 
     const serviceAttribution = await db('ad_service_attribution')
       .where('lead_date', '>=', d30);

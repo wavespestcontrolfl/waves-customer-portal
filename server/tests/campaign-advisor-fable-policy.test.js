@@ -40,7 +40,9 @@ const mockBudgetRow = (i, budgetTo = 8) => ({
 });
 let mockBudgetLog = [];
 let mockSearchTerms = SEARCH_TERMS;
-let mockFirstRows = {};
+// A complete search-term sync an hour ago, unless a test says otherwise.
+const freshSyncMark = () => ({ system_settings: { key: 'ads.search_terms.last_synced_at', value: new Date(Date.now() - 3600 * 1000).toISOString() } });
+let mockFirstRows = freshSyncMark();
 let mockConflictRows = {};
 const mockLimits = [];
 jest.mock('../models/db', () => jest.fn((table) => {
@@ -78,6 +80,7 @@ const EMPTY_REPORT = {
 
 beforeEach(() => {
   mockBudgetLog = [mockBudgetRow(1)];
+  mockFirstRows = freshSyncMark();
   mockLimits.length = 0;
   mockDispatch.mockReset();
   mockSendSMS.mockClear();
@@ -209,7 +212,7 @@ describe('Codex r4 on #5486', () => {
 });
 
 describe('search-term truncation (Codex r6 on #5486)', () => {
-  afterEach(() => { mockSearchTerms = SEARCH_TERMS; mockFirstRows = {}; });
+  afterEach(() => { mockSearchTerms = SEARCH_TERMS; });
   const term = (i) => ({ search_term: `synthetic term ${i}`, clicks: 1, cost: String(200 - i), conversions: '0', conversion_value: '0', roas: '0' });
 
   test('101 spend rows: the prompt lists 100 and says the list is TRUNCATED', async () => {
@@ -224,10 +227,11 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
 
   test('no fresh sync at all: the prompt says search terms are UNAVAILABLE, not zero (Codex r7)', async () => {
     mockSearchTerms = [];
+    mockFirstRows = {};
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
     const { text } = mockDispatch.mock.calls[0][1];
-    expect(text).toMatch(/UNAVAILABLE: no search-term sync in the last 48 hours/);
+    expect(text).toMatch(/UNAVAILABLE: no complete search-term sync in the last 48 hours/);
   });
 
   test('a recent successful sync with zero terms is a valid empty snapshot, not UNAVAILABLE (Codex r9)', async () => {
@@ -235,7 +239,7 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
     mockFirstRows = { system_settings: { key: 'ads.search_terms.last_synced_at', value: new Date(Date.now() - 3600 * 1000).toISOString() } };
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no search-term/);
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no complete search-term/);
     expect(mockWhereCalls.some((c) => c.table === 'system_settings' && c.args[0].key === 'ads.search_terms.last_synced_at')).toBe(true);
   });
 
@@ -244,13 +248,22 @@ describe('search-term truncation (Codex r6 on #5486)', () => {
     mockFirstRows = { system_settings: { key: 'ads.search_terms.last_synced_at', value: new Date(Date.now() - 72 * 3600 * 1000).toISOString() } };
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    expect(mockDispatch.mock.calls[0][1].text).toMatch(/UNAVAILABLE: no search-term/);
+    expect(mockDispatch.mock.calls[0][1].text).toMatch(/UNAVAILABLE: no complete search-term/);
+  });
+
+  test('fresh rows but no complete-sync record (partial snapshot): UNAVAILABLE, rows not presented as complete (Codex r12)', async () => {
+    mockFirstRows = {};
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const { text } = mockDispatch.mock.calls[0][1];
+    expect(text).toMatch(/UNAVAILABLE: no complete search-term sync/);
+    expect(text).not.toContain('synthetic term spent');
   });
 
   test('fresh rows present: no UNAVAILABLE note', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
     await advisor.generateDailyAdvice();
-    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no search-term/);
+    expect(mockDispatch.mock.calls[0][1].text).not.toMatch(/UNAVAILABLE: no complete search-term/);
   });
 
   test('100 or fewer: no truncation note', async () => {

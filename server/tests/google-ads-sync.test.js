@@ -333,6 +333,17 @@ describe('syncSearchTerms retires terms missing from the latest snapshot (Codex 
     });
   });
 
+  test('rows for a campaign missing locally: no retirement, no success record, and the run fails (Codex r12)', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 999 }, search_term_view: { search_term: 'synthetic orphan term', status: 'NONE' },
+      metrics: { impressions: 3, clicks: 1, cost_micros: 2_000_000, conversions: 0, conversions_value: 0 },
+    }]);
+    mockQueryFirst.mockResolvedValue(null); // no local ad_campaigns row
+    await expect(GoogleAds.syncSearchTerms(30, { throwOnError: true })).rejects.toMatchObject({ code: 'search_terms_incomplete' });
+    expect(mockWhere.mock.calls.find((c) => c[0] === 'updated_at' && c[1] === '<')).toBeUndefined();
+    expect(mockInsert.mock.calls.find((c) => c[0]?.key === GoogleAds.SEARCH_TERMS_SYNCED_KEY)).toBeUndefined();
+  });
+
   test('records a run-level success, even for an empty snapshot (Codex r9)', async () => {
     mockCustomerQuery.mockResolvedValue([]);
     await GoogleAds.syncSearchTerms(30, { throwOnError: true });

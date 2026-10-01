@@ -695,6 +695,18 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
     }
 
+    // Same 7-day no-repeat/no-reversal rule the advisor applies when it
+    // writes the report, rechecked at click time: a change logged after the
+    // report (capacity cron, manual edit, an earlier Apply) makes its
+    // one-click recommendation stale.
+    const recentChange = await db('ad_budget_log')
+      .where({ campaign_id: campaign.id })
+      .where('created_at', '>=', new Date(Date.now() - 7 * 86400000))
+      .first('created_at');
+    if (recentChange) {
+      return res.status(409).json({ applied: false, error: `"${campaign.campaign_name}" had a budget or mode change in the last 7 days, so this recommendation may repeat or undo it. Make the change manually if it's still right.` });
+    }
+
     let result;
     if (isBudgetAction) {
       const amount = toFiniteNumber(value);

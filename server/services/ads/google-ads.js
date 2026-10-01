@@ -337,6 +337,9 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
     // no longer reports are zeroed below, so stale spend never outlives the
     // rolling window (the ads advisor reads cost > 0 as current spend).
     const syncedAt = new Date();
+    // Rows for a Google campaign with no local ad_campaigns row (campaign sync
+    // failed or lagging) can't be stored, so the snapshot is incomplete.
+    let unmatched = 0;
 
     await db.transaction(async (trx) => {
       for (const row of rows) {
@@ -346,7 +349,7 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         const campaign = await trx('ad_campaigns')
           .where({ platform: 'google_ads', platform_campaign_id: platformId })
           .first();
-        if (!campaign) continue;
+        if (!campaign) { unmatched += 1; continue; }
 
         const costDollars = Number(row.metrics.cost_micros || 0) / 1_000_000;
 
@@ -377,6 +380,11 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         results.push(data);
       }
 
+      // An incomplete snapshot keeps the matched rows it got but neither
+      // retires the rest nor counts as a successful run: the advisor reads
+      // search terms as UNAVAILABLE until a complete sync lands.
+      if (unmatched > 0) return;
+
       // Terms missing from this snapshot had no activity in the window.
       await trx('ad_search_terms')
         .where('updated_at', '<', syncedAt)
@@ -390,6 +398,12 @@ async function syncSearchTerms(days = 30, { throwOnError = false } = {}) {
         .merge({ value: syncedAt.toISOString(), updated_at: syncedAt });
     });
 
+    if (unmatched > 0) {
+      throw Object.assign(
+        new Error(`${unmatched} search-term row(s) belong to campaigns missing locally; snapshot incomplete, not marked synced`),
+        { code: 'search_terms_incomplete' },
+      );
+    }
     logger.info(`[google-ads] Synced ${results.length} search terms`);
     return results;
   } catch (err) {
