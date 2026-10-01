@@ -336,7 +336,7 @@ are not a return-visit item): (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
 tying it to the eaves — de-web-only wording, no treatment claim ("We
-swept webs and egg sacs from your eaves and entry points.") and an
+swept webs and any egg sacs from your eaves and entry points.") and an
 expectation that never credits a residual; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
@@ -348,7 +348,7 @@ nothing else stands in for it — matched by exact key, never a substring),
 or the visit separately recorded a genuine `treatmentApplied: true` eave
 action, never just the sweep-only action that gates the section in the
 first place) → combined wording ("We
-swept webs and egg sacs, then applied a residual insecticide to the eaves
+swept webs and any egg sacs, then applied a residual insecticide to the eaves
 and entry points where spiders build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
 alone and never on free text. Neither combination ever interpolates a raw
@@ -377,7 +377,7 @@ Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 cracks/voids, never a surface barrier, so it never shares the pyrethroid
 barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
 Bait → roach gel bait; Advion Ant Bait Gel → ant bait; Advion WDG Granular
-→ non-repellent (a sprayed granule, not a bait);
+(a granular bait broadcast by the pound, with no approved line) → no class;
 Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
 explicitly mapped to no class. A product NOT in this map gets no line —
 fail closed, never guessed; extending the map to a new product requires an
@@ -393,9 +393,11 @@ unrecognized or free-text area string never qualifies either, fail closed;
 when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
 rather than silently asserting the claim. The non-repellent "6-foot
-perimeter band" sentence likewise needs one non-repellent application that
-is both ant-tagged and recorded exterior by the same evidence; otherwise the
-general non-repellent wording. Each line names the active ingredient from a
+perimeter band" sentence needs one non-repellent application that is both
+ant-tagged and recorded as a band: an explicit `perimeter_spray` method or a
+perimeter/foundation chip (Perimeter, Exterior perimeter, Property
+perimeter, Foundation, Foundation perimeter) by exact key; any other
+exterior chip is spot work and gets the general non-repellent wording. Each line names the active ingredient from a
 closed product-name map (fipronil, dinotefuran, indoxacarb, bifenthrin,
 lambda-cyhalothrin, esfenvalerate, deltamethrin, (S)-hydroprene,
 pyriproxyfen and novaluron; owner 2026-10-01: never a brand name), and the

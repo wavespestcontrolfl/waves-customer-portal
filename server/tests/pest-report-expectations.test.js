@@ -118,6 +118,12 @@ describe('buildRainExpectation', () => {
     });
     expect(live.lines[0]).toMatch(/Heavy rain soon after an exterior application/);
 
+    // A bait at an exterior chip leaves no residual to wash off: no caveat.
+    const baitOutside = buildRainExpectation({
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ name: 'Advion Ant Bait Gel', applicationArea: 'Bait stations' }], serviceMonth: 2, forecastHeavyRain: true,
+    });
+    expect(baitOutside.lines.join(' ')).not.toMatch(/Heavy rain soon after an exterior application/);
+
     // The caveat names an exterior application, so an application with no
     // exterior method or area on record gets none.
     const interiorOnly = buildRainExpectation({
@@ -376,7 +382,7 @@ describe('classifyProductExpectation — explicit product-name map (no heuristic
     [{ name: 'Advion Evolution Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Ant Bait Gel' }, 'ant_bait'],
-    [{ name: 'Advion WDG Granular' }, 'non_repellent'],
+    [{ name: 'Advion WDG Granular' }, null],
     [{ name: 'Gentrol IGR' }, 'igr'],
     [{ name: 'Tekko Pro IGR' }, 'igr'],
     // Surfactant — explicitly mapped to no class, not merely absent.
@@ -427,7 +433,7 @@ describe('every catalog product name this map claims to know classifies (codex P
     ['Advion Evolution Cockroach Gel Bait', 'roach_gel_bait'],
     ['Advion Cockroach Gel Bait', 'roach_gel_bait'],
     ['Advion Ant Bait Gel', 'ant_bait'],
-    ['Advion WDG Granular', 'non_repellent'],
+    ['Advion WDG Granular', null],
     ['Gentrol IGR', 'igr'],
     ['Tekko Pro IGR', 'igr'],
     // Deliberately mapped to no class (documented decision, not a gap) —
@@ -526,6 +532,15 @@ describe('buildWhatToExpect', () => {
       expect(out.lines[0]).not.toMatch(/6-foot|ants/i);
     });
 
+    it('an exterior spot chip (Lanai, Bait stations) is not a band: the general wording', () => {
+      for (const applicationArea of ['Lanai', 'Bait stations', 'Eaves / soffit', 'Yard']) {
+        const out = buildWhatToExpect({ products: [{ name: 'Taurus SC', targets: ['Ants'], applicationArea }] });
+        expect(out.lines[0]).not.toMatch(/6-foot|perimeter band/);
+      }
+      const foundation = buildWhatToExpect({ products: [{ name: 'Taurus SC', targets: ['Ants'], applicationArea: 'Foundation' }] });
+      expect(foundation.lines[0]).toMatch(/6-foot perimeter band/);
+    });
+
     it('the ant tag and the exterior record must be on the SAME application', () => {
       const out = buildWhatToExpect({ products: [
         { name: 'Taurus SC', targets: ['Ants'] },
@@ -565,11 +580,10 @@ describe('buildWhatToExpect', () => {
     });
   });
 
-  // A sprayed granule, not a bait: its label calls indoxacarb non-repellent.
-  it('Advion WDG Granular takes the non-repellent line, never the gel bait line', () => {
-    const out = buildWhatToExpect({ products: [{ name: 'Advion WDG Granular' }] });
-    expect(out.lines[0]).toMatch(/^We applied a indoxacarb-based non-repellent|^We applied an indoxacarb-based non-repellent/);
-    expect(out.lines[0]).not.toMatch(/gel bait/);
+  // A granular bait broadcast by the pound: no approved line describes it
+  // (the ant-bait line says "gel bait"), so it fails closed (codex #5523 P1).
+  it('Advion WDG Granular gets no line, never the gel bait or non-repellent line', () => {
+    expect(buildWhatToExpect({ products: [{ name: 'Advion WDG Granular' }] })).toBeNull();
   });
 
   it('LESCO 90/10 Nonionic Surfactant gets no line (explicitly mapped to no class)', () => {
@@ -729,7 +743,6 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
   const ALL = [
     { name: 'Taurus SC', targets: ['Ants'], method: 'perimeter_spray', methodInferred: false },
     { name: 'Alpine WSG' },
-    { name: 'Advion WDG Granular' },
     { name: 'Atticus Talak', method: 'perimeter_spray', methodInferred: false },
     { name: 'Demand CS' },
     { name: 'Onslaught Fastcap' },
@@ -797,7 +810,7 @@ describe('buildSpiderExpectation', () => {
       applications: [],
     });
     expect(out.headline).toBe('Spiders');
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     // No treatment/residual claim anywhere in the card.
     expect(out.whatWeDid).not.toMatch(/treated|residual/i);
     expect(out.expectation).not.toMatch(/The residual binds/);
@@ -812,7 +825,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
       applications: [],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from the exterior of your home.');
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
     expect(out.whatWeDid).not.toMatch(/eaves/);
   });
@@ -827,7 +840,7 @@ describe('buildSpiderExpectation', () => {
       applications: [],
     });
     expect(out).not.toBeNull();
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from the exterior of your home.');
     expect(out.whatWeDid).not.toMatch(/eaves|entry points/);
     expect(out.expectation).toMatch(/takes out established harborage/);
   });
@@ -838,7 +851,7 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: 'Treated webs on exterior surfaces', treatmentApplied: true }],
       applications: [{ product: { name: 'Demand CS' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from the exterior of your home.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from the exterior of your home.');
     expect(out.expectation).not.toMatch(/The residual binds/);
   });
 
@@ -854,7 +867,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     expect(out.expectation).not.toMatch(/The residual binds/);
   });
 
@@ -863,7 +876,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
     expect(out.expectation).toMatch(/The residual binds/);
     expect(out.expectation).toMatch(/thins out over the next few weeks/);
     expect(out.nextStep).toBeUndefined();
@@ -874,7 +887,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffits' }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
   });
 
   // codex P1 2026-09-29 (pre-push audit round 3): eave/soffit area evidence
@@ -887,7 +900,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Interior entry points' }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
   });
 
   it('an eave-sounding but uncontrolled free-text area does not qualify as eave/soffit evidence', () => {
@@ -895,7 +908,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Cleaned out the eaves and gutters' }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
   });
 
   it('action recorded AND a spider-labeled pyrethroid residual applied, AND the visit separately recorded a genuine (treatmentApplied: true) eave action: combined wording', () => {
@@ -904,7 +917,7 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: 'Treated eaves and soffit with residual', treatmentApplied: true }],
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }], // no area of its own
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.');
     expect(out.expectation).toMatch(/The residual binds/);
   });
 
@@ -914,7 +927,7 @@ describe('buildSpiderExpectation', () => {
       actionEntries: [{ label: EAVE_ACTION[0], treatmentApplied: false }],
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
   });
 
   it('action recorded, a spider-targeted product applied but it is NOT pyrethroid-classified: still de-web only (no false residual credit)', () => {
@@ -922,7 +935,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Taurus SC' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }], // non_repellent, not pyrethroid
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
   });
 
   it('action recorded, a pyrethroid product applied but NOT targeted for spiders: still de-web only', () => {
@@ -930,7 +943,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Demand CS' }, targets: ['ants'], applicationArea: 'Eaves / soffit' }],
     });
-    expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
   });
 
   // codex P2 #5137 deferred finding b: "Completed the recorded eave and
@@ -962,7 +975,7 @@ describe('buildSpiderExpectation', () => {
         applications: [],
       });
       expect(out).not.toBeNull();
-      expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+      expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     });
 
     it('the protocol library\'s "Swept eaves, window frames, door frames, and lanai" action still counts as web-removal evidence (sweeping IS the act)', () => {
@@ -971,7 +984,7 @@ describe('buildSpiderExpectation', () => {
         applications: [],
       });
       expect(out).not.toBeNull();
-      expect(out.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+      expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     });
   });
 
@@ -1008,7 +1021,7 @@ describe('buildPestExpectations — composition', () => {
     // for ants, not spiders, and non_repellent-classified anyway) => de-web
     // wording, not the combined/residual wording.
     expect(out.spiders.headline).toBe('Spiders');
-    expect(out.spiders.whatWeDid).toBe('We swept webs and egg sacs from your eaves and entry points.');
+    expect(out.spiders.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
     expect(out.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
 

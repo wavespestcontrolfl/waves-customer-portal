@@ -76,6 +76,9 @@ function isEaveApplicationArea(value) {
 // SW Florida rainy season (owner framing: "ants spike when the rains come").
 const RAINY_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]); // Jun–Oct
 
+// Product classes that leave a surface residual (the forecast caveat).
+const RESIDUAL_SPRAY_CLASSES = new Set(['non_repellent', 'pyrethroid']);
+
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 }
@@ -170,8 +173,12 @@ function buildTrailingWeekRainLine({
   // The caveat is a treatment claim: an inspection- or sweep-only visit (no
   // recorded application) never gets it, attached or standalone (codex r2
   // on #5265).
-  // The caveat names an exterior application, so it needs one on record.
-  const treatmentCaveat = forecastHeavyRain && (products || []).some(hasExteriorApplicationEvidence);
+  // The caveat says a residual can wash off before it binds, so it needs a
+  // residual spray (non-repellent or pyrethroid) recorded outside; a bait or
+  // IGR at an exterior chip forms no surface residual (codex #5523 P2).
+  const treatmentCaveat = forecastHeavyRain && (products || []).some((product) => (
+    RESIDUAL_SPRAY_CLASSES.has(classifyProductExpectation(product)) && hasExteriorApplicationEvidence(product)
+  ));
   if (rainInches == null) return treatmentCaveat ? HEAVY_RAIN_FORECAST_CAVEAT : null;
   const inchesText = formatInches(rainInches);
   let sentence = rainConfidence === 'low'
@@ -252,7 +259,7 @@ function buildRainExpectation({
       // The band line describes a non-repellent's 6-foot perimeter band and
       // ant-to-ant transfer, so a repellent barrier never earns it.
       return cls === 'non_repellent'
-        && hasExteriorApplicationEvidence(product)
+        && hasPerimeterBandEvidence(product)
         && hasAntTargetEvidence(product);
     });
     lines.push(perimeterTreatmentEvidence
@@ -332,15 +339,17 @@ function hasAntTargetEvidence(product) {
 //      explicit PRODUCT_EXPECTATION_CLASS map) was also applied
 //      -> combined wording — the eaves claim still rests on the recorded
 //         action, never on the product target alone
-const WEB_ONLY_TEXT = 'We swept webs and egg sacs from your eaves and entry points.';
+// "any egg sacs": the records name webs, never egg sacs, so the copy never
+// says egg sacs were there (codex #5523 P2).
+const WEB_ONLY_TEXT = 'We swept webs and any egg sacs from your eaves and entry points.';
 // Same de-web fact, location-neutral — no recorded action placed the work
 // at the eaves (codex P2 round 5).
-const WEB_ONLY_GENERIC_TEXT = 'We swept webs and egg sacs from the exterior of your home.';
-const WEB_AND_RESIDUAL_TEXT = 'We swept webs and egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.';
+const WEB_ONLY_GENERIC_TEXT = 'We swept webs and any egg sacs from the exterior of your home.';
+const WEB_AND_RESIDUAL_TEXT = 'We swept webs and any egg sacs, then applied a residual insecticide to the eaves and entry points where spiders build.';
 
 // Owner 2026-10-01: webs are not a return-visit item, so the spider card has
 // no "text us" next step, and it never tells the customer new webs are coming.
-const WEB_ONLY_EXPECTATION = 'Removing webs and egg sacs takes out established harborage and the eggs in those sacs, so spiders lose their foothold on the structure.';
+const WEB_ONLY_EXPECTATION = 'Removing webs and any egg sacs takes out established harborage and any eggs with them, so spiders lose their foothold on the structure.';
 // Residual-backed expectation (combo 2) — the only case where a residual
 // can be credited for thinning webs out over time.
 const RESIDUAL_EXPECTATION = 'The residual binds to those surfaces, so it eliminates spiders that return to build there. Webbing thins out over the next few weeks.';
@@ -440,10 +449,11 @@ const PRODUCT_EXPECTATION_CLASS = new Map([
   ['advion evolution cockroach gel bait', 'roach_gel_bait'],
   ['advion cockroach gel bait', 'roach_gel_bait'],
   ['advion ant bait gel', 'ant_bait'],
-  // Advion WDG is a sprayed water-dispersible granule, not a bait: its label
-  // calls indoxacarb non-repellent and describes ant-to-ant transfer, so it
-  // takes the non-repellent line (the ant-bait line says "gel bait").
-  ['advion wdg granular', 'non_repellent'],
+  // The catalog row is a granular bait broadcast by the pound (migration
+  // 20260712100000, report-product-copy.js), and no approved line describes
+  // a granular bait: the ant-bait line says "gel bait" (codex #5523 P1), so
+  // it gets no line, the same fail-closed posture as an unmapped product.
+  ['advion wdg granular', null],
   ['gentrol igr', 'igr'],
   ['tekko pro igr', 'igr'],
   // Surfactant/adjuvant — deliberately maps to no class (documented here so
@@ -465,7 +475,6 @@ function classifyProductExpectation(product = {}) {
 const PRODUCT_ACTIVE_INGREDIENT = new Map([
   ['taurus sc', 'fipronil'],
   ['alpine wsg', 'dinotefuran'],
-  ['advion wdg granular', 'indoxacarb'],
   ['atticus talak', 'bifenthrin'],
   ['atticus talak 7.9 f', 'bifenthrin'],
   ['demand cs', 'lambda-cyhalothrin'],
@@ -506,14 +515,16 @@ const EXPECTATION_TEXT = {
   non_repellent_general: (ai) => `We applied ${ai ? `a ${ai}-based non-repellent` : 'a non-repellent'}. Insects can't `
     + 'detect the treated zone, so they cross it, pick up the active ingredient and carry it back to their '
     + 'harborage. Activity can spike for a few days, then declines over the next couple of weeks.',
-  ant_bait: (ai) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} along active foraging trails. Foragers feed `
-    + 'on it and share it through the colony before it takes effect. You may see more ants on the placements for a '
-    + 'few days. Leave them alone; they\'re carrying the bait back to the nest.',
-  roach_gel_bait: (ai) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} as crack-and-crevice placements in `
-    + 'hinges, voids and other harborage. Roaches feed on it and carry it back into harborage, where the active '
-    + 'ingredient eliminates them. Over the next week or two you may see roaches out in daylight, slowed and disoriented, as the '
-    + 'active ingredient takes effect. Don\'t use over-the-counter sprays near the placements; a residual spray '
-    + 'contaminates the bait and keeps roaches off it.',
+  // The closing instruction to the customer is left out of the writer's plain
+  // version: the writer's rule 7 bans aftercare instructions (codex #5523 P2).
+  ant_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} along active `
+    + 'foraging trails. Foragers feed on it and share it through the colony before it takes effect. You may see more '
+    + `ants on the placements for a few days.${aftercare ? ' Leave them alone; they\'re carrying the bait back to the nest.' : ''}`,
+  roach_gel_bait: (ai, { aftercare = true } = {}) => `We placed ${ai ? `an ${ai} gel bait` : 'a gel bait'} as `
+    + 'crack-and-crevice placements in hinges, voids and other harborage. Roaches feed on it and carry it back into '
+    + 'harborage, where the active ingredient eliminates them. Over the next week or two you may see roaches out in '
+    + 'daylight, slowed and disoriented, as the active ingredient takes effect.'
+    + `${aftercare ? ' Don\'t use over-the-counter sprays near the placements; a residual spray contaminates the bait and keeps roaches off it.' : ''}`,
   // Barrier wording — ONLY when the application evidence confirms an
   // exterior/perimeter method or area (see hasExteriorApplicationEvidence).
   pyrethroid: (ai) => `We applied a residual ${ai ? `${ai} ` : ''}barrier around the outside of your home. `
@@ -566,10 +577,23 @@ function hasExteriorApplicationEvidence(product = {}) {
   return isExteriorApplicationArea(product.applicationArea);
 }
 
+// The "6-foot perimeter band around your foundation" wording needs the band
+// itself on record: an explicit perimeter spray, or a perimeter/foundation
+// chip by exact key. Other exterior chips (Lanai, Yard, Eaves / soffit, Bait
+// stations) are spot work, never a band (codex #5523 P2).
+const PERIMETER_BAND_CHIPS = new Set(['Perimeter', 'Exterior perimeter', 'Property perimeter', 'Foundation', 'Foundation perimeter']
+  .map(normalizeAreaChipText));
+
+function hasPerimeterBandEvidence(product = {}) {
+  if (product.methodInferred !== true && String(product.method || '') === 'perimeter_spray') return true;
+  return applicationAreaChips(product.applicationArea).some((chip) => PERIMETER_BAND_CHIPS.has(chip));
+}
+
 // `plain` is the AI report writer's version of the same lines: its owner
-// rules never name an active ingredient or a footage figure (report-writer-
-// rules.js rule 5 and its footage screen), so those words are left out
-// and everything else is identical.
+// rules never name an active ingredient or a footage figure and never give
+// aftercare instructions (report-writer-rules.js rules 5 and 7 and its
+// footage screen), so those words are left out and everything else is
+// identical.
 function buildWhatToExpect({ products = [], plain = false } = {}) {
   const byClass = new Map();
   const ingredients = (list) => (plain ? null : activeIngredientPhrase(list));
@@ -589,7 +613,7 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
     if (cls === 'pyrethroid' && hasExteriorApplicationEvidence(product)) {
       pyrethroidExteriorConfirmed = true;
     }
-    if (cls === 'non_repellent' && hasAntTargetEvidence(product) && hasExteriorApplicationEvidence(product)) {
+    if (cls === 'non_repellent' && hasAntTargetEvidence(product) && hasPerimeterBandEvidence(product)) {
       nonRepellentAntBand = true;
     }
   }
@@ -611,14 +635,14 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
       // only the applications that earned it.
       if (cls === 'non_repellent') {
         return EXPECTATION_TEXT.non_repellent(ingredients(classProducts.filter(
-          (p) => hasAntTargetEvidence(p) && hasExteriorApplicationEvidence(p),
+          (p) => hasAntTargetEvidence(p) && hasPerimeterBandEvidence(p),
         )), { footage: !plain });
       }
       if (cls === 'igr') {
         const sixMonthLabel = classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name)));
         return EXPECTATION_TEXT.igr(ai, { sixMonthLabel });
       }
-      return EXPECTATION_TEXT[cls](ai);
+      return EXPECTATION_TEXT[cls](ai, { aftercare: !plain });
     })
     .filter((line) => validateCustomerCopy(line));
   return lines.length ? { lines } : null;

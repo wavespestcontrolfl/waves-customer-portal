@@ -479,9 +479,11 @@ describe('four-section report: supplied timeframes and dates', () => {
       'Results build over the next few weeks.',
     ];
     const allowed = groundedTimeframePhrases(lines);
-    expect(allowed).toEqual(['several days', 'the next couple of weeks', 'the next week or two', 'the next few weeks']);
+    expect(allowed).toEqual(['several days', 'over the next couple of weeks', 'Over the next week or two', 'over the next few weeks']);
     for (const line of lines) expect(writerRulesRejection(`WHAT TO EXPECT: ${line}`, { allowedPhrases: allowed })).toBeNull();
     expect(writerRulesRejection('WHAT TO EXPECT: Activity drops over the next three weeks.', { allowedPhrases: allowed })).toBe('timeframe');
+    // The approved window with a different preposition is a new timeframe.
+    expect(writerRulesRejection('WHAT TO EXPECT: Activity declines within the next couple of weeks.', { allowedPhrases: allowed })).toBe('timeframe');
   });
 
   test('an approved window never passes shortened or without its hedge', () => {

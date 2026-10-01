@@ -17,6 +17,8 @@ describe('writer expectations', () => {
     expect(lines[0]).toMatch(/^We applied a non-repellent as a perimeter band .*spike in ant activity for several days/);
     expect(lines[1]).toMatch(/^We placed a gel bait along active foraging trails/);
     expect(lines.join(' ')).not.toMatch(/fipronil|indoxacarb|6-foot/);
+    // No aftercare instruction (the writer's rule 7).
+    expect(lines.join(' ')).not.toMatch(/Leave them alone|over-the-counter/);
     expect(windowDays).toBe(14);
   });
 
