@@ -2003,14 +2003,23 @@ function computeLineReferences(book) {
 // date is at most CARRY_FORWARD_MAX_DAYS_PAST days behind the build and not
 // beyond the window. A line with no anniversary at all is listed (flag
 // no_anniversary).
-function selectReviewEntries(book, { from, to, now, latestByLine }) {
-  const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
-  // the account's earliest completed visit in the portal, per customer
+// The account's earliest completed visit in the portal, per customer —
+// over the COMPLETE completed history (loadFirstCompletedVisits: every
+// family, cancelled programs included), never just the active book: a
+// cancelled pest program's April visits still date the account's arrival.
+function accountFirstVisits(firstVisits, book) {
   const accountFirst = new Map();
-  for (const entry of book) {
-    const day = dateColumn(entry.first && entry.first.first_visit);
-    if (day && (!accountFirst.has(entry.customer.id) || day < accountFirst.get(entry.customer.id))) accountFirst.set(entry.customer.id, day);
+  const rows = firstVisits ? [...firstVisits.values()] : book.map((entry) => ({ customer_id: entry.customer.id, first_visit: entry.first && entry.first.first_visit }));
+  for (const row of rows) {
+    const day = dateColumn(row.first_visit);
+    if (day && (!accountFirst.has(row.customer_id) || day < accountFirst.get(row.customer_id))) accountFirst.set(row.customer_id, day);
   }
+  return accountFirst;
+}
+
+function selectReviewEntries(book, { from, to, now, latestByLine, firstVisits = null }) {
+  const carryFloor = daysAgoYmd(now, CARRY_FORWARD_MAX_DAYS_PAST);
+  const accountFirst = accountFirstVisits(firstVisits, book);
   const selected = [];
   for (const entry of book) {
     const anniversary = resolveAnniversary({
@@ -2194,7 +2203,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   const refs = computeLineReferences(book);
   const { lineRphStats } = refs;
   const latestByLine = await loadLatestSnapshots(dbh, inputs.customerIds, { batchKey });
-  const selected = selectReviewEntries(book, { from, to, now, latestByLine });
+  const selected = selectReviewEntries(book, { from, to, now, latestByLine, firstVisits: inputs.firstVisits });
   const reviewFacts = await loadReviewFacts(dbh, selected, { now, config, batchKey });
   const manualEditCutoff = monthsAgoYmd(now, config.exception_manual_edit_months);
   const rows = selected.map((entry) => rankEntry(entry, { refs, reviewFacts, batchKey, today, config, manualEditCutoff }));
@@ -2503,6 +2512,7 @@ module.exports = {
   batchEmailed,
   composeBatchEmail,
   _private: {
+    accountFirstVisits,
     presenceWindowFor,
     IMPORT_PRESENCE_DAYS,
     SOLD_POSTURE_KEYS,

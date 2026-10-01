@@ -1309,6 +1309,34 @@ describe('engine replay guards', () => {
     // the batch passes the account's earliest visit and the line's cadence window
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
     expect(src).toMatch(/accountFirstVisit: accountFirst\.get\(entry\.customer\.id\) \|\| null,\n\s+presenceWindowDays: presenceWindowFor\(entry\.visitsPerYear\),/);
+    // the account's earliest visit comes from the COMPLETE completed history, cancelled programs included — never just the active book
+    expect(src).toMatch(/selectReviewEntries\(book, \{ from, to, now, latestByLine, firstVisits: inputs\.firstVisits \}\)/);
+    const history = new Map([['c|lawn_care', { customer_id: 'c', line: 'lawn_care', first_visit: '2026-01-05' }], ['c|tree_shrub', { customer_id: 'c', line: 'tree_shrub', first_visit: '2026-08-20' }]]);
+    expect(P.accountFirstVisits(history, []).get('c')).toBe('2026-01-05');
+    expect(P.accountFirstVisits(null, [{ customer: { id: 'c' }, first: { first_visit: '2026-08-20' } }]).get('c')).toBe('2026-08-20');
+  });
+  test('a program added to an imported account after a since-cancelled one is dated by its own first visit — the cancelled program still dates the account\'s arrival', async () => {
+    const book = fixture.decemberBook();
+    const target = book.customers.belowList.id; // member_since 2025-01-10
+    const added = fixture.planLine(target, 'tree_shrub', 'bimonthly', 80, { service_keys: ['tree_shrub_program'] }); // no estimate
+    const run = async (history) => {
+      const scenario = { planLines: [...book.planLines, added], customers: book.customerRows, firstVisits: [...book.firstVisits, ...history], completedVisits: book.completedVisits, estimates: book.estimates, terms: book.terms, ledger: [], priorReviews: [], sentRowCount: 0, signals: {}, batchRow: null };
+      const scripted = fixture.scriptedDb(scenario);
+      db.mockImplementation((table) => scripted(table));
+      db.raw.mockImplementation((...args) => scripted.raw(...args));
+      db.transaction.mockImplementation((fn) => scripted.transaction(fn));
+      mockFacts.mockImplementation(async (id) => book.factsByCustomer[id] || fixture.facts());
+      mockCoveredTerms.mockImplementation(fixture.coveredTermsStub({ terms: book.terms }));
+      await rateReview.buildBatch({ batchKey: '2026-12', anniversaryFrom: '2026-01-01', anniversaryTo: '2026-12-31', now: NOW, deps: { pricingEngine: fixture.fakePricingEngine() } });
+      return scripted.writes.snapshotInserts.find((r) => r.customer_id === target && r.family_key === 'tree_shrub');
+    };
+    // the account arrived with a (since cancelled) lawn program in January; tree/shrub first seen in August → its own start, under the lock
+    const later = await run([{ customer_id: target, line: 'lawn_care', first_visit: '2026-01-05', completed_visits: 2 }, { customer_id: target, line: 'tree_shrub', first_visit: '2026-08-20', completed_visits: 2 }]);
+    expect(later).toMatchObject({ anniversary_date: '2026-08-20', anniversary_source: 'first_visit', status: 'exception' });
+    expect(JSON.parse(later.flags)).toContain('tenure_under_lock');
+    // tree/shrub first seen with the account's own first visit (December 2025 pest) → present at import → member_since
+    const withAccount = await run([{ customer_id: target, line: 'tree_shrub', first_visit: '2025-12-20', completed_visits: 4 }]);
+    expect(withAccount).toMatchObject({ anniversary_date: '2025-01-10', anniversary_source: 'member_since' });
   });
   test('the sold-mix replay (hand-picked-tier evidence) keeps the stamped rodent posture; the current-list replay strips it', async () => {
     const engine = { generateEstimate: jest.fn(() => ({ lineItems: [], waveGuard: { tier: 'bronze' } })) };
