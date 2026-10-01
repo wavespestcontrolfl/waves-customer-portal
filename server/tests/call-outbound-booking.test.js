@@ -517,6 +517,37 @@ describe('voice-agent bookings share the office-review activation path', () => {
     expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
   });
 
+  describe('a street-level hold completed through the shared seam (pest-recap / project-completion default to performed)', () => {
+    const setup = (row) => {
+      const trx = makeHandle(row);
+      const db = require('../models/db');
+      const dbHandle = makeHandle(row);
+      db.mockImplementation(dbHandle);
+      db.transaction = dbHandle.transaction;
+      db.fn = dbHandle.fn;
+      db.raw = dbHandle.raw;
+      return { trx };
+    };
+    afterEach(() => jest.restoreAllMocks());
+    test('a performed completion stamps field_confirmed_at in the transition trx and still writes the credit evidence', async () => {
+      jest.spyOn(require('../services/street-level-hold'), 'isStreetLevelHoldVisit').mockResolvedValue(true);
+      const { trx } = setup(voiceRow({ status: 'confirmed', field_confirmed_at: null }));
+      await transitionJobStatus({ jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', trx });
+      expect(trx._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.field_confirmed_at instanceof Date)).toBe(true);
+      expect(InspectionCredit.markBookingForInspectionCredit).toHaveBeenCalledWith(trx, expect.objectContaining({ scheduledServiceId: 'svc-v1' }));
+    });
+    for (const holdCompletionOutcome of ['incomplete', 'customer_declined']) {
+      test(`${holdCompletionOutcome}: nothing stamped, no credit evidence`, async () => {
+        jest.spyOn(require('../services/street-level-hold'), 'isStreetLevelHoldVisit').mockResolvedValue(true);
+        InspectionCredit.markBookingForInspectionCredit.mockClear();
+        const { trx } = setup(voiceRow({ status: 'confirmed', field_confirmed_at: null }));
+        await transitionJobStatus({ jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', holdCompletionOutcome, trx });
+        expect(trx._state.updates.some((u) => u.vals && u.vals.field_confirmed_at)).toBe(false);
+        expect(InspectionCredit.markBookingForInspectionCredit).not.toHaveBeenCalled();
+      });
+    }
+  });
+
   test('a pending voice row going straight to en_route activates instead of going half-armed', async () => {
     const row = voiceRow();
     const trx = makeHandle(row);

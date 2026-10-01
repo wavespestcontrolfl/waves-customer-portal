@@ -454,7 +454,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // Dismiss. Checked HERE, under the per-call lock and inside the
     // transaction, so the decision and the write cannot straddle a concurrent
     // office confirm.
-    if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, item)) {
+    // The card is re-read UNDER the lock and the guard judges its LIVE payload: a promotion
+    // (call reprocess) can turn a plain outbound_booking_review card into a street-level hold while
+    // this action waited for the lock, and the route's pre-lock snapshot would miss it.
+    const liveCard = ['resolved', 'dismissed'].includes(nextStatus)
+      ? await trx('triage_items').where({ id }).first('reason_code', 'payload')
+      : null;
+    if (['resolved', 'dismissed'].includes(nextStatus) && await streetLevelHoldStillPending(trx, liveCard ? { ...item, ...liveCard } : item)) {
       throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
     }
     if (holdsTable) {

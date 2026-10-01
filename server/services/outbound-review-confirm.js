@@ -806,6 +806,17 @@ async function hasRecordedOfficeConfirm(dbh, serviceId) {
  * @returns {Promise<boolean|null>} null when the visit is not a hold (nothing to do), true when THIS
  *   call released it, false when it is a hold that could not be released
  */
+async function releaseStreetLevelHoldForPerformedCompletion(serviceId, actor = {}, routeTag = 'completion') {
+  try {
+    const dbh = require('../models/db');
+    const svc = await dbh('scheduled_services').where({ id: serviceId }).first('id', 'source_action', 'customer_confirmed');
+    return await releaseStreetLevelHoldForCompletion(svc, actor, routeTag);
+  } catch (e) {
+    logger.warn(`[${routeTag}] street-level hold release lookup failed for ${serviceId}: ${e.code || e.name || 'error'}`);
+    return false;
+  }
+}
+
 async function releaseStreetLevelHoldForCompletion(svc, actor = {}, routeTag = 'completion') {
   try {
     const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
@@ -1090,6 +1101,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 
 module.exports = {
   releaseStreetLevelHoldForCompletion,
+  releaseStreetLevelHoldForPerformedCompletion,
   fileOwedFollowUpForStreetLevelHold,
   reconcileStreetLevelHoldAfterStamp,
   stampBookedDispositionForStreetLevelHold,

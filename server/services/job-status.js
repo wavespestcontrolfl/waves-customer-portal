@@ -318,13 +318,20 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       success). This writer then skips its
  *                                       own lazy activation instead of
  *                                       running a second, concurrent one.
+ * @param {string} [args.holdCompletionOutcome] the closeout outcome of a 'completed' transition:
+ *                                       'performed' (the default — every engine that completes a visit
+ *                                       through this writer) or 'incomplete' / 'customer_declined'.
+ *                                       A performed completion of a street-level address hold counts as
+ *                                       confirming its address (owner ruling 2026-10-01): the field stamp
+ *                                       commits WITH the transition and the post-commit lazy activation
+ *                                       then releases the hold. An unsuccessful outcome stamps nothing.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
-  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false,
+  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false, holdCompletionOutcome = 'performed',
   // A caller transitioning a BATCH of rows passes one Set and refreshes the
   // affected routes once after its loop (dispatch-assignment.js
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
@@ -418,6 +425,17 @@ async function transitionJobStatus({
       // same posture every at-booking redemption surface carries.
       // Best-effort: an evidence hiccup never blocks the completion; the
       // hook's own idempotent marker call is the belt.
+      // THE shared seam for a performed completion of a street-level hold (completeScheduledService,
+      // pest-recap, project-completion all pass through here): the field-confirmation stamp commits in
+      // this transaction, so the lazy activation below approves the address and releases the hold.
+      // Atomic with the status flip (a lost CAS rolls it back). Unsuccessful outcomes stamp nothing.
+      if (String(toStatus || '') === 'completed' && legacyOutboundActivationNeeded && legacyRow.source_action === 'voice_agent'
+        && !legacyRow.field_confirmed_at && !['incomplete', 'customer_declined'].includes(String(holdCompletionOutcome))
+        && await require('./street-level-hold').isStreetLevelHoldVisit(jobId, t)) {
+        const stampedAt = new Date();
+        await t('scheduled_services').where({ id: jobId }).whereNull('field_confirmed_at').update({ field_confirmed_at: stampedAt });
+        legacyRow.field_confirmed_at = stampedAt;
+      }
       // A street-level address hold completed WITHOUT the field-confirmation stamp (an incomplete or declined
       // closeout, which still sets status completed) earns no credit evidence: its address was never approved
       // and no work was performed. The completion engine commits the stamp in this same transaction before

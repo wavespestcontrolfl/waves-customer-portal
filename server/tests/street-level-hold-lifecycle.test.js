@@ -464,3 +464,41 @@ describe('an unsuccessful closeout whose settlement fails stays retryable (pre-p
     expect(src).toMatch(/settleHoldAfterUnsuccessfulCloseout\(svc, visitOutcome\);\s*\n[\s\S]{0,400}if \(holdRelease === false\)/);
   });
 });
+
+describe('r23: every completion engine settles a performed completion of a hold through the one shared seam', () => {
+  const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+  test('transitionJobStatus stamps the field confirmation in the transition trx for a performed completion only, before the credit-evidence skip', () => {
+    const j = read('../services/job-status.js');
+    expect(j).toContain("holdCompletionOutcome = 'performed'");
+    const stamp = j.indexOf("whereNull('field_confirmed_at').update({ field_confirmed_at: stampedAt })");
+    expect(stamp).toBeGreaterThan(0);
+    expect(j.slice(stamp - 700, stamp)).toContain("['incomplete', 'customer_declined'].includes(String(holdCompletionOutcome))");
+    expect(j.indexOf('const unapprovedHold', stamp)).toBeGreaterThan(stamp);
+    // ...and it lands before the status CAS (so a lost CAS rolls the stamp back).
+    expect(j.indexOf(".update({ status: toStatus, updated_at: t.fn.now() })", stamp)).toBeGreaterThan(stamp);
+  });
+  test('completeScheduledService passes its outcome so an unsuccessful closeout stamps nothing in the seam', () => {
+    const c = read('../services/complete-scheduled-service.js');
+    expect(c).toContain("holdCompletionOutcome: addressConfirmingOutcome ? 'performed' : String(visitOutcome),");
+  });
+  test('pest-recap releases a hold it completed before the recap text, and the recap send carries the visit id', () => {
+    const r = read('../services/pest-recap.js');
+    expect(r).toContain('completedHere = true;');
+    const rel = r.indexOf("releaseStreetLevelHoldForPerformedCompletion(serviceId, { technicianId: transitionedBy }, 'pest-recap')");
+    expect(rel).toBeGreaterThan(0);
+    expect(r.indexOf("purpose: 'service_completion',", rel)).toBeGreaterThan(rel);
+    expect(r).toContain("metadata: { original_message_type: 'pest_recap', service_record_id: recordId, scheduled_service_id: serviceId }");
+  });
+  test('project-completion releases a hold it completed, after commit', () => {
+    const p = read('../services/project-completion.js');
+    const rel = p.indexOf("releaseStreetLevelHoldForPerformedCompletion(postCommitTrackServiceId");
+    expect(rel).toBeGreaterThan(p.indexOf('postCommitTrackServiceId = scheduledService.id;'));
+  });
+  test('the shared send step reads metadata.scheduled_service_id as the visit (the recap is held while a hold is live)', () => {
+    expect(read('../services/messaging/send-customer-message.js')).toContain('input.metadata?.scheduled_service_id');
+  });
+  test('the release wrapper is exported for the engines that pass through the seam', async () => {
+    const { releaseStreetLevelHoldForPerformedCompletion } = require('../services/outbound-review-confirm');
+    expect(typeof releaseStreetLevelHoldForPerformedCompletion).toBe('function');
+  });
+});

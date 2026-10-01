@@ -7423,6 +7423,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           fromStatus,
           toStatus: 'completed',
           transitionedBy: completionInput.actor.technicianId,
+          holdCompletionOutcome: addressConfirmingOutcome ? 'performed' : String(visitOutcome),
           trx,
         });
 
