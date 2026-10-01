@@ -1621,6 +1621,24 @@ report showed; a record with no frozen instruction regenerates it. Only the trea
 sentence that depends on the weekly plan ("follow this week's plan", or "that
 counts toward this week's watering" for a water-in shallower than the plan's
 run) is composed on each render from the plan present on that render.
+Label mow hold (P2b, same gate): when an applied product's frozen facts carry a
+label-sourced `mowHoldDays` (from `products_catalog.mow_hold_days`, 1..14; no
+default, no derivation), the banner gains `mowHold`
+`{ days, untilDate, untilLabel, line }` for the longest hold: `untilDate` is the
+completion's Eastern calendar date plus `days` (YYYY-MM-DD), `untilLabel` the
+Eastern weekday ("Thu"; "Wed, Jan 6" at 7+ days), `line` one finished sentence
+("Mowing: hold off until Thu, 2 days after today's treatment."). The key is
+absent when no product has a value. A visit with a mow hold but no watering
+claim gets a banner `{ state: null, lines: [], holdUntil: null, waterInBy: null,
+expiresAt: null, ruleSource, mowHold }`; that is the only case `state` is
+`null`, and the client then titles the card "Mowing after today's visit".
+`mowHold.line` is never in `lines` (so the lawn watering text and the PDF's one
+watering line are unchanged), it is frozen with a frozen instruction and
+otherwise rebuilt from the frozen product facts (a state-null instruction is
+never frozen), it never changes by the clock (the live banner's "ended" note
+replaces only the watering lines), and `mowHoldDays` never appears on
+`applications[].product`. Facts frozen before the column existed make no mow
+claim. The value is part of the lawn render cache signature.
 `reportV2.aftercare.watering` carries every treatment sentence. A render whose
 watering inputs could not be read (customer preferences or the catalog) omits
 the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
