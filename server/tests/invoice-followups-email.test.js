@@ -541,6 +541,55 @@ describe('invoice follow-up email sidecar', () => {
     expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
   });
 
+  // Codex #5424 r15 P1: an operator's send-now Email has no billing authority to re-read the hold under its
+  // locks, so its provider handoff reads it itself - with the operator's trusted exemption (a plain dispute
+  // hold is skipped, a wrong-number / wrong-party fallback hold still stops the pay link).
+  describe('an operator send-now Email: the final handoff reads the hold with the operator exemption', () => {
+    const CollectionHold = require('../services/collections/collection-hold');
+    async function operatorSendNow({ held }) {
+      const sequence = followupRow();
+      setDbQueues({
+        'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+        customers: [chain({ first: customer() })],
+        invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+        notification_prefs: [chain({ first: { email_enabled: false, invoice_channels: ['email'] } })],
+        customer_interactions: [chain(), chain()],
+        invoice_followup_sequences: [chain({ first: sequence }), chain(), chain({ first: sequence }), chain({ result: 1 }), chain(), chain({ result: 1 })],
+      });
+      const dispatch = jest.fn(async () => {});
+      const calls = [];
+      const ownership = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+      let verdict;
+      EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        // From here on every hold read is the FINAL provider-boundary one.
+        CollectionHold.messagingHeldByCollectionHold.mockClear();
+        CollectionHold.messagingHeldByCollectionHold.mockImplementation(async (...args) => { calls.push(args); return held ? { held: true, reason: 'hold' } : { held: false }; });
+        verdict = await withProviderHandoff(dispatch);
+        return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+      });
+      try {
+        await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
+      } finally {
+        ownership.mockRestore();
+        CollectionHold.messagingHeldByCollectionHold.mockImplementation(async () => ({ held: false }));
+      }
+      return { dispatch, calls, verdict };
+    }
+
+    test('a hold still standing at the final handoff (a fallback hold - the exemption skips a plain dispute) blocks the send: a retryable WAIT, nothing dispatched', async () => {
+      const { dispatch, calls, verdict } = await operatorSendNow({ held: true });
+      expect(calls).toEqual([['cust-1', db, { ignoreDisputeHold: true }]]);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(verdict).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+    });
+
+    test('no hold at the final handoff: the operator email dispatches', async () => {
+      const { dispatch, calls } = await operatorSendNow({ held: false });
+      expect(calls).toEqual([['cust-1', db, { ignoreDisputeHold: true }]]);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('a dispute hold that lands before the Text handoff releases the reservation and keeps the touch due (no pause, no queued pay-link row)', async () => {
     const ContactLedger = require('../services/collections/contact-ledger');
     const sequence = followupRow();

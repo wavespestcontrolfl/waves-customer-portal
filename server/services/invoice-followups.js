@@ -317,7 +317,7 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
         })
-        : selfPayOnlyHandoff(row.invoice_id, state),
+        : selfPayOnlyHandoff(row.invoice_id, state, { holdCustomerId: customer.id }),
     });
     return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
