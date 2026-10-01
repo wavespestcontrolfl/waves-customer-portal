@@ -3150,6 +3150,9 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     const response = await acceptShown(token);
 
     expect(response.status).toBe(409);
+    // The real answer rides the refusal (Codex P1): the retry keeps the payable
+    // setup invoice instead of re-attesting a promise that can never land.
+    expect(response.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
     expect(db.__state.tables.scheduled_services[0].pending_setup_fee).toBe(49);
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
@@ -3302,33 +3305,44 @@ describe('PAF setup fee — setup-only accept stamps the series instead of minti
     expect(InvoiceService.create).not.toHaveBeenCalled();
   });
 
-  test('R9 (route): a multi-program accept with the claim stamped mints no combined invoice, never calls the stamper, and puts the claim on the anchor parent ONLY', async () => {
+  // Codex P1 on #5485: a MULTI-PROGRAM accept never defers the fee — the claim
+  // would live on one program's series and could not follow whichever program
+  // is performed first. A tab that promised it is refused with the real answer
+  // (setupFeePromise: false, nothing stamped); the retry takes today's payable
+  // setup invoice (no stamp anywhere).
+  test('R9 (route): a multi-program accept never defers the setup fee — the promise is refused with the real answer, and the retry keeps the payable setup invoice', async () => {
     gateOn();
+    const multiConverter = () => {
+      EstimateConverter.convertEstimate.mockReset();
+      EstimateConverter.convertEstimate.mockImplementation(async () => {
+        for (const row of db.__state.tables.customers) row.billing_mode = 'per_application';
+        return {
+          customerId: 'cust-1',
+          tier: 'Bronze',
+          monthlyRate: 60,
+          firstScheduledServiceId: 'ss-paf-multi',
+          combinedInvoiceMemberIds: ['ss-member-2'],
+          recurringConversionSkipped: false,
+          welcomeSms: null,
+          membershipEmail: null,
+          deferredFollowUpReminderRows: [],
+        };
+      });
+    };
     const token = setupOnlyFixture('paf-multi');
     db.__state.tables.scheduled_services.push({ id: 'ss-member-2', customer_id: 'customers-1', recurring_parent_id: null, pending_setup_fee: null, estimated_price: 40 });
-    // Re-arm the converter result with a combined-invoice sibling (setupOnlyFixture queued one already).
-    EstimateConverter.convertEstimate.mockReset();
-    EstimateConverter.convertEstimate.mockImplementationOnce(async () => {
-      for (const row of db.__state.tables.customers) row.billing_mode = 'per_application';
-      return {
-        customerId: 'cust-1',
-        tier: 'Bronze',
-        monthlyRate: 60,
-        firstScheduledServiceId: 'ss-paf-multi',
-        combinedInvoiceMemberIds: ['ss-member-2'],
-        recurringConversionSkipped: false,
-        welcomeSms: null,
-        membershipEmail: null,
-        deferredFollowUpReminderRows: [],
-      };
-    });
-    const response = await acceptShown(token);
-
-    expect(response.status).toBe(200);
-    expect(InvoiceService.create).not.toHaveBeenCalled();
-    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).not.toHaveBeenCalled();
+    multiConverter();
+    const promised = await acceptShown(token);
+    expect(promised.status).toBe(409);
+    expect(promised.data).toMatchObject({ code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false });
     const rows = db.__state.tables.scheduled_services;
-    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBe(99);
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
+    expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
+
+    const retried = await accept(token);
+    expect(retried.status).toBe(200);
+    expect(retried.data.setupFeeAfterFirstVisit).toBeUndefined();
+    expect(rows.find((r) => r.id === 'ss-paf-multi').pending_setup_fee).toBeNull();
     expect(rows.find((r) => r.id === 'ss-member-2').pending_setup_fee).toBeNull();
   });
 

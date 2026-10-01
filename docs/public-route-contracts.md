@@ -1484,9 +1484,12 @@ count is unknown, or a converted customer whose billing lane is not `per_applica
 keeps today's payload and pay link, omits the field and records the BASE consent. An
 accept the page DID promise first-visit billing for (card rail, setup-only shape, known
 visit counts, `per_application` lane) whose stamp cannot land (no series parent, no
-billable first visit, a different claim already on the series) is REFUSED with
-`409 { code: 'SETUP_FEE_TERMS_REFRESH' }` and the whole accept rolls back, never a
-payable setup invoice recorded under the after-first-visit consent. (3) Durable retry: the accept
+billable first visit, a different claim already on the series, or a MULTI-PROGRAM accept —
+the claim lives on one program's series and could not follow whichever program is performed
+first, so a multi-program accept never defers the fee) is REFUSED with
+`409 { code: 'SETUP_FEE_TERMS_REFRESH', setupFeePromise: false }` and the whole accept rolls
+back, never a payable setup invoice recorded under the after-first-visit consent; the
+retry, without the attestation, takes today's payable setup invoice. (3) Durable retry: the accept
 persists `estimates.estimate_data.setupFeeDeferredToFirstVisit: true` in the same
 transaction as the lane stamp (`recurringCardLaneAccepted`), and a retry of that
 already-accepted estimate (`alreadyAccepted: true`) rebuilds the same

@@ -12836,7 +12836,36 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               scheduledServiceId: standardConversionResult?.firstScheduledServiceId || null,
               throwOnError: true,
             }))?.payerId;
-          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled;
+          // Can the stamp actually land? Decided BEFORE the attestation check
+          // (Codex P1), so a shape it never can — no priced anchor visit of this
+          // customer, a different claim already on the series, or a
+          // MULTI-PROGRAM accept (the claim lives on one program's series and
+          // could not follow whichever program is performed first) — answers
+          // "no promise" and the retry takes today's payable setup invoice
+          // instead of refusing on every confirm.
+          let deferLanding = null;
+          if (deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled) {
+            const landAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
+            const landAnchorId = standardConversionResult?.firstScheduledServiceId || null;
+            const multiProgram = (standardConversionResult?.combinedInvoiceMemberIds || []).length > 0;
+            const landAnchor = landAmount > 0 && landAnchorId && !multiProgram
+              ? await trx('scheduled_services').where({ id: landAnchorId })
+                .first('id', 'recurring_parent_id', 'customer_id', 'estimated_price')
+              : null;
+            const landParentId = landAnchor ? (landAnchor.recurring_parent_id || landAnchor.id) : null;
+            if (landAnchor && Number(landAnchor.estimated_price) > 0 && landParentId
+              && String(landAnchor.customer_id) === String(customerId)) {
+              const landParent = await trx('scheduled_services').where({ id: landParentId }).forUpdate().first('pending_setup_fee');
+              const existing = landParent?.pending_setup_fee;
+              if (existing == null || Math.round(Number(existing) * 100) === Math.round(landAmount * 100)) {
+                deferLanding = { parentId: landParentId, amount: landAmount, alreadyStamped: existing != null };
+              }
+            }
+            if (!deferLanding) {
+              logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} cannot ride the first visit (${multiProgram ? 'multi-program accept' : 'no priced anchor visit / a different claim on the series'}) — today's payable setup invoice applies`);
+            }
+          }
+          const deferPromisedNow = deferShapeEligible && deferLaneIsPerApplication && !deferPayerBilled && !!deferLanding;
           setupFeePromiseEvaluated = true;
           if (setupFeeAfterVisitAttested !== deferPromisedNow) {
             logger.warn(`[estimate-accept] setup-fee terms differ for estimate ${estimate.id} (tab rendered the first-visit promise: ${setupFeeAfterVisitAttested}, accept would apply it: ${deferPromisedNow}) — refusing for a refresh`);
@@ -12873,43 +12902,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // refused (below). Never record the after-visit consent for an
               // accept that then bills a payable invoice.
               setupFeeAfterVisitConsentShown = true;
-              const deferFeeAmount = Math.round(Number(EstimateConverter.frozenSetupFeeAmount(conversionEstData)) * 100) / 100;
-              const deferAnchorId = standardConversionResult?.firstScheduledServiceId || null;
-              if (deferFeeAmount > 0 && deferAnchorId) {
-                const deferAnchor = await trx('scheduled_services').where({ id: deferAnchorId })
-                  .first('id', 'recurring_parent_id', 'customer_id', 'source_estimate_id', 'estimated_price');
-                const deferSeriesParentId = deferAnchor
-                  ? (deferAnchor.recurring_parent_id || deferAnchor.id)
-                  : null;
-                // The claim is consumed only by a completion MINT, and the mint
-                // gate refuses an unresolved/zero visit amount (a monthly-tier
-                // quote with an unknown visit count converts to an unpriced
-                // row — completion parks it). Deferring onto such a visit would
-                // queue the fee indefinitely, so only a visit with its own
-                // positive price carries the stamp.
-                const deferAnchorBillable = Number(deferAnchor?.estimated_price) > 0;
-                if (!deferAnchorBillable) {
-                  logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — first visit ${deferAnchorId} has no billable price to carry it`);
-                }
-                if (deferAnchorBillable && deferSeriesParentId && String(deferAnchor.customer_id) === String(customerId)) {
-                  // Compare-and-swap from NULL (the same shape invoice.js and
-                  // admin-schedule stamp with): never overwrites another claim.
-                  const stampedRows = await trx('scheduled_services')
-                    .where({ id: deferSeriesParentId })
-                    .whereNull('pending_setup_fee')
-                    .update({ pending_setup_fee: deferFeeAmount, updated_at: new Date() });
-                  if (stampedRows === 1) {
-                    deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
-                  } else {
-                    const existingClaim = await trx('scheduled_services').where({ id: deferSeriesParentId }).first('pending_setup_fee');
-                    if (existingClaim && Math.round(Number(existingClaim.pending_setup_fee) * 100) === Math.round(deferFeeAmount * 100)) {
-                      // The identical claim is already on the series: idempotent.
-                      deferSetupFeeStamp = { parentId: deferSeriesParentId, amount: deferFeeAmount };
-                    } else {
-                      logger.warn(`[estimate-accept] setup fee for estimate ${estimate.id} NOT deferred — series ${deferSeriesParentId} already carries a different setup claim`);
-                    }
-                  }
-                }
+              // Compare-and-swap from NULL (the same shape invoice.js and
+              // admin-schedule stamp with): never overwrites another claim. The
+              // parent row is locked above, so only an identical claim can be
+              // there already (idempotent).
+              if (deferLanding.alreadyStamped) {
+                deferSetupFeeStamp = { parentId: deferLanding.parentId, amount: deferLanding.amount };
+              } else {
+                const stampedRows = await trx('scheduled_services')
+                  .where({ id: deferLanding.parentId })
+                  .whereNull('pending_setup_fee')
+                  .update({ pending_setup_fee: deferLanding.amount, updated_at: new Date() });
+                if (stampedRows === 1) deferSetupFeeStamp = { parentId: deferLanding.parentId, amount: deferLanding.amount };
               }
               if (!deferSetupFeeStamp) {
                 // Refuse retryably (rolls the whole accept back, including the
@@ -12922,6 +12926,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   409,
                 );
                 termsErr.code = 'SETUP_FEE_TERMS_REFRESH';
+                // The retry must take the payable-invoice path, not re-attest.
+                termsErr.setupFeePromise = false;
                 // The client drops its captured intent on this refresh: retire it after the
                 // rollback (same path as the consent refusals) so no recovery enrolls it.
                 if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
@@ -20935,7 +20941,7 @@ function buildAcceptNotificationPayload({
   if (setupFeeDeferred && !invoiceMode && !invoicePayUrl) {
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Card saved; setup fee stamped on the first visit and billed with it. No invoice or pay link sent.`,
+      adminBody: `${waveguardTier} WaveGuard ${monthlyText}${proposedNote} approved. Payment method saved; setup fee stamped on the first visit and billed with it. No invoice or pay link sent.`,
       customerTitle: 'Estimate accepted',
       customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Nothing is charged today — your setup fee is billed with your first visit.`,
       customerLink: '/?tab=billing',

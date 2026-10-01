@@ -11313,7 +11313,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : NotificationService.notifyAdmin(
                 'billing',
                 'Completion invoice not created — bill this visit by hand',
-                `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons or setup fee.`,
+                `The completion for ${visitLabel} committed, but its invoice could not be created; any completion text that sends will carry no pay link. Create and send the invoice from the customer page at the visit's price plus any add-ons. A setup fee owed on this plan is NOT part of it: it is raised in its own setup-fee alert — bill it there, once.`,
                 {
                   link: `/admin/customers?customerId=${svc.customer_id}`,
                   bell: true,
