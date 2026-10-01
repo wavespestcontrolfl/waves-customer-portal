@@ -224,6 +224,7 @@ function materializeRow(base, { issueKeys, gapDays, celsiusYtdCount }) {
     behindEligible: judgeEligibility(row),
     approved: !!row.approved,
     windows: row.windows,
+    metricWindows: row.metricWindows || {},
     windowSources: [...sources],
     visibleChange: row.visibleChange,
     limits: row.limits || [],
@@ -235,10 +236,10 @@ function materializeRow(base, { issueKeys, gapDays, celsiusYtdCount }) {
   };
 }
 
+// True only when the row has at least one metric window that can close.
 function judgeEligibility(row) {
-  if (row.transient || row.judgedByAbsence) return false;
-  if (row.behindEligible === false) return false;
-  return true;
+  if (row.transient || row.judgedByAbsence || row.behindEligible === false) return false;
+  return Object.values(row.metricWindows || {}).some((w) => Number.isFinite(w?.closeDays));
 }
 
 function resolveProductRows(applications, issueKeys) {
@@ -339,30 +340,37 @@ function buildLawnExpectations(input = {}, { includeUnapproved = false } = {}) {
 }
 
 // ── Progress judgement ────────────────────────────────────────────────────
-// W5 progression rules for ONE row. `scoreDelta` is current minus prior for
-// the row's metric. A transient row, a row judged by absence and a site limit
-// can never return 'behind'.
-function judgeProgress(row, { daysSinceApplication, scoreDelta, band = 8 } = {}) {
+// W5 progression rules for ONE metric of ONE row. `scoreDelta` is current
+// minus prior for that metric. Each metric is judged against the window that
+// belongs to IT (row.metricWindows[metric]): color against the color window,
+// density against the density window, spread against the spread window. A
+// metric with no window of its own is never judged here, and no verdict is
+// "behind" until that metric's window has closed. Transient rows, rows judged
+// by absence and site limits carry no windows, so they can never be behind.
+//
+//   too_early     before the metric's window opens
+//   in_window     window open, not closed, no clear gain yet
+//   ahead         a full band of gain before the full window opens
+//   on_track      gained a band, or (hold mode) has stopped falling
+//   behind        window closed with no gain (gain mode) or still falling
+//                 (hold mode)
+//   holding_steady  nothing to judge against for this metric
+//   unclear       missing inputs
+function judgeProgress(row, { metric, daysSinceApplication, scoreDelta, band = 8 } = {}) {
   if (!row) return 'unclear';
   if (!Number.isFinite(daysSinceApplication) || !Number.isFinite(scoreDelta)) return 'unclear';
-  const first = row.windows?.first || null;
-  const full = row.windows?.full || null;
-  const firstMin = Number.isFinite(first?.minDays) ? first.minDays : 0;
-  const fullMin = Number.isFinite(full?.minDays) ? full.minDays : firstMin;
-  const fullMax = Number.isFinite(full?.maxDays) ? full.maxDays : null;
-  const behindEligible = row.behindEligible !== undefined ? row.behindEligible : judgeEligibility(row);
-
-  let state;
-  if (daysSinceApplication < firstMin) state = 'too_early';
-  else if (scoreDelta >= band) state = daysSinceApplication >= fullMin ? 'on_track' : 'ahead';
-  else if (scoreDelta <= -band) state = 'behind';
-  else if (fullMax != null && daysSinceApplication > fullMax) state = 'behind';
-  else state = 'in_window';
-
-  if (state === 'behind' && !behindEligible) {
-    return 'holding_steady';
+  const win = row.metricWindows?.[metric || row.metric] || null;
+  if (!win || !Number.isFinite(win.closeDays)) return 'holding_steady';
+  if (daysSinceApplication < (win.startDays || 0)) return 'too_early';
+  const gained = scoreDelta >= band;
+  const closed = daysSinceApplication > win.closeDays;
+  if (win.mode === 'hold') {
+    if (gained) return 'on_track';
+    if (!closed) return 'in_window';
+    return scoreDelta <= -band ? 'behind' : 'on_track';
   }
-  return state;
+  if (gained) return daysSinceApplication >= (win.fullMinDays ?? win.startDays ?? 0) ? 'on_track' : 'ahead';
+  return closed ? 'behind' : 'in_window';
 }
 
 module.exports = {

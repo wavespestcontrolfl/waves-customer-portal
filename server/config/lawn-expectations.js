@@ -165,6 +165,15 @@ const catalog = (minDays, maxDays, catalogRef, extra = {}) => ({
   minDays, maxDays, source: 'catalog', catalogRef, ...extra,
 });
 
+// A progress window for ONE metric. mode 'gain': the score is expected to
+// rise, so "behind" needs no gain by closeDays. mode 'hold': the score is
+// expected to stop falling, so "behind" needs a drop of a full band still
+// happening at closeDays. A metric with no entry in a row's metricWindows is
+// never judged, and no verdict is "behind" before closeDays passes.
+const judged = (mode, extra = {}) => ({
+  mode, fullMinDays: null, source: 'proposed', ...extra,
+});
+
 // `byNextVisit` keys: too_early (the next visit lands before the first
 // visible change), partial (some change, the full result not yet), visible
 // (inside the full window), complete (past the full window), absence (rows
@@ -177,6 +186,9 @@ const PRODUCT_ROWS = {
     mode: null,
     appliesTo: 'selective weed control',
     metric: 'weed_suppression',
+    metricWindows: {
+      weed_suppression: judged('gain', { startDays: 3, fullMinDays: 14, closeDays: 21 }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -208,6 +220,9 @@ const PRODUCT_ROWS = {
     mode: null,
     appliesTo: 'sedge control',
     metric: 'weed_suppression',
+    metricWindows: {
+      weed_suppression: judged('gain', { startDays: 7, fullMinDays: 21, closeDays: 28, needsLabelCheck: true }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -253,6 +268,12 @@ const PRODUCT_ROWS = {
     mode: null,
     appliesTo: 'slow-release feed',
     metric: 'color_health',
+    metricWindows: {
+      // Color and density are separate metrics with separate windows: color
+      // judged against 7-21 days, density only against 60-90 days.
+      color_health: judged('gain', { startDays: 7, fullMinDays: 14, closeDays: 21 }),
+      turf_density: judged('gain', { startDays: 60, fullMinDays: 60, closeDays: 90, existingPromptTiming: true }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -322,6 +343,11 @@ const PRODUCT_ROWS = {
     mode: 'curative',
     appliesTo: 'disease control',
     metric: 'stress_damage',
+    metricWindows: {
+      // Spread stopping (a score that stops falling), NOT regrowth: regrowth
+      // takes 2 to 4 weeks (large patch: weeks to months) and is not judged.
+      stress_damage: judged('hold', { startDays: 3, closeDays: 10 }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -383,6 +409,11 @@ const PRODUCT_ROWS = {
     mode: 'curative',
     appliesTo: 'insect control',
     metric: 'stress_damage',
+    metricWindows: {
+      // Activity stopping (a score that stops falling), NOT fill-in, which
+      // takes several weeks and has no number to judge against.
+      stress_damage: judged('hold', { startDays: 3, closeDays: 7 }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -435,6 +466,11 @@ const ISSUE_ROWS = {
     kind: 'issue',
     appliesTo: 'dry or uneven area',
     metric: 'color_health',
+    metricWindows: {
+      color_health: judged('gain', {
+        startDays: 0, fullMinDays: 14, closeDays: 21, source: 'catalog', catalogRef: 'drought-irrigation-stress',
+      }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -459,6 +495,9 @@ const ISSUE_ROWS = {
     kind: 'issue',
     appliesTo: 'chinch bug damage',
     metric: 'stress_damage',
+    metricWindows: {
+      stress_damage: judged('hold', { startDays: 3, closeDays: 7 }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -482,6 +521,11 @@ const ISSUE_ROWS = {
     kind: 'issue',
     appliesTo: 'large patch',
     metric: 'stress_damage',
+    metricWindows: {
+      // Spread slowing ("within days", catalog) is judged at about a week;
+      // regrowth ("weeks to months") has no number and is not judged.
+      stress_damage: judged('hold', { startDays: 3, closeDays: 7, catalogPhrase: 'within days' }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,
@@ -552,6 +596,16 @@ const ISSUE_ROWS = {
     kind: 'issue',
     appliesTo: 'turf cut short',
     metric: 'turf_density',
+    metricWindows: {
+      // The row's metric is density: judged against the density window
+      // (60-90 days), never the 2-3 week color window.
+      turf_density: judged('gain', {
+        startDays: 60, fullMinDays: 60, closeDays: 90, source: 'catalog', catalogRef: 'mower-scalping',
+      }),
+      color_health: judged('gain', {
+        startDays: 0, fullMinDays: 14, closeDays: 21, source: 'catalog', catalogRef: 'mower-scalping',
+      }),
+    },
     transient: false,
     judgedByAbsence: false,
     approved: false,

@@ -488,7 +488,7 @@ describe('buildLawnExpectations', () => {
 
     it('a faded iron lift 35 days later reads as holding steady, not behind', () => {
       const row = rowFor('LESCO Chelated Iron Plus');
-      expect(judgeProgress(row, { daysSinceApplication: 35, scoreDelta: -6 })).toBe('in_window');
+      expect(judgeProgress(row, { daysSinceApplication: 35, scoreDelta: -6 })).toBe('holding_steady');
       expect(judgeProgress(row, { daysSinceApplication: 35, scoreDelta: -12 })).toBe('holding_steady');
     });
 
@@ -510,6 +510,103 @@ describe('buildLawnExpectations', () => {
       expect(judgeProgress(row, { daysSinceApplication: 25, scoreDelta: 9 })).toBe('on_track');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: 1 })).toBe('in_window');
       expect(judgeProgress(row, { daysSinceApplication: 10, scoreDelta: null })).toBe('unclear');
+    });
+  });
+
+  describe('progress is judged against the window of the metric it measures', () => {
+    const rowsWithWindows = ALL_ROWS.filter((r) => Object.keys(r.metricWindows || {}).length);
+    const cases = rowsWithWindows.flatMap((row) => Object.entries(row.metricWindows)
+      .map(([metric, win]) => [row.id, metric, row, win]));
+
+    it('covers the rows that can be judged (config-derived, not a hand list)', () => {
+      expect(rowsWithWindows.map((r) => r.id).sort()).toEqual([
+        'herbicide_broadleaf', 'herbicide_sedge', 'granular_fertilizer', 'fungicide_curative',
+        'insecticide_curative', 'issue_dry_spot', 'issue_chinch', 'issue_large_patch', 'issue_mowed_short',
+      ].sort());
+    });
+
+    it.each(cases)('%s / %s window is well formed and sourced', (_id, _metric, _row, win) => {
+      expect(['gain', 'hold']).toContain(win.mode);
+      expect(['proposed', 'catalog']).toContain(win.source);
+      if (win.source === 'catalog') expect(win.catalogRef).toBeTruthy();
+      expect(Number.isFinite(win.closeDays)).toBe(true);
+      expect(win.closeDays).toBeGreaterThanOrEqual(win.startDays);
+      if (win.mode === 'gain') expect(win.fullMinDays).toBeGreaterThanOrEqual(win.startDays);
+    });
+
+    it.each(cases)('%s / %s: no behind verdict fires before that metric window closes', (_id, metric, row, win) => {
+      for (let d = 0; d <= win.closeDays; d += 1) {
+        for (const scoreDelta of [-60, -30, -8, -7, 0, 7, 8, 30]) {
+          expect(judgeProgress(row, { metric, daysSinceApplication: d, scoreDelta })).not.toBe('behind');
+        }
+      }
+    });
+
+    it.each(cases)('%s / %s: behind can fire once the window has closed', (_id, metric, row, win) => {
+      expect(judgeProgress(row, { metric, daysSinceApplication: win.closeDays + 1, scoreDelta: -30 })).toBe('behind');
+      // A gain-mode metric is also behind with no gain; a hold-mode metric that stopped falling is on track.
+      const flat = judgeProgress(row, { metric, daysSinceApplication: win.closeDays + 1, scoreDelta: 0 });
+      expect(flat).toBe(win.mode === 'gain' ? 'behind' : 'on_track');
+    });
+
+    it('a metric a row has no window for is never judged, on any day', () => {
+      const broadleaf = PRODUCT_ROWS.herbicide_broadleaf;
+      for (const d of [0, 30, 400]) {
+        expect(judgeProgress(broadleaf, { metric: 'turf_density', daysSinceApplication: d, scoreDelta: -40 })).toBe('holding_steady');
+      }
+    });
+
+    it('the primary metric of every behind-capable row has a window of its own', () => {
+      for (const row of ALL_ROWS) {
+        const behindCapable = Object.values(row.metricWindows || {}).length > 0;
+        if (behindCapable) expect(row.metricWindows[row.metric]).toBeTruthy();
+      }
+    });
+
+    it('a density metric is never judged on a color-length window', () => {
+      for (const row of ALL_ROWS) {
+        const density = row.metricWindows?.turf_density;
+        if (density) expect(density.closeDays).toBeGreaterThanOrEqual(60);
+        const color = row.metricWindows?.color_health;
+        if (color) expect(color.closeDays).toBeLessThanOrEqual(30);
+      }
+    });
+
+    it('scalping regression: density is not behind at day 30 or 89, and is behind only after the 60 to 90 day window', () => {
+      const scalped = ISSUE_ROWS.mowed_short;
+      expect(scalped.metric).toBe('turf_density');
+      for (const d of [14, 21, 30, 45, 60, 89, 90]) {
+        expect(judgeProgress(scalped, { daysSinceApplication: d, scoreDelta: -20 })).not.toBe('behind');
+        expect(judgeProgress(scalped, { daysSinceApplication: d, scoreDelta: 0 })).not.toBe('behind');
+      }
+      expect(judgeProgress(scalped, { daysSinceApplication: 91, scoreDelta: 0 })).toBe('behind');
+      // Color keeps its own 2 to 3 week window on the same row.
+      expect(judgeProgress(scalped, { metric: 'color_health', daysSinceApplication: 22, scoreDelta: 0 })).toBe('behind');
+      expect(judgeProgress(scalped, { metric: 'color_health', daysSinceApplication: 20, scoreDelta: 0 })).toBe('in_window');
+    });
+
+    it('granular nitrogen: color closes at 21 days, density only at 90', () => {
+      const n = PRODUCT_ROWS.granular_fertilizer;
+      expect(judgeProgress(n, { metric: 'color_health', daysSinceApplication: 22, scoreDelta: 0 })).toBe('behind');
+      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 30, scoreDelta: 0 })).toBe('too_early');
+      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 75, scoreDelta: 0 })).toBe('in_window');
+      expect(judgeProgress(n, { metric: 'turf_density', daysSinceApplication: 91, scoreDelta: 0 })).toBe('behind');
+    });
+
+    it('spread rows (fungicide, insecticide, chinch, large patch) judge a falling score, never regrowth or fill-in', () => {
+      for (const row of [PRODUCT_ROWS.fungicide_curative, PRODUCT_ROWS.insecticide_curative, ISSUE_ROWS.chinch, ISSUE_ROWS.large_patch]) {
+        expect(row.metricWindows.stress_damage.mode).toBe('hold');
+        // 30 days later, flat: spread stopped, so not behind and not "no regrowth"
+        expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: 0 })).toBe('on_track');
+        expect(judgeProgress(row, { daysSinceApplication: 30, scoreDelta: -12 })).toBe('behind');
+        expect(judgeProgress(row, { daysSinceApplication: 5, scoreDelta: -12 })).toBe('in_window');
+      }
+    });
+
+    it('dry spot color is judged on the catalog 2 to 3 week window', () => {
+      const dry = ISSUE_ROWS.dry_spot;
+      expect(judgeProgress(dry, { daysSinceApplication: 21, scoreDelta: 0 })).toBe('in_window');
+      expect(judgeProgress(dry, { daysSinceApplication: 22, scoreDelta: 0 })).toBe('behind');
     });
   });
 
