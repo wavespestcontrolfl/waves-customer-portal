@@ -403,6 +403,21 @@ export function LawnFollowUpCard({ followUp = null, showYourPart = true }) {
   );
 }
 
+// GATE_LAWN_EXPECTATIONS (lead layout): the month's program sentence, rendered
+// once beside the trends. The server marks the line with
+// snapshot.seasonalNoteSource === 'program'; any other seasonalNote is the old
+// season note, which the lead layout has never rendered.
+export function LawnProgramLine({ snapshot = null }) {
+  const text = snapshot && snapshot.seasonalNoteSource === 'program' ? String(snapshot.seasonalNote || '').trim() : '';
+  if (!text) return null;
+  return (
+    <Card>
+      <CardTitle>This time of year</CardTitle>
+      <p style={{ margin: 0, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>{text}</p>
+    </Card>
+  );
+}
+
 function KeyLine({ label, value, dot, valueSize = 14.5 }) {
   return (
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
