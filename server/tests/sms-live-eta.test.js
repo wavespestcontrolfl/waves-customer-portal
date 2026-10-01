@@ -1960,6 +1960,40 @@ describe('round 42 P2: tech_names plumbing (source pins)', () => {
   });
 });
 
+// Codex round-48 P2 (PR #5334): "reached your property" is a completed arrival.
+describe('round 48 P2: "reached" completed arrivals', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'The technician has reached your property.', 'He reached the house.', 'The crew reached your home.', 'The technician reached there.', 'They have reached your address.',
+    'The tech just reached your place.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('first-person and recorded-name forms', () => {
+    for (const t of ['We have reached your place.', 'We reached the house.', "We've reached your property."]) {
+      expect(bodyClaimsCompletedArrival(t)).toBe(true);
+      expect(bodyMentionsVisitStatus(t)).toBe(true);
+    }
+    expect(bodyClaimsCompletedArrival('Sam reached your address.', { techNames: ['Sam'] })).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam reached your address.')).toBe(false);
+  });
+  test.each([
+    'The tech has not reached your property yet.', 'Has he reached the house?', 'Did the technician reach your home?', 'Once the tech reached your home I will text.',
+    'The tech reached your home tomorrow.', 'The tech will reach your home soon.', 'The technician reached out to you.', 'I reached the office.',
+    'The technician reached the end of the street.', 'Your payment reached our account.',
+  ])('%p is not a completed-arrival claim (negated / question / conditional / future day / not an arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('draft-time: "reached your property" against an en-route fact is rejected like "has arrived"', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician has reached your property.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
 // Codex round-47 P2 (PR #5334): "made it (there)" is a completed arrival.
 describe('round 47 P2: "made it" completed arrivals', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');

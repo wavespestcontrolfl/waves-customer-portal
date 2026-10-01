@@ -266,50 +266,60 @@ function requiresLiveStatusEvidence(promptVersion) {
   return realAnswersGateOn();
 }
 
-function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [], promptVersion = null }) {
-  const drafter = require('./sms-shadow-drafter');
-  const trackTokens = extractTrackTokens(fullBody);
-  // The link itself is not prose: a token like "a-12-b" must never read as a
-  // "12" minutes figure, so claim analysis runs on the body without its
-  // /track/ URLs.
-  // Classify the text the customer RECEIVES: the provider path normalizes smart
-  // punctuation (’ “ ” –) to plain ASCII before delivery (round-38 P2).
-  const outgoingBody = normalizeGsmPunctuation(stripTrackLinks(fullBody));
-  const hasTrackLink = trackTokens.length > 0;
-  const liveContext = snapshotHasEntries || hasTrackLink;
+// Minutes unit: the numeric claims the body makes (trigger-based, unioned with the structural
+// default-deny once there is a live snapshot or a /track/ link to hold them to — Codex round-7) and
+// whether a vague / unread timed phrase stands in for a figure.
+function classifyMinutesClaims(drafter, outgoingBody, liveContext) {
   const claims = liveContext
     ? [...drafter.findEtaMinutesClaims(outgoingBody), ...drafter.findGroundedMinutesFigures(outgoingBody)]
     : drafter.findEtaMinutesClaims(outgoingBody);
-  const timedArrivalClaim = unreadTimedClaim(drafter, outgoingBody, { claims, liveContext });
-  // Codex round-13 P2: "has arrived" / "is here" / "pulled up" states the
-  // tech IS on site — a different fact from "on the way" status copy, so it
-  // requires the on-site tracker state at send. Only meaningful (and only
-  // checked) where a live snapshot/link says which visit it is about.
+  return { claims, timedArrivalClaim: unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) };
+}
+// Status unit: what the body says about the visit's live state. Needs the minutes unit's results.
+function classifyStatusClaims(drafter, outgoingBody, { liveContext, snapshotHasEntries, techNames, claims, timedArrivalClaim }) {
+  // Codex round-13 P2: "has arrived" / "is here" / "pulled up" states the tech IS on site — a different
+  // fact from "on the way" status copy, so it requires the on-site tracker state at send. Only
+  // meaningful (and only checked) where a live snapshot/link says which visit it is about.
   const arrivedClaim = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames });
-  // Backstop (audit P1, round 4): a body that talks about the tech arriving
-  // is checked whenever the draft carried a LIVE ETA, or whenever it
-  // mentions minutes at all.
+  // Backstop (audit P1, round 4): a body that talks about the tech arriving is checked whenever the
+  // draft carried a LIVE ETA, or whenever it mentions minutes at all.
   const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
   const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody, { techNames }) && mentionsMinutes;
-  // Round-20: broad default-deny — any visit-status vocabulary at all (see
-  // bodyMentionsVisitStatus), whether or not a narrower classifier read it.
+  // Round-20: broad default-deny — any visit-status vocabulary at all (see bodyMentionsVisitStatus),
+  // whether or not a narrower classifier read it.
   const visitStatusMention = liveContext && drafter.bodyMentionsVisitStatus(outgoingBody, { techNames });
-  const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
-  // Codex round-41 P2: with NO snapshot and no link to bind to, recognizable CURRENT
-  // visit-status wording ("The technician is on the way", "has arrived", "Our team is
-  // en route", first-person forms) is an ungrounded assertion — the real-answers
-  // prompt authorizes status only from LIVE STATUS facts, so a decision without a
-  // live snapshot (gate-off draft, no eligible visit, a reviewer adding the wording)
-  // has nothing backing it. Scoped to GATE_SMS_REAL_ANSWERS so legacy / human flows
-  // with the gate off are unchanged, and the approved follow-up SLA wording ("within
-  // the hour") keeps its exemption.
-  const ungroundedStatus = !liveContext && requiresLiveStatusEvidence(promptVersion)
+  return { arrivedClaim, unparsedStatusClaim, visitStatusMention };
+}
+// Ungrounded-claim unit. Codex round-41 P2: with NO snapshot and no link to bind to, recognizable
+// CURRENT visit-status wording ("The technician is on the way", "has arrived", "Our team is en route",
+// first-person forms) is an ungrounded assertion — the real-answers prompt authorizes status only from
+// LIVE STATUS facts, so a decision without a live snapshot (gate-off draft, no eligible visit, a
+// reviewer adding the wording) has nothing backing it. Strictness follows the persisted prompt version
+// (requiresLiveStatusEvidence); the approved follow-up SLA wording ("within the hour") keeps its
+// exemption.
+function classifyUngroundedStatus(drafter, outgoingBody, { liveContext, techNames, promptVersion }) {
+  return !liveContext && requiresLiveStatusEvidence(promptVersion)
     && !require('./sms-followup-sla').replyPromisesFollowup(outgoingBody)
     && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames })
       || drafter.bodyMentionsArrival(outgoingBody, { techNames })
       || drafter.bodyMentionsVisitStatus(outgoingBody, { techNames }));
-  // Round-16 structural backstop: nothing above read a claim, yet a number sits
-  // beside a time unit / arrival word — hold it to the status-claim checks.
+}
+function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [], promptVersion = null }) {
+  const drafter = require('./sms-shadow-drafter');
+  const trackTokens = extractTrackTokens(fullBody);
+  // The link itself is not prose: a token like "a-12-b" must never read as a "12" minutes figure, so
+  // claim analysis runs on the body without its /track/ URLs. Classify the text the customer RECEIVES:
+  // the provider path normalizes smart punctuation (’ “ ” –) to plain ASCII before delivery
+  // (round-38 P2).
+  const outgoingBody = normalizeGsmPunctuation(stripTrackLinks(fullBody));
+  const hasTrackLink = trackTokens.length > 0;
+  const liveContext = snapshotHasEntries || hasTrackLink;
+  const { claims, timedArrivalClaim } = classifyMinutesClaims(drafter, outgoingBody, liveContext);
+  const { arrivedClaim, unparsedStatusClaim, visitStatusMention } = classifyStatusClaims(drafter, outgoingBody, { liveContext, snapshotHasEntries, techNames, claims, timedArrivalClaim });
+  const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
+  const ungroundedStatus = classifyUngroundedStatus(drafter, outgoingBody, { liveContext, techNames, promptVersion });
+  // Round-16 structural backstop: nothing above read a claim, yet a number sits beside a time unit /
+  // arrival word — hold it to the status-claim checks.
   const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
   return {
     claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim, visitStatusMention,
@@ -395,6 +405,53 @@ function bindEtaClaim(claim, entries, freshness) {
   return bindTimedOrMinutesClaim(claim, enRouteEntries, freshness);
 }
 
+// Technician names that ride as extra status subjects. Two sources: the live entries' names AND the
+// names persisted with the decision itself (input_snapshot.tech_names, round-42 P2) — the latter exist
+// even when there is no live snapshot, so name-subjected status wording ("Sam is on the way") is
+// classified on the no-snapshot path too. Older decisions without the field keep the entries-only
+// behavior. No extra DB read.
+function mergeTechNames(persistedTechNames, liveEtaSnapshot) {
+  return sanitizeTechNames([
+    ...(Array.isArray(persistedTechNames) ? persistedTechNames : []),
+    ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
+  ]);
+}
+// No claim and no link. Round-20 structural rule: wording classification decides WHICH claim to verify,
+// never WHETHER to recheck. A draft that carries a live-ETA/on-site snapshot and whose body touches
+// visit status in ANY form (the broad bodyMentionsVisitStatus vocabulary gate, not a phrase list of
+// claims) is held to the visit-state recheck at send time even when no narrower classifier recognized
+// the wording ("The technician arrived.", "en-route"): each snapshot entry's visits must still be in
+// the state the draft recorded (en route / on site), with the same technician and destination. Body
+// copy with no status vocabulary at all ("Thanks, 5 stars!") is unaffected, as are accurate
+// corrections ("hasn't arrived") and scheduling windows. With no snapshot at all, only ungrounded
+// current-status wording (round-41) fails closed.
+async function recheckWithoutClaim(claim, entries, dbh) {
+  if (!entries.length) return claim.ungroundedStatus ? 'eta_claim_no_snapshot' : null;
+  if (!claim.visitStatusMention) return null;
+  return checkEntriesStillLive({ boundEntries: entries, allowOnSite: false, recordedState: true, dbh });
+}
+// Tracking-link-only path (Codex round-4 P2): no minutes figure, no arrival wording — bound directly by
+// token (a link genuinely names ONE visit), so more than one live ETA is not disqualifying here. A token
+// this draft's snapshot never minted fails closed.
+async function recheckLinkOnly(claim, entries, dbh) {
+  const linkedEntries = entriesForTokens(entries, claim.trackTokens);
+  if (!linkedEntries.length) return 'eta_claim_untracked_link';
+  return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: claim.trackTokens });
+}
+// A classified claim: bind it to the snapshot entry (or entries) it is about, then recheck those.
+async function recheckBoundClaim(claim, entries, { factsGeneratedAt, now, dbh }) {
+  // Round-16/17 structural backstop: a NUMERIC signal no parser could read (a number beside a time unit
+  // / arrival word) never passes on freshness and liveness alone — it could be any figure, so it must
+  // parse and bind exactly, and it did not. (The detector is number-based, so every unclassified signal
+  // is numeric.)
+  if (claim.unclassifiedClaim) return 'eta_claim_unclassified';
+  const bound = bindEtaClaim(claim, entries, { factsGeneratedAt, now });
+  if (bound.reason) return bound.reason;
+  // A minutes/arrival claim that ALSO carries a track link must have that link belong to the SAME bound
+  // visit(s) — never let a mismatched or stale link ride along on an otherwise-valid claim.
+  if (claim.hasTrackLink && !entriesForTokens(bound.entries, claim.trackTokens).length) return 'eta_claim_untracked_link';
+  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, requireOnSite: claim.arrivedClaim, checkFix: claim.claims.length > 0 || claim.timedArrivalClaim, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
+}
 /**
  * null when the outgoing body may go out, else a short reason string the
  * caller logs before blocking/superseding. `liveEtaSnapshot` and
@@ -405,61 +462,16 @@ function bindEtaClaim(claim, entries, freshness) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], promptVersion = null, now = new Date(), dbh = db }) {
-  // Codex round-13 P2: any /track/ link that is not the canonical origin's exact
-  // token path is refused outright, claim or not.
+  // Codex round-13 P2: any /track/ link that is not the canonical origin's exact token path is refused
+  // outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
-  // This draft's recorded technician names ride as extra status subjects (persisted
-  // in the snapshot: no extra DB read). Older snapshots carry none.
-  // Two sources: the live entries' names AND the names persisted with the decision itself
-  // (input_snapshot.tech_names, round-42 P2) — the latter exist even when there is no live
-  // snapshot, so name-subjected status wording ("Sam is on the way") is classified on the
-  // no-snapshot path too. Older decisions without the field keep the entries-only behavior.
-  const techNames = sanitizeTechNames([
-    ...(Array.isArray(persistedTechNames) ? persistedTechNames : []),
-    ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
-  ]);
+  const techNames = mergeTechNames(persistedTechNames, liveEtaSnapshot);
   const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames, promptVersion });
   const entries = usableSnapshotEntries(liveEtaSnapshot);
-  // Round-20 structural rule: wording classification decides WHICH claim to
-  // verify, never WHETHER to recheck. A draft that carries a live-ETA/on-site
-  // snapshot and whose body touches visit status in ANY form (the broad
-  // bodyMentionsVisitStatus vocabulary gate, not a phrase list of claims) is
-  // held to the visit-state recheck at send time even when no narrower
-  // classifier recognized the wording ("The technician arrived.", "en-route"):
-  // each snapshot entry's visits must still be in the state the draft recorded
-  // (en route / on site), with the same technician and destination. Body copy
-  // with no status vocabulary at all ("Thanks, 5 stars!") is unaffected, as are
-  // accurate corrections ("hasn't arrived") and scheduling windows.
-  if (!claim.hasClaim && !claim.hasTrackLink) {
-    if (!entries.length) return claim.ungroundedStatus ? 'eta_claim_no_snapshot' : null;
-    if (!claim.visitStatusMention) return null;
-    return checkEntriesStillLive({ boundEntries: entries, allowOnSite: false, recordedState: true, dbh });
-  }
+  if (!claim.hasClaim && !claim.hasTrackLink) return recheckWithoutClaim(claim, entries, dbh);
   if (!entries.length) return 'eta_claim_no_snapshot';
-
-  // Tracking-link-only path (Codex round-4 P2): no minutes figure, no
-  // arrival wording — bound directly by token (a link genuinely names ONE
-  // visit), so more than one live ETA is not disqualifying here. A token
-  // this draft's snapshot never minted fails closed.
-  if (!claim.hasClaim) {
-    const linkedEntries = entriesForTokens(entries, claim.trackTokens);
-    if (!linkedEntries.length) return 'eta_claim_untracked_link';
-    return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: claim.trackTokens });
-  }
-
-  // Round-16/17 structural backstop: a NUMERIC signal no parser could read (a
-  // number beside a time unit / arrival word) never passes on freshness and
-  // liveness alone — it could be any figure, so it must parse and bind exactly,
-  // and it did not. (The detector is number-based, so every unclassified
-  // signal is numeric.)
-  if (claim.unclassifiedClaim) return 'eta_claim_unclassified';
-  const bound = bindEtaClaim(claim, entries, { factsGeneratedAt, now });
-  if (bound.reason) return bound.reason;
-  // A minutes/arrival claim that ALSO carries a track link must have that
-  // link belong to the SAME bound visit(s) — never let a mismatched or stale
-  // link ride along on an otherwise-valid claim.
-  if (claim.hasTrackLink && !entriesForTokens(bound.entries, claim.trackTokens).length) return 'eta_claim_untracked_link';
-  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, requireOnSite: claim.arrivedClaim, checkFix: claim.claims.length > 0 || claim.timedArrivalClaim, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
+  if (!claim.hasClaim) return recheckLinkOnly(claim, entries, dbh);
+  return recheckBoundClaim(claim, entries, { factsGeneratedAt, now, dbh });
 }
 
 // Shared "is the bound entry's visit still customer-facing live" recheck —
@@ -519,13 +531,6 @@ async function destinationChanged(boundEntries, rows, dbh) {
   }
   return false;
 }
-// ONE per-entry identity comparison (round-22 P2): WHO is coming (technician),
-// in WHICH vehicle (tracker device fingerprint), and WHERE (destination). Each
-// bound entry recorded these at draft time; any change — or an unreadable
-// current value — makes the figure/status about something else. `checkPerson`
-// is off for a link-only share, which names no technician or vehicle (the
-// destination still applies: the link routes to the visit's current address).
-// Returns the block reason or null.
 // The ETA for one snapshot entry recomputed NOW: same resolution as the
 // drafter (context-aggregator.resolveLiveEtaMinutesUncached -> fresh position of
 // the technician's configured device -> bounded route-provider ETA, google
@@ -562,156 +567,178 @@ async function recomputedLiveEtaMinutes(entry, dbh) {
     return { unavailable: true };
   }
 }
+// Technician + tracker device + mapping GENERATION identity (checkPerson only). Pure extraction of
+// the first half of the former entryIdentityReason; same checks, same order, same reasons.
+async function entryDeviceReason(entry, dbh) {
+  const hasGeneration = 'mappingChangedAt' in entry;
+  if (!entry.deviceImei && !hasGeneration) return null;
+  const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
+  const { deviceFingerprint, mappingGeneration } = require('./live-eta-destination');
+  if (!tech) return 'eta_claim_device_changed';
+  if (entry.deviceImei && deviceFingerprint(tech.bouncie_imei) !== entry.deviceImei) return 'eta_claim_device_changed';
+  if (hasGeneration && mappingGeneration(tech.bouncie_imei_changed_at) !== mappingGeneration(entry.mappingChangedAt)) return 'eta_claim_device_changed';
+  return null;
+}
+async function technicianDeviceReason(boundEntries, rows, dbh) {
+  const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
+  // Round-18: only entries that recorded a technicianId are checked.
+  if (boundEntries.some((entry) => entry.technicianId != null
+    && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)))) return 'eta_claim_tech_changed';
+  // Round-22/41: an entry that recorded the ETA's tracker device (and/or the mapping
+  // GENERATION, technicians.bouncie_imei_changed_at) must still find its technician
+  // mapped to that same device under that same generation (admin-geofence can
+  // re-point it). The generation catches A->B->A, where the device fingerprint
+  // returns to its previous value although the earlier ETA facts predate the remap.
+  for (const entry of boundEntries) {
+    const reason = await entryDeviceReason(entry, dbh);
+    if (reason) return reason;
+  }
+  return null;
+}
+// Round-24: a MINUTES figure is about one GPS fix. If the tracker has since stored a NEWER fix
+// (tech_status.location_updated_at), the public tracker has recomputed from different coordinates —
+// but pings arrive every few seconds while driving, so refusing on any newer ping would make a
+// reviewed/scheduled ETA reply almost never sendable. Instead the ETA is RECOMPUTED right now with the
+// aggregator's own resolution (same technician, configured device, recorded destination, real
+// route-provider result only) and the send proceeds only if the fresh figure still EQUALS the claimed
+// one. No newer ping -> no recompute. 1 s tolerance absorbs timestamp precision differences.
+async function entryFixReason(entry, dbh) {
+  if (!Number.isFinite(entry.fixAtMs) || entry.technicianId == null) return null;
+  const status = await dbh('tech_status').where({ tech_id: entry.technicianId }).first('location_updated_at');
+  const latest = status && status.location_updated_at ? new Date(status.location_updated_at).getTime() : NaN;
+  // Round-27: an ABSENT/unreadable tech_status timestamp is not proof of a newer fix — when the ETA
+  // came from the direct Bouncie fallback (no fresh tech_status row) the cache write is asynchronous
+  // and may never land. It is treated like a newer ping: RECOMPUTE with the same path and tolerance.
+  const unverifiable = !Number.isFinite(latest);
+  if (!(unverifiable || latest > entry.fixAtMs + 1000)) return null;
+  const recomputed = await recomputedLiveEtaMinutes(entry, dbh);
+  // The provider / database could not answer: an infrastructure reason (retryable, in the shared set),
+  // NEVER a verdict about the message. Only a recompute that SUCCEEDED and differs is the terminal
+  // superseded-fix verdict.
+  if (recomputed.unavailable) return 'eta_claim_recompute_unavailable';
+  if (recomputed.impossible || !recomputedStillMatches(entry.minutes, recomputed.minutes)) return 'eta_claim_superseded_fix';
+  return null;
+}
+async function fixSupersededReason(boundEntries, dbh) {
+  for (const entry of boundEntries) {
+    const reason = await entryFixReason(entry, dbh);
+    if (reason) return reason;
+  }
+  return null;
+}
+// ONE per-entry identity comparison (round-22 P2): WHO is coming (technician),
+// in WHICH vehicle (tracker device fingerprint), and WHERE (destination). Each
+// bound entry recorded these at draft time; any change — or an unreadable
+// current value — makes the figure/status about something else. `checkPerson`
+// is off for a link-only share, which names no technician or vehicle (the
+// destination still applies: the link routes to the visit's current address).
+// Returns the block reason or null.
 async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, checkFix = false }) {
   if (checkPerson) {
-    const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
-    // Round-18: only entries that recorded a technicianId are checked.
-    if (boundEntries.some((entry) => entry.technicianId != null
-      && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)))) return 'eta_claim_tech_changed';
-    // Round-22/41: an entry that recorded the ETA's tracker device (and/or the mapping
-    // GENERATION, technicians.bouncie_imei_changed_at) must still find its technician
-    // mapped to that same device under that same generation (admin-geofence can
-    // re-point it). The generation catches A->B->A, where the device fingerprint
-    // returns to its previous value although the earlier ETA facts predate the remap.
-    for (const entry of boundEntries) {
-      const hasGeneration = 'mappingChangedAt' in entry;
-      if (!entry.deviceImei && !hasGeneration) continue;
-      const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
-      const { deviceFingerprint, mappingGeneration } = require('./live-eta-destination');
-      if (!tech) return 'eta_claim_device_changed';
-      if (entry.deviceImei && deviceFingerprint(tech.bouncie_imei) !== entry.deviceImei) return 'eta_claim_device_changed';
-      if (hasGeneration && mappingGeneration(tech.bouncie_imei_changed_at) !== mappingGeneration(entry.mappingChangedAt)) return 'eta_claim_device_changed';
-    }
+    const reason = await technicianDeviceReason(boundEntries, rows, dbh);
+    if (reason) return reason;
   }
   if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';
-  // Round-24: a MINUTES figure is about one GPS fix. If the tracker has since
-  // stored a NEWER fix (tech_status.location_updated_at), the public tracker has
-  // recomputed from different coordinates — but pings arrive every few seconds
-  // while driving, so refusing on any newer ping would make a reviewed/scheduled
-  // ETA reply almost never sendable. Instead the ETA is RECOMPUTED right now
-  // with the aggregator's own resolution (same technician, configured device,
-  // recorded destination, real route-provider result only) and the send proceeds
-  // only if the fresh figure still EQUALS the claimed one (the same exact-match
-  // rule the draft-time guard and the entry binding use). No newer ping -> no
-  // recompute. An unreadable tech_status row or a recompute that fails/is
-  // unavailable -> block. 1 s tolerance absorbs timestamp precision differences.
-  if (checkFix) {
-    for (const entry of boundEntries) {
-      if (!Number.isFinite(entry.fixAtMs) || entry.technicianId == null) continue;
-      const status = await dbh('tech_status').where({ tech_id: entry.technicianId }).first('location_updated_at');
-      const latest = status && status.location_updated_at ? new Date(status.location_updated_at).getTime() : NaN;
-      // Round-27: an ABSENT/unreadable tech_status timestamp is not proof of a
-      // newer fix — when the ETA came from the direct Bouncie fallback (no fresh
-      // tech_status row) the cache write is asynchronous and may never land. It
-      // is treated like a newer ping: RECOMPUTE with the same path and tolerance,
-      // and block only if the recompute is unavailable or differs.
-      const unverifiable = !Number.isFinite(latest);
-      if (unverifiable || latest > entry.fixAtMs + 1000) {
-        const recomputed = await recomputedLiveEtaMinutes(entry, dbh);
-        // The provider / database could not answer: an infrastructure reason (retryable, in the
-        // shared set), NEVER a verdict about the message. Only a recompute that SUCCEEDED and
-        // differs is the terminal superseded-fix verdict.
-        if (recomputed.unavailable) return 'eta_claim_recompute_unavailable';
-        if (recomputed.impossible || !recomputedStillMatches(entry.minutes, recomputed.minutes)) return 'eta_claim_superseded_fix';
-      }
-    }
+  return checkFix ? fixSupersededReason(boundEntries, dbh) : null;
+}
+// Codex round-36 P2: a link-only share names ONE visit — the row that owns the token — not the whole
+// grouped entry. Scope the rows (and the entry's ids and recorded destinations) to the token owner(s)
+// before the date / liveness / identity checks, so an unrelated sibling that was rescheduled or moved
+// cannot reject a valid link for the live owner. A token no row owns is left unscoped and fails below as
+// eta_claim_link_expired. Pure extraction: same scoping, same result shape.
+function scopeToLinkOwners(rows, boundEntries, { allowOnSite, trackTokensToVerify }) {
+  if (!(allowOnSite && trackTokensToVerify.length)) return { rows, boundEntries, linkScoped: false };
+  const owners = new Set(rows.filter((row) => row.track_view_token && trackTokensToVerify.includes(row.track_view_token)).map((row) => row.id));
+  if (!owners.size) return { rows, boundEntries, linkScoped: false };
+  return {
+    linkScoped: true,
+    rows: rows.filter((row) => owners.has(row.id)),
+    boundEntries: boundEntries
+      .map((e) => ({
+        ...e,
+        scheduledServiceIds: e.scheduledServiceIds.filter((id) => owners.has(id)),
+        ...(Array.isArray(e.destinations) ? { destinations: e.destinations.filter((d) => d && owners.has(d.id)) } : {}),
+      }))
+      .filter((e) => e.scheduledServiceIds.length),
+  };
+}
+// Visit date + customer-facing liveness of the bound entries' rows. Returns { reason } to refuse, else
+// { liveById } for the token-expiry stage.
+function visitLivenessReason({ rows, boundEntries, linkScoped, allowOnSite, requireOnSite, recordedState }, customerTrackState) {
+  // Auditor P1: every claim kind (status-only, minutes, link, recorded-state) is about a visit happening
+  // TODAY (America/New_York). Status-only claims skip the draft-freshness window, so without this a
+  // queued "The tech is on the way" could send the NEXT day while yesterday's visit still reads
+  // en_route. The SAME calendar-day rule the aggregator's liveEtaEligible / liveEtaOnSite use; a missing
+  // or unreadable date blocks.
+  const { calendarDay } = require('./live-eta-destination');
+  const today = etDateString();
+  if (rows.some((row) => calendarDay(row.scheduled_date) !== today)) return { reason: 'eta_claim_visit_not_today' };
+  // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has arrived") holds only once the
+  // tracker says the tech is on the property.
+  const liveStates = new Set(requireOnSite ? ['on_property'] : ((allowOnSite || recordedState) ? ['en_route', 'on_property'] : ['en_route']));
+  const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
+  // Codex round-7 P2: a minutes/status claim about a grouped entry implicitly covers EVERY sibling in it
+  // ("your techs are 9 minutes away" means both the pest and lawn stop, not just whichever one is still
+  // moving) — so EVERY sibling of a bound entry must still be customer-facing live (`every()`), not just
+  // one of them (`some()`): a cancelled/skipped/completed sibling fails the whole entry closed, even
+  // while another sibling sharing the physical stop is still en route. The tracking-link-only path is
+  // deliberately NOT changed here — sharing a link names ONE visit (the token's own owning row, verified
+  // by the token-expiry stage), never a claim about the whole group, so it keeps its existing `some()`
+  // semantics.
+  const allBoundEntriesLive = allowOnSite
+    ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
+    : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
+  // A scoped link-only share's owner no longer live is an expired LINK (unchanged reason).
+  if (!allBoundEntriesLive) return { reason: linkScoped ? 'eta_claim_link_expired' : 'eta_claim_no_longer_en_route' };
+  return { liveById };
+}
+// Recorded-state recheck (no classified claim): each entry's visits must still be in the exact state the
+// draft carried — on site stays on site, en route stays en route.
+function recordedStateReason(boundEntries, rows, customerTrackState) {
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  const stillRecorded = boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => (
+    customerTrackState(rowById.get(id)) === (entry.state === 'on_property' ? 'on_property' : 'en_route'))));
+  return stillRecorded ? null : 'eta_claim_no_longer_en_route';
+}
+// Each /track/ token found in the body: its own row must exist, be customer-facing live, and carry an
+// unexpired token. (Codex round-5/6 P2.)
+function tokenExpiryReason(trackTokensToVerify, rows, liveById) {
+  if (!trackTokensToVerify.length) return null;
+  const rowByToken = new Map(rows.filter((row) => row.track_view_token).map((row) => [row.track_view_token, row]));
+  for (const token of trackTokensToVerify) {
+    const row = rowByToken.get(token);
+    // A token with no matching row here would already have failed the untracked-link check above —
+    // guarded again defensively rather than assumed live.
+    if (!row) return 'eta_claim_link_expired';
+    // Codex round-6 P2: the entry-liveness stage uses `some()` across a grouped entry's sibling ids — a
+    // cancelled/terminal sibling's own token must never ride through just because ANOTHER sibling sharing
+    // the same physical stop is still live. The row that OWNS this exact token must itself be
+    // customer-facing live.
+    if (!liveById.get(row.id)) return 'eta_claim_link_expired';
+    if (!sendTimeTrackTokenLive(row.track_token_expires_at)) return 'eta_claim_link_expired';
   }
   return null;
 }
 async function checkEntriesStillLive({ boundEntries: entriesIn, allowOnSite, requireOnSite = false, recordedState = false, checkFix = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
-    let boundEntries = entriesIn;
-    let linkScoped = false;
-    const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    let rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city', 'scheduled_date');
-    // Codex round-36 P2: a link-only share names ONE visit — the row that owns the
-    // token — not the whole grouped entry. Scope the rows (and the entry's ids and
-    // recorded destinations) to the token owner(s) before the date / liveness /
-    // identity checks, so an unrelated sibling that was rescheduled or moved cannot
-    // reject a valid link for the live owner. A token no row owns is left unscoped
-    // and fails below as eta_claim_link_expired.
-    if (allowOnSite && trackTokensToVerify.length) {
-      const owners = new Set(rows.filter((row) => row.track_view_token && trackTokensToVerify.includes(row.track_view_token)).map((row) => row.id));
-      if (owners.size) {
-        linkScoped = true;
-        rows = rows.filter((row) => owners.has(row.id));
-        boundEntries = boundEntries
-          .map((e) => ({
-            ...e,
-            scheduledServiceIds: e.scheduledServiceIds.filter((id) => owners.has(id)),
-            ...(Array.isArray(e.destinations) ? { destinations: e.destinations.filter((d) => d && owners.has(d.id)) } : {}),
-          }))
-          .filter((e) => e.scheduledServiceIds.length);
-      }
-    }
-    // Auditor P1: every claim kind (status-only, minutes, link, recorded-state)
-    // is about a visit happening TODAY (America/New_York). Status-only claims skip
-    // the draft-freshness window, so without this a queued "The tech is on the
-    // way" could send the NEXT day while yesterday's visit still reads en_route.
-    // The SAME calendar-day rule the aggregator's liveEtaEligible / liveEtaOnSite
-    // use; a missing or unreadable date blocks.
-    const { calendarDay } = require('./live-eta-destination');
-    const today = etDateString();
-    if (rows.some((row) => calendarDay(row.scheduled_date) !== today)) return 'eta_claim_visit_not_today';
-    // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
-    // arrived") holds only once the tracker says the tech is on the property.
-    const liveStates = new Set(requireOnSite ? ['on_property'] : ((allowOnSite || recordedState) ? ['en_route', 'on_property'] : ['en_route']));
-    const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
-    // Codex round-7 P2: a minutes/status claim about a grouped entry
-    // implicitly covers EVERY sibling in it ("your techs are 9 minutes
-    // away" means both the pest and lawn stop, not just whichever one is
-    // still moving) — so EVERY sibling of a bound entry must still be
-    // customer-facing live (`every()`), not just one of them (`some()`): a
-    // cancelled/skipped/completed sibling fails the whole entry closed, even
-    // while another sibling sharing the physical stop is still en route.
-    // The tracking-link-only path is deliberately NOT changed here — sharing
-    // a link names ONE visit (the token's own owning row, verified below by
-    // trackTokensToVerify), never a claim about the whole group, so it keeps
-    // its existing `some()` semantics.
-    const allBoundEntriesLive = allowOnSite
-      ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
-      : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
-    // A scoped link-only share's owner no longer live is an expired LINK (unchanged reason).
-    if (!allBoundEntriesLive) return linkScoped ? 'eta_claim_link_expired' : 'eta_claim_no_longer_en_route';
-    // Round-18/20/22: technician, tracker device and destination identity, in
-    // one comparison (see entryIdentityReason). A link-only share names no
-    // technician or vehicle, so only the destination applies there.
+    const allIds = [...new Set(entriesIn.flatMap((e) => e.scheduledServiceIds))];
+    const fetched = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city', 'scheduled_date');
+    const { rows, boundEntries, linkScoped } = scopeToLinkOwners(fetched, entriesIn, { allowOnSite, trackTokensToVerify });
+    const live = visitLivenessReason({ rows, boundEntries, linkScoped, allowOnSite, requireOnSite, recordedState }, customerTrackState);
+    if (live.reason) return live.reason;
+    // Round-18/20/22: technician, tracker device and destination identity, in one comparison (see
+    // entryIdentityReason). A link-only share names no technician or vehicle, so only the destination
+    // applies there.
     const identityReason = await entryIdentityReason(boundEntries, rows, dbh, { checkPerson: !allowOnSite, checkFix });
     if (identityReason) return identityReason;
-    // Recorded-state recheck (no classified claim): each entry's visits must
-    // still be in the exact state the draft carried — on site stays on site,
-    // en route stays en route.
-    if (recordedState) {
-      const rowById = new Map(rows.map((row) => [row.id, row]));
-      const stillRecorded = boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => (
-        customerTrackState(rowById.get(id)) === (entry.state === 'on_property' ? 'on_property' : 'en_route'))));
-      if (!stillRecorded) return 'eta_claim_no_longer_en_route';
-    }
-
-    if (trackTokensToVerify.length) {
-      const rowByToken = new Map(rows.filter((row) => row.track_view_token).map((row) => [row.track_view_token, row]));
-      for (const token of trackTokensToVerify) {
-        const row = rowByToken.get(token);
-        // A token with no matching row here would already have failed the
-        // untracked-link check above — guarded again defensively rather than
-        // assumed live.
-        if (!row) return 'eta_claim_link_expired';
-        // Codex round-6 P2: allBoundEntriesLive above uses `some()` across a
-        // grouped entry's sibling ids — a cancelled/terminal sibling's own
-        // token must never ride through just because ANOTHER sibling sharing
-        // the same physical stop is still live. The row that OWNS this exact
-        // token must itself be customer-facing live.
-        if (!liveById.get(row.id)) return 'eta_claim_link_expired';
-        if (!sendTimeTrackTokenLive(row.track_token_expires_at)) return 'eta_claim_link_expired';
-      }
-    }
+    const recordedReason = recordedState ? recordedStateReason(boundEntries, rows, customerTrackState) : null;
+    if (recordedReason) return recordedReason;
+    return tokenExpiryReason(trackTokensToVerify, rows, live.liveById);
   } catch (err) {
     logger.warn(`[sms-eta-freshness] en_route recheck failed: ${err.message}; blocking send`);
     return 'eta_claim_recheck_failed';
   }
-
-  return null;
 }
 
 module.exports = { etaClaimBlockReason, ETA_FRESHNESS_WINDOW_MS, ETA_INFRASTRUCTURE_FAILURE_REASONS, isEtaInfrastructureFailure };

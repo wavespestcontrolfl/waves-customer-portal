@@ -2282,3 +2282,28 @@ describe('"made it" completed-arrival claims at send time', () => {
     expect(await run(body, snapshot(), done)).toBeNull();
   });
 });
+
+// Codex round-48 P2 (PR #5334): "reached your property" arrivals at send time.
+describe('"reached" completed-arrival claims at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = (extra) => ({ entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', ...extra }] });
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const onSite = { status: 'on_site', track_state: 'on_property' };
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, snap, extra) => etaClaimBlockReason({ liveEtaSnapshot: snap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(['The technician has reached your property.', 'He reached the house.', 'We have reached your place.'])('%p needs the on-property state: blocked while en route', async (body) => {
+    expect(await run(body, snapshot())).toBe('eta_claim_no_longer_en_route');
+  });
+  test('passes once on property, blocked again once the visit is done; a recorded name works', async () => {
+    const onProp = snapshot({ state: 'on_property' });
+    expect(await run('The technician has reached your property.', onProp, onSite)).toBeNull();
+    expect(await run('The technician has reached your property.', onProp, done)).toBe('eta_claim_no_longer_en_route');
+    expect(await run('Sam reached your address.', snapshot({ technicianNames: ['Sam'] }))).toBe('eta_claim_no_longer_en_route');
+  });
+  test.each(['The tech has not reached your property yet.', 'Has he reached the house?', 'The tech reached your home tomorrow.'])('%p keeps its exemption', async (body) => {
+    expect(await run(body, snapshot(), done)).toBeNull();
+  });
+});

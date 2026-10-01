@@ -1158,9 +1158,9 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // First-person plural ARRIVAL / on-site claims (Codex round-37 P2): "We've arrived",
 // "We just got there", "We're on site", "We're at your door". Explicit forms only —
 // bare "we're here" and "we have on-site inspections" stay excluded.
-const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$))))"
+const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address)))"
   + "|we(?:'re|\\s+are)\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:on[\\s-]?site|at\\s+(?:your|the)\\s+(?:door|house|home|place|property|address)|outside\\s+(?:your|the)\\s+(?:door|house|home|place|property)|on\\s+(?:the|your)\\s+property)";
-const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|made\s+it(?:\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|(?=\s*(?:[.!,;:?]|$))))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve))|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve)))|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|made\s+it(?:\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address))|(?=\s*(?:[.!,;:?]|$)))|reached\s+(?:there|(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve))|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|(?:here|there)(?!\s+to\s+(?:help|assist|answer|support|serve)))|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 const COMPLETED_ARRIVAL_RE = new RegExp(COMPLETED_ARRIVAL_BASE_RE.source.replace(/\)\\b$/, `|${WE_ARRIVED_ALT})\\b`), 'i');
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
@@ -1430,7 +1430,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
   // Completed-arrival "got there/here" (round-36 P2): part of the same default-deny
   // vocabulary as the completed-arrival classifier.
-  + `|${PREFIX}(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))`
+  + `|${PREFIX}(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|made\\s+it(?:\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address))|(?=\\s*(?:[.!,;:?]|$)))|reached\\s+(?:there|(?:your|the)\\s+(?:house|home|place|property|address))`
   // Movement forms (left for / pulled up / showed up) also need a technician-type
   // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
   + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
@@ -1646,10 +1646,12 @@ const WORD_FIGURE_CUE_BEFORE_RE = /\b(?:in|within|eta\s*:?)\s*(?:about\s+|around
 function isPlainWordCount(str, index, length) {
   return !WORD_FIGURE_CUE_AFTER_RE.test(str.slice(index + length)) && !WORD_FIGURE_CUE_BEFORE_RE.test(str.slice(Math.max(0, index - 20), index));
 }
-function findGroundedMinutesFigures(text) {
+// findGroundedMinutesFigures, as three stages over one shared scan context (pure extraction — same
+// scans, same order, same claims). The context carries the normalized string, the accumulating claims
+// and the shared "is this figure a claim" judge.
+function groundedFigureContext(text) {
   const claims = [];
   const str = normalizeTimeQuantities(normalizeNumberWords(text));
-  const wordOrigins = numberWordOriginIndexes(text, str);
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
     const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
@@ -1668,7 +1670,10 @@ function findGroundedMinutesFigures(text) {
     claims.push({ minutes, index: matchIndex });
     return true;
   };
-
+  return { claims, str, wordOrigins: numberWordOriginIndexes(text, str), sentenceFor, maybeGroundedClaim };
+}
+// Stage 1 — ranges ("10-12 minutes", "between 10 and 12 minutes"). Returns the consumed spans.
+function groundedRangeFigures({ str, sentenceFor, maybeGroundedClaim }) {
   const consumed = [];
   for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
     const re = new RegExp(rangeRe.source, rangeRe.flags);
@@ -1680,26 +1685,27 @@ function findGroundedMinutesFigures(text) {
       if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
     }
   }
-
+  return consumed;
+}
+// Stage 2 — unit-bearing single figures ("12 minutes"), skipping spans a range already consumed.
+function groundedUnitFigures({ str, sentenceFor, maybeGroundedClaim }, consumed) {
   const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
   let m;
   while ((m = re.exec(str))) {
     if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
     maybeGroundedClaim(Number(m[1]), m.index, m[0].length, sentenceFor(m.index));
   }
-
-  // Bare-integer default-deny (Codex round-8 P2, PR #5334): "the tech should
-  // make it in 20" carries no unit word AND matches none of
-  // findEtaMinutesClaims's fixed phrase/trigger lists. Once there IS a live
-  // ETA to check a claim against, ANY bare integer 1-180 left unclaimed above
-  // is a timed claim UNLESS classifyBareEtaNumber reads it as something else
-  // entirely — a time of day, money, an address/phone-like token, a date, a
-  // count with a non-time noun right after it, an ordinal, or a percentage.
-  // Numbers already claimed or excluded by the unit-based passes above are
-  // skipped by index so this pass never double-claims or re-fights a
-  // duration exclusion those passes already settled (a trailing "minutes"
-  // word reads here as an ordinary trailing noun either way, so the verdict
-  // agrees).
+}
+// Stage 3 — bare integers, then "<N>ish". Bare-integer default-deny (Codex round-8 P2, PR #5334): "the
+// tech should make it in 20" carries no unit word AND matches none of findEtaMinutesClaims's fixed
+// phrase/trigger lists. Once there IS a live ETA to check a claim against, ANY bare integer 1-180 left
+// unclaimed above is a timed claim UNLESS classifyBareEtaNumber reads it as something else entirely — a
+// time of day, money, an address/phone-like token, a date, a count with a non-time noun right after it,
+// an ordinal, or a percentage. Numbers already claimed or excluded by the unit-based passes above are
+// skipped by index so this pass never double-claims or re-fights a duration exclusion those passes
+// already settled (a trailing "minutes" word reads here as an ordinary trailing noun either way, so the
+// verdict agrees).
+function groundedBareFigures({ claims, str, wordOrigins }, consumed) {
   const bareRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)/g;
   let bm2;
   while ((bm2 = bareRe.exec(str))) {
@@ -1707,19 +1713,19 @@ function findGroundedMinutesFigures(text) {
     if (claims.some((c) => c.index === bm2.index)) continue;
     const minutes = Number(bm2[1]);
     if (minutes < 1 || minutes > 180) continue;
-    // Round-23 P2: a bare figure that was a written number word with no time unit
-    // or arrival cue beside it is a count ("we completed one"), not an ETA.
+    // Round-23 P2: a bare figure that was a written number word with no time unit or arrival cue beside
+    // it is a count ("we completed one"), not an ETA.
     if (wordOrigins.has(bm2.index) && isPlainWordCount(str, bm2.index, bm2[0].length)) continue;
     if (!isWindowQuantity(str, bm2.index, bm2[0].length) && classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
       claims.push({ minutes, index: bm2.index });
     }
   }
-
-  // "<N>ish" (round 8): the digits and "ish" share no word boundary at all,
-  // so the \b-anchored bare-integer pass above can never match "20ish" —
-  // this tiny dedicated pass is the only way to catch it. Always a timed
-  // approximation once findGroundedMinutesFigures runs at all; no exclusion
-  // category applies to an "-ish" suffix.
+}
+// "<N>ish" (round 8): the digits and "ish" share no word boundary at all, so the \b-anchored bare-integer
+// pass can never match "20ish" — this tiny dedicated pass is the only way to catch it. Always a timed
+// approximation once findGroundedMinutesFigures runs at all; no exclusion category applies to an "-ish"
+// suffix.
+function groundedIshFigures({ claims, str }) {
   const ishRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?=ish\b)ish\b/gi;
   let ishm;
   while ((ishm = ishRe.exec(str))) {
@@ -1727,9 +1733,15 @@ function findGroundedMinutesFigures(text) {
     const minutes = Number(ishm[1]);
     if (minutes >= 1 && minutes <= 180 && !isWindowQuantity(str, ishm.index, ishm[0].length)) claims.push({ minutes, index: ishm.index });
   }
-
+}
+function findGroundedMinutesFigures(text) {
+  const ctx = groundedFigureContext(text);
+  const consumed = groundedRangeFigures(ctx);
+  groundedUnitFigures(ctx, consumed);
+  groundedBareFigures(ctx, consumed);
+  groundedIshFigures(ctx);
   // Office follow-up timing (round 13) is never an ETA — see isOfficeFollowupDuration.
-  return claims.filter((c) => !isOfficeFollowupDuration(str, c.index, 1));
+  return ctx.claims.filter((c) => !isOfficeFollowupDuration(ctx.str, c.index, 1));
 }
 // Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
 // an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT
@@ -1857,83 +1869,93 @@ function buildLiveEtaSnapshot(context) {
 function countEnRouteEtaStops(context) {
   return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
 }
+// validateLiveEtaMinutes, as four decision units (pure extraction — same checks, same order, same
+// violation text). Each returns a violation message or null.
+const liveEtaFail = (message) => ({ ok: false, violations: [message] });
+// Arrival-state consistency between the reply and the LIVE STATUS facts.
+function arrivalStateViolation(reply, factsBlock, techNames) {
+  const facts = String(factsBlock || '');
+  // Codex round-13 P2: a completed-arrival claim ("has arrived") with an en-route tech and no on-site
+  // fact is false — the facts must say the tech is on site before a reply may say so.
+  if (bodyClaimsCompletedArrival(reply, { techNames }) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(facts) && !/tech marked on site/.test(facts)) {
+    return 'the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived';
+  }
+  // Round-34 P2 (mirror of the arrived-vs-en-route check above): route wording ("on the way", "running
+  // late", "nearby") against an ON-SITE-only fact is false — the send-time guard requires en_route for
+  // it, so the draft must not converge.
+  if (/tech marked on site/.test(facts) && !/tech marked en route/.test(facts) && bodyMentionsArrival(reply, { techNames })) {
+    return 'the reply says the tech is on the way / running late / nearby but the facts show the tech is already ON SITE — say the tech has arrived (is on site), never that they are on the way';
+  }
+  return null;
+}
+// Time wording the parsers cannot turn into an exact figure.
+function unparseableTimeViolation(reply, hasLiveEta) {
+  // Codex round-9 P2 (PR #5334): an hour-based duration the normalizer could not turn into minutes ("an
+  // hour", "half an hour", "a couple hours") next to a real minutes figure ("about an hour out, 2
+  // minutes") would otherwise ride the numeric claim through — reject it outright once there is a LIVE
+  // ETA to hold the reply to.
+  if (bodyHasUnconvertedNumberWord(reply)) {
+    return 'the reply states an arrival time in number words that cannot be read as an exact figure — state the EXACT LIVE ETA minutes as digits, or drop the timeframe and say the tech is on the way';
+  }
+  if (hasLiveEta && bodyHasUnnormalizedHourWord(reply)) {
+    return 'the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way';
+  }
+  return null;
+}
+// No numeric claim was read: a vague / approximate duration is still a TIMED claim. Codex round-5 P2: a
+// vague/approximate duration ("half an hour away", "an hour out", "a few minutes", "a couple minutes",
+// "quarter hour", "shortly", "any minute now", "soon") is a TIMED claim exactly like a parsed number,
+// but there is no number here to check against the LIVE ETA fact — it is rejected outright, the same
+// direction as a claim that doesn't match, rather than waved through as pure status copy.
+function vagueTimeViolation(reply) {
+  return bodyHasTimedArrivalPhrase(reply)
+    ? 'the reply gives an approximate/vague arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number, or drop the timeframe and say the tech is on the way'
+    : null;
+}
+// Numeric claims vs the LIVE ETA figures: ambiguity across stops, then the exact-minute match.
+function exactMinuteViolation(claims, factsMinutes, liveStops) {
+  if (!factsMinutes.size) return 'the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one';
+  // Two distinct live ETAs (two techs en route at once): prose can't be bound to the right visit
+  // deterministically, so no minutes figure may go out at all (Codex r3) — rare, and failing closed
+  // costs one revision. Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops with the
+  // same figure are still two entries, which send-time binding rejects as ambiguous — so the number must
+  // never be approved here.
+  if (liveStops > 1) return 'more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes';
+  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
+  return wrong.length ? `the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number` : null;
+}
 function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null, techNames = [] }) {
-  // Round-19 P2: parse the reply without its tracking links (a token's trailing
-  // digits are not an ETA) — the same shared step the send-time check uses.
+  // Round-19 P2: parse the reply without its tracking links (a token's trailing digits are not an ETA) —
+  // the same shared step the send-time check uses.
   const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
-  // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
-  // en-route tech and no on-site fact is false — the facts must say the tech
-  // is on site before a reply may say so.
-  if (bodyClaimsCompletedArrival(reply, { techNames }) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(String(factsBlock || '')) && !/tech marked on site/.test(String(factsBlock || ''))) {
-    return { ok: false, violations: ['the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived'] };
-  }
-  // Round-34 P2 (mirror of the arrived-vs-en-route check above): route wording ("on
-  // the way", "running late", "nearby") against an ON-SITE-only fact is false — the
-  // send-time guard requires en_route for it, so the draft must not converge.
-  if (/tech marked on site/.test(String(factsBlock || '')) && !/tech marked en route/.test(String(factsBlock || '')) && bodyMentionsArrival(reply, { techNames })) {
-    return { ok: false, violations: ['the reply says the tech is on the way / running late / nearby but the facts show the tech is already ON SITE — say the tech has arrived (is on site), never that they are on the way'] };
-  }
-  // Every LIVE ETA line, not only the first (audit P1): a customer with two
-  // distinct live stops has two figures, and a reply about either is grounded.
+  const stateViolation = arrivalStateViolation(reply, factsBlock, techNames);
+  if (stateViolation) return liveEtaFail(stateViolation);
+  // Every LIVE ETA line, not only the first (audit P1): a customer with two distinct live stops has two
+  // figures, and a reply about either is grounded.
   const factsLineMinutes = [...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10));
-  // Distinct live STOPS (Codex round-16 P2): grouped siblings render the shared
-  // ETA once per service line, so rendered lines over-count; when the caller has
-  // the context's liveEtaGroups (the unit the send-time snapshot uses) it passes
-  // their count.
+  // Distinct live STOPS (Codex round-16 P2): grouped siblings render the shared ETA once per service
+  // line, so rendered lines over-count; when the caller has the context's liveEtaGroups (the unit the
+  // send-time snapshot uses) it passes their count.
   const liveStops = Number.isInteger(liveEtaStopCount) ? liveEtaStopCount : factsLineMinutes.length;
   const factsMinutes = new Set(factsLineMinutes);
-  // Structural default-deny (Codex round-7 P2): once the facts actually
-  // carry a LIVE ETA to check a claim against, stop relying on
-  // findEtaMinutesClaims's trigger-word list — union in
-  // findGroundedMinutesFigures, which catches a plain minutes figure with no
-  // trigger word at all. With no LIVE ETA fact, keep the trigger-based
-  // detection only (there's nothing to bind an untriggered figure to here
-  // anyway, and this keeps an ordinary duration mention in a reply about a
-  // non-live visit from being second-guessed).
+  // Structural default-deny (Codex round-7 P2): once the facts actually carry a LIVE ETA to check a
+  // claim against, stop relying on findEtaMinutesClaims's trigger-word list — union in
+  // findGroundedMinutesFigures, which catches a plain minutes figure with no trigger word at all. With
+  // no LIVE ETA fact, keep the trigger-based detection only (there's nothing to bind an untriggered
+  // figure to here anyway, and this keeps an ordinary duration mention in a reply about a non-live visit
+  // from being second-guessed).
   const claims = factsMinutes.size
     ? [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)]
     : findEtaMinutesClaims(reply);
-  // Codex round-9 P2 (PR #5334): an hour-based duration the normalizer could
-  // not turn into minutes ("an hour", "half an hour", "a couple hours") next
-  // to a real minutes figure ("about an hour out, 2 minutes") would otherwise
-  // ride the numeric claim through — reject it outright once there is a LIVE
-  // ETA to hold the reply to.
-  if (bodyHasUnconvertedNumberWord(reply)) {
-    return { ok: false, violations: ['the reply states an arrival time in number words that cannot be read as an exact figure — state the EXACT LIVE ETA minutes as digits, or drop the timeframe and say the tech is on the way'] };
-  }
-  if (factsMinutes.size && bodyHasUnnormalizedHourWord(reply)) {
-    return { ok: false, violations: ['the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way'] };
-  }
+  const timeViolation = unparseableTimeViolation(reply, factsMinutes.size > 0);
+  if (timeViolation) return liveEtaFail(timeViolation);
   if (!claims.length) {
-    // Codex round-5 P2: a vague/approximate duration ("half an hour away",
-    // "an hour out", "a few minutes", "a couple minutes", "quarter hour",
-    // "shortly", "any minute now", "soon") is a TIMED claim exactly like a
-    // parsed number, but there is no number here to check against the LIVE
-    // ETA fact — it is rejected outright, the same direction as a claim that
-    // doesn't match, rather than waved through as pure status copy.
-    if (bodyHasTimedArrivalPhrase(reply)) {
-      return { ok: false, violations: ['the reply gives an approximate/vague arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number, or drop the timeframe and say the tech is on the way'] };
-    }
-    return { ok: true, violations: [] };
+    const vague = vagueTimeViolation(reply);
+    return vague ? liveEtaFail(vague) : { ok: true, violations: [] };
   }
-  if (!factsMinutes.size) {
-    return { ok: false, violations: ['the reply states a minutes-away ETA but the facts carry no LIVE ETA line — never compute, round, or invent one'] };
-  }
-  // Two distinct live ETAs (two techs en route at once): prose can't be
-  // bound to the right visit deterministically, so no minutes figure may
-  // go out at all (Codex r3) — rare, and failing closed costs one revision.
-  // Count LIVE ETA lines, not distinct values (Codex round-15 P2): two stops
-  // with the same figure are still two entries, which send-time binding
-  // rejects as ambiguous — so the number must never be approved here.
-  if (liveStops > 1) {
-    return { ok: false, violations: ['more than one tech is en route, so a minutes-away figure cannot be tied to the right visit — say the techs are on the way and share the tracking link instead of stating minutes'] };
-  }
-  const wrong = [...new Set(claims.map((c) => c.minutes).filter((m) => !factsMinutes.has(m)))];
-  if (wrong.length) {
-    return { ok: false, violations: [`the reply states ${wrong.join('/')} minute(s) away but LIVE ETA is ${[...factsMinutes].join(' or ')} minutes — use that EXACT number`] };
-  }
-  return { ok: true, violations: [] };
+  const minuteViolation = exactMinuteViolation(claims, factsMinutes, liveStops);
+  return minuteViolation ? liveEtaFail(minuteViolation) : { ok: true, violations: [] };
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
