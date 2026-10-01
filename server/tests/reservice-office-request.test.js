@@ -70,7 +70,7 @@ const sms = (n, customer, body, h, direction = 'inbound') => ({
 // (speaker caller, a service_request field). `words` builds that; legacy
 // fixtures that name V1 call_summary / pain_points get the same words as V2
 // caller evidence, so they keep their meaning. `v2: false` leaves V2 out.
-const v2Of = (words) => JSON.stringify({ evidence: [{ field_path: 'service_request.pests_observed', quote: words, speaker: 'caller' }] });
+const v2Of = (words) => JSON.stringify({ evidence: [{ field_path: '/service_request/pests_observed', quote: words, speaker: 'caller' }] });
 const call = (n, customer, h, extra = {}) => {
   const { words, v2, ...rest } = extra;
   const parsed = typeof rest.ai_extraction === 'string' ? JSON.parse(rest.ai_extraction) : rest.ai_extraction;
@@ -303,10 +303,10 @@ describe('terminal Codex pass 2 (#5518)', () => {
 
   test('V2 wins over a disagreeing V1: only the caller\'s service-request quotes, agent lines ignored', async () => {
     const enriched = JSON.stringify({ evidence: [
-      { field_path: 'service_request.pests_observed', quote: 'the ants are back by the patio', speaker: 'caller' },
-      { field_path: 'service_request.pests_observed', quote: 'We can treat ants', speaker: 'agent' },
-      { field_path: 'scheduling.preferred_date', quote: 'Tuesday works', speaker: 'caller' },
-      { field_path: 'service_request.urgency', quote: 'it is getting worse', speaker: 'caller' },
+      { field_path: '/service_request/pests_observed', quote: 'the ants are back by the patio', speaker: 'caller' },
+      { field_path: '/service_request/pests_observed', quote: 'We can treat ants', speaker: 'agent' },
+      { field_path: '/scheduling/preferred_date', quote: 'Tuesday works', speaker: 'caller' },
+      { field_path: '/service_request/urgency', quote: 'it is getting worse', speaker: 'caller' },
     ] });
     const db = fakeDb({ sms_log: [], call_log: [call(1, CUST, 1, { v2: false, v2_extraction_status: 'valid', ai_extraction_enriched: enriched, ai_extraction: JSON.stringify({ pain_points: 'Spiders in garage' }) })] });
     expect((await pickSuggestion(db, CUST, { now: NOW })).text).toBe('the ants are back by the patio ... it is getting worse');
@@ -317,5 +317,17 @@ describe('terminal Codex pass 2 (#5518)', () => {
     expect(body.length).toBeGreaterThan(400);
     const db = fakeDb({ sms_log: [sms(1, CUST, body, 1)], call_log: [] });
     expect(await pickSuggestion(db, CUST, { now: NOW })).toBeNull();
+  });
+});
+
+describe('terminal Codex pass 3 (#5518)', () => {
+  test('evidence paths match as JSON Pointers or dotted names; a look-alike root does not count', async () => {
+    const enriched = JSON.stringify({ evidence: [
+      { field_path: 'service_request.pests_observed', quote: 'dotted path', speaker: 'caller' },
+      { field_path: '/service_request_extra/x', quote: 'look-alike', speaker: 'caller' },
+      { field_path: '/service_request/pests_observed/0/pest_type', quote: 'roaches in the bathroom', speaker: 'caller' },
+    ] });
+    const db = fakeDb({ sms_log: [], call_log: [call(1, CUST, 1, { v2: false, v2_extraction_status: 'valid', ai_extraction_enriched: enriched })] });
+    expect((await pickSuggestion(db, CUST, { now: NOW })).text).toBe('dotted path ... roaches in the bathroom');
   });
 });

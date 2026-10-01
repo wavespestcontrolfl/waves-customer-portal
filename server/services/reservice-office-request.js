@@ -101,7 +101,11 @@ function callSuggestionText(row) {
   const quotes = [];
   for (const item of Array.isArray(enriched.evidence) ? enriched.evidence : []) {
     if (item?.speaker !== 'caller') continue;
-    if (!String(item.field_path || '').startsWith('service_request')) continue;
+    // field_path is asked for as a JSON Pointer ("/service_request/urgency",
+    // prompts/call-extraction-v1.js), which names fields in dotted form, so
+    // both spellings are normalized; a look-alike root never matches.
+    const fieldPath = String(item.field_path || '').replace(/^\//, '').replace(/\//g, '.');
+    if (fieldPath !== 'service_request' && !fieldPath.startsWith('service_request.')) continue;
     const quote = String(item.quote || '').replace(/\s+/g, ' ').trim();
     if (!quote || seen.has(quote.toLowerCase())) continue;
     seen.add(quote.toLowerCase());
