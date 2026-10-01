@@ -25190,6 +25190,19 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
 
+    // A request grounded by promise marks alone lives or dies by them: when
+    // the marks were the only substantive input and never reached the
+    // writer's context (the context build failed), there is nothing real to
+    // write from. Reject retryably rather than return copy that leaves the
+    // marked promise out (Codex #5516), as the assessment-only path does.
+    if (visitPromises.length && !baseHasReportInput && !companionCustomerInput && !contextSignals.hasVisitPromises) {
+      return res.status(503).json({
+        error: 'The promises you marked could not be loaded right now — try Generate again in a moment.',
+        code: 'promise_grounding_unavailable',
+        retryable: true,
+      });
+    }
+
     if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
       && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
       return res.status(503).json({

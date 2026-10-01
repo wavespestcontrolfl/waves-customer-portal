@@ -13339,6 +13339,12 @@ export function CompletionPanel({
   const [promiseCheck, setPromiseCheck] = useState(null);
   const [promiseCheckLoading, setPromiseCheckLoading] = useState(true);
   const [promiseReloadKey, setPromiseReloadKey] = useState(0);
+  // Older promises a restored draft had marked, beyond the newest ten the
+  // list shows: asked for by id so the mark is kept and shown (Codex #5516).
+  // `promiseIncludeAnswered` is the include list the last load answered.
+  const [promiseIncludeIds, setPromiseIncludeIds] = useState([]);
+  const [promiseIncludeAnswered, setPromiseIncludeAnswered] = useState("");
+  const promiseIncludeKey = promiseIncludeIds.join(",");
   const [promiseMarks, setPromiseMarks] = useState({});
   const [techTipsLoading, setTechTipsLoading] = useState(true);
   const [techTipsError, setTechTipsError] = useState("");
@@ -14734,7 +14740,8 @@ export function CompletionPanel({
       return () => { cancelled = true; };
     }
     setPromiseCheckLoading(true);
-    adminFetch(`/admin/dispatch/${service.id}/promises`)
+    const include = promiseIncludeKey;
+    adminFetch(`/admin/dispatch/${service.id}/promises${include ? `?include=${encodeURIComponent(include)}` : ""}`)
       .then((data) => {
         if (!cancelled) setPromiseCheck(data?.available === true && Array.isArray(data.promises) && data.promises.length ? data : null);
       })
@@ -14742,11 +14749,24 @@ export function CompletionPanel({
         if (!cancelled) setPromiseCheck(null);
       })
       .finally(() => {
-        if (!cancelled) setPromiseCheckLoading(false);
+        if (cancelled) return;
+        setPromiseIncludeAnswered(include);
+        setPromiseCheckLoading(false);
       });
     return () => { cancelled = true; };
-  }, [service.id, promiseReloadKey]);
+  }, [service.id, promiseReloadKey, promiseIncludeKey]);
   const visitPromises = promiseCheck?.promises || [];
+  // Marks on promises the list has not shown yet and has not been asked
+  // for: kept as they stand until the list answers for them.
+  const unlistedMarkIds = promiseCheckLoading ? [] : Object.keys(promiseMarks).filter((id) => (
+    !visitPromises.some((promise) => promise.id === id)
+    && !(promiseIncludeAnswered ? promiseIncludeAnswered.split(",") : []).includes(id)
+  ));
+  const unlistedMarkKey = unlistedMarkIds.join(",");
+  useEffect(() => {
+    if (!unlistedMarkKey) return;
+    setPromiseIncludeIds((ids) => [...new Set([...ids, ...unlistedMarkKey.split(",")])].slice(0, 50));
+  }, [unlistedMarkKey]);
   // No marks while Quick complete hides the report, on a backdated closeout
   // (the marks would never apply) or on a visit that did no work: declined
   // or incomplete (Codex #5516).
@@ -14756,9 +14776,10 @@ export function CompletionPanel({
   const promiseMarksForRequest = promiseMarksSuppressed ? [] : promiseMarksPayload(promiseMarks, visitPromises);
   // The marks that still hold: once the list loads, only marks on a listed
   // promise's current wording (a restored mark on a reworded promise drops
-  // out); while it loads, the marks as they stand (so a restore never
+  // out); while it loads, or while it has yet to answer for a marked
+  // promise it did not show, the marks as they stand (so a restore never
   // clears a good report early).
-  const validPromiseMarks = promiseCheckLoading
+  const validPromiseMarks = promiseCheckLoading || unlistedMarkIds.length
     ? promiseMarks
     : Object.fromEntries(visitPromises.flatMap((promise) => {
       const entry = currentMark(promiseMarks, promise);
@@ -19949,7 +19970,7 @@ export function CompletionPanel({
                 total={promiseCheck.total}
                 marks={promiseMarks}
                 onChange={setPromiseMarks}
-                disabled={generating}
+                disabled={generating || submitting}
                 tokens={{ ink: M.ink, muted: M.ink3, border: M.hairline, card: M.card, onInk: M.actionFg, font }}
               />
             )}
@@ -22395,7 +22416,7 @@ export function CompletionPanel({
               total={promiseCheck.total}
               marks={promiseMarks}
               onChange={setPromiseMarks}
-              disabled={generating}
+              disabled={generating || submitting}
               compact
               tokens={{ ink: D.text, muted: D.muted, border: D.border, card: D.card, onInk: D.white }}
             />

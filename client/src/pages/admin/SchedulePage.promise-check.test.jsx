@@ -199,6 +199,46 @@ describe('the promise check on the completion form', () => {
     await waitFor(() => expect(notes().value).toBe('Ghost ants on the slider track.'));
   });
 
+  it('the marks cannot change while the completion is sending', async () => {
+    let finish;
+    const onSubmit = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    await renderPanel({ onSubmit });
+    await screen.findByText('Promises we made');
+    fireEvent.click(markButton('Check under the dishwasher', 'Done'));
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => { fireEvent.click(submit); });
+    await waitFor(() => expect(markButton('Check under the dishwasher', 'Not yet').disabled).toBe(true));
+    await act(async () => { finish({}); });
+  });
+
+  it('a restored mark on a promise beyond the newest ten is asked for by id, shown, and sent', async () => {
+    const OLDER = { id: '00000000-0000-4000-8000-000000000099', description: 'Recheck the attic vent', source: 'call', madeAt: '2026-08-01T15:00:00.000Z', version: '9999999999999999' };
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      let data = { customer: {}, actions: [], available: false };
+      const href = decodeURIComponent(String(url));
+      if (href.includes('/promises')) {
+        data = { available: true, promises: href.includes(`include=${OLDER.id}`) ? [...PROMISES, OLDER] : PROMISES, total: 12 };
+      }
+      if (href.includes('generate-report')) data = { report: REPORT };
+      return { ok: true, json: async () => data };
+    }));
+    localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+      serviceId: service.id,
+      savedAt: Date.now(),
+      notes: 'Ghost ants on the slider track.',
+      promiseMarks: { [OLDER.id]: { mark: 'done', version: OLDER.version, stillLeft: '' } },
+    }));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await renderPanel({ onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await screen.findByText('Recheck the attic vent');
+    const submit = await screen.findByRole('button', { name: /^Complete/i });
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await act(async () => fireEvent.click(submit));
+    expect(onSubmit.mock.calls[0][1].promiseMarks).toEqual([{ id: OLDER.id, mark: 'done', version: OLDER.version }]);
+  });
+
   it('a marked promise that changed since the report asks: OK sends as is, Cancel reloads the list', async () => {
     const changed = Object.assign(new Error('A promise you marked changed after the report was written (the office closed, reworded or moved it). The report may still mention it.'), { code: 'promise_marks_changed' });
     const onSubmit = vi.fn().mockRejectedValueOnce(changed).mockRejectedValueOnce(changed).mockResolvedValue({});

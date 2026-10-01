@@ -44,12 +44,17 @@ function cleanText(value, max = Infinity) {
   return text.length > max ? text.slice(0, max).trim() : text;
 }
 
-// The version of a promise's wording the technician saw: a mark counts only
-// while the promise still reads that way (an office edit in between drops
-// it; Codex #5516). Wording, not updated_at: automatic refreshes touch rows
-// without changing what was promised.
-function promiseVersion(description) {
-  return crypto.createHash('sha256').update(cleanText(description)).digest('hex').slice(0, 16);
+// The version of the promise the technician saw: its wording and the
+// office's last verdict on it (reviewed_at, stamped by every Mark done,
+// Dismiss, Reopen, Confirm or Edit). A mark counts only while the promise
+// still stands as the technician saw it: an office edit, or a close and
+// Reopen that renews the obligation in the same words, drops it (Codex
+// #5516). Not updated_at: automatic refreshes touch rows without changing
+// what was promised.
+function promiseVersion(description, reviewedAt = null) {
+  return crypto.createHash('sha256')
+    .update(`${cleanText(description)}\u0000${isoOrNull(reviewedAt) || ''}`)
+    .digest('hex').slice(0, 16);
 }
 
 function isoOrNull(value) {
@@ -102,11 +107,18 @@ async function openVisitPromises(conn, { customerId }) {
       rows.push({ id: row.id, description: row.description, source: email ? 'email' : 'text', madeAt: row.sms_started_at });
     }
   }
+  // The office's last verdict on each, for its version (the text ledger's
+  // listing does not carry it).
+  const ids = rows.map((row) => row.id).filter(Boolean);
+  const reviewedAt = new Map(ids.length
+    ? (await conn('call_commitments').whereIn('id', ids).select('id', 'reviewed_at'))
+      .map((row) => [String(row.id), row.reviewed_at])
+    : []);
   return rows
     .map((row) => ({
       ...row,
       description: cleanText(row.description, MAX_DESCRIPTION_CHARS),
-      version: promiseVersion(row.description),
+      version: promiseVersion(row.description, reviewedAt.get(String(row.id))),
       madeAt: isoOrNull(row.madeAt),
     }))
     .filter((row) => row.id && row.description)
@@ -116,9 +128,14 @@ async function openVisitPromises(conn, { customerId }) {
 // The card's list, newest first: { promises: [{ id, description, source:
 // call|text|email, madeAt, version }], total } (total counts every open
 // visit promise, so the card can say when older ones are not shown).
-async function loadVisitPromises(conn, { customerId }) {
+// `include`: older open promises a restored draft had marked, listed after
+// the newest ten so the mark is kept and shown (Codex #5516).
+async function loadVisitPromises(conn, { customerId, include = [] }) {
   const open = await openVisitPromises(conn, { customerId });
-  return { promises: open.slice(0, MAX_LISTED_PROMISES), total: open.length };
+  const wanted = new Set((Array.isArray(include) ? include : [])
+    .filter((id) => UUID_RE.test(String(id))).slice(0, MAX_MARKS).map((id) => String(id).toLowerCase()));
+  const older = open.slice(MAX_LISTED_PROMISES).filter((row) => wanted.has(String(row.id).toLowerCase()));
+  return { promises: [...open.slice(0, MAX_LISTED_PROMISES), ...older], total: open.length };
 }
 
 // The request's marks, validated: [{ id, mark, version, stillLeft? }], one
@@ -227,9 +244,9 @@ async function lockOwnedOpenPromise(trx, id, { customerId, source, version, lock
   const owner = source === 'email' ? (sourceRow?.customer_id || initial.email_customer_id) : sourceRow?.customer_id;
   if (!sourceRow || String(owner || '') !== String(customerId)) return null;
   const row = await trx('call_commitments').where({ id }).forUpdate()
-    .first('status', 'party', 'kind', 'description', 'human_note', column);
+    .first('status', 'party', 'kind', 'description', 'human_note', 'reviewed_at', column);
   if (!row || row.status !== 'open' || row.party !== 'waves' || !VISIT_PROMISE_KINDS.includes(row.kind)) return null;
-  if (promiseVersion(row.description) !== version) return null;
+  if (promiseVersion(row.description, row.reviewed_at) !== version) return null;
   // The promise still points at the source just checked.
   if (String(row[column] || '') !== String(initial[column])) return null;
   return row;
@@ -242,7 +259,8 @@ async function addStillLeftNote(conn, promise, customerId, line) {
     const row = await lockOwnedOpenPromise(trx, promise.id, { customerId, source: promise.source, version: promise.version });
     if (!row) return false;
     const current = String(row.human_note || '');
-    if (current.includes(line)) return false;
+    // Already there (a resumed completion): the mark stands.
+    if (current.includes(line)) return true;
     const combined = current ? `${current}\n${line}` : line;
     // The office's own note is never cut to make room: a note too full for
     // the line keeps everything it says and gets no line (Codex #5516).
@@ -264,7 +282,7 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
     if (promise.mark === 'not_yet') continue;
     try {
       if (promise.mark === 'done') {
-        const note = `Done at ${visit} (marked by the technician).`;
+        const doneLine = `Done at ${visit} (marked by the technician).`;
         // The ownership, open and wording checks run under locks in the
         // same transaction as the office's own write: applyHumanUpdate for
         // a call promise; applySmsCommitmentUpdate (its own checks again,
@@ -275,6 +293,12 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
             lock: promise.source === 'call' ? 'share' : 'update',
           });
           if (!locked) return false;
+          // The office's own note stays: the visit's line goes under it when
+          // it fits, and a note too full for it is left as it is (Codex
+          // #5516).
+          const current = String(locked.human_note || '');
+          const combined = current ? `${current}\n${doneLine}` : doneLine;
+          const note = combined.length <= MAX_HUMAN_NOTE_CHARS ? combined : undefined;
           if (promise.source === 'call') {
             await require('../call-commitments').applyHumanUpdate(trx, promise.id, { action: 'fulfill', note, reviewedBy });
           } else {
@@ -297,6 +321,66 @@ async function applyVisitPromiseMarks(conn, { customerId, marks, visitDate = nul
   return results;
 }
 
+// The marks that did not reach the office's list, after the write: a Done
+// promise still open, or a Partly one still open without its line. A
+// promise closed or moved meanwhile has nothing left open. When the list
+// cannot be read, every Done or Partly mark counts, so a failure surfaces
+// rather than hides.
+async function unsavedVisitPromiseMarks(conn, { customerId, marks, results = null }) {
+  const kept = promiseMarksFromBody(marks).filter((entry) => entry.mark !== 'not_yet');
+  if (!kept.length) return [];
+  const applied = new Set((Array.isArray(results) ? results : [])
+    .filter((result) => result.applied === true).map((result) => String(result.id).toLowerCase()));
+  let open;
+  try {
+    open = new Map((await openVisitPromises(conn, { customerId })).map((row) => [String(row.id).toLowerCase(), row]));
+  } catch (err) {
+    logger.warn(`[visit-promises] promise list unreadable after the marks: ${err.message}`);
+    return kept.map((entry) => ({ id: entry.id, mark: entry.mark, stillLeft: entry.stillLeft || null, description: null }));
+  }
+  return kept.flatMap((entry) => {
+    const promise = open.get(entry.id.toLowerCase());
+    if (!promise) return [];
+    if (entry.mark === 'partly' && applied.has(entry.id.toLowerCase())) return [];
+    return [{ id: promise.id, mark: entry.mark, stillLeft: entry.stillLeft || null, description: promise.description }];
+  });
+}
+
+// The report already went out saying what the technician marked: a mark
+// that did not reach the office's list rings one bell to settle it by hand
+// (Codex #5516; docs/admin-notifications.md). Never contacts the customer.
+async function alertUnsavedVisitPromiseMarks(conn, { customerId, serviceId, visitDate = null, unsaved }) {
+  if (!Array.isArray(unsaved) || !unsaved.length || !serviceId) return null;
+  const { raiseAdminAlert, cutAtWord } = require('../admin-alert-compose');
+  const customer = customerId
+    ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name').catch(() => null)
+    : null;
+  const name = cutAtWord([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'the customer', 40);
+  const day = visitDayLabel(visitDate);
+  const count = unsaved.length;
+  const lines = unsaved.map((entry) => {
+    const what = entry.description ? `"${cleanText(redactAccessCodes(entry.description), 200)}"` : 'a promise the list could not show';
+    return entry.mark === 'done'
+      ? `- ${what}: marked Done, still open.`
+      : `- ${what}: marked Partly${entry.stillLeft ? ` (still left: ${cleanText(redactAccessCodes(entry.stillLeft), 200)})` : ''}, the note was not added.`;
+  });
+  return raiseAdminAlert('alert', {
+    area: 'Comms',
+    action: count === 1 ? 'update a promise the technician marked' : `update ${count} promises the technician marked`,
+    why: `Marked at ${name}'s ${day ? `${day} ` : ''}visit, but the promise list does not show ${count === 1 ? 'it' : 'them'}.`,
+    severity: 'needs-you',
+    link: '/admin/communications#tab=owed',
+    subject: { type: 'visit', id: serviceId },
+    doneWhen: 'promise_fulfilled',
+    who: 'person',
+  }, {
+    dedupeKey: `visit-promise-marks:${serviceId}`,
+    bell: true,
+    detail: `The visit's report already went out saying what the technician marked. Settle these on the Promises list:\n${lines.join('\n')}`,
+    metadata: { customer_id: customerId || null, promise_ids: unsaved.map((entry) => entry.id) },
+  });
+}
+
 module.exports = {
   VISIT_PROMISE_KINDS,
   MAX_LISTED_PROMISES,
@@ -311,4 +395,6 @@ module.exports = {
   writerPromiseLines,
   visitDayLabel,
   applyVisitPromiseMarks,
+  unsavedVisitPromiseMarks,
+  alertUnsavedVisitPromiseMarks,
 };

@@ -490,10 +490,23 @@ describe('the promise check reaches the writer', () => {
     await handler(mkReq(bare), refused);
     expect(refused.statusCode).toBe(400);
     mockResolveMarks.mockImplementation(async () => RESOLVED);
+    // The context carried the PROMISES record.
+    mockBuildContext.mockImplementationOnce(async () => ({ contextText: 'PROMISES', signals: { hasVisitPromises: true } }));
     const generated = mkRes();
     await handler(mkReq({ ...bare, promiseMarks: MARKS }), generated);
     expect(generated.statusCode).toBe(200);
     expect(mockBuildContext.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ visitPromises: RESOLVED }));
+  });
+
+  test('gate on: marks alone whose grounding is lost are refused retryably, never written from nothing', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockResolveMarks.mockImplementation(async () => RESOLVED);
+    mockBuildContext.mockImplementationOnce(async () => { throw new Error('context down'); });
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: '', productsApplied: '', products: [], promiseMarks: MARKS }), res);
+    expect(res.statusCode).toBe(503);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'promise_grounding_unavailable', retryable: true }));
+    expect(mockProvider).not.toHaveBeenCalled();
   });
 
   test('gate on: a failed promise read writes the report without them', async () => {

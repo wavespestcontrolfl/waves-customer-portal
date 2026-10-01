@@ -55,7 +55,7 @@ const router = require('../routes/admin-dispatch');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { loadVisitPromises } = require('../services/service-report/visit-promises');
 
-function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }) {
+function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1' }, query = {}) {
   const layer = router.stack.find((l) => l.route && l.route.path === '/:serviceId/promises' && l.route.methods.get);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
@@ -65,7 +65,7 @@ function invoke(params = {}, actor = { techRole: 'admin', technicianId: 'admin-1
     json(payload) { this.body = payload; return this; },
   };
   return new Promise((resolve, reject) => {
-    handler({ params, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
+    handler({ params, query, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
       .then(() => resolve(res))
       .catch(reject);
   });
@@ -148,6 +148,16 @@ describe('GET /:serviceId/promises', () => {
     // The total counts every open visit promise, so the card can say when
     // only the newest are shown.
     expect(res.body).toEqual({ available: true, promises: PROMISES, total: 3 });
-    expect(loadVisitPromises).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1' });
+    expect(loadVisitPromises).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', include: [] });
+  });
+
+  test('older promises a restored draft marked are asked for by id', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    mockDbCurrent = serviceDb(SERVICE, []);
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ serviceKey: 'pest_re_service', findingsType: null });
+    loadVisitPromises.mockResolvedValue({ promises: PROMISES, total: 14 });
+    const ids = ['00000000-0000-4000-8000-000000000100', '00000000-0000-4000-8000-000000000101'];
+    await invoke({ serviceId: 'svc-1' }, { techRole: 'technician', technicianId: 'tech-1' }, { include: ` ${ids.join(' , ')} ` });
+    expect(loadVisitPromises).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', include: ids });
   });
 });

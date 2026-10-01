@@ -3350,7 +3350,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (stalePromiseIds.length
         && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: 409, body: {
-          error: 'A promise you marked changed after the report was written (the office closed, reworded or moved it). The report may still mention it.',
+          error: 'A promise you marked changed after the report was written (the office closed, reopened, reworded or moved it). The report may still mention it.',
           code: 'promise_marks_changed',
           promiseIds: stalePromiseIds,
           confirmable: true,
@@ -14076,10 +14076,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     // The promise check (owner "ok yes add these" 2026-10-01): the
     // technician's Done and Partly marks reach the office's promise list.
-    // POST-COMMIT and best-effort: a failure leaves the promise open and
-    // never fails the completion, and nothing contacts the customer. Only
-    // while the writer rules are live, on a visit the writer covers, judged
-    // on the profile the completion transaction used (null skips).
+    // POST-COMMIT: a failed write never fails the completion and nothing
+    // contacts the customer, but the report already said what was marked,
+    // so a mark that did not reach the list rings one office bell to settle
+    // it by hand (Codex #5516). Only while the writer rules are live, on a
+    // visit the writer covers, judged on the profile the completion
+    // transaction used (null skips).
     // Only a visit that did its work: never a declined (or incomplete) one
     // (Codex #5516). Backfills excluded, like the comms guard. Re-runnable
     // on a resume.
@@ -14089,11 +14091,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
       try {
         const VisitPromises = require('../services/service-report/visit-promises');
         if (effectiveCompletionProfile && VisitPromises.promiseCheckInScope(svc.service_type, effectiveCompletionProfile)) {
-          await VisitPromises.applyVisitPromiseMarks(db, {
-            customerId: svc.customer_id,
-            marks: promiseMarks,
-            visitDate: svc.scheduled_date,
-            reviewedBy: completionInput.actor?.technicianId || null,
+          let promiseResults = null;
+          try {
+            promiseResults = await VisitPromises.applyVisitPromiseMarks(db, {
+              customerId: svc.customer_id,
+              marks: promiseMarks,
+              visitDate: svc.scheduled_date,
+              reviewedBy: completionInput.actor?.technicianId || null,
+            });
+          } catch (applyErr) {
+            logger.warn(`[dispatch] promise marks not applied: ${applyErr.message}`);
+          }
+          const unsaved = await VisitPromises.unsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, marks: promiseMarks, results: promiseResults,
+          });
+          await VisitPromises.alertUnsavedVisitPromiseMarks(db, {
+            customerId: svc.customer_id, serviceId: svc.id, visitDate: svc.scheduled_date, unsaved,
           });
         }
       } catch (promiseErr) {

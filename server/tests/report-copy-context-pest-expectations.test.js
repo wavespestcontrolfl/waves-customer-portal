@@ -261,8 +261,11 @@ describe('buildReportCopyContext — writer rules', () => {
     const on = await buildReportCopyContext({ ...args(knexFor(), true), visitPromises });
     expect(on.contextText).toContain('PROMISES (what we promised this customer before today');
     expect(on.contextText).toContain('- Done today: Check under the dishwasher');
+    // The generate route's promise-only grounding check reads this.
+    expect(on.signals.hasVisitPromises).toBe(true);
     const off = await buildReportCopyContext({ ...args(knexFor(), false), visitPromises });
     expect(off.contextText).not.toContain('PROMISES');
+    expect(off.signals.hasVisitPromises).toBe(false);
   });
 
   it('drops footage, product safety, household notes and the automatic no-activity finding; gives the approved wording', async () => {

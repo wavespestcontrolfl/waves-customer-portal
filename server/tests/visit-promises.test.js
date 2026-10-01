@@ -26,6 +26,7 @@ jest.mock('../services/sms-operational-actions', () => ({
   applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 
 const CallCommitments = require('../services/call-commitments');
 const SmsActions = require('../services/sms-operational-actions');
@@ -33,7 +34,17 @@ const logger = require('../services/logger');
 const VisitPromises = require('../services/service-report/visit-promises');
 
 const ID = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const V = (description) => VisitPromises.promiseVersion(description);
+const V = (description, reviewedAt = null) => VisitPromises.promiseVersion(description, reviewedAt);
+// A read-only handle for the listing: the office's last verdict on each
+// promise (reviewed_at), none by default.
+function listDb(reviewed = {}) {
+  return (table) => ({
+    whereIn: (_col, ids) => ({
+      select: async () => (table === 'call_commitments' ? ids.map((id) => ({ id, reviewed_at: reviewed[id] || null })) : []),
+    }),
+  });
+}
+const LIST_DB = listDb();
 
 const CALL_ROW = {
   id: ID(1), party: 'waves', kind: 'technician_follow_up', description: 'Check under the  dishwasher and the kitchen sink',
@@ -61,7 +72,7 @@ beforeEach(() => {
 
 describe('the promises listed', () => {
   test('Waves promises a technician keeps, from calls, texts and emails, newest first', async () => {
-    const { promises, total } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises, total } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1' });
     expect(promises).toEqual([
       { id: ID(3), description: 'Recheck the attic vent', source: 'email', madeAt: '2026-09-30T12:00:00.000Z', version: V('Recheck the attic vent') },
       { id: ID(1), description: 'Check under the dishwasher and the kitchen sink', source: 'call', madeAt: '2026-09-29T15:00:00.000Z', version: V('Check under the dishwasher and the kitchen sink') },
@@ -69,7 +80,7 @@ describe('the promises listed', () => {
     ]);
     expect(total).toBe(3);
     // Call rows are asked for the visit kinds and Waves' side only, as a pure read.
-    expect(CallCommitments.listOpenCommitments).toHaveBeenCalledWith({}, expect.objectContaining({
+    expect(CallCommitments.listOpenCommitments).toHaveBeenCalledWith(LIST_DB, expect.objectContaining({
       party: 'waves', kinds: ['technician_follow_up', 'other'], customerId: 'cust-1', prepare: false,
     }));
   });
@@ -77,13 +88,13 @@ describe('the promises listed', () => {
   test('a source whose ledger is off is not listed', async () => {
     mockCallLedger = false;
     mockEmailLedger = false;
-    const { promises } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1' });
     expect(promises.map((promise) => promise.source)).toEqual(['text']);
     expect(CallCommitments.listOpenCommitments).not.toHaveBeenCalled();
   });
 
   test('no customer, no read', async () => {
-    expect(await VisitPromises.loadVisitPromises({}, { customerId: null })).toEqual({ promises: [], total: 0 });
+    expect(await VisitPromises.loadVisitPromises(LIST_DB, { customerId: null })).toEqual({ promises: [], total: 0 });
     expect(CallCommitments.listOpenCommitments).not.toHaveBeenCalled();
     expect(SmsActions.listSmsCommitments).not.toHaveBeenCalled();
   });
@@ -92,7 +103,7 @@ describe('the promises listed', () => {
     const long = `Check under the dishwasher, ${'and every cabinet along that wall, '.repeat(15)}then the sink.`;
     CallCommitments.listOpenCommitments.mockResolvedValue([{ ...CALL_ROW, description: long }]);
     SmsActions.listSmsCommitments.mockResolvedValue([]);
-    const { promises } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1' });
     expect(long.length).toBeGreaterThan(300);
     expect(promises[0].description).toBe(long);
     expect(promises[0].version).toBe(V(long));
@@ -103,7 +114,7 @@ describe('the promises listed', () => {
       ...CALL_ROW, id: ID(100 + i), call_started_at: `2026-09-${String(10 + i).padStart(2, '0')}T12:00:00Z`,
     })));
     SmsActions.listSmsCommitments.mockResolvedValue([]);
-    const { promises, total } = await VisitPromises.loadVisitPromises({}, { customerId: 'cust-1' });
+    const { promises, total } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1' });
     expect(promises).toHaveLength(VisitPromises.MAX_LISTED_PROMISES);
     expect(total).toBe(14);
     expect(promises[0].id).toBe(ID(113));
@@ -131,7 +142,7 @@ describe('marks from the request', () => {
   });
 
   test('a mark resolves only against a promise still open for this customer', async () => {
-    const resolved = await VisitPromises.resolveVisitPromiseMarks({}, {
+    const resolved = await VisitPromises.resolveVisitPromiseMarks(LIST_DB, {
       customerId: 'cust-1',
       marks: [
         { id: ID(1), mark: 'done', version: V(CALL_ROW.description) },
@@ -155,7 +166,7 @@ describe('marks from the request', () => {
   });
 
   test('a mark that no longer holds is reported as changed', async () => {
-    const stale = await VisitPromises.staleVisitPromiseMarks({}, {
+    const stale = await VisitPromises.staleVisitPromiseMarks(LIST_DB, {
       customerId: 'cust-1',
       marks: [
         { id: ID(1), mark: 'done', version: V(CALL_ROW.description) }, // still open, same wording
@@ -164,6 +175,28 @@ describe('marks from the request', () => {
       ],
     });
     expect(stale).toEqual([ID(2), ID(9)]);
+  });
+
+  test('a promise the office reopened (or otherwise settled) since the tech saw it is stale, even in the same words', async () => {
+    const reopened = listDb({ [ID(1)]: '2026-10-01T09:00:00Z' });
+    expect(await VisitPromises.staleVisitPromiseMarks(reopened, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }],
+    })).toEqual([ID(1)]);
+    // Marked against the promise as it now stands, the mark holds.
+    expect(await VisitPromises.staleVisitPromiseMarks(reopened, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description, '2026-10-01T09:00:00Z') }],
+    })).toEqual([]);
+  });
+
+  test('a restored mark on an older promise is listed after the newest ten when asked for', async () => {
+    CallCommitments.listOpenCommitments.mockResolvedValue(Array.from({ length: 14 }, (_, i) => ({
+      ...CALL_ROW, id: ID(100 + i), call_started_at: `2026-09-${String(10 + i).padStart(2, '0')}T12:00:00Z`,
+    })));
+    SmsActions.listSmsCommitments.mockResolvedValue([]);
+    const { promises, total } = await VisitPromises.loadVisitPromises(LIST_DB, { customerId: 'cust-1', include: [ID(100), 'not-a-uuid', ID(999)] });
+    expect(promises).toHaveLength(VisitPromises.MAX_LISTED_PROMISES + 1);
+    expect(promises[promises.length - 1].id).toBe(ID(100));
+    expect(total).toBe(14);
   });
 
   test("the writer's PROMISES lines say each promise as marked", () => {
@@ -200,6 +233,8 @@ function ledgerDb({ customers = ['cust-1'], commitments = {}, sources = {} } = {
     const chain = {
       where: (criteria) => { Object.assign(state.criteria, criteria); return chain; },
       whereNull: () => chain,
+      whereIn: (_col, ids) => { state.ids = ids; return chain; },
+      select: async () => (state.ids || []).map((id) => ({ id, reviewed_at: commitments[id]?.reviewed_at || null })),
       forShare: () => { state.lock = 'share'; return chain; },
       forUpdate: () => { state.lock = 'update'; return chain; },
       first: async () => {
@@ -216,7 +251,8 @@ function ledgerDb({ customers = ['cust-1'], commitments = {}, sources = {} } = {
     };
     return chain;
   };
-  return { conn: { transaction: (fn) => fn(trx) }, updates, locks };
+  const conn = Object.assign((table) => trx(table), { transaction: (fn) => fn(trx) });
+  return { conn, updates, locks };
 }
 
 const LEDGER = () => ({
@@ -240,8 +276,9 @@ describe('marks reach the office list after the save', () => {
     expect(CallCommitments.applyHumanUpdate).toHaveBeenCalledWith(expect.any(Function), ID(1), { action: 'fulfill', note, reviewedBy: 'tech-1' });
     // A text promise is checked under the office path's own lock strength,
     // then written by that path inside the same transaction.
+    // The office's own note stays, with the visit's line under it.
     expect(SmsActions.applySmsCommitmentUpdate).toHaveBeenCalledWith(expect.any(Function), ID(2), {
-      customerId: 'cust-1', action: 'fulfill', note, reviewedBy: 'tech-1',
+      customerId: 'cust-1', action: 'fulfill', note: `Customer prefers mornings\n${note}`, reviewedBy: 'tech-1',
     });
     expect(results).toEqual([
       { id: ID(1), mark: 'done', applied: true },
@@ -298,6 +335,38 @@ describe('marks reach the office list after the save', () => {
     expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
   });
 
+  test('Done on a promise the office reopened meanwhile writes nothing', async () => {
+    const ledger = LEDGER();
+    ledger.commitments[ID(1)].reviewed_at = '2026-10-01T09:00:00Z';
+    const { conn } = ledgerDb(ledger);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01',
+    });
+    expect(results).toEqual([]);
+    expect(CallCommitments.applyHumanUpdate).not.toHaveBeenCalled();
+  });
+
+  test("Done leaves an office note too full for the visit's line as it is", async () => {
+    const ledger = LEDGER();
+    ledger.commitments[ID(1)].human_note = 'x'.repeat(1990);
+    const { conn } = ledgerDb(ledger);
+    await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(1), mark: 'done', version: V(CALL_ROW.description) }], visitDate: '2026-10-01', reviewedBy: 'tech-1',
+    });
+    expect(CallCommitments.applyHumanUpdate).toHaveBeenCalledWith(expect.any(Function), ID(1), { action: 'fulfill', note: undefined, reviewedBy: 'tech-1' });
+  });
+
+  test('a Partly note already on the promise (a resumed completion) counts as saved', async () => {
+    const ledger = LEDGER();
+    ledger.commitments[ID(2)].human_note = 'Customer prefers mornings\nPartly done at the October 1 visit. Still left: the left side.';
+    const { conn, updates } = ledgerDb(ledger);
+    const results = await VisitPromises.applyVisitPromiseMarks(conn, {
+      customerId: 'cust-1', marks: [{ id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'the left side' }], visitDate: '2026-10-01',
+    });
+    expect(results).toEqual([{ id: ID(2), mark: 'partly', applied: true }]);
+    expect(updates).toEqual([]);
+  });
+
   test("Partly never cuts the office's own note to make room", async () => {
     const full = LEDGER();
     full.commitments[ID(2)].human_note = 'x'.repeat(1990);
@@ -349,6 +418,61 @@ describe('marks reach the office list after the save', () => {
 
 // House style: the giant completion file is pinned by source; the behavior
 // is tested above through the service it delegates to.
+describe('marks that did not reach the list', () => {
+  const marks = [
+    { id: ID(1), mark: 'done', version: V(CALL_ROW.description) },
+    { id: ID(2), mark: 'partly', version: V(TEXT_ROW.description), stillLeft: 'the left side' },
+    { id: ID(3), mark: 'not_yet', version: V(EMAIL_ROW.description) },
+  ];
+
+  test('a Done promise still open, and a Partly one without its line, are unsaved; Not yet never is', async () => {
+    const unsaved = await VisitPromises.unsavedVisitPromiseMarks(LIST_DB, {
+      customerId: 'cust-1', marks, results: [{ id: ID(1), mark: 'done', applied: false }, { id: ID(2), mark: 'partly', applied: false }],
+    });
+    expect(unsaved).toEqual([
+      { id: ID(1), mark: 'done', stillLeft: null, description: 'Check under the dishwasher and the kitchen sink' },
+      { id: ID(2), mark: 'partly', stillLeft: 'the left side', description: 'Look at the gap under the garage door' },
+    ]);
+  });
+
+  test('a saved Partly note, or a promise closed meanwhile, leaves nothing to settle', async () => {
+    CallCommitments.listOpenCommitments.mockResolvedValue([]);
+    const unsaved = await VisitPromises.unsavedVisitPromiseMarks(LIST_DB, {
+      customerId: 'cust-1', marks, results: [{ id: ID(2), mark: 'partly', applied: true }],
+    });
+    expect(unsaved).toEqual([]);
+  });
+
+  test('a list that cannot be read counts every Done and Partly mark, so the failure surfaces', async () => {
+    CallCommitments.listOpenCommitments.mockRejectedValue(new Error('db down'));
+    const unsaved = await VisitPromises.unsavedVisitPromiseMarks(LIST_DB, { customerId: 'cust-1', marks, results: null });
+    expect(unsaved.map((entry) => [entry.id, entry.mark, entry.description])).toEqual([[ID(1), 'done', null], [ID(2), 'partly', null]]);
+  });
+
+  test('one office bell per visit, following the notification rule; nothing when all were saved', async () => {
+    const NotificationService = require('../services/notification-service');
+    const conn = (table) => ({ where: () => ({ first: async () => (table === 'customers' ? { first_name: 'Pat', last_name: 'Doe' } : null) }) });
+    expect(await VisitPromises.alertUnsavedVisitPromiseMarks(conn, { customerId: 'cust-1', serviceId: 'svc-1', visitDate: '2026-10-01', unsaved: [] })).toBeNull();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    await VisitPromises.alertUnsavedVisitPromiseMarks(conn, {
+      customerId: 'cust-1', serviceId: 'svc-1', visitDate: '2026-10-01',
+      unsaved: [{ id: ID(1), mark: 'done', stillLeft: null, description: 'Check under the dishwasher' }],
+    });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Comms — update a promise the technician marked',
+      "Marked at Pat Doe's October 1 visit, but the promise list does not show it.",
+      expect.objectContaining({
+        link: '/admin/communications#tab=owed',
+        dedupeKey: 'visit-promise-marks:svc-1',
+        bell: true,
+        detail: expect.stringContaining('"Check under the dishwasher": marked Done, still open.'),
+        metadata: expect.objectContaining({ subject: { type: 'visit', id: 'svc-1' }, severity: 'needs-you', promise_ids: [ID(1)] }),
+      }),
+    );
+  });
+});
+
 describe('wiring source contracts', () => {
   const fs = require('fs');
   const path = require('path');
@@ -359,11 +483,16 @@ describe('wiring source contracts', () => {
     const call = completionSource.indexOf('VisitPromises.applyVisitPromiseMarks(db, {');
     expect(call).toBeGreaterThan(completionSource.indexOf('durableCompletionCommitted = true;'));
     expect(completionSource.indexOf('const responsePayload = {', call)).toBeGreaterThan(call);
-    const block = completionSource.slice(completionSource.lastIndexOf('if (!isBackfillCompletion', call), call + 400);
+    const block = completionSource.slice(completionSource.lastIndexOf('if (!isBackfillCompletion', call), call + 1800);
     expect(block).toMatch(/visitOutcome !== 'customer_declined' && visitOutcome !== 'incomplete'/);
     expect(block).toMatch(/Array\.isArray\(promiseMarks\) && promiseMarks\.length/);
     expect(block).toMatch(/reportWriterRulesLive\(\)/);
     expect(block).toMatch(/effectiveCompletionProfile && VisitPromises\.promiseCheckInScope\(svc\.service_type, effectiveCompletionProfile\)/);
+    // What did not reach the list is checked after the write (even when it
+    // threw) and rings the office (Codex #5516).
+    const unsaved = block.indexOf('VisitPromises.unsavedVisitPromiseMarks(db, {');
+    expect(unsaved).toBeGreaterThan(block.indexOf('catch (applyErr)'));
+    expect(block.indexOf('VisitPromises.alertUnsavedVisitPromiseMarks(db, {')).toBeGreaterThan(unsaved);
     const catchBody = block.slice(block.indexOf('catch (promiseErr)'));
     expect(catchBody).toMatch(/logger\.warn/);
     expect(catchBody).not.toMatch(/res\.status|throw/);

@@ -150,6 +150,9 @@ function buildWriterRecords({
     sections,
     allowedPhrases: groundedTimeframePhrases(expectations.lines),
     allowedDates: reach ? [reach.full, reach.monthDay] : [],
+    // How many marked promises reached the writer (the generate route's
+    // promise-only grounding check).
+    promiseCount: promiseLines.length,
   };
 }
 

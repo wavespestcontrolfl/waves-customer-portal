@@ -627,7 +627,9 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
 // from calls, texts and emails (visit-promises.js). Only while
 // GATE_REPORT_WRITER_RULES is live and only on visits the writer covers
 // (never lawn or tree, shrub & palm); otherwise a no-read
-// { available: false }. Read-only.
+// { available: false }. Read-only. `include` (comma-separated ids): open
+// promises beyond the newest ten that a restored draft had marked, listed
+// after them (Codex #5516).
 router.get('/:serviceId/promises', async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').reportWriterRulesLive()) {
@@ -658,7 +660,8 @@ router.get('/:serviceId/promises', async (req, res, next) => {
     if (!VisitPromises.promiseCheckInScope(svc.service_type, completionProfile, { failed: profileFailed })) {
       return res.json({ available: false, promises: [] });
     }
-    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id });
+    const include = String(req.query?.include || '').split(',').map((id) => id.trim()).filter(Boolean);
+    const { promises, total } = await VisitPromises.loadVisitPromises(db, { customerId: svc.customer_id, include });
     res.json({ available: true, promises, total });
   } catch (err) { next(err); }
 });
