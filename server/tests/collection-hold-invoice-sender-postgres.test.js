@@ -526,6 +526,95 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
           } finally { notify.mockRestore(); }
         });
 
+        // Codex #5459 r2 P2: the refusal-time alert can fail in the same outage that failed the restore. The
+        // stale-claim sweep raises it (marker on the row, or a self-pay invoice under a hold) and retries until it lands.
+        describe('the stale-claim sweep owns the stranded alert when the refusal-time alert failed (Codex #5459 r2 P2)', () => {
+          const dedupeKey = (id) => `hold-claim-stranded:${id}`;
+          const makeStale = (id) => db('invoices').where({ id }).update({ updated_at: new Date(Date.now() - 11 * 60 * 1000) });
+          async function strandedWithFailedAlert(notify) {
+            const c = await newCustomer();
+            const holdId = await placeHold(c);
+            const { inv } = await packetInvoiceFor(c);
+            const spy = failRestoreAfterHoldLookup();
+            let out;
+            try { out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {})); } finally { spy.mockRestore(); db.__failTables.clear(); }
+            expect(out).toMatchObject({ code: 'COLLECTION_HOLD_CLAIM_STRANDED' });
+            expect(notify).toHaveBeenCalledTimes(1); // the refusal-time attempt (answered null: not recorded)
+            return { c, inv, holdId };
+          }
+
+          test('a failed refusal-time alert is raised by the sweep exactly once (retried while it keeps failing), then the row is parked and never alerted again', async () => {
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue({ id: 'synthetic' });
+            try {
+              const { inv } = await strandedWithFailedAlert(notify);
+              expect((await invoice(inv)).scheduled_send_error).toContain('HOLD_CLAIM_STRANDED'); // the durable owed-alert marker
+              // a fresh claim is a live worker's: the sweep leaves it alone
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(1);
+              expect((await invoice(inv)).status).toBe('sending');
+              // stale, the sweep's alert fails too: the row is NOT parked, so the alert is retried next tick
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(2);
+              expect((await invoice(inv)).status).toBe('sending');
+              // the alert lands: the row is parked in the same sweep
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(3);
+              expect(notify.mock.calls.every((call) => call[3].dedupeKey === dedupeKey(inv))).toBe(true);
+              expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_at: null, send_claim_token: null });
+              expect((await invoice(inv)).scheduled_send_error).toBe(require('../services/invoice-helpers').STALE_SEND_PARK_ERROR);
+              // parked: no further alert, ever
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(3);
+            } finally { notify.mockRestore(); }
+          });
+
+          test('the marker outlives a hold release; and with NO marker (its write failed too) a stale self-pay claim under a hold is still alerted', async () => {
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValueOnce(null).mockResolvedValue({ id: 'synthetic' });
+            try {
+              const { inv, holdId } = await strandedWithFailedAlert(notify);
+              await db('collections_flags').where({ id: holdId }).update({ released_at: db.fn.now() });
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(2);
+              expect((await invoice(inv)).status).toBe('scheduled'); // parked after the alert landed
+
+              const c2 = await newCustomer();
+              await placeHold(c2);
+              const noMarker = await newInvoice(c2, { status: 'sending', send_claim_token: randomUUID() });
+              await makeStale(noMarker);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(3);
+              expect(notify).toHaveBeenLastCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: dedupeKey(noMarker) }));
+              expect((await invoice(noMarker)).status).toBe('scheduled');
+              // an ordinary stale claim (no marker, no hold) is parked exactly as before, with no alert
+              const c3 = await newCustomer();
+              const plain = await newInvoice(c3, { status: 'sending', send_claim_token: randomUUID() });
+              await makeStale(plain);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).toHaveBeenCalledTimes(3);
+              expect((await invoice(plain)).status).toBe('scheduled');
+            } finally { notify.mockRestore(); }
+          });
+
+          test('an alert that already LANDED (the standing notification for the key) is not raised again by the sweep', async () => {
+            const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
+            try {
+              const c = await newCustomer();
+              await placeHold(c);
+              const inv = await newInvoice(c, { status: 'sending', send_claim_token: randomUUID(), scheduled_send_error: 'HOLD_CLAIM_STRANDED' });
+              await db('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Billing - recover the invoice', body: 'x', metadata: JSON.stringify({ dedupeKey: dedupeKey(inv) }) });
+              await makeStale(inv);
+              await Invoices.processScheduledSends({ limit: 25 });
+              expect(notify).not.toHaveBeenCalled();
+              expect((await invoice(inv)).status).toBe('scheduled');
+            } finally {
+              notify.mockRestore();
+              await db('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'hold-claim-stranded:%'").del();
+            }
+          });
+        });
+
         test('control: a restore that lands keeps the ordinary retryable hold defer and raises no alert', async () => {
           const notify = jest.spyOn(notifications(), 'notifyAdmin').mockResolvedValue({ id: 'synthetic' });
           try {

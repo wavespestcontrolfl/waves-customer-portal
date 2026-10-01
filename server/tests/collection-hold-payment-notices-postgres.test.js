@@ -734,28 +734,32 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       test('an alert that FAILS (or a crash between settlement and alert) is retried by the next sweep, stamped only on success, and never rung twice', async () => {
         const sendgrid = require('../services/sendgrid-mail');
         const Recovery = require('../services/email-bounce-recovery');
-        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockRejectedValueOnce(new Error('alert store down (synthetic)')).mockResolvedValue({ id: 'synthetic' });
+        const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('alert store down (synthetic)')).mockResolvedValue({ id: 'synthetic' });
         try {
           const { rec } = await strandedResent({ withMarker: true });
           expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 1 });
           let row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
           expect(row.status).toBe(Recovery.RESEND_UNCERTAIN_STATUS);
           expect(row.metadata.resend_alerted_at).toBeUndefined(); // the alert failed: still owed
-          expect(notify).toHaveBeenCalledTimes(1);
+          expect(notify).toHaveBeenCalledTimes(1); // notifyAdmin answers a failed write with null, not a throw
+          // next sweep: the alert fails again (a throw this time) - still owed
+          await Recovery.retryHeldRecoveries();
+          expect(notify).toHaveBeenCalledTimes(2);
+          expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).metadata.resend_alerted_at).toBeUndefined();
           // next sweep: settled row is not re-settled, but the owed alert is retried and then stamped
           expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 0 });
-          expect(notify).toHaveBeenCalledTimes(2);
+          expect(notify).toHaveBeenCalledTimes(3);
           row = await db('email_bounce_recoveries').where({ id: rec.id }).first();
           expect(row.metadata.resend_alerted_at).toBeTruthy();
           // alerted: later sweeps ring nothing more, and nothing is ever re-sent
           expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0, uncertain: 0 });
-          expect(notify).toHaveBeenCalledTimes(2);
+          expect(notify).toHaveBeenCalledTimes(3);
           expect(notify.mock.calls.every((call) => call[3].dedupeKey === `bounce-recovery-resend-uncertain:${rec.id}`)).toBe(true);
           expect(sendgrid.sendOne).not.toHaveBeenCalled();
           // a crash between settlement and alert leaves status resend_uncertain with no flag: the same retry covers it
           await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata - 'resend_alerted_at'") });
           await Recovery.retryHeldRecoveries();
-          expect(notify).toHaveBeenCalledTimes(3);
+          expect(notify).toHaveBeenCalledTimes(4);
           expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).metadata.resend_alerted_at).toBeTruthy();
         } finally { notify.mockRestore(); }
       });

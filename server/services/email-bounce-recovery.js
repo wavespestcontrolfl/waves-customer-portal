@@ -1012,8 +1012,9 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
 // SendGrid may or may not have accepted it. The recovery is settled (never re-sent, which could deliver the
 // same notice twice) and the office confirms with the customer or the SendGrid activity feed.
 async function alertRecoveryResendUncertain(row) {
-  // Throws on failure: the caller stamps resend_alerted_at only after this resolves.
-  await require('./admin-alert-compose').raiseAdminAlert('alert', {
+  // Throws on failure: the caller stamps resend_alerted_at only after this resolves. notifyAdmin reports a
+  // failed write as a null return rather than a throw, so a null is a failed alert too.
+  const raised = await require('./admin-alert-compose').raiseAdminAlert('alert', {
     area: 'Comms',
     action: 'check a re-sent email that may not have gone',
     why: 'A corrected-address re-send stopped mid-send, so it was not tried again.',
@@ -1027,6 +1028,7 @@ async function alertRecoveryResendUncertain(row) {
     dedupeKey: `bounce-recovery-resend-uncertain:${row.id}`,
     metadata: { recovery_id: row.id, original_message_id: row.original_message_id, customer_id: row.customer_id || null },
   });
+  if (!raised) throw new Error('the uncertain-resend alert was not recorded');
 }
 
 /**

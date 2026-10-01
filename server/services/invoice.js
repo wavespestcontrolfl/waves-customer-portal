@@ -3550,7 +3550,7 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
       const stillOurs = readFailed
         || (current && current.status === "sending" && current.send_claim_token === invoice.send_claim_token);
       if (stillOurs) {
-        await alertHoldClaimStranded(invoiceId, row);
+        await alertHoldClaimStranded(invoiceId, row, invoice.send_claim_token);
         return holdClaimStrandedOutcome();
       }
       // The claim is gone and the invoice is not stuck: nothing to recover, no alert.
@@ -3589,24 +3589,97 @@ function holdClaimStrandedOutcome() {
   };
 }
 
-async function alertHoldClaimStranded(invoiceId, row) {
+// Marker appended to the 'sending' row's scheduled_send_error when a hold refusal could not hand the claim back
+// (Codex #5459 r2 P2). It is the durable "this stranded claim is owed an office alert" record: the stale-claim
+// sweep reads it before parking the row (the park overwrites the error text) and raises the alert itself.
+const HOLD_CLAIM_STRANDED_MARKER = "HOLD_CLAIM_STRANDED";
+const holdClaimStrandedAlertKey = (invoiceId) => `hold-claim-stranded:${invoiceId}`;
+
+// Raises the stranded / manual-recovery alert. THROWS on failure: callers decide how to retry.
+async function raiseHoldClaimStrandedAlert(invoiceId, customerId) {
+  // notifyAdmin reports a failed write as a null return rather than a throw: that is a failed alert too.
+  const raised = await require("./admin-alert-compose").raiseAdminAlert("alert", {
+    area: "Billing",
+    action: "recover the invoice stuck behind a customer hold",
+    why: "A hold stopped the send, and the invoice could not be handed back to the queue.",
+    severity: "needs-you",
+    link: `/admin/invoices?invoice=${invoiceId}`,
+    subject: { type: "invoice", id: String(invoiceId) },
+    doneWhen: "invoice_claim_recovered",
+    who: "person",
+  }, {
+    detail: `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
+    dedupeKey: holdClaimStrandedAlertKey(invoiceId),
+    metadata: { invoice_id: invoiceId, customer_id: customerId ?? null },
+  });
+  if (!raised) throw new Error("the stranded-claim alert was not recorded");
+}
+
+// Best effort at refusal time: record the owed alert on the row (durable once the database answers), then
+// raise it. A failure of either is logged only - the stale-claim sweep (processScheduledSends) retries the alert
+// until it lands, so an outage that also failed the restore cannot leave the office untold.
+async function alertHoldClaimStranded(invoiceId, row, claimToken = null) {
+  if (claimToken) {
+    try {
+      await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken })
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+        .update({ scheduled_send_error: db.raw("CASE WHEN COALESCE(scheduled_send_error, '') = '' THEN ?::text ELSE scheduled_send_error || ' | ' || ?::text END", [HOLD_CLAIM_STRANDED_MARKER, HOLD_CLAIM_STRANDED_MARKER]) });
+    } catch (err) {
+      logger.error(`[invoice] hold-claim-stranded marker not recorded for ${invoiceId}: ${err.message}`);
+    }
+  }
   try {
-    await require("./admin-alert-compose").raiseAdminAlert("alert", {
-      area: "Billing",
-      action: "recover the invoice stuck behind a customer hold",
-      why: "A hold stopped the send, and the invoice could not be handed back to the queue.",
-      severity: "needs-you",
-      link: `/admin/invoices?invoice=${invoiceId}`,
-      subject: { type: "invoice", id: String(invoiceId) },
-      doneWhen: "invoice_claim_recovered",
-      who: "person",
-    }, {
-      detail: `Invoice ${invoiceId}: the customer has an active collections hold, so its send was stopped, but its in-progress send claim could not be released. It will not send on its own after the hold ends. Open the invoice and re-queue or resend it once the hold is released.`,
-      dedupeKey: `hold-claim-stranded:${invoiceId}`,
-      metadata: { invoice_id: invoiceId, customer_id: row?.customer_id ?? null },
-    });
+    await raiseHoldClaimStrandedAlert(invoiceId, row?.customer_id);
   } catch (err) {
-    logger.error(`[invoice] hold-claim-stranded alert failed for ${invoiceId}: ${err.message}`);
+    logger.error(`[invoice] hold-claim-stranded alert failed for ${invoiceId} (the stale-claim sweep retries it): ${err.message}`);
+  }
+}
+
+// The stale-claim sweep's half (Codex #5459 r2 P2). A stale 'sending' row is a STRANDED HOLD CLAIM candidate when
+// it carries the marker, or it is a self-pay invoice whose customer has an active hold (the marker write can fail
+// in the same outage that failed the restore). Such a row is parked only once its alert has LANDED (the dedupe
+// key's standing notification), so a failed alert keeps being retried each tick and never duplicates.
+function strandedHoldClaimCandidate(q) {
+  return q.where((c) => c
+    .whereRaw("COALESCE(scheduled_send_error, '') LIKE ?", [`%${HOLD_CLAIM_STRANDED_MARKER}%`])
+    .orWhere((held) => held.whereNull("payer_id").whereExists(function activeHold() {
+      require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
+    })));
+}
+function standingStrandedAlert() {
+  this.select(1).from("notifications as n").where("n.recipient_type", "admin")
+    .whereRaw("n.metadata->>'dedupeKey' = 'hold-claim-stranded:' || invoices.id::text");
+}
+const STALE_SENDING_SQL = "NOW() - INTERVAL '10 minutes'";
+function stalePark() {
+  return {
+    status: "scheduled",
+    scheduled_send_at: null,
+    scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+    send_claim_token: null,
+    updated_at: new Date(),
+  };
+}
+
+// Runs at the end of every sweep: raises the alert for each stale stranded hold claim whose alert has not landed,
+// then parks that row. A failed alert leaves the row in 'sending' (the park above skips it), so the next tick
+// retries; an alert that landed is never raised twice.
+async function raiseStrandedHoldClaimAlerts() {
+  try {
+    const rows = await strandedHoldClaimCandidate(db("invoices").where({ status: "sending" })
+      .where("updated_at", "<", db.raw(STALE_SENDING_SQL)))
+      .whereNotExists(standingStrandedAlert)
+      .select("id", "customer_id");
+    for (const row of rows) {
+      try {
+        await raiseHoldClaimStrandedAlert(row.id, row.customer_id);
+        await db("invoices").where({ id: row.id, status: "sending" }).update(stalePark());
+      } catch (err) {
+        logger.error(`[invoice] stranded hold-claim alert for ${row.id} failed - leaving it in 'sending' for the next sweep: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[invoice] stranded hold-claim sweep failed: ${err.message}`);
   }
 }
 
@@ -7841,13 +7914,12 @@ const InvoiceService = {
     await db("invoices")
       .where({ status: "sending" })
       .where("updated_at", "<", db.raw("NOW() - INTERVAL '10 minutes'"))
-      .update({
-        status: "scheduled",
-        scheduled_send_at: null,
-        scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
-        send_claim_token: null,
-        updated_at: new Date(),
-      });
+      // A stranded hold claim whose office alert has not landed stays in 'sending' until it has (see
+      // raiseStrandedHoldClaimAlerts at the end of this sweep).
+      .where((outer) => outer.whereNot((stranded) => {
+        strandedHoldClaimCandidate(stranded).whereNotExists(standingStrandedAlert);
+      }))
+      .update(stalePark());
 
     const due = await db("invoices")
       .where({ status: "scheduled" })
@@ -8435,6 +8507,7 @@ const InvoiceService = {
         );
       }
     }
+    await raiseStrandedHoldClaimAlerts();
     return { sent, failed, deferred };
   },
 
