@@ -1180,21 +1180,33 @@ async function loadCompletedVisitRows(dbh, customerIds, { sinceYmd }) {
 // Settled membership dues per customer over the lookback — the monthly
 // lane's revenue (facts.js posture: both rails carry chargeMonthly's
 // "WaveGuard Monthly" marker and can double-count one payment, so the
-// LARGER rail counts, never the sum).
+// LARGER rail counts, never the sum). Both rails are NET of refunds: a
+// partially refunded dues payment stays 'paid' with the refund on
+// refund_amount, and a dues invoice is netted by the refunds on the
+// payments linked to it (invoice.js's linkage: Stripe intent / charge id,
+// metadata invoice_id) — netting one rail alone would let the other's
+// gross figure win the GREATEST.
 async function loadSettledDues(dbh, customerIds, { sinceYmd }) {
   if (!customerIds.length) return new Map();
   const notSettled = INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid');
   const { rows } = await dbh.raw(`
     WITH inv AS (
-      SELECT customer_id, sum(total) AS amount FROM invoices
-      WHERE customer_id = ANY(?::uuid[]) AND archived_at IS NULL
-        AND (paid_at IS NOT NULL OR status IN ('paid', 'prepaid'))
-        AND status NOT IN (${notSettled.map(() => '?').join(', ')})
-        AND title ILIKE '%WaveGuard Monthly%'
-        AND (COALESCE(paid_at, created_at) AT TIME ZONE 'America/New_York')::date >= ?
-      GROUP BY customer_id
+      SELECT i.customer_id, sum(i.total) - COALESCE(sum((
+          SELECT sum(COALESCE(p.refund_amount, 0)) FROM payments p
+          WHERE COALESCE(p.refund_amount, 0) > 0
+            AND ((p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = i.stripe_payment_intent_id)
+              OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = i.stripe_charge_id)
+              OR p.metadata::jsonb ->> 'invoice_id' = i.id::text)
+        )), 0) AS amount
+      FROM invoices i
+      WHERE i.customer_id = ANY(?::uuid[]) AND i.archived_at IS NULL
+        AND (i.paid_at IS NOT NULL OR i.status IN ('paid', 'prepaid'))
+        AND i.status NOT IN (${notSettled.map(() => '?').join(', ')})
+        AND i.title ILIKE '%WaveGuard Monthly%'
+        AND (COALESCE(i.paid_at, i.created_at) AT TIME ZONE 'America/New_York')::date >= ?
+      GROUP BY i.customer_id
     ), pay AS (
-      SELECT customer_id, sum(amount) AS amount FROM payments
+      SELECT customer_id, sum(amount - COALESCE(refund_amount, 0)) AS amount FROM payments
       WHERE customer_id = ANY(?::uuid[]) AND status = 'paid'
         AND (description ILIKE '%WaveGuard Monthly%' OR metadata->>'type' = 'monthly_autopay')
         AND (created_at AT TIME ZONE 'America/New_York')::date >= ?

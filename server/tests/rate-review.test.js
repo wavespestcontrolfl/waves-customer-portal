@@ -917,6 +917,11 @@ describe('engine replay guards', () => {
     expect(revenue).toMatch(/p\.stripe_payment_intent_id = i\.stripe_payment_intent_id/);
     expect(revenue).toMatch(/metadata::jsonb ->> 'invoice_id' = i\.id::text/);
     expect(revenue).not.toMatch(/p\.invoice_id/);
+    // settled monthly dues are net of refunds on BOTH rails — netting one alone would let the other's gross figure win GREATEST
+    const dues = src.slice(src.indexOf('async function loadSettledDues'), src.indexOf('function duesPerVisitCents'));
+    expect(dues).toMatch(/sum\(amount - COALESCE\(refund_amount, 0\)\)/);
+    expect(dues).toMatch(/sum\(i\.total\) - COALESCE\(sum\(\(/);
+    expect(dues).toMatch(/GREATEST\(COALESCE\(inv\.amount, 0\), COALESCE\(pay\.amount, 0\)\)/);
   });
   test('a family restarted on a new estimate takes the first completed visit of the current series', () => {
     const first = { first_visit: '2024-03-10', completed_dates: ['2024-03-10', '2024-06-10', '2026-07-02', '2026-10-02'] };
