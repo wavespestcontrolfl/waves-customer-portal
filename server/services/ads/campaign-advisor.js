@@ -111,132 +111,118 @@ function normalizeAdsReport(advice) {
   return advice;
 }
 
-class CampaignAdvisor {
-  async generateDailyAdvice() {
-    logger.info('Running AI Campaign Advisor...');
+// Hard cap on budget-change rows put in the prompt. The prompt tells the model
+// this list is what changed in the 7-day window, so it carries every row in the
+// window up to this bound (a note says so when the window held more).
+const ADVISOR_MAX_BUDGET_CHANGES = 200;
 
-    const campaigns = await db('ad_campaigns')
-      .where('status', '!=', 'removed')
-      .select('*');
+// Secondary lists an SMS summary falls back to when there are no recommendations.
+const SUMMARY_SECONDARY_LISTS = [
+  ['waste_alerts', 'Waste alerts'],
+  ['scaling_opportunities', 'Scaling opportunities'],
+  ['capacity_warnings', 'Capacity warnings'],
+  ['seo_insights', 'SEO insights'],
+];
 
-    if (campaigns.length === 0) {
-      logger.info('No campaigns to advise on');
-      return { grade: 'N/A', overall_assessment: 'No campaigns configured yet.', recommendations: [] };
+async function loadGscSummary() {
+  try {
+    if (!SearchConsole) return null;
+    const gsc = await SearchConsole.getPerformanceSummary(28);
+    if (!(gsc.current.clicks > 0)) return null;
+    return {
+      totalClicks: gsc.current.clicks,
+      totalImpressions: gsc.current.impressions,
+      ctr: (gsc.current.ctr * 100).toFixed(2) + '%',
+      brandedClicks: gsc.current.brandedClicks,
+      nonbrandClicks: gsc.current.nonbrandClicks,
+      clicksChange: gsc.change.clicks + '%',
+      nonbrandChange: gsc.change.nonbrandClicks + '%',
+      topNonBrandQueries: (gsc.topQueries || []).filter(q => !q.is_branded).slice(0, 10).map(q => ({
+        query: q.query, clicks: parseInt(q.clicks), impressions: parseInt(q.impressions),
+        position: parseFloat(q.avg_position).toFixed(1), service: q.service_category,
+      })),
+      page2Opportunities: (gsc.opportunities || []).slice(0, 10).map(q => ({
+        query: q.query, impressions: parseInt(q.impressions), position: parseFloat(q.avg_position).toFixed(1),
+      })),
+      decliningQueries: (gsc.declining || []).slice(0, 5),
+    };
+  } catch (err) {
+    logger.warn(`GSC data for advisor: ${err.message}`);
+    return null;
+  }
+}
+
+async function loadGbpSummary(d30) {
+  try {
+    const gbp = await db('gbp_performance_daily').where('date', '>=', d30);
+    if (gbp.length === 0) return null;
+    const byLoc = {};
+    for (const r of gbp) {
+      const loc = r.location_name || 'unknown';
+      if (!byLoc[loc]) byLoc[loc] = { calls: 0, websiteClicks: 0, directionRequests: 0 };
+      byLoc[loc].calls += r.calls || 0;
+      byLoc[loc].websiteClicks += r.website_clicks || 0;
+      byLoc[loc].directionRequests += r.direction_requests || 0;
     }
+    return byLoc;
+  } catch (err) {
+    logger.warn(`GBP data for advisor: ${err.message}`);
+    return null;
+  }
+}
 
-    const now = new Date();
-    const d7 = etDateString(addETDays(now, -7));
-    const d30 = etDateString(addETDays(now, -30));
+const numOrNull = (v) => (v == null ? null : Number(v));
 
-    const last7days = await db('ad_performance_daily').where('date', '>=', d7);
-    const last30days = await db('ad_performance_daily').where('date', '>=', d30);
+function budgetChangesSection(budgetLog) {
+  const rows = budgetLog.slice(0, ADVISOR_MAX_BUDGET_CHANGES).map(b => ({
+    campaign: b.campaign_name, at: b.created_at, from: b.previous_mode, to: b.new_mode,
+    budget_from: numOrNull(b.previous_budget),
+    budget_to: numOrNull(b.new_budget),
+    trigger: b.trigger, reason: b.reason,
+  }));
+  const note = budgetLog.length > ADVISOR_MAX_BUDGET_CHANGES
+    ? `\n(Only the ${ADVISOR_MAX_BUDGET_CHANGES} most recent changes are listed; older changes in the 7-day window are omitted.)`
+    : '';
+  return JSON.stringify(rows) + note;
+}
 
-    const searchTerms = await db('ad_search_terms')
-      .orderBy('cost', 'desc')
-      .limit(ADVISOR_MAX_SEARCH_TERMS);
+function searchTermsSection(searchTerms) {
+  return JSON.stringify(searchTerms.filter((t) => Number(t.cost) > 0).slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
+    term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
+    conversions: Number(t.conversions), convValue: Number(t.conversion_value), roas: Number(t.roas),
+  })), null, 2);
+}
 
-    const serviceAttribution = await db('ad_service_attribution')
-      .where('lead_date', '>=', d30);
+function gscSection(gscSummary) {
+  if (!gscSummary) return '(No GSC data available)';
+  return `
+GOOGLE SEARCH CONSOLE (organic search, last 28 days):
+Total organic clicks: ${gscSummary.totalClicks} (${gscSummary.clicksChange} vs prev)
+Non-brand clicks: ${gscSummary.nonbrandClicks} (${gscSummary.nonbrandChange} vs prev)
+Branded clicks: ${gscSummary.brandedClicks}
+CTR: ${gscSummary.ctr}
 
-    const capacity = await this.getWeekCapacity();
-    const targets = await db('ad_targets').first();
-    // Same live assignable count the budget manager uses for capacity.
-    const techCount = await BudgetManager.getTechCountForArea();
+Top non-brand queries:
+${JSON.stringify(gscSummary.topNonBrandQueries, null, 2)}
 
-    const budgetLog = await db('ad_budget_log')
-      .where('created_at', '>=', new Date(now - 7 * 86400000))
-      .orderBy('created_at', 'desc')
-      .limit(20);
+Page 2 opportunities (positions 4-15):
+${JSON.stringify(gscSummary.page2Opportunities, null, 2)}
 
-    // GSC/SEO data for combined analysis
-    let gscSummary = null;
-    try {
-      if (SearchConsole) {
-        const gsc = await SearchConsole.getPerformanceSummary(28);
-        if (gsc.current.clicks > 0) {
-          gscSummary = {
-            totalClicks: gsc.current.clicks,
-            totalImpressions: gsc.current.impressions,
-            ctr: (gsc.current.ctr * 100).toFixed(2) + '%',
-            brandedClicks: gsc.current.brandedClicks,
-            nonbrandClicks: gsc.current.nonbrandClicks,
-            clicksChange: gsc.change.clicks + '%',
-            nonbrandChange: gsc.change.nonbrandClicks + '%',
-            topNonBrandQueries: (gsc.topQueries || []).filter(q => !q.is_branded).slice(0, 10).map(q => ({
-              query: q.query, clicks: parseInt(q.clicks), impressions: parseInt(q.impressions),
-              position: parseFloat(q.avg_position).toFixed(1), service: q.service_category,
-            })),
-            page2Opportunities: (gsc.opportunities || []).slice(0, 10).map(q => ({
-              query: q.query, impressions: parseInt(q.impressions), position: parseFloat(q.avg_position).toFixed(1),
-            })),
-            decliningQueries: (gsc.declining || []).slice(0, 5),
-          };
-        }
-      }
-    } catch (err) {
-      logger.warn(`GSC data for advisor: ${err.message}`);
-    }
+Declining queries:
+${JSON.stringify(gscSummary.decliningQueries, null, 2)}
+`;
+}
 
-    // GBP data
-    let gbpSummary = null;
-    try {
-      const gbp = await db('gbp_performance_daily').where('date', '>=', d30);
-      if (gbp.length > 0) {
-        const byLoc = {};
-        for (const r of gbp) {
-          const loc = r.location_name || 'unknown';
-          if (!byLoc[loc]) byLoc[loc] = { calls: 0, websiteClicks: 0, directionRequests: 0 };
-          byLoc[loc].calls += r.calls || 0;
-          byLoc[loc].websiteClicks += r.website_clicks || 0;
-          byLoc[loc].directionRequests += r.direction_requests || 0;
-        }
-        gbpSummary = byLoc;
-      }
-    } catch (err) {
-      logger.warn(`GBP data for advisor: ${err.message}`);
-    }
+function gbpSection(gbpSummary) {
+  if (!gbpSummary) return '(No GBP data available)';
+  return `
+GOOGLE BUSINESS PROFILE (last 30 days):
+${JSON.stringify(gbpSummary, null, 2)}
+`;
+}
 
-    // Aggregate per campaign
-    const campaignSummaries = campaigns.map(c => {
-      const perf7d = last7days.filter(p => p.campaign_id === c.id);
-      const perf30d = last30days.filter(p => p.campaign_id === c.id);
-
-      return {
-        id: c.id,
-        name: c.campaign_name,
-        platform: c.platform,
-        status: c.status,
-        linked: Boolean(c.platform_campaign_id),
-        type: c.campaign_type,
-        area: c.target_area,
-        serviceLine: c.service_line,
-        serviceCategory: c.service_category,
-        budgetMode: c.budget_mode,
-        dailyBudgetBase: c.daily_budget_base,
-        dailyBudgetCurrent: c.daily_budget_current,
-        last7d: this.aggregatePerformance(perf7d),
-        last30d: this.aggregatePerformance(perf30d),
-        trending: this.getTrend(perf7d, perf30d),
-      };
-    });
-
-    // With no provider key at all, return a data-only summary
-    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
-      const fallback = this.generateFallbackAdvice(campaignSummaries, targets);
-      await this.storeReport(fallback);
-      return fallback;
-    }
-
-    try {
-      // Fable (adsAdvisor policy, owner ruling 2026-10-01) first, Sol on a miss. timeoutMs keeps the SDK's old 10-minute
-      // ceiling as the shared budget across both legs — a verbose day's
-      // report needs more than the dispatcher's 2-minute-per-leg default.
-      const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.adsAdvisor, {
-        laneId: 'ads_advisor',
-        maxTokens: ADVISOR_MAX_TOKENS,
-        jsonMode: true,
-        timeoutMs: ADVISOR_TIMEOUT_MS,
-        system: `You are a digital marketing performance analyst specializing in pest control and lawn care businesses in Southwest Florida. You review Google Ads, Google Search Console (organic SEO), and Google Business Profile data daily and provide specific, actionable recommendations across BOTH paid and organic channels.
+function advisorSystemPrompt(techCount, targets) {
+  return `You are a digital marketing performance analyst specializing in pest control and lawn care businesses in Southwest Florida. You review Google Ads, Google Search Console (organic SEO), and Google Business Profile data daily and provide specific, actionable recommendations across BOTH paid and organic channels.
 
 RECOMMENDATION QUALITY RULES (these override everything below):
 - Recommend ONLY changes that are real, supported by the numbers in this data, and worth doing at THIS account's scale. Judge the account by its actual spend and conversion volume, not by generic best practice.
@@ -274,82 +260,55 @@ BUSINESS CONTEXT:
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 
-Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
+Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`;
+}
 
-        text: `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
+// The SMS body's actions block: the top recommendations, else (an empty list is
+// a valid "nothing worth changing" report) a count of whatever secondary items
+// the report still flags, else the no-change line.
+function summaryActionsBlock(advice) {
+  const topRecs = (advice.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
+  if (topRecs) return `Top actions:\n${topRecs}`;
+  const flagged = SUMMARY_SECONDARY_LISTS
+    .filter(([key]) => Array.isArray(advice[key]) && advice[key].length > 0)
+    .map(([key, label]) => {
+      const items = advice[key];
+      const first = String(items[0][ADS_LIST_FIELDS[key][0]]).trim().slice(0, 80);
+      return `• ${label}: ${items.length} (e.g. ${first})`;
+    });
+  if (flagged.length === 0) return 'No changes recommended today.';
+  return `No campaign changes recommended, but flagged:\n${flagged.join('\n')}`;
+}
 
-CAMPAIGN PERFORMANCE:
-${JSON.stringify(campaignSummaries, null, 2)}
+class CampaignAdvisor {
+  async generateDailyAdvice() {
+    logger.info('Running AI Campaign Advisor...');
 
-SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — this is the complete list of terms that cost money):
-${JSON.stringify(searchTerms.filter((t) => Number(t.cost) > 0).slice(0, ADVISOR_MAX_SEARCH_TERMS).map(t => ({
-  term: t.search_term, clicks: t.clicks, spend: Number(t.cost),
-  conversions: Number(t.conversions), convValue: Number(t.conversion_value), roas: Number(t.roas),
-})), null, 2)}
+    const campaigns = await db('ad_campaigns')
+      .where('status', '!=', 'removed')
+      .select('*');
 
-SERVICE-LINE ATTRIBUTION (last 30 days):
-${JSON.stringify(this.groupByService(serviceAttribution))}
+    if (campaigns.length === 0) {
+      logger.info('No campaigns to advise on');
+      return { grade: 'N/A', overall_assessment: 'No campaigns configured yet.', recommendations: [] };
+    }
 
-CAPACITY THIS WEEK:
-${JSON.stringify(capacity)}
+    const now = new Date();
+    const inputs = await this.loadAdvisorInputs(now);
+    const campaignSummaries = this.buildCampaignSummaries(campaigns, inputs.last7days, inputs.last30days);
 
-TARGETS: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}
+    // With no provider key at all, return a data-only summary
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return this.storeFallbackAdvice(campaignSummaries, inputs.targets);
+    }
 
-RECENT BUDGET CHANGES:
-${JSON.stringify(budgetLog.slice(0, 10).map(b => ({
-  campaign: b.campaign_name, at: b.created_at, from: b.previous_mode, to: b.new_mode,
-  budget_from: b.previous_budget == null ? null : Number(b.previous_budget),
-  budget_to: b.new_budget == null ? null : Number(b.new_budget),
-  trigger: b.trigger, reason: b.reason,
-})))}
-${gscSummary ? `
-GOOGLE SEARCH CONSOLE (organic search, last 28 days):
-Total organic clicks: ${gscSummary.totalClicks} (${gscSummary.clicksChange} vs prev)
-Non-brand clicks: ${gscSummary.nonbrandClicks} (${gscSummary.nonbrandChange} vs prev)
-Branded clicks: ${gscSummary.brandedClicks}
-CTR: ${gscSummary.ctr}
-
-Top non-brand queries:
-${JSON.stringify(gscSummary.topNonBrandQueries, null, 2)}
-
-Page 2 opportunities (positions 4-15):
-${JSON.stringify(gscSummary.page2Opportunities, null, 2)}
-
-Declining queries:
-${JSON.stringify(gscSummary.decliningQueries, null, 2)}
-` : '(No GSC data available)'}
-${gbpSummary ? `
-GOOGLE BUSINESS PROFILE (last 30 days):
-${JSON.stringify(gbpSummary, null, 2)}
-` : '(No GBP data available)'}
-
-Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, number-backed, and worth doing at this account's scale; an empty recommendations list is a valid answer.`,
-      }, {
-        // The dispatcher's loose parse accepts any JSON value; the old
-        // utils/llm-json parser accepted only a non-array object. Keep that
-        // contract: a wrongly shaped answer is a rejected leg, not a stored
-        // row. Beyond shape, every field storeReport/sendSummary actually
-        // read must be present and usable (isUsableAdsReport) — see its
-        // comment.
-        validate: (result) => {
-          if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
-          return isUsableAdsReport(result.json) ? null : 'schema_invalid';
-        },
-      });
-
-      // An unparseable or wrongly shaped answer is a rejected leg inside the
-      // dispatcher (the next provider gets a turn); a two-leg miss lands in
-      // the catch below and stores the deterministic fallback advice.
-      if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
+    try {
+      const res = await this.dispatchAdvice(
+        advisorSystemPrompt(inputs.techCount, inputs.targets),
+        this.buildAdvisorText(now, inputs, campaignSummaries),
+      );
       const advice = normalizeAdsReport(res.json);
-
-      advice.date = etDateString(now);
-      // Which model actually wrote this report (primary or backup leg) — the
-      // PPC page shows it. Stored inside report_data, so no migration.
-      // servedModel is what the provider reports it actually ran; the route
-      // model is only what was requested (an alias can resolve differently).
-      if (res.servedModel || res.model) advice.model = res.servedModel || res.model;
-      if (res.provider) advice.provider = res.provider;
+      this.stampProvenance(advice, res, now);
       this.normalizeRecommendations(advice, campaigns);
       await this.storeReport(advice);
       await this.sendSummary(advice);
@@ -357,10 +316,138 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
       return advice;
     } catch (err) {
       logger.error(`AI Advisor failed: ${err.message}`);
-      const fallback = this.generateFallbackAdvice(campaignSummaries, targets);
-      await this.storeReport(fallback);
-      return fallback;
+      return this.storeFallbackAdvice(campaignSummaries, inputs.targets);
     }
+  }
+
+  async storeFallbackAdvice(campaignSummaries, targets) {
+    const fallback = this.generateFallbackAdvice(campaignSummaries, targets);
+    await this.storeReport(fallback);
+    return fallback;
+  }
+
+  async loadAdvisorInputs(now) {
+    const d7 = etDateString(addETDays(now, -7));
+    const d30 = etDateString(addETDays(now, -30));
+
+    const last7days = await db('ad_performance_daily').where('date', '>=', d7);
+    const last30days = await db('ad_performance_daily').where('date', '>=', d30);
+
+    const searchTerms = await db('ad_search_terms')
+      .orderBy('cost', 'desc')
+      .limit(ADVISOR_MAX_SEARCH_TERMS);
+
+    const serviceAttribution = await db('ad_service_attribution')
+      .where('lead_date', '>=', d30);
+
+    const capacity = await this.getWeekCapacity();
+    const targets = await db('ad_targets').first();
+    // Same live assignable count the budget manager uses for capacity.
+    const techCount = await BudgetManager.getTechCountForArea();
+
+    // One past the cap, so a window that held more than the cap is detectable.
+    const budgetLog = await db('ad_budget_log')
+      .where('created_at', '>=', new Date(now - 7 * 86400000))
+      .orderBy('created_at', 'desc')
+      .limit(ADVISOR_MAX_BUDGET_CHANGES + 1);
+
+    // GSC/SEO data for combined analysis, then GBP data
+    const gscSummary = await loadGscSummary();
+    const gbpSummary = await loadGbpSummary(d30);
+
+    return { last7days, last30days, searchTerms, serviceAttribution, capacity, targets, techCount, budgetLog, gscSummary, gbpSummary };
+  }
+
+  // Aggregate per campaign
+  buildCampaignSummaries(campaigns, last7days, last30days) {
+    return campaigns.map(c => {
+      const perf7d = last7days.filter(p => p.campaign_id === c.id);
+      const perf30d = last30days.filter(p => p.campaign_id === c.id);
+
+      return {
+        id: c.id,
+        name: c.campaign_name,
+        platform: c.platform,
+        status: c.status,
+        linked: Boolean(c.platform_campaign_id),
+        type: c.campaign_type,
+        area: c.target_area,
+        serviceLine: c.service_line,
+        serviceCategory: c.service_category,
+        budgetMode: c.budget_mode,
+        dailyBudgetBase: c.daily_budget_base,
+        dailyBudgetCurrent: c.daily_budget_current,
+        last7d: this.aggregatePerformance(perf7d),
+        last30d: this.aggregatePerformance(perf30d),
+        trending: this.getTrend(perf7d, perf30d),
+      };
+    });
+  }
+
+  buildAdvisorText(now, inputs, campaignSummaries) {
+    const { targets } = inputs;
+    return `Daily ads review for ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}:
+
+CAMPAIGN PERFORMANCE:
+${JSON.stringify(campaignSummaries, null, 2)}
+
+SEARCH TERMS WITH SPEND (by spend, up to ${ADVISOR_MAX_SEARCH_TERMS}, last 30 days — this is the complete list of terms that cost money):
+${searchTermsSection(inputs.searchTerms)}
+
+SERVICE-LINE ATTRIBUTION (last 30 days):
+${JSON.stringify(this.groupByService(inputs.serviceAttribution))}
+
+CAPACITY THIS WEEK:
+${JSON.stringify(inputs.capacity)}
+
+TARGETS: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}
+
+RECENT BUDGET CHANGES:
+${budgetChangesSection(inputs.budgetLog)}
+${gscSection(inputs.gscSummary)}
+${gbpSection(inputs.gbpSummary)}
+
+Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, number-backed, and worth doing at this account's scale; an empty recommendations list is a valid answer.`;
+  }
+
+  // Fable (adsAdvisor policy, owner ruling 2026-10-01) first, Sol on a miss.
+  // timeoutMs keeps the SDK's old 10-minute ceiling as the shared budget across
+  // both legs — a verbose day's report needs more than the dispatcher's
+  // 2-minute-per-leg default. An unparseable or wrongly shaped answer is a
+  // rejected leg inside the dispatcher (the next provider gets a turn); a
+  // two-leg miss throws here and the caller stores the deterministic fallback.
+  async dispatchAdvice(system, text) {
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.adsAdvisor, {
+      laneId: 'ads_advisor',
+      maxTokens: ADVISOR_MAX_TOKENS,
+      jsonMode: true,
+      timeoutMs: ADVISOR_TIMEOUT_MS,
+      system,
+      text,
+    }, {
+      // The dispatcher's loose parse accepts any JSON value; the old
+      // utils/llm-json parser accepted only a non-array object. Keep that
+      // contract: a wrongly shaped answer is a rejected leg, not a stored
+      // row. Beyond shape, every field storeReport/sendSummary actually
+      // read must be present and usable (isUsableAdsReport) — see its
+      // comment.
+      validate: (result) => {
+        if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
+        return isUsableAdsReport(result.json) ? null : 'schema_invalid';
+      },
+    });
+    if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
+    return res;
+  }
+
+  stampProvenance(advice, res, now) {
+    advice.date = etDateString(now);
+    // Which model actually wrote this report (primary or backup leg) — the
+    // PPC page shows it. Stored inside report_data, so no migration.
+    // servedModel is what the provider reports it actually ran; the route
+    // model is only what was requested (an alias can resolve differently).
+    if (res.servedModel || res.model) advice.model = res.servedModel || res.model;
+    if (res.provider) advice.provider = res.provider;
   }
 
   // Model recommendations are stored verbatim and drive real Apply buttons,
@@ -513,9 +600,7 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
   async sendSummary(advice) {
     if (!TwilioService || !process.env.ADAM_PHONE) return;
     try {
-      const topRecs = (advice.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
-      // An empty list is a valid "nothing worth changing" report.
-      const actionsBlock = topRecs ? `Top actions:\n${topRecs}` : 'No changes recommended today.';
+      const actionsBlock = summaryActionsBlock(advice);
       await TwilioService.sendSMS(process.env.ADAM_PHONE,
         `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\n${actionsBlock}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
         { messageType: 'internal_alert' }

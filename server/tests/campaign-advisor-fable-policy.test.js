@@ -32,18 +32,22 @@ const SEARCH_TERMS = [
   { search_term: 'synthetic term free', clicks: 0, cost: '0', conversions: '0', conversion_value: '0', roas: '0' },
 ];
 const mockInsert = jest.fn().mockResolvedValue([1]);
+const mockBudgetRow = (i, budgetTo = 8) => ({
+  campaign_name: `Synthetic Search ${i}`, previous_mode: 'base', new_mode: 'base',
+  previous_budget: '5.00', new_budget: String(budgetTo), trigger: 'advisor', reason: `synthetic raise ${i}`,
+  created_at: '2026-09-30T12:00:00Z',
+});
+let mockBudgetLog = [];
+const mockLimits = [];
 jest.mock('../models/db', () => jest.fn((table) => {
   const rowsFor = {
     ad_campaigns: [CAMPAIGN],
     ad_search_terms: SEARCH_TERMS,
-    ad_budget_log: [{
-      campaign_name: 'Synthetic Search', previous_mode: 'base', new_mode: 'base',
-      previous_budget: '5.00', new_budget: '8.00', trigger: 'advisor', reason: 'synthetic raise',
-      created_at: '2026-09-30T12:00:00Z',
-    }],
+    ad_budget_log: mockBudgetLog,
   };
   const b = {
-    where: () => b, orderBy: () => b, limit: () => b, select: () => b,
+    where: () => b, orderBy: () => b, select: () => b,
+    limit: (n) => { mockLimits.push([table, n]); return b; },
     first: () => Promise.resolve(null),
     insert: (row) => mockInsert(table, row),
     then: (r, j) => Promise.resolve(rowsFor[table] || []).then(r, j),
@@ -63,6 +67,8 @@ const EMPTY_REPORT = {
 };
 
 beforeEach(() => {
+  mockBudgetLog = [mockBudgetRow(1)];
+  mockLimits.length = 0;
   mockDispatch.mockReset();
   mockSendSMS.mockClear();
   mockInsert.mockClear();
@@ -131,6 +137,26 @@ describe('provenance and recent-change context (Codex r1 on #5486)', () => {
     expect(text).toContain('"budget_from":5');
     expect(text).toContain('"budget_to":8');
   });
+
+  test('every change in the 7-day window reaches the prompt, not just the newest 10 (Codex r2 on #5486)', async () => {
+    mockBudgetLog = Array.from({ length: 35 }, (_, i) => mockBudgetRow(i + 1));
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const { text } = mockDispatch.mock.calls[0][1];
+    for (let i = 1; i <= 35; i++) expect(text).toContain(`"campaign":"Synthetic Search ${i}"`);
+    expect(text).not.toMatch(/older changes in the 7-day window are omitted/);
+  });
+
+  test('a window past the hard cap is bounded and the prompt says it was cut', async () => {
+    mockBudgetLog = Array.from({ length: 201 }, (_, i) => mockBudgetRow(i + 1));
+    mockDispatch.mockResolvedValue({ ok: true, json: { ...EMPTY_REPORT }, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockLimits).toContainEqual(['ad_budget_log', 201]);
+    const { text } = mockDispatch.mock.calls[0][1];
+    expect(text).toContain('"campaign":"Synthetic Search 200"');
+    expect(text).not.toContain('"campaign":"Synthetic Search 201"');
+    expect(text).toContain('Only the 200 most recent changes are listed; older changes in the 7-day window are omitted.');
+  });
 });
 
 describe('empty recommendations', () => {
@@ -155,6 +181,37 @@ describe('empty recommendations', () => {
     const body = mockSendSMS.mock.calls[0][1];
     expect(body).toContain('No changes recommended today.');
     expect(body).not.toContain('Top actions');
+  });
+
+  test('empty recommendations with other flagged items are texted as flagged, never as "no changes" (Codex r2 on #5486)', async () => {
+    const report = {
+      ...EMPTY_REPORT,
+      waste_alerts: [{ search_term: 'synthetic wasted term', spend: 12, conversions: 0, action: 'add_negative' }, { search_term: 'second term', spend: 9 }],
+      capacity_warnings: [{ area: 'Synthetic Area', utilization: 95, recommendation: 'slow spend' }],
+    };
+    mockDispatch.mockResolvedValue({ ok: true, json: report, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    expect(mockSendSMS).toHaveBeenCalledTimes(1);
+    const body = mockSendSMS.mock.calls[0][1];
+    expect(body).not.toContain('No changes recommended today.');
+    expect(body).toContain('No campaign changes recommended, but flagged:');
+    expect(body).toContain('• Waste alerts: 2 (e.g. synthetic wasted term)');
+    expect(body).toContain('• Capacity warnings: 1 (e.g. Synthetic Area)');
+    expect(body).not.toContain('Scaling opportunities');
+    expect(body).not.toContain('Top actions');
+  });
+
+  test('recommendations still lead the text when present', async () => {
+    const report = {
+      ...EMPTY_REPORT,
+      recommendations: [{ priority: 'high', action: 'Raise budget', reasoning: '7.0x ROAS on $40 spend' }],
+      waste_alerts: [{ search_term: 'synthetic wasted term', spend: 12 }],
+    };
+    mockDispatch.mockResolvedValue({ ok: true, json: report, provider: 'anthropic', model: 'm' });
+    await advisor.generateDailyAdvice();
+    const body = mockSendSMS.mock.calls[0][1];
+    expect(body).toContain('Top actions:\n• Raise budget');
+    expect(body).not.toContain('flagged');
   });
 
   test('isUsableAdsReport / normalize accept an empty list; an omitted list is rejected', () => {

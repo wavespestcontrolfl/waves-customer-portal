@@ -33,7 +33,7 @@ const REPORT_DATA = {
   scaling_opportunities: [], capacity_warnings: [], insights: [],
 };
 
-function stubFetch({ report, onApply, onGenerate, loadFails } = {}) {
+function stubFetch({ report, onApply, onGenerate, loadFails, historyFails } = {}) {
   const fetchMock = vi.fn(async (url, options = {}) => {
     const json = (body, ok = true, status = 200) => ({ ok, status, json: async () => body });
     if (url === "/api/admin/ads/campaigns") return json({ campaigns: [CAMPAIGN] });
@@ -41,6 +41,7 @@ function stubFetch({ report, onApply, onGenerate, loadFails } = {}) {
     if (url === "/api/admin/ads/sync-status") return json({ syncs: [] });
     if (url === "/api/admin/ads/advisor" && loadFails) return json({ error: "boom" }, false, 500);
     if (url === "/api/admin/ads/advisor") return json({ report: report === undefined ? { date: "2026-10-01", grade: "B", report_data: REPORT_DATA } : report });
+    if (url === "/api/admin/ads/advisor/history" && historyFails) return json({ error: "boom" }, false, 500);
     if (url === "/api/admin/ads/advisor/history") return json({ reports: [] });
     if (url === "/api/admin/ads/advisor/apply") return onApply ? onApply(options) : json({ applied: true, result: {} });
     if (url === "/api/admin/ads/advisor/generate") return onGenerate ? onGenerate(options) : json({ report: REPORT_DATA });
@@ -154,5 +155,22 @@ describe("Ads page Advisor tab", () => {
     expect(await screen.findByText(/Couldn't load the advisor report/)).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Regenerate" }));
     await waitFor(() => expect(screen.queryByText(/Couldn't load the advisor report/)).not.toBeInTheDocument());
+  });
+
+  // Codex r2 on #5486: adminFetch does not check r.ok, so a history 500 body
+  // ({error}) used to become an empty history with no signal.
+  it("a failed history request shows an inline alert while the report still renders", async () => {
+    stubFetch({ historyFails: true });
+    await openAdvisor();
+    expect(await screen.findByText(REPORT_DATA.overall_assessment)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/Couldn't load the previous reports/);
+    expect(screen.queryByText(/Couldn't load the advisor report/)).not.toBeInTheDocument();
+  });
+
+  it("a healthy history request shows no alert", async () => {
+    stubFetch();
+    await openAdvisor();
+    await screen.findByText(REPORT_DATA.overall_assessment);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
