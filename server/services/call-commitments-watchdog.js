@@ -157,8 +157,12 @@ async function runInner({ now = new Date() } = {}) {
     const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }))
       .sort((a, b) => rank.get(a.id) - rank.get(b.id));
     const noticeRows = () => trx('notifications').where({ recipient_type: 'admin' });
+    // The closing UPDATE's selection: not done, or done by a person (the
+    // watchdog takes the row over once; see openToCloser).
+    const openToCloser = (q) => NotificationService._private.openToCloser(q, 'call-commitments-watchdog');
     // A system retire closes the row as done (read is not done): a person's
-    // earlier read or done stands (doneColumns COALESCEs), the bell drops it.
+    // earlier read and first done_at stand (doneColumns COALESCEs), done_by is
+    // the watchdog's, the bell drops it.
     const closeDone = (resolution) => NotificationService._private.doneColumns({
       by: 'call-commitments-watchdog', resolution, at: now, keepExisting: true, conn: trx,
     });
@@ -218,7 +222,7 @@ async function runInner({ now = new Date() } = {}) {
       await noticeRows().whereNull('done_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
         .whereIn(trx.raw("metadata->>'commitment_id'"), ids)
         .update({ ...closeDone('Included in the overdue promises summary'), metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text)", [notif.id]) });
-      await noticeRows().whereNull('done_at').whereNot('id', notif.id)
+      await openToCloser(noticeRows()).whereNot('id', notif.id)
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
         .update({ ...closeDone('Replaced by a newer overdue promises summary'), metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
       return { ...result, alerted: 1, aggregate: true };
@@ -255,7 +259,7 @@ async function runInner({ now = new Date() } = {}) {
         });
       }
       if (!acknowledged) result.alerted += 1;
-      await noticeRows().whereNull('done_at').whereNot('id', notif.id)
+      await openToCloser(noticeRows()).whereNot('id', notif.id)
         .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
         .whereRaw("metadata->>'commitment_id' = ?", [r.id]).update(closeDone('Replaced by a newer reminder for this promise'));
     }

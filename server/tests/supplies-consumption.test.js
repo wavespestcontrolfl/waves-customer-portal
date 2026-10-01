@@ -21,7 +21,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
   // The real doneColumns' keepExisting shape is proven in notification-mark-read-admin; here only what the caller asked for is recorded.
-  _private: { doneColumns: ({ by, resolution, keepExisting, conn }) => ({ done_by: by, resolution, keepExisting: keepExisting === true, conn }) },
+  _private: { openToCloser: (q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)')), doneColumns: ({ by, resolution, keepExisting, conn }) => ({ done_by: by, resolution, keepExisting: keepExisting === true, conn }) },
 }));
 
 const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
@@ -32,7 +32,8 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   const inserts = [];
   const trx = (table) => {
     const q = {};
-    q.where = () => q;
+    q.where = (w) => { if (typeof w === 'function') w(q); return q; };
+    q.orWhereRaw = () => q;
     q._sql = '';
     q.whereRaw = (sql) => { q._sql += sql; return q; };
     q.forUpdate = () => q;
@@ -60,7 +61,9 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where']) q[m] = () => q;
+    q.whereNotNull = () => q;
+    q.where = (w) => { if (typeof w === 'function') w(q); return q; };
+    q.orWhereRaw = () => q;
     q.whereNull = (col) => { (q._nulls ||= []).push(col); return q; };
     q.whereRaw = (sql, bindings) => { if (table === 'notifications' && bindings) q._key = bindings[0]; return q; };
     q.select = async () => products;
@@ -349,7 +352,7 @@ test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14
   notifyAdmin.mockClear();
   const db = (table) => {
     if (table === 'products_catalog') throw new Error('relation lost');
-    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
+    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull', 'orWhereRaw']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
   };
   db.transaction = async () => { throw new Error('unreachable'); };
   const res = await consumeCompletionSupplies(db, args);
@@ -372,7 +375,8 @@ function lookupBellDb({ retryProducts, movements }) {
       const q = {}; for (const m of ['where', 'whereNotNull']) q[m] = () => q; q.select = async () => retryProducts; return q;
     }
     const q = {}; let productId = null;
-    q.where = (w) => { if (w && w.product_id) productId = w.product_id; return q; };
+    q.where = (w) => { if (typeof w === 'function') w(q); else if (w && w.product_id) productId = w.product_id; return q; };
+    q.orWhereRaw = () => q;
     q.whereRaw = () => q;
     q.whereNull = (col) => { (q._nulls ||= []).push(col); return q; };
     q.first = async () => (table === 'product_inventory_movements' && movements.includes(productId) ? { id: `mv-${productId}` } : null);

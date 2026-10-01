@@ -106,6 +106,40 @@ describe('markAdminDone', () => {
   });
 });
 
+describe('openToCloser (the system closers\' selection)', () => {
+  // A recording builder: where(fn) runs fn against a second recorder.
+  const record = () => {
+    const calls = [];
+    const inner = { whereNull: (...a) => { calls.push(['whereNull', ...a]); return inner; }, orWhereRaw: (...a) => { calls.push(['orWhereRaw', ...a]); return inner; } };
+    const query = { whereNull: (...a) => { calls.push(['outer.whereNull', ...a]); return query; }, where: (fn) => { calls.push(['where']); fn(inner); return query; } };
+    return { query, calls };
+  };
+  const { openToCloser, isPersonDoneBy, PERSON_DONE_BY_SQL } = NotificationService._private;
+
+  test('a system closer selects rows not done OR done by a person (PERSON_DONE_BY_SQL, NULL done_by is not a person)', () => {
+    const { query, calls } = record();
+    expect(openToCloser(query, 'procurement')).toBe(query);
+    expect(calls).toEqual([
+      ['where'],
+      ['whereNull', 'done_at'],
+      ['orWhereRaw', `COALESCE(${PERSON_DONE_BY_SQL}, false)`],
+    ]);
+  });
+
+  test('a person\'s own close keeps plain done_at IS NULL: a second Done writes nothing', () => {
+    for (const by of ['7', 'claude', '6f1c2b3e-1111-4222-8333-444455556666']) {
+      const { query, calls } = record();
+      openToCloser(query, by);
+      expect(calls).toEqual([['outer.whereNull', 'done_at']]);
+    }
+  });
+
+  test('isPersonDoneBy mirrors PERSON_DONE_BY_SQL: digits, uuid, claude; never a component or empty', () => {
+    expect(['42', 'claude', '6F1C2B3E-1111-4222-8333-444455556666'].map(isPersonDoneBy)).toEqual([true, true, true]);
+    expect(['episodes', 'supersede', 'procurement', '', null, undefined, 'Claude', '12a'].map(isPersonDoneBy)).toEqual([false, false, false, false, false, false, false, false]);
+  });
+});
+
 describe('reopenAdminDone', () => {
   const TOKEN = '2026-09-30 12:00:00.123456+00';
   const { PERSON_DONE_BY_SQL } = NotificationService._private;

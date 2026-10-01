@@ -211,7 +211,7 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
   const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('done_at').update({
+    await require('./notification-service')._private.openToCloser(db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]), 'supplies').update({
       ...require('./notification-service')._private.doneColumns({ by: 'supplies', resolution: 'The missed stock deduction was made', keepExisting: true, conn: db }),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb"),
     });

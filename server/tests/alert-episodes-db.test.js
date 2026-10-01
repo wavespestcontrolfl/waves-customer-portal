@@ -130,6 +130,47 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     expect(doneList.find((r) => r.id === auto.id)).toMatchObject({ reopenable: false, done_at_token: systemToken });
   });
 
+  test('a system closer that selects with openToCloser takes over a person\'s Done exactly once: done_by is the component, done_at stays, the person\'s Reopen is refused, a second run writes nothing', async () => {
+    const callLogId = `${RUN}-call`;
+    const mk = async (name, readAt = null) => {
+      const [row] = await db('notifications').insert({
+        recipient_type: 'admin', category: 'missed_call', title: 'Fixture call', body: 'Fixture body', link: '/admin/communications', read_at: readAt,
+        metadata: JSON.stringify({ dedupeKey: key(name), triggerKey: 'customer_missed_call', payload: { callLogId } }),
+      }).returning('*');
+      return row;
+    };
+    const tokenOf = async (id) => (await db('notifications').where({ id }).first(db.raw('done_at::text AS done_at_token'))).done_at_token;
+    const person = await mk('closer-person');
+    const open = await mk('closer-open');
+    const system = await mk('closer-system');
+    expect(await NotificationService.markAdminDone([person.id], { by: '7', resolution: 'Called back' })).toBe(1);
+    expect(await NotificationService.markAdminDone([system.id], { by: 'dispatch', resolution: 'Cleared by dispatch' })).toBe(1);
+    const personDone = await get(person.id);
+    const personToken = await tokenOf(person.id);
+    const systemBefore = await get(system.id);
+    const systemToken = await tokenOf(system.id);
+
+    // Person-done + open rows are reached; the row another component closed is left alone.
+    expect(await NotificationService.supersedeMissedCallAdmin({ callLogId })).toBe(2);
+    const p = await get(person.id);
+    expect(p.done_by).toBe('supersede');
+    expect(new Date(p.done_at).getTime()).toBe(new Date(personDone.done_at).getTime());
+    expect(await tokenOf(person.id)).toBe(personToken);
+    expect(p.resolution).toBe('Called back');
+    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: personToken })).toBe('not_reopenable');
+    expect((await get(person.id)).done_at).not.toBeNull();
+    const o = await get(open.id);
+    expect([o.done_by, o.resolution]).toEqual(['supersede', 'Superseded by a newer event on the same call']);
+    const s = await get(system.id);
+    expect([s.done_by, s.resolution, await tokenOf(system.id)]).toEqual(['dispatch', 'Cleared by dispatch', systemToken]);
+    expect(new Date(s.done_at).getTime()).toBe(new Date(systemBefore.done_at).getTime());
+
+    // A second run finds nothing: every row is done by a system component now.
+    const before = await Promise.all([person.id, open.id, system.id].map(get));
+    expect(await NotificationService.supersedeMissedCallAdmin({ callLogId })).toBe(0);
+    expect(await Promise.all([person.id, open.id, system.id].map(get))).toEqual(before);
+  });
+
   test('keyset paging at full precision: rows created in one millisecond, microseconds apart, are neither skipped nor repeated across a cursor', async () => {
     const ids = [];
     for (const us of ['123900', '123500', '123100']) {

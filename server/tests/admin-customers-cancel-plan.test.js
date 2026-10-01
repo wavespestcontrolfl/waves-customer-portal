@@ -30,7 +30,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockReso
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
   // A system retire closes the bell done (read is not done).
-  _private: { doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
 }));
 jest.mock('../services/cancellation-confirmations', () => ({
   confirmationChannelAvailability: jest.fn(async (c) => ({ sms: !!(c && c.phone), email: !!(c && c.email) })),
@@ -195,6 +195,13 @@ function builderFor(table) {
       whereNull(c) { current.push((r) => r[col(c)] == null); return group; },
       whereNotNull(c) { current.push((r) => r[col(c)] != null); return group; },
       orWhereNotNull(c) { disjuncts.push(current); current = [(r) => r[col(c)] != null]; return group; },
+      // openToCloser's "done by a person" branch (PERSON_DONE_BY_SQL).
+      orWhereRaw(sql) {
+        if (!/person_done_by/.test(String(sql))) throw new Error(`fake db group: unsupported orWhereRaw ${sql}`);
+        disjuncts.push(current);
+        current = [(r) => r.done_at != null && /^([0-9]+|[0-9a-f-]{36}|claude)$/i.test(String(r.done_by ?? ''))];
+        return group;
+      },
       // The prior-refund check links payments to the prepay invoice via
       // metadata JSON (same predicate the renewals reconciler uses).
       whereRaw(sql, bindings) {
@@ -207,7 +214,7 @@ function builderFor(table) {
         return group;
       },
     };
-    fn.call(group);
+    fn.call(group, group);
     disjuncts.push(current);
     return (r) => disjuncts.some((ds) => ds.every((c) => c(r)));
   };

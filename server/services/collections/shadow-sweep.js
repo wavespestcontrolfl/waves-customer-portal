@@ -250,9 +250,8 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (heal.skip) continue;
       const liveShadow = heal.liveShadow;
       if (heal.extraKeys && heal.extraKeys.length) {
-        await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereNull('done_at')
+        await require('../notification-service')._private.openToCloser(db('notifications')
+          .where({ recipient_type: 'admin' }), 'collections')
           .whereIn(db.raw("metadata->>'dedupeKey'"), heal.extraKeys)
           .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'A duplicate case card was retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
@@ -392,9 +391,8 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // points at mutated data — an admin must never see it beside the
         // replacement. Same read_at mechanism, best-effort.
         if (existing.idempotency_key && existing.idempotency_key !== idempotencyKey) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('done_at')
+          await require('../notification-service')._private.openToCloser(db('notifications')
+            .where({ recipient_type: 'admin' }), 'collections')
             .whereRaw("metadata->>'dedupeKey' = ?", [existing.idempotency_key])
             .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case card was replaced by a newer version', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] superseded-card retirement failed: ${err.message}`));
@@ -442,9 +440,8 @@ async function runShadowSweep({ now = new Date() } = {}) {
           .first('id')
           .catch(() => null);
         if (recheck) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('done_at')
+          await require('../notification-service')._private.openToCloser(db('notifications')
+            .where({ recipient_type: 'admin' }), 'collections')
             .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
             .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The call was placed, so the proposal no longer stands', keepExisting: true, conn: db }))
             .catch((err) => logger.warn(`[collections-shadow] post-file card recheck retirement failed: ${err.message}`));
@@ -491,9 +488,8 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // stamp only leaves a stale card, never sends anything.
       const keys = lapsedRows.map((c) => c.idempotency_key).filter(Boolean);
       if (keys.length) {
-        await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereNull('done_at')
+        await require('../notification-service')._private.openToCloser(db('notifications')
+          .where({ recipient_type: 'admin' }), 'collections')
           .whereIn(db.raw("metadata->>'dedupeKey'"), keys)
           .update(require('../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case lapsed, so its proposal card retired', keepExisting: true, conn: db }))
           .catch((err) => logger.warn(`[collections-shadow] card retirement failed: ${err.message}`));

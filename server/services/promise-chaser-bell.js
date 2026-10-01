@@ -362,7 +362,7 @@ async function ringForCall(call, now = new Date()) {
   // A bell this callback already has for a DIFFERENT identity — another
   // promise that has since been kept, or an older version of this one — is
   // stale now that this promise is the one owed (Codex #5019 r21 P2).
-  await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' }).whereNull('done_at')
+  await require('./notification-service')._private.openToCloser(db('notifications').where({ recipient_type: 'admin', category: 'missed_call' }), 'promise-chaser')
     .whereRaw("metadata->>'triggerKey' = 'promise_chaser'")
     .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)])
     .whereRaw("metadata->>'dedupeKey' IS DISTINCT FROM ?", [dedupeKey])

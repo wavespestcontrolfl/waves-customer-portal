@@ -19,7 +19,7 @@ jest.mock('../services/collections/contact-policy', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
   // A system retire closes the card done (read is not done).
-  _private: { doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
 }));
 // Messaging spies — the sweep must NEVER reach any of these.
 jest.mock('../services/messaging/send-customer-message', () => ({

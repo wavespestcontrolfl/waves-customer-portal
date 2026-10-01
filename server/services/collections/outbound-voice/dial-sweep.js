@@ -142,9 +142,8 @@ async function revertAutoPromotion(caseRow, toState) {
  */
 async function retireProposalCard(idempotencyKey) {
   if (!idempotencyKey) return;
-  await db('notifications')
-    .where({ recipient_type: 'admin' })
-    .whereNull('done_at')
+  await require('../../notification-service')._private.openToCloser(db('notifications')
+    .where({ recipient_type: 'admin' }), 'collections')
     .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
     .update(require('../../notification-service')._private.doneColumns({ by: 'collections', resolution: 'The case was promoted, so no proposal stands', keepExisting: true, conn: db }))
     .catch((err) => logger.warn(`[collections-autodial] proposal-card retirement failed: ${err.message}`));

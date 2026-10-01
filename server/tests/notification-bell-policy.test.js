@@ -796,8 +796,13 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     await expect(NotificationService.supersedeMissedCallAdmin({ callLogId: 'call-1' })).resolves.toBe(1);
     expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
-    expect(notifications.whereNull).toHaveBeenCalledWith('done_at');
-    expect(notifications.whereNull).not.toHaveBeenCalledWith('read_at');
+    // openToCloser: not done, or done by a person (the system then owns the row).
+    const closerArg = notifications.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    expect(closerArg).toBeDefined();
+    const inner = { whereNull: jest.fn(() => inner), orWhereRaw: jest.fn(() => inner) };
+    closerArg(inner);
+    expect(inner.whereNull).toHaveBeenCalledWith('done_at');
+    expect(inner.whereNull).not.toHaveBeenCalledWith('read_at');
     expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
     // keepExisting: COALESCE'd done_at / done_by / resolution / read_at, so a person's own read or done stands.
     const patch = notifications.update.mock.calls[0][0];

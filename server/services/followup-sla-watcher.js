@@ -478,7 +478,7 @@ async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) {
     // Switched off: no standing list may outlive the pager that kept it true.
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    await NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
       .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
       // Flagged emptied too, so a re-enabled pager posts its list fresh.
       .update({ ...NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'The follow-up pager was switched off', at: now, keepExisting: true, conn: db }), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
@@ -594,7 +594,7 @@ async function runInner({ now = new Date() } = {}) {
         metadata: { triggerKey: TRIGGER_KEY, missed_commitment_ids: ids },
       });
       if (!notif?.id || notif.suppressed) return;
-      await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+      await NotificationService._private.openToCloser(trx('notifications').where({ recipient_type: 'admin' }), 'followup-sla')
         .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
         .whereRaw("metadata->>'dedupeKey' <> ?", [key])
         .update(NotificationService._private.doneColumns({ by: 'followup-sla', resolution: 'Replaced by a newer missed-follow-up list', at: now, keepExisting: true, conn: trx }));

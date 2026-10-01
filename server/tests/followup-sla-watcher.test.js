@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
   // A system retire closes the row done (read is not done).
-  _private: { doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
+  _private: { openToCloser: jest.fn((q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)'))), doneColumns: jest.fn(({ by, resolution }) => ({ done_at: 'DONE_AT', done_by: by, resolution, read_at: 'DONE_AT' })) },
   // The real guard, so an in-place rewrite is judged on the text a fresh post stores.
   normalizeAdminText: (...args) => jest.requireActual('../services/notification-service').normalizeAdminText(...args),
 }));

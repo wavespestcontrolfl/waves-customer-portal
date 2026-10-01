@@ -110,6 +110,31 @@ function doneColumns({ by, resolution = null, at = new Date(), keepExisting = fa
   };
 }
 
+// The JS twin of PERSON_DONE_BY_SQL, for a `by` the caller already holds.
+const UUID_DONE_BY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isPersonDoneBy(by) {
+  const text = String(by ?? '');
+  return /^[0-9]+$/.test(text) || UUID_DONE_BY_RE.test(text) || text === 'claude';
+}
+
+// The ONE row selection every SYSTEM closer uses for its closing UPDATE (a
+// closer that spreads doneColumns with keepExisting). doneColumns makes the
+// latest closer the owner, so a system close of a row a PERSON already marked
+// Done must be able to reach that row: otherwise the person's done_by survives
+// and their stale Reopen brings an obsolete alert back. Selects rows that are
+// not done, OR done by a person (the system takes ownership exactly once: a
+// row any system component already closed is left alone, so a sweep never
+// rewrites history on each run). done_by NULL on a done row is treated as
+// not-a-person (COALESCE), so it is left alone too. A closer that is itself
+// a person's action (`by` a person: markAdminDone) keeps the plain
+// done_at IS NULL, so a second Done writes nothing. Not for PROBES that ask
+// "is there still an open bell the office could act on": those stay
+// whereNull('done_at'). Columns are unqualified, like doneColumns' own.
+function openToCloser(query, by) {
+  if (isPersonDoneBy(by)) return query.whereNull('done_at');
+  return query.where((q) => q.whereNull('done_at').orWhereRaw(`COALESCE(${PERSON_DONE_BY_SQL}, false)`));
+}
+
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
 // follow the visit's NON-primary saved property (enforced under
 // GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
@@ -1017,10 +1042,9 @@ const NotificationService = {
     if (!callLogId) return 0;
     // Both triggers share the category; the caller must name which event
     // became obsolete so voicemail and booking cannot retire each other's bell.
-    return db('notifications')
+    return openToCloser(db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
-      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
-      .whereNull('done_at')
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey]), 'supersede')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update(doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call', keepExisting: true }));
   },
@@ -1055,6 +1079,8 @@ module.exports._private = {
   excludeActivityOnlyFromBell,
   NOTIFICATION_VERSION_SQL,
   doneColumns,
+  openToCloser,
+  isPersonDoneBy,
   PERSON_DONE_BY_SQL,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,
