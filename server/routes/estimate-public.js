@@ -11526,8 +11526,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Guarded reads only, no inner try/catch: a failed statement
             // would abort the whole accept transaction regardless (waves-db
             // §5b), so the column guard above is the real protection.
+            // Locked: the call pipeline writes server-owned keys into this
+            // blob; an unlocked read could drop one written in between.
             const curRow = await trx('customers')
-              .select('service_preferences').where({ id: customerId }).first();
+              .select('service_preferences').where({ id: customerId }).forUpdate().first();
             const curRaw = typeof curRow?.service_preferences === 'string'
               ? JSON.parse(curRow.service_preferences || '{}')
               : (curRow?.service_preferences || {});

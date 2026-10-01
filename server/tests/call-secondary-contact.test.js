@@ -536,6 +536,13 @@ describe('persistCallSecondaryContact', () => {
     expect(writes.updates[0].service_preferences.binds).toEqual(['9542901693']);
   });
 
+  test('keepConsentStamp on a row with NO prior stamp (this write stamps it for the caller\'s explicit consent): the inferred phone is still held', async () => {
+    const writes = makeDb({ customer: bareCustomer });
+    expect(await persistCallSecondaryContact('cust-1', { ...buyer, role: 'spouse_partner', on_site: true, wants_notifications: false }, { smsConsentExplicit: true, onSiteAskEligible: true, keepConsentStamp: true })).toBe('written');
+    expect(writes.updates[0].service_contacts_consent_at).toBeInstanceOf(Date);
+    expect(writes.updates[0].service_preferences.sql).toContain('unconsented_slot_phone_keys');
+  });
+
   test('no explicit SMS consent on the call -> slot written WITHOUT a consent stamp (#2955 r2)', async () => {
     const writes = makeDb({ customer: bareCustomer });
     expect(await persistCallSecondaryContact('cust-1', buyer)).toBe('written');

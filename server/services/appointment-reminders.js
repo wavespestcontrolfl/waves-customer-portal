@@ -5895,35 +5895,40 @@ const CONFIRMATION_REPLAY_DEAD_STATUSES = new Set(['cancelled', 'completed', 'sk
 async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, contact, inReplyToYes = false } = {}) {
   const contactKey = String(contact.phone).replace(/\D/g, '').slice(-10);
   try {
-    const [svc, reminder, acct, apptTime] = await Promise.all([
+    const [svc, reminder = {}, acct, apptTime] = await Promise.all([
       // Only a live visit (not over, called off, under way or being rescheduled).
       db('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId })
         .whereNotIn('status', [...CONFIRMATION_REPLAY_DEAD_STATUSES])
         .first('id', 'service_type'),
       // A CANCELLED reminder row means the slot was pulled.
       db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId })
-        .first('cancelled', 'service_type'),
+        .first('cancelled', 'service_type', 'confirmation_sent'),
       db('customers').where({ id: customerId }).first(),
       // The canonical customer-promised arrival (reservation arrival: a
       // combined allocation's later member resolves to the group's arrival,
       // not its own work slot).
       scheduledServiceApptTime(scheduledServiceId, { throwOnError: true }),
     ]);
-    if (!svc || reminder?.cancelled || !(apptTime?.getTime() > Date.now())) return { sent: false, reason: 'visit_not_live' };
+    if (!svc || reminder.cancelled || !(apptTime?.getTime() > Date.now())) return { sent: false, reason: 'visit_not_live' };
+    // The visit's own confirmation is still pending (held for the send window
+    // or a move): its fan-out owns this recipient now. Wait for it; once it
+    // has gone out the dedupe below sees it and ends the replay.
+    if (reminder.confirmation_sent === false) return { sent: false, reason: 'primary_confirmation_pending' };
     // The account's confirmation choices apply to this text exactly as to the
     // primary's: confirmations off or an email-only channel = no text. An
     // unreadable prefs row throws below and retries.
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) throw new Error('prefs unavailable');
     if (!prefs.appointmentConfirmation || !prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { sent: false, reason: 'sms_not_chosen' };
-    // Revalidated at send time through the SAME resolvers every appointment
-    // text uses (the replay can run from the sweep days after the YES): the
-    // phone must still be one of the account's appointment recipients
-    // (slot membership, consent stamp, the per-phone unconsented hold) and
-    // pass the recipient opt-in filter.
-    const recipients = await require('./recipient-optin').filterRecipientsByOptin(getAppointmentContacts(acct, prefs.raw), customerId);
-    const recipient = recipients.find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
-    if (!recipient) return { sent: false, reason: 'not_a_recipient' };
+    // Revalidated at send time (the replay can run from the sweep days after
+    // the YES): the phone must still be one of the account's appointment
+    // recipients through the SAME resolver every appointment text uses (slot
+    // membership, consent stamp, the per-phone unconsented hold), and its
+    // opt-in for this customer must still be confirmed. The opt-in row is read
+    // directly so an unreadable one throws (retry), never reads as a refusal.
+    const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
+    const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
+    if (!recipient || optin?.status !== 'confirmed') return { sent: false, reason: 'not_a_recipient' };
     const priorSend = await db('sms_log')
       .where({ message_type: 'confirmation' })
       // sms_log holds the E.164 the sender normalized; the slot phone may be
@@ -5942,7 +5947,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
       firstName: firstNameFrom(recipient.name),
       // Same customer-facing label as the reminder rail: the reminder row's
       // (merged, add-on-aware) label when registered, admin suffixes stripped.
-      serviceLabel: smsServiceLabelStored(reminder?.service_type || svc.service_type),
+      serviceLabel: smsServiceLabelStored(reminder.service_type || svc.service_type),
       date: formatDate(apptTime),
       time: formatTime(apptTime),
       day: formatDay(apptTime),

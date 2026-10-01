@@ -52,7 +52,6 @@ jest.mock('../services/disclaimed-number-holds', () => ({ disclaimedNumberHeldFo
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { filterRecipientsByOptin } = require('../services/recipient-optin');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const contact = { name: 'Sample Spouse', phone: '+15550100123', role: 'spouse_partner' };
@@ -69,14 +68,16 @@ function chain(first, { rejects = false } = {}) {
     if (rejects) throw new Error('db down');
     // The status filter the caller asked for (whereNotIn) is honored.
     if (first && q.calls.whereNotIn.some((list) => list.includes(first.status))) return undefined;
-    return first;
+    // knex's .first() answers undefined (never null) for no row.
+    return first === null ? undefined : first;
   });
   return q;
 }
 let lastSmsLog = null;
-function wire({ svc = SVC, reminder = { cancelled: false, service_type: null }, dup = null, dupRejects = false, prefsRow, prefsFail = false, acct = ACCT } = {}) {
+function wire({ svc = SVC, reminder = { cancelled: false, service_type: null, confirmation_sent: true }, dup = null, dupRejects = false, prefsRow, prefsFail = false, acct = ACCT, optin = { status: 'confirmed' }, optinRejects = false } = {}) {
   db.mockImplementation((table) => {
     if (table === 'customers') return chain(acct);
+    if (table === 'recipient_optin') return chain(optin, { rejects: optinRejects });
     if (table === 'scheduled_services') return chain(svc);
     if (table === 'notification_prefs') return chain(prefsRow, { rejects: prefsFail });
     if (table === 'appointment_reminders') return chain(reminder);
@@ -152,9 +153,22 @@ describe('sendConfirmationToServiceContact', () => {
     expect(await send()).toEqual({ sent: false, reason: 'not_a_recipient' });
     wire({ acct: { ...ACCT, service_contact_phone: '+15550109999' } });
     expect(await send()).toEqual({ sent: false, reason: 'not_a_recipient' });
-    filterRecipientsByOptin.mockResolvedValueOnce([]);
-    wire();
+    wire({ optin: { status: 'declined' } });
     expect(await send()).toEqual({ sent: false, reason: 'not_a_recipient' });
+    wire({ optin: null });
+    expect(await send()).toEqual({ sent: false, reason: 'not_a_recipient' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable opt-in row retries (error), never reads as a refusal', async () => {
+    wire({ optinRejects: true });
+    expect(await send()).toEqual({ sent: false, reason: 'error' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the visit\'s own confirmation still pending (held): the replay waits for it (retryable), never sends a second copy', async () => {
+    wire({ reminder: { cancelled: false, service_type: null, confirmation_sent: false } });
+    expect(await send()).toEqual({ sent: false, reason: 'primary_confirmation_pending' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

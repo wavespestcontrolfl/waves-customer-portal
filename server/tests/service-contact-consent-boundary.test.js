@@ -59,5 +59,7 @@ describe('server-owned service_preferences keys survive customer-facing rebuilds
     const estimateRoute = fs.readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
     expect(prefsRoute).toContain("require('../utils/service-preferences-server-keys').withServerOwnedPrefs(raw, storedBase)");
     expect(estimateRoute).toContain("require('../utils/service-preferences-server-keys').withServerOwnedPrefs(curRaw, prefs)");
+    // ...reading the stored blob under a row lock, so a key written in between is never lost.
+    expect(estimateRoute).toContain(".select('service_preferences').where({ id: customerId }).forUpdate().first();");
   });
 });

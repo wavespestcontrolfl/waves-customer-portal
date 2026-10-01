@@ -3434,7 +3434,9 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     // phone goes on the account's unconsented list — held out of every text
     // resolver (customer-contact) whatever the opt-in gate does, until that
     // person's own YES (recipient-optin) takes it off.
-    ...((contact.phone && keepConsentStamp && customer.service_contacts_consent_at) ? {
+    // Whether or not the row was stamped before (this same write may stamp
+    // it for the caller's explicit consent), the inferred phone is held.
+    ...((contact.phone && keepConsentStamp) ? {
       service_preferences: db.raw(
         "jsonb_set(COALESCE(service_preferences, '{}'::jsonb), '{unconsented_slot_phone_keys}', COALESCE(service_preferences -> 'unconsented_slot_phone_keys', '[]'::jsonb) || to_jsonb(?::text))",
         [last10(contact.phone)],
