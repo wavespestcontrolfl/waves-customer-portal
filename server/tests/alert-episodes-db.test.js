@@ -1,6 +1,6 @@
 /**
  * Alert episodes (admin-alert-episodes closeAdminAlertKeys /
- * openAdminAlertKeys / raiseAdminAlertWithReopen) against live Postgres, the
+ * openAdminAlertKeys / openAdminAlertMetadata / raiseAdminAlertWithReopen) against live Postgres, the
  * SQL as the schedule-integrity watchdog runs it: a close marks the row read
  * done and auto-cleared (a row a person already read keeps its own read_at), a
  * raise on an auto-cleared row rings it again with a bumped generation, and a
@@ -215,6 +215,14 @@ maybeDescribe('alert episodes (live Postgres)', () => {
     await bell('open-c', { meta: { autoCleared: true } });
     const keys = await helpers.openAdminAlertKeys(db, `${RUN}:open-`);
     expect(keys.sort()).toEqual([key('open-a'), key('open-b')]);
+  });
+
+  test('openAdminAlertMetadata: each open row\'s metadata by prefix, skipping auto-cleared rows', async () => {
+    await bell('meta-a', { meta: { spikes: [{ laneId: 'lane-a' }] } });
+    await bell('meta-b', { meta: { autoCleared: true, spikes: [{ laneId: 'lane-b' }] } });
+    const rows = await helpers.openAdminAlertMetadata(db, `${RUN}:meta-`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dedupeKey: key('meta-a'), spikes: [{ laneId: 'lane-a' }] });
   });
 
   test('raise on an auto-cleared row re-rings it: unread again, generation 1, autoCleared false', async () => {

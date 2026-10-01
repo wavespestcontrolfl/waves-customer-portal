@@ -15,8 +15,10 @@ const mockRaise = jest.fn();
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: (...a) => mockRaise(...a) }));
 const mockOpenKeys = jest.fn();
 const mockCloseKeys = jest.fn();
+const mockOpenMeta = jest.fn();
 jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: (...a) => mockOpenKeys(...a),
+  openAdminAlertMetadata: (...a) => mockOpenMeta(...a),
   closeAdminAlertKeys: (...a) => mockCloseKeys(...a),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -32,6 +34,7 @@ beforeEach(() => {
   mockRaise.mockReset();
   mockOpenKeys.mockReset().mockResolvedValue([]);
   mockCloseKeys.mockReset().mockResolvedValue(0);
+  mockOpenMeta.mockReset().mockResolvedValue([]);
 });
 
 // A feed body with `extra` filler models so it clears MIN_FEED_ROWS.
@@ -390,6 +393,15 @@ postgres('llm cost (PostgreSQL)', () => {
     expect(res.byLane.get('sms_draft').unpricedCalls).toBe(0);
   });
 
+  test('a cache-writing call on a model with no listed write rate leaves only that call unpriced', async () => {
+    await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }])), now: NOW });
+    const at = atET('2026-09-30');
+    await app('llm_dispatch_log').insert([row({ created_at: at }), row({ created_at: at }), row({ created_at: at, cache_write_tokens: 10_000 })]);
+    const res = await llmCost.laneCosts(atET('2026-09-30', '00'), atET('2026-10-01', '00'), { conn: app });
+    expect(res.byLane.get('sms_draft').usd).toBeCloseTo(6, 9);
+    expect(res.byLane.get('sms_draft').unpricedCalls).toBe(1);
+  });
+
   test('a session turn whose total prompt reaches a tier is unpriced, not billed at the tier', async () => {
     const sol = { id: 'openai/gpt-6-sol', pricing: { prompt: '0.000002', completion: '0.000008', overrides: [{ min_prompt_tokens: 272000, prompt: '0.000004', completion: '0.000015' }] } };
     await llmCost.pullPrices({ conn: app, fetchImpl: okFetch(feed([sol])), now: NOW });
@@ -436,6 +448,24 @@ postgres('llm cost (PostgreSQL)', () => {
     const next = await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(next).toMatchObject({ ran: true, raised: false, spikes: 0 });
+    expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'spend_normal', expect.any(Object));
+  });
+
+  test('a standing spike item stays open while its lane has unpriced calls: $0 priced is not a recovery', async () => {
+    process.env.GATE_LLM_COST_TRACKING = 'true';
+    process.env.GATE_LLM_CALL_LEDGER = 'true';
+    const fetchImpl = okFetch(feed([{ id: 'anthropic/claude-sonnet-5', pricing: { prompt: '0.000003', completion: '0.000015' } }]));
+    // 10-01: the spiked lane ran only on a model the feed no longer lists
+    await app('llm_dispatch_log').insert(row({ created_at: atET('2026-10-01'), served_model: 'claude-unlisted', input_tokens: 9_000_000 }));
+    mockOpenKeys.mockResolvedValue(['llm-cost-spike:2026-09-30']);
+    mockOpenMeta.mockResolvedValue([{ dedupeKey: 'llm-cost-spike:2026-09-30', spikes: [{ laneId: 'sms_draft', usd: 12, avgUsd: 0.43 }] }]);
+    const res = await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
+    expect(res).toMatchObject({ ran: true, raised: false, reason: 'standing_lane_unpriced' });
+    expect(mockCloseKeys).not.toHaveBeenCalled();
+
+    // the same unpriced calls on a lane no standing item names do not hold the close
+    mockOpenMeta.mockResolvedValue([{ dedupeKey: 'llm-cost-spike:2026-09-30', spikes: [{ laneId: 'call_extraction', usd: 12, avgUsd: 0.43 }] }]);
+    await llmCost.runLlmCostCheck({ now: new Date('2026-10-02T11:40:00Z'), conn: app, fetchImpl });
     expect(mockCloseKeys).toHaveBeenCalledWith(app, ['llm-cost-spike:2026-09-30'], 'spend_normal', expect.any(Object));
   });
 

@@ -309,8 +309,10 @@ function laneModelRows(from, to, conn = db, { tierFloor = null } = {}) {
   ];
   const grouped = scoped();
   if (tierFloor != null) grouped.whereRaw(`${PROMPT_TOKENS_SQL} < ?`, [tierFloor]);
+  // cache-writing calls are summed apart: a model with no listed write rate
+  // leaves only them unpriced, not the whole lane × model
   grouped
-    .groupByRaw('lane_id, provider, COALESCE(served_model, requested_model)')
+    .groupByRaw('lane_id, provider, COALESCE(served_model, requested_model), COALESCE(cache_write_tokens, 0) > 0')
     .select(
       'lane_id',
       'provider',
@@ -391,6 +393,17 @@ function findSpikes(dayByLane, baselineByLane, { minUsd = alertMinUsd(), multipl
   return spikes.sort((a, b) => b.usd - a.usd);
 }
 
+// Lanes named by the standing spike items, or null when they cannot be read.
+async function standingSpikeLanes(conn) {
+  try {
+    const rows = await require('./admin-alert-episodes').openAdminAlertMetadata(conn, KEY_PREFIX);
+    return new Set(rows.flatMap((m) => (Array.isArray(m.spikes) ? m.spikes.map((s) => s.laneId) : [])));
+  } catch (err) {
+    logger.warn(`[llm-cost] standing spike items unreadable: ${err.message}`);
+    return null;
+  }
+}
+
 async function closeSpikeItems(conn, now, reason, keep = null) {
   const episodes = require('./admin-alert-episodes');
   const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => k !== keep);
@@ -433,6 +446,15 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
   if (!day.byLane.size) return { ran: true, raised: false, reason: 'no_ledger_rows', prices };
   const spikes = findSpikes(day.byLane, baseline.byLane);
   if (!spikes.length) {
+    // a lane with unpriced calls yesterday cannot be judged back to normal:
+    // keep the standing items while any of them names such a lane
+    const unjudged = [...day.byLane].filter(([, c]) => c.unpricedCalls > 0).map(([id]) => id);
+    if (unjudged.length) {
+      const standing = await standingSpikeLanes(conn);
+      if (!standing || unjudged.some((id) => standing.has(id))) {
+        return { ran: true, raised: false, spikes: 0, reason: 'standing_lane_unpriced', prices };
+      }
+    }
     await closeSpikeItems(conn, now, 'spend_normal').catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
     return { ran: true, raised: false, spikes: 0, prices };
   }
