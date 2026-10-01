@@ -191,7 +191,10 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     // the same bell unread at its next due sweep.
     await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'commitment_id' = ?", [id])
-      .whereNull('done_at').update(require('./notification-service')._private.doneColumns({
+      // openToCloser: a reminder a person already marked Done is taken over
+      // too, so the settled callback's reminder can't be reopened.
+      .modify((q) => require('./notification-service')._private.openToCloser(q, `callback:${actorId ?? 'staff'}`))
+      .update(require('./notification-service')._private.doneColumns({
         // `callback:<staff id>`, not a bare person id: the action settled the
         // callback itself, so this Done is not one Reopen may undo.
         by: `callback:${actorId ?? 'staff'}`, resolution: `Callback ${action} by staff`, at: now, keepExisting: true, conn: trx,

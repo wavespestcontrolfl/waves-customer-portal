@@ -336,7 +336,12 @@ async function retireLookupBellIfSettled(db, result, { scheduledServiceId, servi
   const failed = (message) => result.errors.push({ reason: 'bell_retire_failed', message });
   let open;
   try {
-    open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('done_at').first('id');
+    // A bell a person marked Done counts too: settling the lookup must still
+    // take it over (openToCloser), or their Reopen could bring back an
+    // obsolete manual-deduction instruction.
+    open = await require('./notification-service')._private.openToCloser(
+      db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]), 'supplies',
+    ).first('id');
   } catch (err) {
     logger.warn(`[supplies-consumption] lookup-bell probe failed for visit ${scheduledServiceId}: ${err.message}`);
     return failed(`the visit lookup bell could not be checked: ${err.message}`);
