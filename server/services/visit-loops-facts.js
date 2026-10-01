@@ -330,7 +330,9 @@ async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since
     .orderBy('rl.original_date', 'desc')
     .limit(MISSED_SCAN_MAX)
     .select('rl.scheduled_service_id', 'rl.original_date', 'rl.original_window', 'rl.new_date', 'rl.created_at as logged_at', 'ss.property_id', 'ss.scheduled_date as ss_scheduled_date', 'ss.service_type',
-      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status');
+      'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window', 'ss.status', 'ss.track_state',
+      // the same completion evidence loadUnfinishedVisit honors
+      conn.raw('EXISTS (SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = rl.scheduled_service_id) AS recorded'));
   // Newest UNRESOLVED no-show: a rebooked newer one must not hide an older open miss.
   for (const noshow of noshows || []) {
     const date = calendarDay(noshow.original_date);
@@ -343,8 +345,11 @@ async function loadOpenNoshow({ conn, customerId, deriveWindow }, { today, since
     const missedStartHms = missedWindowStart(noshow.original_window);
     const rowMoved = calendarDay(noshow.ss_scheduled_date) !== date
       || (missedStartHms != null && hhmmToMinutes(noshow.window_start) !== hhmmToMinutes(missedStartHms));
-    const movedSelf = liveOrDone.includes(noshow.status)
-      && (noshow.new_date != null || noshow.status === 'completed' || rowMoved);
+    // ...or it was performed after all: a tracker 'complete' ahead of a lagging
+    // status, or a written service record (the same evidence loadUnfinishedVisit uses)
+    const performed = noshow.track_state === 'complete' || noshow.recorded === true;
+    const movedSelf = performed || (liveOrDone.includes(noshow.status)
+      && (noshow.new_date != null || noshow.status === 'completed' || rowMoved));
     // Otherwise another visit of the same service on or after the missed day
     // (a same-day replacement counts), never the logged row itself.
     // No property on the missed row (legacy, or the property was deleted): another

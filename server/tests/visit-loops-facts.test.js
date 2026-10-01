@@ -401,6 +401,9 @@ describe('missedVisit', () => {
     expect((await run1({ ...base, ss_scheduled_date: '2026-10-03', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toBeNull();
     expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '15:00:00', status: 'confirmed' })).missedVisit).toBeNull();
     expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'completed' })).missedVisit).toBeNull();
+    // performed in the original slot after all (lagging status): tracker complete or a service record
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed', track_state: 'complete' })).missedVisit).toBeNull();
+    expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'no_show', recorded: true })).missedVisit).toBeNull();
     // still the missed occurrence, untouched: still missed
     expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'confirmed' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
     expect((await run1({ ...base, ss_scheduled_date: '2026-09-30', window_start: '09:00:00', status: 'no_show' })).missedVisit).toMatchObject({ reason: 'customer_noshow' });
