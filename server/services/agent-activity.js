@@ -596,6 +596,6 @@ async function getActivity({ windowHours, focus } = {}) {
   };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
+module.exports = { getActivity, buildActivity, legacyKindFromTitle, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
   _private: { loadDigestRows },
 };

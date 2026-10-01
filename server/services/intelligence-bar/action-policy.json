@@ -1407,6 +1407,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "needs_me": {
+    "module": "needs-me-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
     "domain": "closeout",

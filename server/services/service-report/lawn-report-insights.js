@@ -265,4 +265,14 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   return cards;
 }
 
-module.exports = { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE };
+// True when an issue card's customerAction already carries the aftercare
+// watering task, in the recorded words or the generic credited phrasing.
+// Shared by the hero action (lawn-report-v2.js) and the report lead
+// (lawn-report-lead.js) so both recognize the same restatement.
+function issueRestatesAftercare(issue, aftercareTask) {
+  return !!(issue?.customerAction
+    && (issue.customerAction.includes(aftercareTask || '\u0000')
+      || (issue.category === 'water' && issue.customerAction.includes(CREDITED_WATER_IN_PHRASE))));
+}
+
+module.exports = { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE, issueRestatesAftercare };

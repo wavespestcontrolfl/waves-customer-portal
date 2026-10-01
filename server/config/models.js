@@ -185,6 +185,11 @@ const DEFAULTS = Object.freeze({
   // only when Gemini and the Sol second opinion disagreed. Dark behind
   // GATE_LAWN_ASSESSMENT_REFEREE.
   LAWN_ASSESSMENT_REFEREE: 'claude-fable-5-1',
+  // Daily Google Ads campaign advisor (owner ruling 2026-10-01): Claude Fable
+  // 5.1 at high effort writes the daily report. requires:'deep' in
+  // MODEL_CATALOG; dispatched through services/llm/call.js, which floors
+  // max_tokens for always-thinking models and reads past thinking blocks.
+  ADS_ADVISOR: 'claude-fable-5-1',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -295,6 +300,9 @@ const PLANT_ID_REFEREE     = process.env.MODEL_PLANT_ID_REFEREE    || DEFAULTS.P
 // Lawn visit assessment name referee (owner ruling 2026-09-29) — explicit
 // opt-in via GATE_LAWN_ASSESSMENT_REFEREE, never automatic.
 const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEFAULTS.LAWN_ASSESSMENT_REFEREE;
+// Daily ads advisor (owner ruling 2026-10-01) — its own selector so the
+// advisor moves independently of FLAGSHIP / the highStakes policy.
+const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -475,6 +483,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  adsAdvisor: Object.freeze({
+    name: 'adsAdvisor',
+    // Daily Google Ads advisor (campaign-advisor.js) — owner ruling
+    // 2026-10-01: Claude Fable 5.1 at high effort, GPT (Sol) as the backup.
+    // `effort` reaches only the Anthropic leg (services/llm/call.js#dispatch).
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ADS_ADVISOR, effort: 'high' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
   fastStructured: Object.freeze({
     name: 'fastStructured',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
@@ -645,6 +661,7 @@ module.exports = {
   OPENAI_LAWN_ASSESSMENT,
   PLANT_ID_REFEREE,
   LAWN_ASSESSMENT_REFEREE,
+  ADS_ADVISOR,
   TYPESAFE_JEV,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,

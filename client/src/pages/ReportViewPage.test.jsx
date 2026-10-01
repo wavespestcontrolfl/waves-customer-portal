@@ -1321,3 +1321,24 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
   });
 
 });
+
+describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {
+  const lawn = (reportV2) => ({ serviceType: 'Lawn Care', serviceLine: 'lawn', applications: [], reportV2 });
+  const snapshot = { status: 'watch', statusHeadline: 'Stable — watching thin edges' };
+  const GENERIC = 'Service completed — we noted items to keep an eye on; details are below.';
+
+  it('does not repeat the snapshot headline the lead prints right below', () => {
+    const status = smartStatusSummary(lawn({ snapshot, lead: { headline: 'Stable — watching thin edges' } }), 'static');
+    expect(status.result).toBe(GENERIC);
+  });
+
+  it('without a lead the status card keeps the snapshot headline', () => {
+    const status = smartStatusSummary(lawn({ snapshot }), 'static');
+    expect(status.result).toBe('Stable — watching thin edges');
+  });
+
+  it('a peace-of-mind line (tree & shrub) still wins and is unchanged', () => {
+    const status = smartStatusSummary(lawn({ snapshot: { ...snapshot, peaceOfMind: 'We noted fungus — details below.' }, lead: { headline: 'x' } }), 'static');
+    expect(status.result).toBe('We noted fungus — details below.');
+  });
+});

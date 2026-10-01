@@ -306,6 +306,8 @@ const READ_ONLY = [
   // gap-report-tools.js: read-only list over agent_gap_reports (rows are
   // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
+  // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
+  'needs_me',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
