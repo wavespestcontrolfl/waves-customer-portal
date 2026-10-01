@@ -129,22 +129,23 @@
     "bands": [
       {
         "key": "small",
-        "label": "Small palm",
+        "label": "Small palm (6 to 12 ft spread)",
         "low": 5,
         "high": 10
       },
       {
         "key": "medium",
-        "label": "Medium palm",
+        "label": "Medium palm (12 to 24 ft spread)",
         "low": 10,
         "high": 20
       },
       {
         "key": "large",
-        "label": "Large palm",
+        "label": "Large palm (24 to 48 ft spread)",
         "low": 20,
         "high": 30
       }
-    ]
+    ],
+    "note": "Label: palm size is the canopy spread, measured across the fronds."
   }
 ]

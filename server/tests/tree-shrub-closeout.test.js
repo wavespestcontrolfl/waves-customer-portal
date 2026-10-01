@@ -291,8 +291,8 @@ describe('injection record against the product label', () => {
   test('a palm label band is the recorded palm size', () => {
     const PALM_JET = { id: 'pm-1', name: 'Arborjet Palm-Jet Palm Nutrition', category: 'fertilizer', default_rate: '5-30', default_unit: 'ml/palm', application_method: 'trunk_injection' };
     const band = { product: PALM_JET.name, key: 'small' };
-    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Small palm' })).toEqual([]);
-    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Large palm' })).toEqual(['tree_shrub_injection_palm_size_mismatch']);
+    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' })).toEqual([]);
+    expect(injectionCodes(PALM_JET, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['tree_shrub_injection_palm_size_mismatch']);
   });
 
   test('a per-inch label needs the trunk in inches above zero', () => {

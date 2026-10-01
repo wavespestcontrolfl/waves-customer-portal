@@ -241,7 +241,7 @@ describe('the injection record', () => {
     // The palm-size band is the record's size: no second size field.
     expect(screen.queryByPlaceholderText('DBH / palm size')).toBeNull();
     fireEvent.change(screen.getByLabelText('Palm size'), { target: { value: 'medium' } });
-    expect(record().sizeClassOrDbh).toBe('Medium palm');
+    expect(record().sizeClassOrDbh).toBe('Medium palm (12 to 24 ft spread)');
     expect(screen.getByText('Dose per palm')).toBeTruthy();
     expect(screen.getByText(injectionDoseText(PALM_RATE, '', 'medium'))).toBeTruthy();
     expect(screen.getByText('Dose you put in, per palm')).toBeTruthy();
@@ -372,8 +372,8 @@ describe('the closeout check against the product label', () => {
 
   it('needs the palm size to be the picked palm band', () => {
     const band = { product: PALM_JET.name, key: 'small' };
-    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Small palm' })).toEqual([]);
-    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Large palm' })).toEqual(['Palm size must match the picked band (Small palm).']);
+    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' })).toEqual([]);
+    expect(blocksFor(PALM_JET.name, PALM_RATE, { labelBand: band, sizeClassOrDbh: 'Large palm (24 to 48 ft spread)' })).toEqual(['Palm size must match the picked band (Small palm (6 to 12 ft spread)).']);
   });
 
   it('needs a per-inch trunk in inches above zero', () => {

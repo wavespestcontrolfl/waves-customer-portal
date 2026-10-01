@@ -237,13 +237,13 @@ describe('the record and its product', () => {
     });
     expect(recordForProduct(record, IMA_JET.name, { productAuto: true })).toEqual({ ...record, productAuto: true });
     // A palm size set by the old palm band goes with it.
-    expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm' }, '', { palmSizeFromBand: true }).sizeClassOrDbh).toBe('');
+    expect(recordForProduct({ product: PALM_JET.name, sizeClassOrDbh: 'Small palm (6 to 12 ft spread)' }, '', { palmSizeFromBand: true }).sizeClassOrDbh).toBe('');
   });
 
   it("makes a palm band the record's palm size", () => {
     const palm = injectionLabelRate(PALM_JET);
     expect(recordWithBand({ product: PALM_JET.name }, palm, 'medium')).toEqual({
-      product: PALM_JET.name, labelBand: { product: PALM_JET.name, key: 'medium' }, sizeClassOrDbh: 'Medium palm',
+      product: PALM_JET.name, labelBand: { product: PALM_JET.name, key: 'medium' }, sizeClassOrDbh: 'Medium palm (12 to 24 ft spread)',
     });
     expect(recordWithBand({ product: IMA_JET.name, sizeClassOrDbh: '10 in DBH' }, injectionLabelRate(IMA_JET), 'sap_feeders').sizeClassOrDbh).toBe('10 in DBH');
   });
@@ -277,7 +277,7 @@ describe('the stored dose and trunk size', () => {
   it('reads the trunk inches back from the stored size', () => {
     expect(trunkInchesText('10 in DBH')).toBe('10');
     expect(trunkInchesText('12.5 in DBH')).toBe('12.5');
-    expect(trunkInchesText('Large palm')).toBe('');
+    expect(trunkInchesText('Large palm (24 to 48 ft spread)')).toBe('');
     // Only inches read as inches; another unit is entered again.
     expect(trunkInchesText('10')).toBe('10');
     expect(trunkInchesText('10 in')).toBe('10');
