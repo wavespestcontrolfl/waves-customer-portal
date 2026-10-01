@@ -5859,7 +5859,8 @@ function rowStampedByTerm(term, row) {
 // One term: decide from the canonical rows whether a refresh has anything to
 // do, then run it under the paid-backing recheck. Returns 'clean' (nothing
 // unstamped), 'held' (only price-held rows are unstamped), 'skipped' (no
-// longer a paid live term) or 'restamped'.
+// longer a paid live term, or its customer row is locked by another
+// transaction — retried next run) or 'restamped'.
 // Stamp the term's existing canonical visits without seeding (attach + apply,
 // the stamping half of refreshTermSnapshot).
 async function stampTermCoverageOnly(term, t) {
@@ -5869,10 +5870,15 @@ async function stampTermCoverageOnly(term, t) {
 }
 
 async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), stampOnly = stampTermCoverageOnly) {
-  // A term whose window has ENDED still owes its stamps to unfinished in-window
-  // visits (Codex #5453 r2 P1), but it is only ever stamped, never refreshed:
-  // an activated term's refresh gap-fills the whole stored window with no
-  // today floor, which on an ended term would seed past-dated visits.
+  // A term that ever had a visit linked is only ever STAMPED, never
+  // refreshed: an activated term's refresh gap-fills the whole stored window
+  // with no today floor, so it would re-create a slot the office cancelled
+  // months ago as a pending visit dated in the past (#5453 terminal review
+  // P2). That holds for an ENDED window too (Codex #5453 r2 P1: its
+  // unfinished in-window visits still owe their stamps). Only a term whose
+  // activation never seeded anything is refreshed, so the seeder runs as a
+  // first activation (today floor).
+  let seed = false;
   const ended = !!term.term_end && term.term_end < todayKey;
   const rows = await coverageRowsForTerm(term, conn);
   const open = rows.filter((row) => row.id
@@ -5887,8 +5893,9 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
     // NO scheduled_services row, in ANY status, was ever linked to the term.
     // A term that ever carried a linked visit is never re-seeded here (the
     // office may have cancelled slots on purpose), nor is one that cannot
-    // seed yet (termite awaiting installation, renewal successors).
+    // seed yet (termite awaiting installation).
     if (ended || !(await activationNeverSeeded(term, rows, conn))) return 'clean';
+    seed = true;
   } else {
     const { held, heldIds } = await holdPriceDriftedRows(term, open, conn, { skipRow: (row) => rowPrepaidElsewhere(term, row) });
     if (!open.some((row) => !heldIds.has(String(row.id)))) {
@@ -5909,11 +5916,14 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
   //      before this point (the paid-backing recheck below then skips the
   //      term) or waits until we commit; it can never clear stamps mid-refresh
   //      and then have us stamp a cancelled term;
-  //   3. the customer row FOR UPDATE — the cancel writers take term ->
+  //   3. the customer row FOR UPDATE NOWAIT — the cancel writers take term ->
   //      customer -> scheduled_services, and the accept transaction takes
   //      customer -> scheduled_services; taking the customer before our
   //      scheduled_services writes (and before stampUnlessYearEnded's
-  //      customers UPDATE) keeps the same order as both.
+  //      customers UPDATE) keeps the same order as both. A credit reversal
+  //      (admin-invoices) takes customer -> invoice, the reverse of 1 -> 3,
+  //      so this lock never waits (#5453 terminal review P2): a busy customer
+  //      skips the term and the next hourly run retries it.
   // Inside the refresh the only further cross-transaction waits are try-locks
   // (occupancy date lock, customer-comms), so they cannot join a cycle. The
   // per-customer ANNUAL_PREPAY_LOCK_NS is NOT taken: only mint / re-price
@@ -5929,11 +5939,11 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
       .whereIn('t.status', ACTIVE_STATUSES)
       .first('t.*');
     if (!fresh) return 'skipped';
-    if (fresh.customer_id) await t('customers').where({ id: fresh.customer_id }).forUpdate().first('id');
-    if (ended) {
-      await stampOnly(fresh, t);
-    } else {
+    if (fresh.customer_id && !(await tryLockCustomerNoWait(t, fresh.customer_id))) return 'skipped';
+    if (seed) {
       await refresh(fresh, t);
+    } else {
+      await stampOnly(fresh, t);
     }
     // The activation that threw before its stamp also never reached the
     // billing-mode stamp (syncTermForInvoicePayment runs it right after the
@@ -5950,12 +5960,30 @@ async function restampOneTerm(term, conn, refresh, todayKey = etDateString(), st
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
+// FOR UPDATE NOWAIT on the customer row inside a savepoint, so a lock
+// conflict (55P03) rolls back only the savepoint and the caller's
+// transaction stays usable. false = another transaction holds it.
+async function tryLockCustomerNoWait(t, customerId) {
+  try {
+    await t.transaction((sp) => sp('customers').where({ id: customerId }).forUpdate().noWait().first('id'));
+    return true;
+  } catch (err) {
+    if (err?.code === '55P03') return false;
+    throw err;
+  }
+}
+
 // "Activation never seeded" — see restampOneTerm. `rows` is the canonical
 // coverage set already read.
 async function activationNeverSeeded(term, rows, conn) {
   const sold = normalizeCoverageVisitCount(term.coverage_visit_count);
   if (!sold || rows.length >= sold) return false;
-  if (coverageAwaitsInstallation(term) || term.renewed_from_term_id) return false;
+  // A renewal successor seeds like any first activation (its lineage scope
+  // and fixed window are handled inside ensureCoverageRowsForTerm), so a
+  // paid successor whose activation failed before seeding is recovered too
+  // (#5453 terminal review P1). Only a termite plan awaiting installation
+  // cannot seed yet.
+  if (coverageAwaitsInstallation(term)) return false;
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id) return false;
   const linked = await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id');
