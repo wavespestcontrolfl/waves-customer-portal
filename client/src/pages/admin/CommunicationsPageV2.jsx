@@ -1878,7 +1878,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         } else {
           await adminFetch(`/admin/drafts/${encodeURIComponent(loadedMessageDraft.id)}/revise`, {
             method: "PUT",
-            body: JSON.stringify({ revisedResponse: revised, fromNumber }),
+            body: JSON.stringify({ revisedResponse: revised, fromNumber, linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined }),
           });
         }
         setSendResult({ ok: true, text: "Draft sent." });

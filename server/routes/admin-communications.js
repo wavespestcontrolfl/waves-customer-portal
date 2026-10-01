@@ -318,16 +318,7 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
 }
 
 // POST /api/admin/communications/sms — send an SMS from admin
-// The visits whose links the composer put in the draft (the reschedule / appointment-page link
-// inserts carry their visit's id). The shared send step reads them so a visit that is a street-level
-// address hold blocks the text even when it became one after the link was inserted. Only
-// well-formed ids ride through; a client that omits them loses nothing the selection did not
-// already refuse (soonestUpcomingVisit never picks a held visit).
-const MAX_LINKED_VISITS = 5;
-function linkedVisitIdsFrom(raw) {
-  if (!Array.isArray(raw)) return [];
-  return [...new Set(raw.filter((v) => typeof v === 'string' && UUID_RE.test(v)).map((v) => v.toLowerCase()))].slice(0, MAX_LINKED_VISITS);
-}
+const { linkedVisitIdsFrom } = require('../services/street-level-hold');
 
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;

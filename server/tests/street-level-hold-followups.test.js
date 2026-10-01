@@ -83,6 +83,22 @@ describe('finding 5 (scheduled path): the linked visits survive the queue so the
   });
 });
 
+describe('finding 5 (draft approval): a revised draft carries its linked visits too', () => {
+  test('the composer posts linkedVisitIds on /revise and the route forwards them into the send metadata', () => {
+    const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/CommunicationsPageV2.jsx'), 'utf8');
+    expect(client).toContain('body: JSON.stringify({ revisedResponse: revised, fromNumber, linkedVisitIds: linkedVisitIds.length ? linkedVisitIds : undefined }),');
+    const route = read('../routes/admin-drafts.js');
+    expect(route).toContain("const linkedVisitIds = require('../services/street-level-hold').linkedVisitIdsFrom(req.body?.linkedVisitIds);");
+    expect(route).toContain('...(linkedVisitIds.length ? { linked_scheduled_service_ids: linkedVisitIds } : {}),');
+  });
+  test('linkedVisitIdsFrom keeps only well-formed, de-duplicated, capped ids', () => {
+    const ids = Array.from({ length: 8 }, (_, i) => `3f1c2a9e-5b7d-4e21-9c0a-1d2e3f4a5b6${i}`);
+    expect(hold.linkedVisitIdsFrom([ids[0], ids[0].toUpperCase(), 'nope', 7, null])).toEqual([ids[0]]);
+    expect(hold.linkedVisitIdsFrom(ids)).toHaveLength(5);
+    expect(hold.linkedVisitIdsFrom('x')).toEqual([]);
+  });
+});
+
 describe('finding 6: the office approval is bound to the address it was given for', () => {
   // A fake trx / conn: the visit row, the live-hold lookup, the hold card.
   const makeConn = ({ visit = { source_action: 'voice_agent', source_call_log_id: 'call-1', ...ADDRESS }, held = true, card = { id: 'card-1', status: 'open', payload: { street_level_address: true, scheduled_service_id: 'v1' } }, history = true, status = 'confirmed' } = {}) => {

@@ -307,6 +307,16 @@ async function approvedAddressStillCurrent(dbh, visitId) {
   }
 }
 
+// The visits whose links a composer draft carries (the reschedule / appointment link inserts send their
+// visit's id). Only well-formed ids ride through, de-duplicated and capped; the shared send step checks each
+// for a live street-level hold (metadata.linked_scheduled_service_ids).
+const MAX_LINKED_VISITS = 5;
+const VISIT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function linkedVisitIdsFrom(raw) {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((v) => typeof v === 'string' && VISIT_UUID_RE.test(v)).map((v) => v.toLowerCase()))].slice(0, MAX_LINKED_VISITS);
+}
+
 const HOLD_REFUSAL = 'Office must confirm the address first. This booking is waiting on an address check before it can be dispatched.';
 
 // The status routes' hold guard, serialized with promotion: take the visit row lock FOR UPDATE (the
@@ -320,4 +330,4 @@ async function assertNotLiveHoldUnderLock(trx, visitId) {
   }
 }
 
-module.exports = { visitWhenLine, recordApprovedAddressWitness, approvedAddressStillCurrent, assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, heldVisitSql, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+module.exports = { linkedVisitIdsFrom, visitWhenLine, recordApprovedAddressWitness, approvedAddressStillCurrent, assertNotLiveHoldUnderLock, HOLD_REFUSAL, assertExpectedServiceAddress, visitServiceAddressLine, refreshOwedFollowUpPlan, reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, heldVisitSql, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
