@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_KB_SPECIES_QA=true (knowledge Q&A — texting assistant, tech field Q&A, lead agent — also reads the owner-approved species catalog; customer-facing callers get customer copy only, staff also get tech notes; read at call time via kbSpeciesQaLive(), dark by default)
  *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
@@ -3717,6 +3718,15 @@ function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }
 
+// GATE_SERIES_MOVE_CARRIES_VISIT read at CALL time — strict `=== 'true'`.
+// Owner ruling 2026-10-01: a pest visit riding a lawn visit is ONE appointment;
+// when either moves, both move. Unset = a staff series move that sweeps an
+// occurrence sitting in a grouped visit is refused (VISIT_SERIES_MOVE_UNSUPPORTED),
+// byte-identical to before. Read by rebooker.js and visit-groups.js.
+function seriesMoveCarriesVisitLive() {
+  return process.env.GATE_SERIES_MOVE_CARRIES_VISIT === 'true';
+}
+
 // GATE_KB_SPECIES_QA read at CALL time (server/services/knowledge/wiki-qa.js).
 // Unset = WikiQA answers from knowledge_base alone, byte-identical to before.
 function kbSpeciesQaLive() {
@@ -4418,6 +4428,9 @@ module.exports.pafPrepayLive = pafPrepayLive;
 module.exports.pafTermiteLive = pafTermiteLive;
 module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914
+// GATE_SERIES_MOVE_CARRIES_VISIT reader, on its own line mid-block (not the
+// shared list, not the file's last line) so other gate PRs never conflict.
+module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 // GATE_REPORT_WRITER_RULES reader, exported at the end of the file (after the
 // shared list) so gate PRs adding lines above never touch this one.
 module.exports.reportWriterRulesLive = reportWriterRulesLive;

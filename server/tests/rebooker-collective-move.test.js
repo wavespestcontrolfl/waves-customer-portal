@@ -1598,4 +1598,19 @@ describe('caller wiring (source)', () => {
     expect(commit).toBeGreaterThan(destructure);
     expect(commit).toBeLessThan(notice);
   });
+
+  test('carried visit partners are covered by the series notice: synced, closed and re-armed with the occurrences; the text quotes the stop start', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const effects = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(effects).toContain('const reminderOccurrences = [...occurrences, ...carriedPartners];');
+    // Recorded time, the sync loop, and the close / re-arm scope all read the
+    // combined list — a partner left out of any of them keeps a reminder the
+    // series notice already covered, or loses one it did not.
+    expect(effects).toContain('const recordedReminderTimeById = new Map(reminderOccurrences.map(');
+    expect(effects).toContain('for (const occurrence of reminderOccurrences) {');
+    expect(effects).toContain('const ownedOccurrences = () => reminderOccurrences.filter(');
+    expect(effects).toContain('const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart');
+    // Partners are not follow-ups (synced notify-off, never closed).
+    expect(read('../services/rebooker.js')).not.toMatch(/\.\.\.carriedMembers\.map\(/);
+  });
 });

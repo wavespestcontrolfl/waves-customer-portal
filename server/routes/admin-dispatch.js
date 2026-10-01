@@ -4395,6 +4395,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // but they are never texted, closed or re-armed here — nothing covers
   // them but the reminder cron (codex r19 P1).
   const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];
+  // Grouped-visit partners the move carried (GATE_SERIES_MOVE_CARRIES_VISIT)
+  // are the same appointment as their occurrence: the series notice covers
+  // them, so their reminders sync, close and re-arm exactly like the
+  // occurrences' (owned on the time THIS move recorded). They are never
+  // counted, conflicted or quoted by the text, and Quick Move's anchor-only
+  // close scope leaves them out like any sibling.
+  const carriedPartners = (Array.isArray(result.carriedVisitMembers) ? result.carriedVisitMembers : [])
+    .map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
+  const reminderOccurrences = [...occurrences, ...carriedPartners];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
   // the CURRENT lease can stamp or release.
@@ -4521,7 +4530,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // closed under the series notice nor re-armed here — closing would
     // silence the newer schedule's reminders, re-arming would clear flags
     // the newer move owns and duplicate its texts (codex r8 P1).
-    const recordedReminderTimeById = new Map(occurrences.map((occurrence) => [
+    const recordedReminderTimeById = new Map(reminderOccurrences.map((occurrence) => [
       String(occurrence.id),
       parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })).getTime(),
     ]));
@@ -4550,10 +4559,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // flags — either way a reminder for a window nobody set (hook r20 P1).
     // The sync itself still runs for them (handleReschedule keeps the
     // marker carve-out); only the close and the re-arm skip them.
-    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
+    const ownedOccurrences = () => reminderOccurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
       && occurrence.conflicted !== true && !!occurrence.windowStart);
     if (remindersThisPass) {
-      for (const occurrence of occurrences) {
+      for (const occurrence of reminderOccurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on
         // the slot THIS move recorded — a replayed/retried pass whose
         // occurrence was rescheduled again in between must not drag its
@@ -4609,7 +4618,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // the flush here.
       const ownsFlush = !qualityDates;
       const seriesQualityDates = qualityDates || new Set();
-      for (const occurrence of [...occurrences, ...followUps]) {
+      for (const occurrence of [...reminderOccurrences, ...followUps]) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
         } catch (err) {
@@ -4745,7 +4754,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // The anchor's landing window (the caller's, or its own kept window on
         // a date-only move) — window_text quotes the 2-hour arrival promise
         // from that start, never the job-duration block (see sms-time-format).
-        const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
+        // A grouped anchor quotes its STOP's landed start (the earliest member,
+        // recorded by the move as visitWindowStart) — the unit mover's rule
+        // (visitMove.visitStart, codex #3609 r25 P1).
+        const startForText = anchorOcc?.visitWindowStart || anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
         // Persist the promised arrival instant the same way the single-visit

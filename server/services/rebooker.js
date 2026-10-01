@@ -293,6 +293,21 @@ function collectiveMoveGateOn() {
   return process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true';
 }
 
+// GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01: a pest visit riding
+// a lawn visit is ONE appointment — when either moves, both move). When true
+// for this caller, a series sweep that reaches an occurrence sitting in a
+// grouped visit carries every live partner row to the new stop INSIDE the
+// sweep's own transaction (carryVisitPartners in rescheduleSeries) instead of
+// refusing with VISIT_SERIES_MOVE_UNSUPPORTED. STAFF only: a customer-facing
+// initiator (customer_self_serve, customer_sms, …) and automatic nudges keep
+// today's refusal, as does an explicit single-row member move.
+function seriesCarriesVisitFor(initiatedBy, options = {}) {
+  if (options.visitPolicy === 'single') return false;
+  const by = String(initiatedBy || '');
+  if (/^customer/i.test(by) || by === 'auto_dispatch') return false;
+  return require('../config/feature-gates').seriesMoveCarriesVisitLive();
+}
+
 function dateOnly(v) {
   if (v == null || v === '') return null;
   return String(v instanceof Date ? v.toISOString() : v).slice(0, 10);
@@ -576,7 +591,9 @@ function replaySeriesMoveResult(prior, requestedDate) {
     ? prior.result
     : (() => {
       const rows = Array.isArray(prior.rows) ? prior.rows : [];
-      const rescheduledOccurrences = rows.map((r) => ({
+      // Carried visit partners (partner: true) are another series' rows — the
+      // cadence occurrence list never names them.
+      const rescheduledOccurrences = rows.filter((r) => !r.partner).map((r) => ({
         id: r.id,
         date: r.after?.scheduled_date ?? null,
         windowStart: r.after?.window_start ?? null,
@@ -1205,7 +1222,11 @@ class SmartRebooker {
     let soloVisitRecheck = false;
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
-        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
+        // Carry gate (staff only): the unit mover declines the implicit
+        // widening it would refuse, and the choke point below re-enters the
+        // series writer, which carries the visit's partners itself.
+        options: seriesCarriesVisitFor(initiatedBy, options) ? { ...options, seriesCarriesVisit: true } : options,
       });
       if (unit) return unit;
       // The caller's DISCLOSURE decision assumed a grouped visit (dispatch
@@ -2077,12 +2098,16 @@ class SmartRebooker {
     // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
     // until the series_moves-backed visit operation ships; an ungrouped or
     // single-member visit proceeds as a series.
+    const carriesVisit = seriesCarriesVisitFor(initiatedBy, options);
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
         // The caller asked for a SERIES move explicitly: the primary re-enters
         // rescheduleSeries regardless of the collective choke-point gate.
-        options: { ...options, primaryViaSeries: true },
+        // seriesCarriesVisit (GATE_SERIES_MOVE_CARRIES_VISIT, staff): the
+        // unit mover keeps its frozen / completion-claim refusals but
+        // declines the grouped-anchor refusal — the sweep below carries it.
+        options: { ...options, primaryViaSeries: true, ...(carriesVisit ? { seriesCarriesVisit: true } : {}) },
       });
       if (unit) return unit;
     }
@@ -2242,6 +2267,10 @@ class SmartRebooker {
     let committedResult = null;
     let skippedCount = 0;
     const moveRows = [];
+    // Grouped-visit partners this move carried to the new stop
+    // (GATE_SERIES_MOVE_CARRIES_VISIT) — recorded on the operation row and
+    // synced by the effects pass like the call follow-ups.
+    const carriedMembers = [];
     // Source/destination days of the call-booked follow-ups this move
     // shifted — outside the cadence set, and outside this trx's scope.
     const seriesFollowUpDates = [];
@@ -2441,6 +2470,54 @@ class SmartRebooker {
         .slice(startIdx)
         .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
         .map((s) => s.id);
+      // GATE_SERIES_MOVE_CARRIES_VISIT: the live partners of every swept
+      // occurrence's grouped visit (other rows of the same visit_id that this
+      // sweep does not move). Read UNLOCKED here only to learn the tech-days
+      // and stop keys the locks below must cover, and again under the locks
+      // (fingerprinted) — the same read → lock → re-read idiom as the sweep.
+      // Gate off / customer caller: nothing is read and nothing below runs.
+      const carry = { byVisit: new Map(), partnerIds: [], lockedKeys: new Set() };
+      const CARRY_PARTNER_COLUMNS = [
+        'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'visit_id',
+        'property_id', 'customer_id', 'is_recurring', 'estimated_duration_minutes', 'service_type',
+        'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
+        'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
+        'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+        'track_sms_sent_at', 'arrival_sms_sent_at', 'recurring_parent_id', 'customer_confirmed', 'reservation_expires_at',
+      ];
+      const readCarryPartners = async (rows) => {
+        const sweptSet = new Set(sweptIds.map(String));
+        const visitIds = [...new Set(rows
+          .filter((x) => sweptSet.has(String(x.id)) && x.visit_id)
+          .map((x) => String(x.visit_id)))];
+        if (!visitIds.length) return new Map();
+        const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+        const partners = await trx('scheduled_services')
+          .whereIn('visit_id', visitIds)
+          .whereNotIn('id', sweptIds)
+          .whereNotIn('status', TERMINAL_ROW_STATUSES)
+          .orderBy('id')
+          .select(...CARRY_PARTNER_COLUMNS);
+        const byVisit = new Map();
+        for (const partner of partners) {
+          const key = String(partner.visit_id);
+          if (!byVisit.has(key)) byVisit.set(key, []);
+          byVisit.get(key).push(partner);
+        }
+        return byVisit;
+      };
+      const carryFingerprint = (byVisit) => [...byVisit.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([vid, rows]) => `${vid}:${rows.map((r) => [
+          String(r.id), r.status, dateOnly(r.scheduled_date), hhmm(r.window_start) || '', hhmm(r.window_end) || '',
+          String(r.technician_id || ''), String(r.property_id || ''),
+        ].join('|')).join(',')}`).join(';');
+      const carryPartners0 = carriesVisit ? await readCarryPartners(siblings) : new Map();
+      // Rows moved together with the sweep: probes must not count their old
+      // slots (same-day window shifts) as occupancy. Same array as sweptIds
+      // when nothing is carried, so a non-carrying move is untouched.
+      let probeExcludeIds = sweptIds;
+
       // Travel gap (GATE_SLOT_TRAVEL_GAP): one pin for the whole sweep —
       // siblings of a series share the anchor's property.
       // Customer-facing series moves only (see reschedule()); undefined →
@@ -2523,6 +2600,19 @@ class SmartRebooker {
                 // Unassigned work is a fixed capacity blocker for every route.
                 { techId: null, date: projectOccurrenceDate(i - startIdx, sib) },
               );
+              // Carried visit partners land on the occurrence's date: fence
+              // their source and destination holders too, before any row lock.
+              for (const partner of carryPartners0.get(String(sib.visit_id || '')) || []) {
+                const dest = projectOccurrenceDate(i - startIdx, sib);
+                const partnerTech = String(sib.id) === String(serviceId)
+                  && Object.prototype.hasOwnProperty.call(options, 'technicianId')
+                  ? options.technicianId : partner.technician_id;
+                techDays.push(
+                  { techId: partner.technician_id, date: dateOnly(partner.scheduled_date) },
+                  { techId: partnerTech, date: dest },
+                  { techId: null, date: dest },
+                );
+              }
             }
             await lockTechDays(trx, techDays);
           }
@@ -2542,9 +2632,18 @@ class SmartRebooker {
           if (options.visitPolicy !== 'single' && sweptIds.length) {
             const vg = require('./visit-groups');
             const sweptSet = new Set(sweptIds.map(String));
-            const keys = [...new Set(siblings
+            const keyList = siblings
               .filter((x) => sweptSet.has(String(x.id)))
-              .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
+              .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date }));
+            // A carried visit is re-keyed to its new stop: BOTH stop locks, in
+            // one sorted acquisition (the unit mover's retarget order).
+            for (let i = startIdx; i < siblings.length; i++) {
+              const r = siblings[i];
+              if (!sweptSet.has(String(r.id)) || !carryPartners0.has(String(r.visit_id || ''))) continue;
+              keyList.push(vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: projectOccurrenceDate(i - startIdx, r) }));
+            }
+            const keys = [...new Set(keyList)].sort();
+            keys.forEach((k) => carry.lockedKeys.add(k));
             for (const vgKey of keys) {
               // Ordinary series moves own stop before maintenance. Reviewed
               // moves already own maintenance, so waiting here would invert
@@ -2599,6 +2698,18 @@ class SmartRebooker {
             });
           }
           siblings = locked;
+          // The carried visit partners, re-read under the same locks: a
+          // partner added, removed, moved or reassigned while the sweep
+          // waited needs new fences — abort retryably, never move a stale
+          // picture of the visit.
+          const carryPartnersLocked = carriesVisit ? await readCarryPartners(siblings) : new Map();
+          if (carryFingerprint(carryPartnersLocked) !== carryFingerprint(carryPartners0)) {
+            throw Object.assign(new Error('Cannot reschedule — a grouped service on this plan changed concurrently; reload and try again'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SERIES_CHANGED',
+            });
+          }
           if (deferFuturePlacement) {
             const future = siblings.filter((row) => String(row.id) !== String(serviceId));
             let freeze;
@@ -2653,7 +2764,7 @@ class SmartRebooker {
               );
               const grouped = Number(liveRes?.rows?.[0]?.n || 0) >= 2;
               const preserveCommitment = deferFuturePlacement && String(siblings[droppedIdx]?.visit_id) !== vid;
-              if (grouped && !preserveCommitment) {
+              if (grouped && !preserveCommitment && !carriesVisit) {
                 throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
               }
               // A frozen lone-member visit is just as unmovable by the
@@ -2666,11 +2777,41 @@ class SmartRebooker {
               if (verdict.frozen && !preserveCommitment) {
                 throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
               }
+              if (carriesVisit && grouped) {
+                // The visit moves WITH this occurrence (owner ruling
+                // 2026-10-01). Frozen visits were refused above; what is left
+                // to verify is that every partner can ride: movable status
+                // (the unit mover's own rule), still at this stop, and not a
+                // second swept row of the same visit (one visit, one stop —
+                // two occurrences of one series cannot share it).
+                const occ = siblings.find((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
+                const sweptInVisit = siblings.filter((x) => sweptSet.has(String(x.id)) && String(x.visit_id) === vid);
+                const partners = carryPartnersLocked.get(vid) || [];
+                if (sweptInVisit.length > 1 || !partners.length) {
+                  throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+                }
+                const { UNIT_MOVE_STATUSES, UNIT_MOVE_LIVE_STATUSES } = vg;
+                for (const partner of partners) {
+                  const movable = UNIT_MOVE_STATUSES.has(String(partner.status))
+                    || (options.allowLive === true && UNIT_MOVE_LIVE_STATUSES.has(String(partner.status)));
+                  if (!movable) {
+                    throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${partner.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: partner.id, isOperational: true });
+                  }
+                  if (dateOnly(partner.scheduled_date) !== dateOnly(occ.scheduled_date)
+                    || String(partner.property_id || '') !== String(occ.property_id || '')) {
+                    throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: partner.id, isOperational: true });
+                  }
+                }
+                const visitRow = await trx('service_visits').where({ id: vid }).first();
+                carry.byVisit.set(vid, { visit: visitRow, partners, occurrenceId: String(occ.id) });
+                carry.partnerIds.push(...partners.map((x) => String(x.id)));
+              }
             }
           }
           for (let i = sweptIds.length - 1; i >= 0; i--) {
             if (preservedFutureIds.has(String(sweptIds[i]))) sweptIds.splice(i, 1);
           }
+          if (carry.partnerIds.length) probeExcludeIds = [...sweptIds, ...carry.partnerIds];
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
           // The acknowledged set: a surface confirmed exactly the previewed
@@ -2789,7 +2930,7 @@ class SmartRebooker {
               date,
               windowStart: disclosed.to_start,
               windowEnd: occupancyProbeEnd(disclosed.to_start, disclosed.to_end, row.estimated_duration_minutes),
-              excludeServiceIds: sweptIds,
+              excludeServiceIds: probeExcludeIds,
               excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
               travel: seriesTravel,
             });
@@ -2834,7 +2975,7 @@ class SmartRebooker {
                 technician_id: technicianId || null,
               },
             },
-            excludeServiceIds: sweptIds,
+            excludeServiceIds: probeExcludeIds,
             options,
             travel: seriesTravel,
           });
@@ -2857,6 +2998,195 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
         });
       }
+      // GATE_SERIES_MOVE_CARRIES_VISIT — carry one occurrence's grouped-visit
+      // partners to the occurrence's NEW stop, inside THIS transaction (so a
+      // member can never commit while its partner did not), then re-key the
+      // visit under the stop locks already held for the old and new keys.
+      // Every partner write mirrors what this sweep does for its own rows and
+      // reuses the same helpers: save-time tech eligibility, the slot-reserve
+      // lock, the shared occupancy probe (advisory on staff surfaces, the
+      // beyond-horizon placeholder rule otherwise), the lifecycle rewind, the
+      // route_order clear, the dispatch-due rebase, the one-off date
+      // exception stamp (dateExceptionStamp — the partner series' cadence
+      // anchors stay put) and a CAS pinned to the row as it was read. The
+      // partner's window follows the unit mover's own planner
+      // (planMemberTargets: shifted by the anchor's start delta, otherwise
+      // kept). No message is sent here: the series notice, decided once for
+      // the whole move, covers the visit; the effects pass handles the
+      // partner's reminder row like an occurrence's (carriedVisitMembers).
+      const carryVisitPartners = async (sib, date, updateData, { isAnchor, anchorTechChanges, sibRewound }) => {
+        const entry = carry.byVisit.get(String(sib.visit_id || ''));
+        if (!entry) return;
+        const vg = require('./visit-groups');
+        const dateStr = String(date).split('T')[0];
+        // Window: only a start that actually moved shifts the partners (by
+        // the anchor's own delta); a date-only landing keeps each partner's
+        // window. A windowless landing (cleared anchor / parked sibling)
+        // keeps them too — a windowless row connects to any stop.
+        const startMoved = !!updateData.window_start && hhmm(updateData.window_start) !== hhmm(sib.window_start);
+        const planned = vg.planMemberTargets({
+          members: [sib, ...entry.partners],
+          primary: sib,
+          visitWindowStart: entry.visit ? entry.visit.window_start : null,
+          win: startMoved ? { start: updateData.window_start, end: updateData.window_end } : { start: null, end: null },
+          newDateStr: dateStr,
+        });
+        const techOverride = isAnchor && anchorTechChanges ? (options.technicianId || null) : undefined;
+        let anyLivePartner = false;
+        let dateChanged = dateOnly(entry.visit ? entry.visit.scheduled_date : sib.scheduled_date) !== dateStr;
+        for (const partner of entry.partners) {
+          const target = planned.find((t) => String(t.id) === String(partner.id));
+          const partnerDateChanges = dateOnly(partner.scheduled_date) !== dateStr;
+          const techChanges = techOverride !== undefined && (techOverride || null) !== (partner.technician_id || null);
+          const windowChanges = !!target && target.shifted
+            && (hhmm(target.start) !== hhmm(partner.window_start) || hhmm(target.end) !== hhmm(partner.window_end));
+          if (!partnerDateChanges && !windowChanges && !techChanges) continue;
+          const liveStatus = LIVE_OVERRIDE_STATUSES.has(partner.status);
+          anyLivePartner = anyLivePartner || liveStatus;
+          const partnerRewound = liveStatus || (partnerDateChanges && needsLifecycleRewind(partner));
+          const keptTech = techOverride !== undefined ? techOverride : (partner.technician_id || null);
+          const pUpdate = {
+            scheduled_date: date,
+            window_start: target && target.shifted ? target.start : partner.window_start,
+            window_end: target && target.shifted ? target.end : partner.window_end,
+            // Like a swept sibling, a partner keeps its own status — only a
+            // live row that is rewound lands back on 'confirmed'.
+            status: liveStatus ? 'confirmed' : partner.status,
+            updated_at: trx.fn.now(),
+            ...(partnerRewound ? LIVE_LIFECYCLE_RESET : {}),
+            ...(partnerDateChanges ? { route_order: null, ...dateExceptionStamp(partner, initiatedBy) } : {}),
+            ...(techOverride !== undefined ? { technician_id: techOverride } : {}),
+          };
+          if (techChanges) pUpdate.route_order = null;
+          if (partnerDateChanges || techChanges) await assertAssignableSlotTechnician(keptTech, trx, dateStr);
+          if (keptTech) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['slot-reserve', `${keptTech}:${dateStr}`],
+            );
+          }
+          pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
+          if (pUpdate.window_start) {
+            const occEnd = occupancyProbeEnd(
+              pUpdate.window_start,
+              pUpdate.window_end,
+              process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : partner.estimated_duration_minutes,
+            );
+            const clash = (await probeMoveConflicts({
+              conn: trx,
+              target: {
+                id: partner.id,
+                date: dateStr,
+                windowStart: pUpdate.window_start,
+                windowEnd: occEnd,
+                technicianId: keptTech,
+                changes: pUpdate,
+              },
+              excludeServiceIds: probeExcludeIds,
+              options,
+              travel: seriesTravel,
+            })).rows;
+            if (clash.length) {
+              if (clash[0].warning) arrivalWarnings.set(dateStr, clash[0].warning);
+              if (overlapAdvisory) {
+                // Same advisory contract as a swept row: the clash commits and
+                // rides the operation's overlapDates card.
+                overlapWarnDates.add(dateStr);
+              } else {
+                // Non-advisory callers abort the whole move (all-or-none), as
+                // a clash on a swept row does. (A partner is never parked
+                // windowless: the beyond-horizon placeholder carve-out is a
+                // series-cadence rule, and a partner is another plan's row.)
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'SLOT_TAKEN',
+                  memberId: partner.id,
+                });
+              }
+            }
+          }
+          const awaitingPlacement = !pUpdate.window_start && !!partner.recurring_dispatch_due_date;
+          Object.assign(pUpdate, recurringDispatchDuePatch(partner, pUpdate));
+          if (awaitingPlacement) {
+            pUpdate.time_window = null;
+            pUpdate.window_display = null;
+            pUpdate.route_order = null;
+          }
+          const updatedPartner = await applyTrackLifecycleCas(
+            trx('scheduled_services').where({
+              id: partner.id,
+              status: partner.status,
+              scheduled_date: partner.scheduled_date,
+              window_start: partner.window_start,
+              window_end: partner.window_end ?? null,
+              technician_id: partner.technician_id ?? null,
+              visit_id: partner.visit_id,
+              ...((!pUpdate.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+                ? { estimated_duration_minutes: partner.estimated_duration_minutes ?? null }
+                : {}),
+            }),
+            partner,
+          ).update(pUpdate, SERIES_MOVE_SNAPSHOT_COLUMNS);
+          const updatedPartnerRows = Array.isArray(updatedPartner) ? updatedPartner : null;
+          if ((updatedPartnerRows ? updatedPartnerRows.length : updatedPartner) === 0) {
+            throw Object.assign(new Error('Cannot reschedule — a grouped appointment changed concurrently'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+              memberId: partner.id,
+            });
+          }
+          if (awaitingPlacement && partner.window_start) {
+            await require('./appointment-reminders').precloseWindowlessReminderInTx(trx, partner.id);
+          }
+          if (pUpdate.status !== partner.status) {
+            await trx('job_status_history').insert({
+              job_id: partner.id,
+              from_status: partner.status,
+              to_status: pUpdate.status,
+              transitioned_by: null,
+            });
+          }
+          if (partnerRewound) rewoundSiblings.push({ ...partner, customer_id: service.customer_id });
+          moveRows.push({
+            id: partner.id,
+            anchor: false,
+            // A visit partner carried by another series' move — never counted
+            // as this series' cadence, exception or movable rows.
+            partner: true,
+            visitId: String(sib.visit_id),
+            forOccurrenceId: String(sib.id),
+            exception: false,
+            before: snapshotRow(partner),
+            after: snapshotRow({ ...partner, ...pUpdate, ...(updatedPartnerRows?.[0] || {}) }),
+          });
+          carriedMembers.push({
+            id: partner.id,
+            visitId: String(sib.visit_id),
+            forOccurrenceId: String(sib.id),
+            date,
+            windowStart: pUpdate.window_start || null,
+            windowEnd: pUpdate.window_end || null,
+          });
+        }
+        // Re-key the visit to the new stop from the rows as written: date, the
+        // window union of its live members, stop key + seq (both stop locks
+        // are held), the anchor's technician when this move reassigned it, and
+        // a tracker-lifecycle reset when anything went back to the start of a
+        // day. Same patch as moveVisitAsUnit's step 3.
+        const retargeted = await vg.retargetVisitStopInTx(trx, {
+          visitId: String(sib.visit_id),
+          newDateStr: dateStr,
+          ...(techOverride !== undefined ? { technicianId: techOverride } : {}),
+          resetLifecycle: sibRewound || anyLivePartner || dateChanged,
+          lockedKeys: carry.lockedKeys,
+        });
+        // The stop's landed start (the earliest live member) — the series
+        // notice quotes it, not the occurrence's own start, as the unit
+        // mover's notice quotes visitMove.visitStart.
+        return { visitWindowStart: retargeted.windowStart };
+      };
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
@@ -3038,7 +3368,9 @@ class SmartRebooker {
             const overlap = useArrivalWindows ? null : await trx('scheduled_services')
               .where('scheduled_date', date)
               .where('technician_id', options.technicianId)
-              .whereNot('id', sib.id)
+              // Carried visit partners move with the anchor: their old slot is
+              // not a clash for it (the plain whereNot when nothing is carried).
+              [carry.partnerIds.length ? 'whereNotIn' : 'whereNot']('id', carry.partnerIds.length ? [sib.id, ...carry.partnerIds] : sib.id)
               .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
               .where((q) => {
                 q.whereNull('reservation_expires_at')
@@ -3084,7 +3416,7 @@ class SmartRebooker {
                 ? updateData.technician_id : sib.technician_id,
               changes: updateData,
             },
-            excludeServiceIds: sweptIds,
+            excludeServiceIds: probeExcludeIds,
             options,
             travel: seriesTravel,
           })).rows;
@@ -3172,7 +3504,7 @@ class SmartRebooker {
               technicianId: sib.technician_id,
               changes: updateData,
             },
-            excludeServiceIds: sweptIds,
+            excludeServiceIds: probeExcludeIds,
             options,
             travel: seriesTravel,
           })).rows;
@@ -3329,11 +3661,16 @@ class SmartRebooker {
           before: snapshotRow(sib),
           after: snapshotRow({ ...sib, ...updateData, ...(updatedRows?.[0] || {}) }),
         });
+        // Grouped-visit partners ride this occurrence (GATE_SERIES_MOVE_CARRIES_VISIT).
+        const carried = carry.byVisit.size
+          ? await carryVisitPartners(sib, date, updateData, { isAnchor, anchorTechChanges, sibRewound })
+          : null;
         touched.push({
           id: sib.id,
           date,
           windowStart: sibClashBeyondHorizon ? null : occurrenceWindow.start,
           windowEnd: sibClashBeyondHorizon ? null : occurrenceWindow.end,
+          ...(carried?.visitWindowStart ? { visitWindowStart: carried.visitWindowStart } : {}),
           // True only for a BEYOND-horizon occurrence whose projected window
           // held a seeded placeholder — committed at its cadence date
           // WINDOWLESS (see above); near-term clashes and real-booking
@@ -3376,6 +3713,10 @@ class SmartRebooker {
       // Shifted call follow-ups ride the operation so the durable effects
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
+      // Grouped-visit partners carried with an occurrence do NOT ride this
+      // list: the series notice covers their visit, so the effects pass
+      // syncs, closes and re-arms their reminders with the occurrences
+      // (result.carriedVisitMembers).
       const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
       seriesFollowUpDates.push(...(followUpReport.shifted || []).flatMap((k) => [k.previousDate, k.date]));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
@@ -3426,6 +3767,7 @@ class SmartRebooker {
         overlapDates: [...overlapWarnDates].sort(),
         arrivalWindowDates: [...arrivalWarnings.keys()].sort(),
         followUpOccurrences,
+        ...(carriedMembers.length ? { carriedVisitMembers: carriedMembers } : {}),
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
         rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],

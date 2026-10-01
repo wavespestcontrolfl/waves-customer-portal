@@ -10737,7 +10737,10 @@ async function planCollectiveEditDateMove(req) {
   if (row.visit_id) {
     const vg = require('../services/visit-groups');
     const members = await vg.openMembers(db, row.visit_id);
-    if (members.length >= 2) {
+    // GATE_SERIES_MOVE_CARRIES_VISIT (owner ruling 2026-10-01): the series
+    // writer carries the grouped partners with each occurrence, so a grouped
+    // anchor no longer refuses here. The frozen-visit refusal below stays.
+    if (members.length >= 2 && !require('../config/feature-gates').seriesMoveCarriesVisitLive()) {
       throw Object.assign(
         httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
         { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
