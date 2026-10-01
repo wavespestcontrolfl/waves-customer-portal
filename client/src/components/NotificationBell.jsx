@@ -181,9 +181,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [page, setPage] = useState(1);
-  // Rows marked done since the first page loaded: the next page's offset
-  // moves back by this many (Done takes a row out of the server's pages).
-  const [doneRemoved, setDoneRemoved] = useState(0);
+  // The server's keyset cursor for the next page: rows can leave the feed
+  // between requests (Done, an auto-close), so paging never uses offsets.
+  const [nextCursor, setNextCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreFailed, setMoreFailed] = useState(false);
@@ -410,7 +410,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
       setPage(1);
-      setDoneRemoved(0);
+      setNextCursor(d.next || null);
       setHasMore(type === 'admin' && d.hasMore === true);
     } catch {
       if (seq !== loadSeqRef.current) return;
@@ -424,7 +424,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setLoadingMore(true);
     setMoreFailed(false);
     try {
-      const d = await requestJson(`${basePath}?limit=30&page=${page + 1}&removed=${doneRemoved}`);
+      const d = await requestJson(`${basePath}?limit=30&page=${page + 1}${nextCursor ? `&before=${encodeURIComponent(nextCursor)}` : ''}`);
       if (seq !== loadSeqRef.current) return;
       // New alerts can shift offset pages between requests. Keep each row
       // once while preserving the read state already confirmed in this panel.
@@ -433,6 +433,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
         return [...current, ...(d.notifications || []).filter(n => !ids.has(n.id))];
       });
       setPage(page + 1);
+      setNextCursor(d.next || null);
       setHasMore(d.hasMore === true);
     } catch {
       if (seq !== loadSeqRef.current) return;
@@ -491,7 +492,6 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       await requestJson(`${basePath}/${n.id}/done`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.filter(x => x.id !== n.id));
-    setDoneRemoved(prev => prev + 1);
     if (!n.read_at) setUnreadCount(prev => Math.max(0, prev - 1));
     fetchCount();
   };

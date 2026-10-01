@@ -836,13 +836,14 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
     }
   });
 
-  it('Load more after a Done asks for the next page moved back by the rows marked done', async () => {
+  it('Load more continues from the server cursor, not an offset, so rows done meanwhile skip nothing', async () => {
     const recent = Array.from({ length: 30 }, (_, i) => ({ ...NOTIFICATIONS[0], id: `recent-${i}`, title: `Recent alert ${i}`, read_at: new Date().toISOString() }));
+    const cursor = '2026-09-30T11:31:00.000Z~00000000-0000-4000-8000-000000000029';
     global.fetch = vi.fn(async (url, options) => {
       if (String(url).includes('/unread-count')) return jsonResponse({ count: 0 });
       if (options?.method === 'PUT') return jsonResponse({ success: true, updated: true });
-      if (String(url).includes('page=2')) return jsonResponse({ notifications: [], hasMore: false });
-      return jsonResponse({ notifications: recent, hasMore: true });
+      if (String(url).includes('page=2')) return jsonResponse({ notifications: [], hasMore: false, next: null });
+      return jsonResponse({ notifications: recent, hasMore: true, next: cursor });
     });
     render(<NotificationBell type="admin" />);
     fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
@@ -850,7 +851,7 @@ describe('NotificationBell admin "Done" (docs/admin-notifications.md section 4.3
     fireEvent.click(firstDone);
     await waitFor(() => expect(screen.queryByText('Recent alert 0')).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
-    await waitFor(() => expect(global.fetch.mock.calls.some(([url]) => /page=2&removed=1\b/.test(String(url)))).toBe(true));
+    await waitFor(() => expect(global.fetch.mock.calls.some(([url]) => String(url).includes(`page=2&before=${encodeURIComponent(cursor)}`))).toBe(true));
   });
 
   it('keeps the row when the server refuses the done write', async () => {

@@ -95,6 +95,22 @@ function notificationIssueLimit(value) {
   return Math.min(Math.max(parseInt(value, 10) || 50, 1), 200);
 }
 
+// Keyset cursor for the bell list: "<created_at to the millisecond>~<id>".
+// The feed is ordered by the same millisecond-truncated created_at, so a
+// cursor built from a serialized (millisecond) timestamp sits exactly in it.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function formatCursor(row) {
+  const at = new Date(row.created_at);
+  return Number.isNaN(at.getTime()) ? null : `${at.toISOString()}~${row.id}`;
+}
+function parseCursor(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  const [at, id] = raw.split('~');
+  const date = new Date(at);
+  if (!id || !UUID_RE.test(id) || Number.isNaN(date.getTime())) return null;
+  return { at: date.toISOString(), id };
+}
+
 // GET /api/admin/notifications — list with pagination.
 // Live dashboard alerts are merged in front of the persisted feed on
 // page 1 only; subsequent pages serve persisted notifications without
@@ -105,12 +121,14 @@ router.get('/', async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
-    // removed: rows this panel marked done since its first page. Done drops
-    // a row out of the offset-paged feed, so the next page starts that many
-    // rows earlier or it would skip the rows that moved up.
-    const removed = Math.max(parseInt(req.query.removed, 10) || 0, 0);
-    const offset = Math.max((page - 1) * limit - removed, 0);
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole });
+    // before: the `next` cursor a previous page returned. Rows leave the
+    // feed between requests (Done here, another admin's Done, an auto-close),
+    // so an offset would skip the rows that moved up; the cursor continues
+    // strictly after the last row served. page stays for callers without one.
+    const before = parseCursor(req.query.before);
+    if (req.query.before && !before) return res.status(400).json({ error: 'Invalid cursor' });
+    const offset = before ? 0 : (page - 1) * limit;
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, before });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -122,7 +140,12 @@ router.get('/', async (req, res, next) => {
     // Page availability follows persisted rows before overlay deduplication:
     // a page containing only live-alert duplicates must still allow paging.
     const dedupedPersisted = persisted.slice(0, limit).filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
-    res.json({ notifications: [...(page === 1 ? liveCtx.live : []), ...dedupedPersisted], page, limit, hasMore: persisted.length > limit });
+    const lastServed = persisted.slice(0, limit).at(-1);
+    res.json({
+      notifications: [...(page === 1 && !before ? liveCtx.live : []), ...dedupedPersisted],
+      page, limit, hasMore: persisted.length > limit,
+      next: persisted.length > limit && lastServed ? formatCursor(lastServed) : null,
+    });
   } catch (err) { next(err); }
 });
 

@@ -57,7 +57,7 @@ const bellPolicy = require('../services/notification-bell-policy');
 function chainMock(result) {
   const chain = {};
   const methods = [
-    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy',
+    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy', 'orderByRaw',
     'limit', 'offset', 'select', 'first', 'insert', 'update',
     'count', 'returning', 'onConflict', 'merge',
   ];

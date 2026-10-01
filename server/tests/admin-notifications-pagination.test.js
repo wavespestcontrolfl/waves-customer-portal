@@ -22,12 +22,25 @@ jest.mock('../models/db', () => () => {
     whereNull(key) { rows = rows.filter(r => r[key] == null); return q; },
     // The one raw predicate the bell list adds: Activity-only rows
     // (metadata.feed = 'activity') never reach the bell.
-    whereRaw(sql) {
+    whereRaw(sql, bindings) {
+      // The keyset cursor: (created_at to the ms, id) strictly after it.
+      if (/date_trunc\('milliseconds', created_at\), id\) </.test(sql)) {
+        const [at, id] = bindings;
+        const atMs = Date.parse(at);
+        rows = rows.filter(r => Date.parse(r.created_at) < atMs || (Date.parse(r.created_at) === atMs && r.id < id));
+        return q;
+      }
       if (!/metadata->>'feed'/.test(sql)) throw new Error(`unexpected whereRaw: ${sql}`);
       rows = rows.filter(r => r.metadata?.feed !== 'activity');
       return q;
     },
     orderBy(key, direction) { sorts.push([key, direction]); return q; },
+    // The feed order: created_at to the millisecond, then id, both DESC.
+    orderByRaw(sql) {
+      if (!/date_trunc\('milliseconds', created_at\) DESC, id DESC/.test(sql)) throw new Error(`unexpected orderByRaw: ${sql}`);
+      sorts.push(['created_at', 'desc'], ['id', 'desc']);
+      return q;
+    },
     limit(n) { limit = n; return q; },
     offset(n) { offset = n; return q; },
     then(resolve, reject) {
@@ -113,21 +126,49 @@ test('a done row leaves the list: read is not done', async () => {
   expect(ids).toContain('older-refreshed');
 });
 
-test('Load more after a Done: removed moves the next page back, so the row that moved up is not skipped', async () => {
-  mockRows.push({ id: 'older-two', recipient_type: 'admin', created_at: '2026-08-01T12:00:00Z', read_at: null });
-  const first = await list({ limit: '30' });
-  // The panel marks one first-page row done: it leaves the server's pages.
-  mockRows.find(r => r.id === first.notifications[0].id).done_at = '2026-09-30T12:00:00Z';
-  const skipped = (await list({ limit: '30', page: '2' })).notifications.map(n => n.id);
-  expect(skipped).not.toContain('older-refreshed'); // the bug the counter fixes
-  const second = (await list({ limit: '30', page: '2', removed: '1' })).notifications.map(n => n.id);
-  expect(second).toEqual(['older-refreshed', 'older-two']);
-});
+describe('keyset cursor', () => {
+  const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  beforeEach(() => {
+    // 35 open rows, newest first by created_at; uuid ids so a cursor parses.
+    mockRows = Array.from({ length: 35 }, (_, i) => ({
+      id: uuid(i), recipient_type: 'admin', read_at: null,
+      created_at: new Date(Date.UTC(2026, 8, 30, 12, 0, 0) - i * 60000).toISOString(),
+    }));
+  });
 
-test('removed never pushes the offset below zero', async () => {
-  const plain = await list({ limit: '30', page: '1' });
-  const result = await list({ limit: '30', page: '1', removed: '5' });
-  expect(result.notifications.map(n => n.id)).toEqual(plain.notifications.map(n => n.id));
+  test('rows closed elsewhere between pages (an auto-close, another admin) never make Load more skip an open row', async () => {
+    const first = await list({ limit: '30' });
+    expect(first.notifications).toHaveLength(30);
+    expect(first.next).toBe(`${mockRows[29].created_at}~${uuid(29)}`);
+    // Five first-page rows go done before the next request.
+    for (const i of [0, 3, 7, 11, 20]) mockRows[i].done_at = '2026-09-30T13:00:00Z';
+    const offsetPage = (await list({ limit: '30', page: '2' })).notifications.map(n => n.id);
+    expect(offsetPage).not.toContain(uuid(30)); // why offsets are not enough
+    const second = await list({ limit: '30', page: '2', before: first.next });
+    expect(second.notifications.map(n => n.id)).toEqual([30, 31, 32, 33, 34].map(uuid));
+    expect(second).toMatchObject({ hasMore: false, next: null });
+  });
+
+  test('a cursor page never repeats the live overlay', async () => {
+    liveAlertNotifications.mockResolvedValue({ live: [{ id: 'live:audit-alert' }], liveKeys: new Set() });
+    const first = await list({ limit: '30' });
+    const second = await list({ limit: '30', page: '2', before: first.next });
+    expect(second.notifications.map(n => n.id)).not.toContain('live:audit-alert');
+  });
+
+  test('rows in the same millisecond page by id, none skipped', async () => {
+    for (const r of mockRows) r.created_at = '2026-09-30T12:00:00.123Z';
+    const first = await list({ limit: '30' });
+    const second = await list({ limit: '30', page: '2', before: first.next });
+    const all = [...first.notifications, ...second.notifications].map(n => n.id);
+    expect(new Set(all).size).toBe(35);
+  });
+
+  test('a malformed cursor is a 400, not a silent first page', async () => {
+    const res = { json: jest.fn(), status: jest.fn(() => res) };
+    await handler({ query: { limit: '30', before: 'not-a-cursor' }, techRole: 'admin' }, res, (err) => { throw err; });
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
 });
 
 describe('PUT /:id/done and /:id/reopen', () => {

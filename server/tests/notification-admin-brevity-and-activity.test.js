@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
         return b;
       },
       orderBy() { return b; },
+      orderByRaw() { return b; },
       limit() { return b; },
       offset(n) { return (mockRows[table] || []).filter((r) => conds.every((c) => c(r))).slice(n || 0); },
       first: async () => (mockRows[table] || []).find((r) => conds.every((c) => c(r))) || null,

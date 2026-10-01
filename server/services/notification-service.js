@@ -777,13 +777,17 @@ const NotificationService = {
   },
 
   // Get notifications for admin
-  async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
-    return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
+  // before ({ at, id }): keyset cursor — rows strictly after it in feed
+  // order, which is created_at to the millisecond (what a cursor can carry
+  // through JSON) then id, so the cursor and the ORDER BY always agree.
+  async getAdminNotifications(limit = 50, offset = 0, { role, before = null } = {}) {
+    const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
-    ))
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
+    ));
+    if (before) query.whereRaw("(date_trunc('milliseconds', created_at), id) < (?::timestamptz, ?::uuid)", [before.at, before.id]);
+    return query
+      .orderByRaw("date_trunc('milliseconds', created_at) DESC, id DESC")
       .limit(limit).offset(offset);
   },
 

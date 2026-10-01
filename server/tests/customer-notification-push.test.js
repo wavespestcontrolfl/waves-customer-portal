@@ -344,7 +344,7 @@ describe('customer notification native push dispatch', () => {
 describe('admin feed role scoping (adminRoleOnly triggers)', () => {
   function adminFeedQuery({ rows = [], count = '2', updated = 1 } = {}) {
     const q = {};
-    for (const m of ['whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'limit']) {
+    for (const m of ['whereNull', 'orWhereRaw', 'whereRaw', 'orderBy', 'orderByRaw', 'limit']) {
       q[m] = jest.fn(() => q);
     }
     q.where = jest.fn((arg) => {
