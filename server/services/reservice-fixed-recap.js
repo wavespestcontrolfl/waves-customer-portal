@@ -226,7 +226,9 @@ function customerTextOutcome({ honored, status, body, error, channel, deliveryUn
   // A provider handoff with an unknown result (completionSmsDeliveryUnverifiedAt
   // kept beside 'failed'): the text may have arrived, so the tech must not
   // read it as not sent and text the customer again by hand.
-  if (status === 'failed' && deliveryUnverified) {
+  // Any status with the fence still set (a 'failed' unknown outcome, or a
+  // 'sending' left by a run that died after the handoff) may have delivered.
+  if (deliveryUnverified) {
     return {
       sent: false, unverified: true, ...via, body: body || null,
       reason: "it may have gone out, but delivery wasn't confirmed. The office will check, so don't send another",

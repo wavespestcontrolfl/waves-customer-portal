@@ -465,3 +465,9 @@ describe('review fixes (#5363 r6)', () => {
     expect(reserviceFixedRecapHonored({ ...on, visitOutcome })).toBe(true);
   });
 });
+
+describe('pre-push fix (#5363 r7)', () => {
+  test('a resumed visit still fenced at sending reads as unconfirmed, not "nothing was sent"', () => {
+    expect(customerTextOutcome({ honored: true, status: 'sending', body: 'X', deliveryUnverified: true })).toMatchObject({ sent: false, unverified: true, body: 'X' });
+  });
+});
