@@ -1766,15 +1766,19 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
+  // Literal table names on every WRITER (insert / merge / update): the
+  // status-integrity scan in tests/annual-prepay-term-states.test.js fails
+  // closed on a mutation chain behind a dynamic table expression. Reads
+  // keep the constants.
   const write = async (conn) => {
-    await conn(BATCHES).insert({
+    await conn('rate_review_batches').insert({
       batch_key: batchKey, window_from: from, window_to: to,
       allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
       book_lines: book.length, computed_at: computedAt, updated_at: computedAt,
     }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at']);
     await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
     if (rows.length) {
-      await conn(SNAPSHOTS).insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
+      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
     }
   };
   if (trx) await write(trx); else await db.transaction(write);
@@ -1935,7 +1939,8 @@ async function alreadyEmailed(dbh, batchKey) {
 }
 
 async function stampEmailed(dbh, batchKey, subject) {
-  await dbh(BATCHES).where({ batch_key: batchKey }).update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
+  // literal table name — see the writer note in buildBatch
+  await dbh('rate_review_batches').where({ batch_key: batchKey }).update({ email_sent_at: new Date(), email_subject: subject, updated_at: new Date() });
 }
 
 async function sendBatchEmail({ batchKey, dbh = db, mailer = null }) {
