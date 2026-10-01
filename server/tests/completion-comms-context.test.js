@@ -318,8 +318,12 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(9.95), direction: 'inbound', message_body: 'blue lets her through the side gate where ants are' },
           // The pests getting through is pest talk, not access.
           { created_at: mk(10), direction: 'inbound', message_body: 'Ants use the hole that gets them through the wall' },
-          // An idiom in one clause, an entry point in another: no access detail.
+          // "Gets me through" counts only when a gate or door is what it gets
+          // you through.
           { created_at: mk(10.1), direction: 'inbound', message_body: 'Coffee gets me through the day, but ants are coming in under the back door' },
+          // A fronted or pronoun-linked access point still drops the sentence.
+          { created_at: mk(10.2), direction: 'inbound', message_body: 'For the side gate, use blue where the ants are' },
+          { created_at: mk(10.3), direction: 'inbound', message_body: 'The side gate is on the left and blue opens it near the ant mounds' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],

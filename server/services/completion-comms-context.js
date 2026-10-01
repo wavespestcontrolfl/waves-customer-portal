@@ -320,12 +320,12 @@ const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pas
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
 const ACCESS_POINT_RE = /\b(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?)\b/i;
-const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|using|enter|entering|type|typing|punch(?:ing)?|press(?:ing)?|dial|key\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|through|past)|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+)?access)\b/i;
-// The access point and the access use must share a clause: "coffee gets me
-// through the day, but ants are under the back door" is no access detail.
-const ACCESS_CLAUSE_SPLIT_RE = /[,;:]|\s(?:but|and|so|while|because)\s/i;
+const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|using|enter|entering|type|typing|punch(?:ing)?|press(?:ing)?|dial|key\s+in|(?:gets?|lets?)\s+(?:me|us|you|him|her)\s+(?:in|through|past)\s+(?:[\w-]+\s+){0,3}?(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?)|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+)?access)\b/i;
+// Judged on the whole sentence, never per clause: a fronted or pronoun-linked
+// access point ("For the side gate, use blue…", "The side gate is on the left
+// and blue opens it") must still drop it.
 const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
-  || sentence.split(ACCESS_CLAUSE_SPLIT_RE).some((clause) => ACCESS_POINT_RE.test(clause) && ACCESS_USE_RE.test(clause));
+  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence));
 // And a sentence reaches the writer only when it talks about pests or the
 // signs they leave: scheduling, thanks, a bare reply, and any other way of
 // phrasing an access detail ("blue works at the side gate") never do.
