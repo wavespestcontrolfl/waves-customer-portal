@@ -316,6 +316,16 @@ describe('scheduleNoticeRows — monthly and prepaid lanes', () => {
     out = await scheduleBook(prepayBook({ status: 'cancelled' }));
     expect(out.held.map((h) => h.reason)).toEqual(['prepay_term_not_found']);
   });
+  test('annual_prepay: a term renewing before the review date (the anniversary occurrence) waits for the next review', async () => {
+    // anniversary 2025-12-05 → review date 2026-12-05; a term ending 2026-11-25 renews 2026-11-26, before it
+    const out = await scheduleBook(prepayBook({ term_start: '2025-11-26', term_end: '2026-11-25' }), { plannedSendDate: '2026-10-20', now: new Date('2026-10-20T14:00:00Z') });
+    expect(out.held.map((h) => [h.reason, h.detail])).toEqual([['renewal_before_review_date', { renewalDay: '2026-11-26', floor: '2026-12-05' }]]);
+    expect(notices()).toHaveLength(0);
+    // a renewal on or after the review date is fine (floor met), given the 30-day rule
+    const ok = await scheduleBook(prepayBook({ term_start: '2025-12-05', term_end: '2026-12-04' }), { plannedSendDate: '2026-11-02' });
+    expect(ok.created).toBe(1);
+    expect(notices()[0].effective_date).toBe('2026-12-05');
+  });
   test('annual_prepay: two live terms that could carry the line hold rather than guess', async () => {
     const book = prepayBook();
     book.annual_prepay_terms.push({ ...book.annual_prepay_terms[0], id: TERM(2), coverage_service_type: 'Pest' });

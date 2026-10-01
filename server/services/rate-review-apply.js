@@ -150,6 +150,7 @@ const HOLD_COPY = Object.freeze({
   prepay_term_not_found: 'No live prepaid term for this plan was found, so the renewal amount was not recorded.',
   prepay_term_ambiguous: 'More than one live prepaid term could carry this plan, so the renewal amount was not recorded.',
   renewal_too_soon: 'The prepaid term renews too soon for a 30-day notice, so it is left for the next review.',
+  renewal_before_review_date: 'The prepaid term renews before this review date, so it is left for the next review.',
   renewal_notice_already_sent: 'The renewal reminder already went out for this term, so its amount stays as noticed.',
   term_not_live: 'The prepaid term is no longer live, so the renewal amount was not recorded.',
   termite_program: 'Termite programs renew under their own agreement and are never repriced here.',
@@ -390,6 +391,10 @@ function effectiveDateFor(lane, { floor, visits = [], billingDay = 1, term = nul
     // before term_end): at least MIN_NOTICE_DAYS + 1 days before the
     // successor starts = on or before term_end − 30.
     if (daysBetweenYmd(plannedSend, renewalDay) < MIN_NOTICE_DAYS + 1) throw hold('renewal_too_soon', { renewalDay });
+    // The same floors every lane honours: a term that renews before the
+    // line's review date (its anniversary occurrence in the batch window)
+    // is not this review's to reprice — it waits for the next one.
+    if (renewalDay < floor) throw hold('renewal_before_review_date', { renewalDay, floor });
     if (termRenewalNoticed(term)) throw hold('renewal_notice_already_sent', { termId: term.id });
     return { effectiveDate: renewalDay, firstVisitId: null };
   }
