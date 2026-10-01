@@ -231,7 +231,8 @@ jest.setTimeout(60000);
     // Closed, neither won nor lost: never converted, funnel row untouched.
     expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'handled', converted_at: null });
     expect(await database('ad_service_attribution').where({ lead_id: out.leadId })).toHaveLength(0);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // One notification identity: the in-run retry reuses the persistent dedupe key (codex #5477 r5), a no-op in notifyAdmin.
+    expect(new Set(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey))).toEqual(new Set([`preferred-time-auto-close:${out.leadId}:${visit[0].id}`]));
     expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ link: `/admin/leads?lead=${out.leadId}`, dedupeKey: `preferred-time-auto-close:${out.leadId}:${visit[0].id}` });
     expect(triggerNotification).not.toHaveBeenCalled();
   });
@@ -546,22 +547,32 @@ jest.setTimeout(60000);
     describe('the close FYI is retryable from the persisted audit rows (codex #5477 r4 P2)', () => {
       // The admin alert helper dedupes on a persistent key; emulate that here (one delivered row per key).
       let delivered;
-      let failNext;
+      let failTimes;
       beforeEach(() => {
         delivered = new Set();
-        failNext = false;
+        failTimes = 0;
         mockNotifyAdmin.mockImplementation(async (_c, _t, _w, opts) => {
           if (delivered.has(opts.dedupeKey)) return { deduped: true };
-          if (failNext) { failNext = false; throw new Error('bell down'); }
+          if (failTimes > 0) { failTimes -= 1; throw new Error('bell down'); }
           delivered.add(opts.dedupeKey);
           return { id: 'n' };
         });
       });
       afterEach(() => { mockNotifyAdmin.mockImplementation(async () => ({ id: 'n-1' })); });
 
-      test('the FYI fails after the status commit, then the replay finds the lead already handled and still delivers it: exactly one FYI', async () => {
+      test('the FYI fails right after the status commit: the same run retries it (codex #5477 r5): exactly one FYI', async () => {
         const { cust, booking } = await setupRequestAndBooking();
-        failNext = true;
+        failTimes = 1;
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(1);
+        expect(delivered.size).toBe(1);
+        expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(0); // replay: nothing new
+        expect(delivered.size).toBe(1);
+        expect(new Set(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey)).size).toBe(1);
+      });
+
+      test('the FYI fails on every attempt of the first run, then the replay finds the lead already handled and still delivers it: exactly one FYI', async () => {
+        const { cust, booking } = await setupRequestAndBooking();
+        failTimes = 2;
         expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(1);
         expect(delivered.size).toBe(0);
         expect((await closeBookedPreferredLeads(database, { customerId: cust, booking })).closed).toBe(0); // replay: nothing left to close
@@ -580,8 +591,9 @@ jest.setTimeout(60000);
 
       test('a request staff reopened is not announced again by a retry', async () => {
         const { cust, req, booking } = await setupRequestAndBooking();
-        failNext = true;
+        failTimes = 2; // the close and its in-run retry both fail
         await closeBookedPreferredLeads(database, { customerId: cust, booking });
+        expect(delivered.size).toBe(0);
         await database('leads').where({ id: req.leadId }).update({ status: 'new' });
         await closeBookedPreferredLeads(database, { customerId: cust, booking });
         expect(delivered.size).toBe(0);
@@ -694,12 +706,14 @@ jest.setTimeout(60000);
     await database('leads').where({ id: first.leadId }).update({ status: 'new' });
     expect((await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).closed).toBe(1);
     expect(await closeRows()).toHaveLength(1);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const fyiKeys = () => new Set(mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey));
+    expect(fyiKeys().size).toBe(1);
+    const callsBeforeReplay = mockNotifyAdmin.mock.calls.length;
     // staff reopen it and the same booking replays: the audit row for this visit stands, nothing closes twice, no second FYI
     await database('leads').where({ id: first.leadId }).update({ status: 'new' });
     expect(await closeBookedPreferredLeads(database, { customerId: cust, booking: sba[0] })).toMatchObject({ live: true, closed: 0 });
     expect(await closeRows()).toHaveLength(1);
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin.mock.calls.length).toBe(callsBeforeReplay); // a reopened request is not re-announced
     expect(await database('leads').where({ id: first.leadId }).first()).toMatchObject({ status: 'new' });
   });
 

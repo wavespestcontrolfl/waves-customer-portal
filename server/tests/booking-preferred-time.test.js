@@ -18,6 +18,7 @@ let mockOpenLeads = [];        // what an awaited leads select() resolves to
 let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = staff closed it since the lookup)
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
+let mockVisitDiesBeforeLock = false; // the visit is live on the first read, cancelled by the locked re-read
 let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (the live-status lookup finds nothing)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 const mockRaws = [];            // whereRaw calls (query-shape asserts)
@@ -62,6 +63,7 @@ function builder(table) {
         : table === 'leads' ? (b._forUpdate ? mockLockedLead : mockExistingLead)
         : table === 'customers' ? mockCustomer
           : table === 'self_booked_appointments as sba' ? mockBookedSince
+            : table === 'scheduled_services' && mockVisitDiesBeforeLock && b._forUpdate ? { status: 'cancelled', is_callback: false }
             : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
             : table === 'scheduled_services' && mockScheduledService ? mockScheduledService
             : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id, service_type: 'Pest Control', scheduled_date: '2026-10-08' }
@@ -146,6 +148,7 @@ const {
   validatePreferredTimeRequest,
   recordPreferredTimeRequest,
   hasRecentPreferredTimeRequest,
+  estimateIdWithOpenPreferredLead,
 } = require('../services/booking-preferred-time');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -207,6 +210,7 @@ beforeEach(() => {
   mockBookedList = null;
   mockScheduledService = null;
   mockDeadVisit = false;
+  mockVisitDiesBeforeLock = false;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
   mockMarkConverted.mockResolvedValue(true);
@@ -903,10 +907,27 @@ describe('a completed booking closes the customer\'s open preferred-time request
     expect(mockNotifyAdmin.mock.calls[0][2]).toBe('Pat Sample booked Lawn Care for Thu, Oct 8; the time request closed on its own.');
   });
 
-  test('a request this very call closed is notified once, not again by the retry', async () => {
+  test('a request this very call closed is retried under the SAME persistent dedupe key (codex #5477 r5): one notification identity, so the repeat is a no-op in notifyAdmin', async () => {
     mockAuditRows = [{ lead_id: 'lead-1', metadata: { visit_id: 'visit-7' }, first_name: 'Pat', last_name: 'Sample' }];
     await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking });
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const keys = mockNotifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+    expect(keys.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(keys)).toEqual(new Set(['preferred-time-auto-close:lead-1:visit-7']));
+  });
+
+  test('a fresh close whose FYI failed is healed by the same run (codex #5477 r5): the retry is not skipped for leads this call just closed', async () => {
+    mockNotifyAdmin.mockRejectedValueOnce(new Error('bell down'));
+    mockAuditRows = [{ lead_id: 'lead-1', metadata: { visit_id: 'visit-7', booking_id: 'sba-1' }, first_name: 'Pat', last_name: 'Sample' }];
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 1 });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
+    expect(mockNotifyAdmin.mock.calls[1][3]).toMatchObject({ dedupeKey: 'preferred-time-auto-close:lead-1:visit-7' });
+  });
+
+  test('a visit cancelled between the first read and the close is re-checked under its row lock (codex #5477 r5): nothing closed', async () => {
+    mockVisitDiesBeforeLock = true;
+    expect(await closeBookedPreferredLeads(mockDb, { customerId: 'cust-1', booking })).toMatchObject({ live: true, closed: 0 });
+    expect(closeWrites()).toHaveLength(0);
+    expect(activities()).toHaveLength(0);
   });
 
   test('the ONLY notification is one admin FYI (Leads area, 60/110 limits, link to the lead, already_done), deduped per (lead, visit)', async () => {
@@ -1026,10 +1047,19 @@ describe('a completed booking closes the customer\'s open preferred-time request
     const replayEnd = src.indexOf('const { booking, serviceRow } = txResult;');
     expect(replayStart).toBeGreaterThan(-1);
     const replaySrc = src.slice(replayStart, replayEnd);
-    expect(replaySrc).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing, convertedLeadIds: replayConvertedLeadIds \}\);/);
+    expect(replaySrc).toMatch(/if \(!callbackVisit\) \{[\s\S]*?await closeBookedPreferredLeads\(db, \{ customerId: custId, booking: txResult\.existing, convertedLeadIds: replayConvertedLeadIds \}\);/);
+    // codex #5477 r5: a request staff worked into the booking's VERIFIED estimate converts as won through the
+    // estimate tier, on both paths, BEFORE the close (so the close finds it no longer open).
+    expect(replaySrc).toMatch(/verifyPreferredHandoff\(pricing_estimate_id, estimate_token\)\s*\?\s*await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id\)/);
+    expect(replaySrc).toMatch(/estimateId: replayPreferredEstimateId,/);
+    expect(replaySrc.indexOf('estimateId: replayPreferredEstimateId')).toBeLessThan(replaySrc.indexOf('await closeBookedPreferredLeads('));
     const normal = src.slice(replayEnd);
     // both conversions carry the booking id: the lineage is persisted on the won lead AT the conversion
     expect(normal).toMatch(/bookingId: booking\?\.id \|\| null,/);
+    expect(normal).toMatch(/preferredEstimateId = await estimateIdWithOpenPreferredLead\(db, pricing_estimate_id\);/);
+    expect(normal).toMatch(/if \(followUpRows\.length > 0 \|\| leadTrigger \|\| preferredEstimateId\)/);
+    expect(normal).toMatch(/\.\.\.\(preferredEstimateId \? \{ estimateId: preferredEstimateId \} : \{\}\),/);
+    expect(normal.indexOf('estimateId: preferredEstimateId')).toBeLessThan(normal.indexOf('await closeBookedPreferredLeads('));
     expect(replaySrc).toMatch(/bookingId: txResult\.existing\.id,/);
     expect(normal).toMatch(/if \(!callbackVisit\) \{\s*await closeBookedPreferredLeads\(db, \{ customerId: custId, booking, convertedLeadIds \}\);/);
     // The request's funnel row is dropped by whichever closer runs SECOND: the normal path after attributeSelfBooking
@@ -1057,5 +1087,26 @@ describe('recordPreferredTimeRequest (service)', () => {
     const out = await recordPreferredTimeRequest(mockDb, v, { notify: false });
     expect(out).toEqual({ created: true, leadId: 'lead-1' });
     expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('estimateIdWithOpenPreferredLead (codex #5477 r5: a request worked into the booked estimate is a sale, not handled)', () => {
+  test('answers the estimate id only when an open, live preferred-time request carries it', async () => {
+    const calls = [];
+    const fakeDb = (row) => jest.fn((table) => {
+      const b = {
+        where: (w) => { calls.push({ table, where: w }); return b; },
+        whereNull: () => b,
+        whereIn: () => b,
+        first: async () => row,
+      };
+      return b;
+    });
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ id: 'lead-9' }), 'est-1')).toBe('est-1');
+    expect(calls[0]).toEqual({ table: 'leads', where: { estimate_id: 'est-1', lead_type: 'book_preferred_time' } });
+    expect(await estimateIdWithOpenPreferredLead(fakeDb(undefined), 'est-1')).toBeNull();
+    expect(await estimateIdWithOpenPreferredLead(fakeDb({ id: 'x' }), null)).toBeNull();
+    const throwing = jest.fn(() => { throw new Error('db down'); });
+    expect(await estimateIdWithOpenPreferredLead(throwing, 'est-1')).toBeNull();
   });
 });

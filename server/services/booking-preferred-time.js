@@ -491,10 +491,9 @@ async function notifyRequestClosed({ lead, customerName, service, day, visitId }
  * rows (the lookup the funnel cleanup uses). The send is deduped by its
  * persistent key (preferred-time-auto-close:<lead>:<visit>, an advisory-locked
  * lookup on notifications.metadata->>'dedupeKey'), so a retry never rings twice.
- * `skipIds`: the leads this very call just closed and already notified.
  * Best-effort; never throws into the booking.
  */
-async function resendCloseNotices(db, { booking, skipIds = [] }) {
+async function resendCloseNotices(db, { booking }) {
   try {
     const audits = (await db('lead_activities as a')
       .join('leads as l', 'l.id', 'a.lead_id')
@@ -503,9 +502,7 @@ async function resendCloseNotices(db, { booking, skipIds = [] }) {
       .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
       .where('l.status', CLOSED_STATUS)
       .select('a.lead_id', 'a.metadata', 'l.first_name', 'l.last_name')) || [];
-    const skip = new Set(skipIds.map(String));
     for (const row of audits) {
-      if (skip.has(String(row.lead_id))) continue;
       let meta = row.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       const visitId = meta && meta.visit_id;
@@ -572,7 +569,6 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
     const service = clean(visit.service_type, 120) || 'a service';
     const day = visit.scheduled_date ? formatDay(dateOnlyString(visit.scheduled_date)) : 'the scheduled day';
     let closed = 0;
-    const closedNow = [];
     for (const lead of open) {
       // Per-(lead, visit) advisory lock: the booking's own post-commit path and
       // the submit's reconcile can both arrive for the same visit.
@@ -583,6 +579,12 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
           .whereRaw("metadata->>'reason' = ? AND metadata->>'visit_id' = ?", [CLOSE_REASON, String(visit.id)])
           .first('id');
         if (seen) return null;
+        // The visit read above is a point-in-time check (codex #5477 r5): it may
+        // have been cancelled, skipped or rescheduled since. Lock and re-read it
+        // here so a request never closes on a booking that no longer holds a
+        // live, non-callback visit.
+        const liveVisit = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('status', 'is_callback');
+        if (!liveVisit || liveVisit.is_callback || DEAD_VISIT_STATUSES.includes(liveVisit.status)) return null;
         // Re-read the lead under a row lock (codex #5399 r14): staff may have
         // reassigned its phone, linked it to another customer or closed it since
         // the open-lead query above, and the customer may have refreshed the
@@ -625,12 +627,13 @@ async function closeBookedPreferredLeads(db, { customerId, booking = null, conve
       });
       if (!result) continue;
       closed += 1;
-      closedNow.push(lead.id);
       await notifyRequestClosed({ lead, customerName: result.name, service, day, visitId: visit.id });
     }
-    // Requests THIS booking closed on an earlier run (or whose FYI failed): the
-    // deduped FYI is retried here, so the normal, replay and reconcile closers all heal it.
-    await resendCloseNotices(db, { booking, skipIds: closedNow });
+    // Every request THIS booking closed (just now, or on an earlier run), including one
+    // whose FYI above failed and was swallowed: the FYI is re-sent here. The persistent
+    // dedupe key makes the repeat for one that did go out a no-op, so the normal, replay
+    // and reconcile closers all heal a lost FYI.
+    await resendCloseNotices(db, { booking });
     return { live: true, closed };
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking close failed for customer=${customerId}: ${err.message}`);
@@ -728,8 +731,35 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
   }
 }
 
+/**
+ * A request staff worked into an estimate is a real sale when the customer
+ * books from that estimate (codex #5477 r5): it must convert as WON through the
+ * estimate tier, not close as 'handled'. Returns the estimate id when the
+ * booking's VERIFIED handoff estimate carries an open preferred-time lead
+ * (leads.estimate_id), else null. The caller verifies the handoff token; this
+ * only answers whether the estimate tier has a request to convert, so a booking
+ * with no such request keeps main's conversion behavior byte for byte.
+ * Best-effort; a failed read answers null.
+ */
+async function estimateIdWithOpenPreferredLead(db, estimateId) {
+  if (!estimateId) return null;
+  try {
+    const row = await db('leads')
+      .where({ estimate_id: estimateId, lead_type: LEAD_TYPE })
+      .whereNull('deleted_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .first('id');
+    return row ? estimateId : null;
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] estimate-linked request lookup failed for estimate=${estimateId}: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   closeBookedPreferredLeads,
+  estimateIdWithOpenPreferredLead,
   dropSupersededPreferredFunnelRows,
   reconcileBookingSince,
   LEAD_TYPE,
