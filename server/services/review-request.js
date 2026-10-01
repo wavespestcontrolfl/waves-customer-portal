@@ -4716,7 +4716,7 @@ const ReviewService = {
           serviceDate,
         };
         const drafted = techVoice
-          ? await Drafter.draftTechVoice({ ...draftInput, techName: voiceTechName, serviceRecordId, sequenceId, channel: "sms" })
+          ? await Drafter.draftTechVoice({ ...draftInput, recipientName: contact.name, techName: voiceTechName, serviceRecordId, sequenceId, channel: "sms" })
           : await Drafter.draftAskBody(draftInput);
         if (drafted) persistedBody = drafted;
       }
@@ -4779,7 +4779,7 @@ const ReviewService = {
             serviceDate,
           };
           const drafted = techVoice
-            ? await Drafter.draftTechVoice({ ...draftInput, techName: voiceTechName, serviceRecordId, sequenceId, channel: "email" })
+            ? await Drafter.draftTechVoice({ ...draftInput, recipientName: emailContact.name, techName: voiceTechName, serviceRecordId, sequenceId, channel: "email" })
             : await Drafter.draftEmailIntro(draftInput);
           if (drafted) persistedBody = drafted;
         }

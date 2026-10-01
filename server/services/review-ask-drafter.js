@@ -874,12 +874,15 @@ async function techVoiceAttempt({ system, facts, channel, check, record }, note,
   return reject ? { reject } : { body: draft.body };
 }
 
-async function draftTechVoice({ customer, recipientFirstName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
+async function draftTechVoice({ customer, recipientFirstName, recipientName, serviceType, techName, sequenceStep, serviceDate, serviceRecordId, sequenceId, channel }) {
   if (!isEnabled("reviewAskTechVoice")) return null;
   if (!customer || !customer.id) return null;
   try {
     const ctx = await gatherTechVoiceContext({ customer, serviceRecordId, sequenceId, sequenceStep });
-    const firstName = personFirstName(recipientFirstName || customer.first_name);
+    // The company check reads the FULL name ("Sunset Vacation Rentals"), never
+    // the first word a caller already cut it to.
+    const fullName = recipientName || [customer.first_name, customer.last_name].filter(Boolean).join(" ");
+    const firstName = COMPANY_NAME_RE.test(String(fullName || "")) ? "" : personFirstName(recipientFirstName || customer.first_name);
     const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, new Date()) : null;
     const stepKind = channel === "email" ? "email" : resolveStepKind(sequenceStep, serviceDaysAgo);
     const termite = isTermiteService(serviceType);

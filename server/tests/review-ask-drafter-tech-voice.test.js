@@ -136,6 +136,12 @@ describe('draftTechVoice', () => {
     expect(await Drafter.draftTechVoice(INPUT)).toBeNull();
   });
 
+  test('terminal pass 2: the company check reads the full contact name, not the first word a caller cut it to', async () => {
+    mockDispatch.mockResolvedValueOnce(reply(GOOD));
+    await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Sunset', recipientName: 'Sunset Vacation Rentals' });
+    expect(mockDispatch.mock.calls[0][1].text).toContain('Customer first name: (unknown - do not use a name)');
+  });
+
   test('a company stored as the first name is never used as a greeting', async () => {
     mockDispatch.mockResolvedValueOnce(reply(GOOD));
     await Drafter.draftTechVoice({ ...INPUT, recipientFirstName: 'Sunset Vacation Rentals', customer: { id: 'cust-1', first_name: 'Sunset Vacation Rentals' } });
