@@ -302,6 +302,7 @@ const LANE_RUNTIME = {
   codex_remediation: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', ...LONG_BATCH },
   footprint_claim: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   business_name_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
+  photo_subject_confirm: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // offline (Codex r16): classifyQueryIntent calls Anthropic only and drops to keyword rules on a miss (seo-diagnosis-tools.js).
   seo_intent: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'classification' },
   // M3 (Codex r16): the Monday cron runs generateWeeklyReport unattended, persists seo_advisor_reports and texts the owner — same shape as agent_bi.

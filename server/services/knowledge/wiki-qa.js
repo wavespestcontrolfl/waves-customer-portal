@@ -10,6 +10,25 @@ const { isEnabled, kbSpeciesQaLive } = require('../../config/feature-gates');
 // customer-facing and never sees species tech notes.
 const STAFF_SOURCES = new Set(['tech_field', 'admin_manual']);
 const MAX_SPECIES = 3;
+
+// The answer model ends with one coverage line (stripped before anyone sees
+// the answer) so the weekly knowledge-gaps email can list what the
+// knowledge base could not answer. A missing or malformed line records NULL.
+const COVERAGE_RULE = ' After your answer, add one final line exactly "COVERAGE: full", "COVERAGE: partial" or "COVERAGE: none" — full when the articles fully answer the question, partial when they answer only part of it, none when they do not answer it.';
+// Only the END of the answer is read: the upper-case COVERAGE token, any
+// markdown around it, the value, and anything after it on that line (a
+// trailing explanation). Ordinary text such as a "Coverage: none" row in a
+// warranty table is never touched.
+const COVERAGE_TAIL = /(^|[\s.;)])[>*_`\s-]*COVERAGE[*_`]*[ \t]*[:=][ \t*_`]*([A-Za-z]+)[^\n]*\s*$/;
+const COVERAGE_VALUES = new Set(['full', 'partial', 'none']);
+
+function splitCoverage(text) {
+  const raw = String(text || '');
+  const m = raw.match(COVERAGE_TAIL);
+  const coverage = m ? m[2].toLowerCase() : null;
+  if (!m || !COVERAGE_VALUES.has(coverage)) return { answer: raw.trimEnd(), coverage: null };
+  return { answer: raw.slice(0, m.index + m[1].length).trimEnd(), coverage };
+}
 const CATALOG_FILE_BACK_REASON = 'Answer drew on the species catalog; it is not filed back into the knowledge base';
 
 // Structured-output contract for the routing step (llm/call.js jsonSchema).
@@ -48,7 +67,7 @@ class WikiQA {
 
     if (indexRows.length === 0) {
       const answer = 'The knowledge base is empty. Add articles via the compiler before asking questions.';
-      await this.logQuery(question, answer, [], context.source);
+      await this.logQuery(question, answer, [], context.source, 'none');
       return { answer, articlesUsed: [] };
     }
 
@@ -111,7 +130,7 @@ ${liveIndex}`,
 
     if (paths.length === 0 && species.length === 0) {
       const answer = "I couldn't find relevant articles in the knowledge base for this question. The topic may not be documented yet.";
-      await this.logQuery(question, answer, [], context.source);
+      await this.logQuery(question, answer, [], context.source, 'none');
       return { answer, articlesUsed: [] };
     }
 
@@ -127,7 +146,7 @@ ${liveIndex}`,
     // two-leg miss throws like the SDK path did)
     const answered = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
       laneId: 'wiki_qa',
-      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}`,
+      system: `You are the Waves Pest Control knowledge base assistant. Answer questions using ONLY the provided wiki articles. Be specific — include exact numbers, rates, products, and procedures. If the wiki doesn't contain the answer, say so clearly. Keep answers concise and actionable.${species.length ? SPECIES_RULE : ''}${COVERAGE_RULE}`,
       text: `Question: ${question}
 
 Wiki articles:
@@ -137,8 +156,8 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     });
     if (!answered.ok) throw new Error(`wiki answer failed: ${answered.reason}`);
 
-    const answer = answered.text;
-    await this.logQuery(question, answer, refs, context.source);
+    const { answer, coverage } = splitCoverage(answered.text);
+    await this.logQuery(question, answer, refs, context.source, coverage);
 
     return { answer, articlesUsed: refs, articleTitles: articles.map(a => ({ path: a.path, title: a.title })) };
   }
@@ -234,7 +253,9 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
   async keywordSearch(question, context) {
     const results = await this.search(question, 5);
     if (results.length === 0) {
-      return { answer: 'No matching articles found. Try different keywords.', articlesUsed: [] };
+      const answer = 'No matching articles found. Try different keywords.';
+      await this.logQuery(question, answer, [], context?.source || 'keyword_fallback', 'none');
+      return { answer, articlesUsed: [] };
     }
 
     const articles = await db('knowledge_base')
@@ -287,12 +308,13 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
     return refs.some((ref) => String(ref).startsWith('species:'));
   }
 
-  async logQuery(query, answer, articlesReferenced, askedBy) {
+  async logQuery(query, answer, articlesReferenced, askedBy, coverage = null) {
     try {
       await db('knowledge_queries').insert({
         query, answer,
         articles_referenced: JSON.stringify(articlesReferenced),
         asked_by: askedBy || 'admin_manual',
+        ...(coverage ? { coverage } : {}),
       });
     } catch (err) {
       logger.error(`Log knowledge query failed: ${err.message}`);
@@ -318,3 +340,4 @@ ${articles.map(a => `\n--- ${a.title} (${a.path}) ---\n${a.content}`).join('\n\n
 
 module.exports = new WikiQA();
 module.exports.CATALOG_FILE_BACK_REASON = CATALOG_FILE_BACK_REASON;
+module.exports.splitCoverage = splitCoverage;

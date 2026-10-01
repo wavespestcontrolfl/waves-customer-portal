@@ -2,7 +2,7 @@
  * Alert episodes (admin-alert-episodes closeAdminAlertKeys /
  * openAdminAlertKeys / raiseAdminAlertWithReopen) against live Postgres, the
  * SQL as the schedule-integrity watchdog runs it: a close marks the row read
- * and auto-cleared (a row a person already read keeps its own read_at), a
+ * done and auto-cleared (a row a person already read keeps its own read_at), a
  * raise on an auto-cleared row rings it again with a bumped generation, and a
  * raise on an open row that predates dedupe versions stays silent. Every row
  * these tests insert is deleted afterwards. The watchdog's own rules are
@@ -46,7 +46,7 @@ maybeDescribe('alert episodes (live Postgres)', () => {
   });
   const close = (names, reason = 'gap resolved') => helpers.closeAdminAlertKeys(db, names.map(key), reason);
 
-  test('close: an unread row is read and auto-cleared; a READ row keeps its read_at but is auto-cleared; empty list is a no-op', async () => {
+  test('close: an unread row is read, done and auto-cleared; a READ (not done) row keeps its read_at but is still done and auto-cleared; empty list is a no-op', async () => {
     const unread = await bell('close-unread');
     const read = await bell('close-read', { read: true });
     const other = await bell('close-untouched');
@@ -55,15 +55,137 @@ maybeDescribe('alert episodes (live Postgres)', () => {
 
     const u = await get(unread.id);
     expect(u.read_at).not.toBeNull();
+    // An unread row is read at the done instant.
+    expect(new Date(u.read_at).getTime()).toBe(new Date(u.done_at).getTime());
+    expect(u.done_by).toBe('episodes');
     expect(u.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'gap resolved', dedupeKey: key('close-unread') });
     expect(typeof u.metadata.autoClearedAt).toBe('string');
     const r = await get(read.id);
     expect(new Date(r.read_at).toISOString()).toBe('2026-09-01T12:00:00.000Z');
+    // Read is not done: the person's read is closed too (done_at stamped), their read_at kept.
+    expect([r.done_by, r.done_at === null]).toEqual(['episodes', false]);
     expect(r.metadata.autoCleared).toBe(true);
-    expect((await get(other.id)).read_at).toBeNull();
+    const untouched = await get(other.id);
+    expect([untouched.read_at, untouched.done_at]).toEqual([null, null]);
 
     // Already cleared: a second close rewrites nothing.
     expect(await close(['close-unread', 'close-read'])).toBe(0);
+  });
+
+  test('done state: a close is also done (a person\'s resolution and done time stand; the close takes done_by) and a comeback puts the row back in the bell', async () => {
+    const auto = await bell('done-auto');
+    const person = await bell('done-person');
+    expect(await NotificationService.markAdminDone([person.id], { by: '7', resolution: 'Handled by phone' })).toBe(1);
+    // A second done of the same row writes nothing.
+    expect(await NotificationService.markAdminDone([person.id], { by: 'claude' })).toBe(0);
+    expect(await helpers.closeAdminAlertKeys(db, [key('done-auto'), key('done-person')], 'gap resolved', { resolution: 'Series priced' })).toBe(2);
+
+    const a = await get(auto.id);
+    expect(a.done_at).not.toBeNull();
+    expect([a.done_by, a.resolution]).toEqual(['episodes', 'Series priced']);
+    expect(a.read_at).not.toBeNull();
+    const p = await get(person.id);
+    // The system close takes done_by (so the person's old reopen token can't put a
+    // cleared alert back); their resolution and done time stand.
+    expect([p.done_by, p.resolution]).toEqual(['episodes', 'Handled by phone']);
+    const listed = (await NotificationService.getAdminNotifications(500)).map((r) => r.id);
+    expect(listed).not.toContain(auto.id);
+    expect(listed).not.toContain(person.id);
+
+    // The problem comes back: the same raise re-rings the row and clears every done field.
+    const result = await raise('done-auto');
+    expect(result.rang).toBe(true);
+    const back = await get(auto.id);
+    expect(back.read_at).toBeNull();
+    expect([back.done_at, back.done_by, back.resolution]).toEqual([null, null, null]);
+    expect((await NotificationService.getAdminNotifications(500)).map((r) => r.id)).toContain(auto.id);
+
+    // A person reopens a done row: done fields clear, read_at stays. The reopen
+    // is fenced on the full-precision done_at the Recently-done list served.
+    const tokenOf = async (id) => (await db('notifications').where({ id }).first(db.raw('done_at::text AS done_at_token'))).done_at_token;
+    // A person's Done that a system close then took over (the check cleared it)
+    // is not reopenable, even with the person's own token (Codex #5462 r5 P1).
+    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: await tokenOf(person.id) })).toBe('not_reopenable');
+    // A person's Done no system touched is.
+    const manual = await bell('done-manual');
+    expect(await NotificationService.markAdminDone([manual.id], { by: '7', resolution: 'Handled by phone' })).toBe(1);
+    const doneToken = await tokenOf(manual.id);
+    // A stale list (an older close of the same row) cannot clear it...
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: '2020-01-01 00:00:00.000001+00' })).toBe('changed');
+    expect((await get(manual.id)).done_at).not.toBeNull();
+    // ...nor can one that names a microsecond neighbour of the real close.
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken.replace(/(\d)([+-]\d+)$/, (_m, d, z) => `${(Number(d) + 1) % 10}${z}`) })).toBe('changed');
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken })).toBe('reopened');
+    const reopened = await get(manual.id);
+    expect([reopened.done_at, reopened.done_by, reopened.resolution]).toEqual([null, null, null]);
+    expect(reopened.read_at).not.toBeNull();
+    expect(await NotificationService.reopenAdminDone(manual.id, { expectedDoneAt: doneToken })).toBe('not_found');
+
+    // A system close (done_by is a component, not a person) is never reopenable.
+    expect(await helpers.closeAdminAlertKeys(db, [key('done-auto')], 'gap resolved again', { resolution: 'Series priced' })).toBe(1);
+    const systemToken = await tokenOf(auto.id);
+    expect(await NotificationService.reopenAdminDone(auto.id, { expectedDoneAt: systemToken })).toBe('not_reopenable');
+    expect((await get(auto.id)).done_at).not.toBeNull();
+    const doneList = await NotificationService.getAdminDoneNotifications({ role: 'admin', limit: 5000 });
+    expect(doneList.find((r) => r.id === auto.id)).toMatchObject({ reopenable: false, done_at_token: systemToken });
+  });
+
+  test('a system closer that selects with openToCloser takes over a person\'s Done exactly once: done_by is the component, done_at stays, the person\'s Reopen is refused, a second run writes nothing', async () => {
+    const callLogId = `${RUN}-call`;
+    const mk = async (name, readAt = null) => {
+      const [row] = await db('notifications').insert({
+        recipient_type: 'admin', category: 'missed_call', title: 'Fixture call', body: 'Fixture body', link: '/admin/communications', read_at: readAt,
+        metadata: JSON.stringify({ dedupeKey: key(name), triggerKey: 'customer_missed_call', payload: { callLogId } }),
+      }).returning('*');
+      return row;
+    };
+    const tokenOf = async (id) => (await db('notifications').where({ id }).first(db.raw('done_at::text AS done_at_token'))).done_at_token;
+    const person = await mk('closer-person');
+    const open = await mk('closer-open');
+    const system = await mk('closer-system');
+    expect(await NotificationService.markAdminDone([person.id], { by: '7', resolution: 'Called back' })).toBe(1);
+    expect(await NotificationService.markAdminDone([system.id], { by: 'dispatch', resolution: 'Cleared by dispatch' })).toBe(1);
+    const personDone = await get(person.id);
+    const personToken = await tokenOf(person.id);
+    const systemBefore = await get(system.id);
+    const systemToken = await tokenOf(system.id);
+
+    // Person-done + open rows are reached; the row another component closed is left alone.
+    expect(await NotificationService.supersedeMissedCallAdmin({ callLogId })).toBe(2);
+    const p = await get(person.id);
+    expect(p.done_by).toBe('supersede');
+    expect(new Date(p.done_at).getTime()).toBe(new Date(personDone.done_at).getTime());
+    expect(await tokenOf(person.id)).toBe(personToken);
+    expect(p.resolution).toBe('Called back');
+    expect(await NotificationService.reopenAdminDone(person.id, { expectedDoneAt: personToken })).toBe('not_reopenable');
+    expect((await get(person.id)).done_at).not.toBeNull();
+    const o = await get(open.id);
+    expect([o.done_by, o.resolution]).toEqual(['supersede', 'Superseded by a newer event on the same call']);
+    const s = await get(system.id);
+    expect([s.done_by, s.resolution, await tokenOf(system.id)]).toEqual(['dispatch', 'Cleared by dispatch', systemToken]);
+    expect(new Date(s.done_at).getTime()).toBe(new Date(systemBefore.done_at).getTime());
+
+    // A second run finds nothing: every row is done by a system component now.
+    const before = await Promise.all([person.id, open.id, system.id].map(get));
+    expect(await NotificationService.supersedeMissedCallAdmin({ callLogId })).toBe(0);
+    expect(await Promise.all([person.id, open.id, system.id].map(get))).toEqual(before);
+  });
+
+  test('keyset paging at full precision: rows created in one millisecond, microseconds apart, are neither skipped nor repeated across a cursor', async () => {
+    const ids = [];
+    for (const us of ['123900', '123500', '123100']) {
+      const row = await bell(`keyset-${us}`);
+      await db('notifications').where({ id: row.id }).update({ created_at: db.raw('?::timestamptz', [`2031-01-01 12:00:00.${us}+00`]) });
+      ids.push(row.id);
+    }
+    const page = async (before) => (await NotificationService.getAdminNotifications(1, 0, { role: 'admin', before })).filter((r) => ids.includes(r.id) || r.created_at_cursor?.startsWith('2031-01-01'));
+    const first = await page(null);
+    expect(first.map((r) => r.id)).toEqual([ids[0]]); // newest row in the table (year 2031)
+    expect(first[0].created_at_cursor).toMatch(/^2031-01-01 \d\d:00:00\.1239\d*[+-]\d\d/);
+    const second = await page({ at: first[0].created_at_cursor, id: first[0].id });
+    expect(second.map((r) => r.id)).toEqual([ids[1]]);
+    const third = await page({ at: second[0].created_at_cursor, id: second[0].id });
+    expect(third.map((r) => r.id)).toEqual([ids[2]]);
   });
 
   test('a quiet refresh (ringOnRefresh false) rewrites a standing READ row\'s text and keeps the read; a reopen still rings despite it', async () => {

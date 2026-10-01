@@ -46,6 +46,8 @@ function setDbQueues(queues) {
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
+      // Concurrent-seed recheck under the comms lock: nothing new appeared.
+      if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
       if (table === 'annual_prepay_terms as apt_owner_probe') return query({ first: { customer_id: 'owner-unchanged' } });
       throw new Error(`Unexpected db table ${table}`);
     }
