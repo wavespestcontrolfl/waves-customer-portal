@@ -366,6 +366,7 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ') // hidden fallback, not page content
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

@@ -70,6 +70,19 @@ function displayUrl(urlString) {
   } catch { return urlString; }
 }
 
+// A roundup of service providers, by its own path: companies, exterminators,
+// pros, or a service Waves offers named as a service. A product roundup
+// ("best ant killer", "top mosquito repellents") never matches.
+const PROVIDER_LIST_PATH_RE = /\b(compan(y|ies)|exterminators?|pros|contractors|providers?|services?|pest control|lawn care|mosquito control|termite control|rodent control)\b/;
+function pathWords(urlString) {
+  try {
+    const u = new URL(urlString);
+    let path = u.pathname;
+    try { path = decodeURIComponent(path); } catch { /* keep raw */ }
+    return path.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join(' ');
+  } catch { return ''; }
+}
+
 function isPriorityCity(city) {
   return PRIORITY_CITIES.includes(String(city || '').toLowerCase().replace(/,.*$/, '').trim());
 }
@@ -156,13 +169,15 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
     ...p,
     url: displayUrl(topUrl),
     // evidence about the PAGE, not the question that cited it: an editorial
-    // best / top / rated / near-me page (read with tracking parameters
+    // best / top / rated / near-me page about SERVICE PROVIDERS (its path names
+    // companies, exterminators or a service like pest control — never "best
+    // ant killer", a product list), read with tracking parameters
     // stripped, so ?utm_campaign=best proves nothing), the roundup an editor
     // can add Waves to. Never a directory (a /biz/ profile is one company, and
     // a directory is joined by signing up, not by a pitch), never a listicle
     // candidate on a place name alone, never a cost guide cited for "who
     // should I hire".
-    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)),
+    listPage: p.category === 'editorial' && hasBestToken(displayUrl(topUrl)) && PROVIDER_LIST_PATH_RE.test(pathWords(topUrl)),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),
@@ -200,22 +215,35 @@ function rankCitedPages(rows, queryRows, { currentSurfaces = null, limit = DEFAU
   const queryById = new Map((queryRows || []).map((q) => [q.id, q]));
   const benchmarkByQuery = new Map(benchmark.questions.map((q) => [q.query, q]));
   const current = currentRowIds(rows || [], currentSurfaces);
-  const pages = new Map();
-  for (const row of rows || []) {
-    if (!isMeasuredAnswer(row)) continue; // still decides what is current, never a citation
+  // only measured rows are citations (every row still decides what is current)
+  const answers = (rows || []).filter(isMeasuredAnswer).map((row) => {
     const question = questionOf(row, queryById, benchmarkByQuery);
-    const provider = isProviderIntentQuestion(question);
-    const answer = { question, provider, isCurrent: current.has(row.id), named: row.waves_mentioned === true, engine: row.llm_platform || 'unknown' };
-    const seenThisRow = new Set();
-    for (const url of cleanUrls(row.cited_urls)) {
-      const c = classifyUrl(url, { providerIntent: provider });
-      if (!c || !ENQUEUABLE_CATEGORIES.includes(c.category) || isNeverTargetHost(c.host)) continue;
+    return { row, question, provider: isProviderIntentQuestion(question), urls: cleanUrls(row.cited_urls) };
+  });
+  // pass 1 — which pages are eligible: classified listing/editorial by ANY
+  // citing answer (the listicle heuristic needs a provider question), once
+  const eligible = new Map();
+  for (const a of answers) {
+    for (const url of a.urls) {
       const key = pageKey(url);
-      // one answer citing the same page twice (with and without a tracking
-      // parameter) is one citation
-      if (!key || seenThisRow.has(key)) continue;
+      if (!key || eligible.has(key)) continue;
+      const c = classifyUrl(url, { providerIntent: a.provider });
+      if (c && ENQUEUABLE_CATEGORIES.includes(c.category) && !isNeverTargetHost(c.host)) eligible.set(key, c);
+    }
+  }
+  // pass 2 — every measured citation of an eligible page counts, whatever
+  // question it answered; only a provider miss is intent-restricted (addCitation)
+  const pages = new Map();
+  for (const a of answers) {
+    const answer = { question: a.question, provider: a.provider, isCurrent: current.has(a.row.id), named: a.row.waves_mentioned === true, engine: a.row.llm_platform || 'unknown' };
+    // one answer citing the same page twice (with and without a tracking
+    // parameter) is one citation
+    const seenThisRow = new Set();
+    for (const url of a.urls) {
+      const key = pageKey(url);
+      if (!eligible.has(key) || seenThisRow.has(key)) continue;
       seenThisRow.add(key);
-      if (!pages.has(key)) pages.set(key, newPage(key, c));
+      if (!pages.has(key)) pages.set(key, newPage(key, eligible.get(key)));
       addCitation(pages.get(key), { ...answer, url });
     }
   }

@@ -129,9 +129,23 @@ describe('rankCitedPages', () => {
     // a /biz/ profile with "best" in its slug is still one company; a tracking-only "best" proves nothing
     const more = rankCitedPages([row({ query: Q1, urls: ['https://www.yelp.com/biz/best-pest-control-sarasota', 'https://www.bobvila.com/articles/pest-control-cost/?utm_campaign=best'] })], []);
     expect(more.map((p) => p.listPage)).toEqual([false, false]);
+    // a product roundup is not a list of service providers
+    const [product] = rankCitedPages([row({ query: Q1, urls: ['https://www.bobvila.com/articles/best-ant-killer/'] })], []);
+    expect(product.listPage).toBe(false);
     // a heuristic listicle candidate on a place name alone is not proof of a list
     const [guide] = rankCitedPages([row({ query: Q1, urls: ['https://someblog.example/sarasota-pest-guide'] })], []);
     expect(guide).toMatchObject({ subtype: 'listicle_candidate', listPage: false });
+  });
+
+  test('once eligible, a page counts every citation — a current cost answer citing it is current', () => {
+    const LIST = 'https://localpicks.example/best-pest-control-companies-sarasota';
+    const rows = [
+      row({ query: Q3, date: '2026-09-30', urls: [LIST] }), // cost question, newest: the heuristic would not classify it alone
+      row({ query: Q1, date: '2026-09-30', urls: [] }),
+      row({ query: Q1, date: '2026-09-20', urls: [LIST] }), // older provider citation makes it eligible
+    ];
+    const [page] = rankCitedPages(rows, []);
+    expect(page).toMatchObject({ host: 'localpicks.example', citations: 2, currentCitations: 1, currentMisses: 0, tier: 3 });
   });
 
   test('one answer citing the same page twice counts once', () => {

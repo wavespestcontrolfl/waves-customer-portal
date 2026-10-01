@@ -278,6 +278,8 @@ describe('cited-page pitches', () => {
     expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
     expect(citedPageVerdict({ text: ARTICLE, finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
     expect(citedPageVerdict({ text: ARTICLE }, c)).toBeNull();
+    // a full article that mentions JavaScript somewhere is still the article
+    expect(citedPageVerdict({ text: `${ARTICLE.repeat(4)} Please enable JavaScript to use our contact form.` }, c)).toBeNull();
   });
 
   test('a page that is not itself a list never carries the angle, whatever question cited it', () => {
