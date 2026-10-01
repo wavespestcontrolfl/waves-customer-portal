@@ -193,11 +193,15 @@ test('an active family hold defers the schedule check until the resume date', ()
 
 test('a held or stopped family is reported back as skipped, so a caller never reads it as judged', () => {
   const held = new Set();
-  acceptedScheduleFindings(estimate(), [], new Set(), { todayET: TODAY, heldFamilies: new Set(['pest_control']), skippedFamilies: held });
+  const onHold = new Set();
+  acceptedScheduleFindings(estimate(), [], new Set(), { todayET: TODAY, heldFamilies: new Set(['pest_control']), skippedFamilies: held, onHoldFamilies: onHold });
   expect([...held]).toEqual(['pest_control']);
+  expect([...onHold]).toEqual(['pest_control']); // a plan hold is the one temporary reason
   const stopped = new Set();
-  acceptedScheduleFindings(estimate(), [parent()], new Set(['visit-1']), { todayET: TODAY, skippedFamilies: stopped });
+  const stoppedOnHold = new Set();
+  acceptedScheduleFindings(estimate(), [parent()], new Set(['visit-1']), { todayET: TODAY, skippedFamilies: stopped, onHoldFamilies: stoppedOnHold });
   expect([...stopped]).toEqual(['pest_control']);
+  expect([...stoppedOnHold]).toEqual([]); // a stopped series is skipped for good, not on hold
   const judged = new Set();
   acceptedScheduleFindings(estimate(), series('quarterly', 4), new Set(), { todayET: TODAY, skippedFamilies: judged });
   expect([...judged]).toEqual([]);

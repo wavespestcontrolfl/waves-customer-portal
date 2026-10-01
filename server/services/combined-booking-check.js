@@ -181,7 +181,7 @@ function checkTimeAndTech(dated, families, { firstDay, byId }) {
 /**
  * Pure verdict for one accepted estimate.
  *   ctx: { estimate, rows, excludedFamilies: Set, scheduleGaps,
- *          scheduleSkippedFamilies: Set, scheduleUnjudged: bool }
+ *          scheduleSkippedFamilies: Set, scheduleOnHoldFamilies: Set, scheduleUnjudged: bool }
  * Returns null when the accept is not a multi-service recurring accept, or
  * every row of the plan was cancelled (no alert at all); else
  * { ok, deferred, frozen, heldFamilies, problems: [{ code, families, text }], labels }.
@@ -189,7 +189,7 @@ function checkTimeAndTech(dated, families, { firstDay, byId }) {
 function evaluateCombinedBooking(ctx) {
   const {
     estimate, rows: allRows = [], excludedFamilies = new Set(),
-    scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false,
+    scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleOnHoldFamilies = new Set(), scheduleUnjudged = false,
   } = ctx;
   const accepted = acceptedFamilies(estimate);
   if (!accepted || accepted.size < 2) return null;
@@ -200,12 +200,11 @@ function evaluateCombinedBooking(ctx) {
   // series stopped for good): nothing left to verify, so nothing to say.
   const acceptedRows = allRows.filter((row) => isPlanRow(row, accepted));
   if (acceptedRows.length && acceptedRows.every((row) => CANCELLED.has(row.status))) return null;
-  // Skipped by the classifier and still holding live visits = on hold: not
-  // judged now, and a standing finding about it is kept until it is (the
-  // runner's heldProblems). A family whose visits were all cancelled was
-  // stopped for good: its findings are not kept.
-  const hasLiveRows = (family) => acceptedRows.some((row) => rowFamilies(row).includes(family) && !CANCELLED.has(row.status));
-  const heldFamilies = [...accepted].filter((family) => scheduleSkippedFamilies.has(family) && hasLiveRows(family));
+  // Skipped by the classifier for an ACTIVE PLAN HOLD (the one temporary
+  // reason): not judged now, and a standing finding about it is kept until it
+  // is (the runner's heldProblems). A stopped series is skipped too, but for
+  // good: its findings are not kept.
+  const heldFamilies = [...accepted].filter((family) => scheduleOnHoldFamilies.has(family));
   const families = new Set([...accepted].filter((family) => !excludedFamilies.has(family) && !scheduleSkippedFamilies.has(family)));
   // Every family on hold / stopped / kept on an older series: nothing to judge.
   if (!families.size) return { ok: false, deferred: true, frozen: heldFamilies.length > 0, heldFamilies, problems: [], labels: [] };
@@ -304,8 +303,16 @@ async function loadContext(conn, estimate) {
   };
 }
 
-async function checkEstimate(conn, estimate, { scheduleGaps = [], scheduleSkippedFamilies = new Set(), scheduleUnjudged = false } = {}) {
-  const ctx = { ...await loadContext(conn, estimate), scheduleGaps, scheduleSkippedFamilies, scheduleUnjudged };
+// `coverage` is the classifier's { skipped, onHold } for this estimate;
+// undefined when it did not judge the estimate (never declared OK then).
+async function checkEstimate(conn, estimate, { scheduleGaps = [], coverage } = {}) {
+  const ctx = {
+    ...await loadContext(conn, estimate),
+    scheduleGaps,
+    scheduleSkippedFamilies: coverage ? coverage.skipped : new Set(),
+    scheduleOnHoldFamilies: coverage ? coverage.onHold : new Set(),
+    scheduleUnjudged: !coverage,
+  };
   const verdict = evaluateCombinedBooking(ctx);
   return verdict ? { verdict, ctx } : null;
 }
@@ -559,11 +566,9 @@ async function runCombinedBookingCheck({ now = new Date(), conn = db, raise, rin
     const id = String(estimate.id);
     const known = standing.get(id);
     try {
-      const judged = coverage.get(id);
       const checked = await checkEstimate(conn, estimate, {
         scheduleGaps: gaps.filter((gap) => String(gap.estimateId) === id),
-        scheduleSkippedFamilies: judged, // checkEstimate defaults it when unjudged
-        scheduleUnjudged: !judged,
+        coverage: coverage.get(id),
       });
       const { outcome, problems } = outcomeOf(checked?.verdict, known?.problems);
       if (outcome === 'frozen') {

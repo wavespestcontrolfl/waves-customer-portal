@@ -205,7 +205,8 @@ postgres('combined-booking check through the real conversion', () => {
         .acceptedRecurringScheduleGaps(trx, { now: new Date(), cutoff: new Date(), estimateIds: [est.estimateId], coverage });
       expect(gaps.map((gap) => gap.serviceFamily)).toEqual(['pest_control']);
       // Judged, with no family skipped.
-      expect([...coverage.get(String(est.estimateId))]).toEqual([]);
+      expect([...coverage.get(String(est.estimateId)).skipped]).toEqual([]);
+      expect([...coverage.get(String(est.estimateId)).onHold]).toEqual([]);
       // The watchdog's own 24h-settled call does not see a 20-minute-old accept yet.
       expect(await require('../services/recurring-schedule-audit').findAcceptedRecurringScheduleGaps({}, trx)
         .then((all) => all.filter((gap) => gap.estimateId === est.estimateId))).toEqual([]);

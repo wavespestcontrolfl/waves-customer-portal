@@ -39,7 +39,8 @@ function run(lines, rows, extra = {}) {
   return evaluateCombinedBooking({
     estimate: extra.estimate || estimate(lines), rows,
     excludedFamilies: extra.excludedFamilies, scheduleGaps: extra.scheduleGaps,
-    scheduleSkippedFamilies: extra.scheduleSkippedFamilies, scheduleUnjudged: extra.scheduleUnjudged,
+    scheduleSkippedFamilies: extra.scheduleSkippedFamilies, scheduleOnHoldFamilies: extra.scheduleOnHoldFamilies,
+    scheduleUnjudged: extra.scheduleUnjudged,
   });
 }
 const codes = (verdict) => verdict.problems.map((problem) => problem.code);
@@ -120,18 +121,24 @@ describe('evaluateCombinedBooking', () => {
     expect(verdict.ok).toBe(true);
   });
 
-  test('a series stopped for good (every visit cancelled) is not a hold: its findings are not kept', () => {
-    const lawnCancelled = lawnRows().map((row) => ({ ...row, status: 'cancelled' }));
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnCancelled], { scheduleSkippedFamilies: new Set(['lawn_care']) });
-    expect(verdict.heldFamilies).toEqual([]);
-    expect(outcomeOf(verdict, [{ code: 'missing_time_tech', families: ['lawn_care'], text: 'x' }]).outcome).toBe('ok');
-    // Every series stopped: a cancelled plan, not frozen.
+  test('only an active plan hold keeps findings; a stopped series (even with completed visits) does not', () => {
+    const lawnOpen = { code: 'missing_time_tech', families: ['lawn_care'], text: '5 lawn visits missing time/tech' };
+    const lawnStopped = lawnRows().map((row, i) => ({ ...row, status: i === 0 ? 'completed' : 'cancelled' }));
+    const stopped = run([PEST, LAWN], [...pestRows(), ...lawnStopped], { scheduleSkippedFamilies: new Set(['lawn_care']) });
+    expect(stopped.heldFamilies).toEqual([]);
+    expect(outcomeOf(stopped, [lawnOpen]).outcome).toBe('ok');
+    const held = run([PEST, LAWN], [...pestRows(), ...lawnRows()],
+      { scheduleSkippedFamilies: new Set(['lawn_care']), scheduleOnHoldFamilies: new Set(['lawn_care']) });
+    expect(held.heldFamilies).toEqual(['lawn_care']);
+    expect(outcomeOf(held, [lawnOpen]).outcome).toBe('problems');
+    // Every series stopped and cancelled: a cancelled plan, not frozen.
     const allCancelled = [...pestRows(), ...lawnRows()].map((row) => ({ ...row, status: 'cancelled' }));
     expect(run([PEST, LAWN], allCancelled, { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) })).toBeNull();
   });
 
   test('every family on hold: frozen, nothing judged', () => {
-    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: new Set(['pest_control', 'lawn_care']) });
+    const both = new Set(['pest_control', 'lawn_care']);
+    const verdict = run([PEST, LAWN], [...pestRows(), ...lawnRows()], { scheduleSkippedFamilies: both, scheduleOnHoldFamilies: both });
     expect(verdict).toMatchObject({ frozen: true, problems: [] });
   });
 

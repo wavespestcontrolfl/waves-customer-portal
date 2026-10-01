@@ -370,8 +370,9 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
 // is_recurring. It only reports evidence for staff review: a later manual
 // amendment can legitimately differ from the accepted snapshot.
 // `skippedFamilies` (a Set) collects the families left unjudged here (an
-// active plan hold, every matching row on a stopped series).
-function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set(), skippedFamilies = new Set() } = {}) {
+// active plan hold, every matching row on a stopped series); `onHoldFamilies`
+// (a Set) the subset skipped for an active plan hold, the one temporary reason.
+function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { todayET = etDateString(), heldFamilies = new Set(), skippedFamilies = new Set(), onHoldFamilies = new Set() } = {}) {
   const converter = require('./estimate-converter');
   const seeder = require('./recurring-appointment-seeder');
   const { inferFrequencyKeyFromEstimateData } = require('./billing-cadence');
@@ -399,7 +400,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
   ];
   const findings = [];
   for (const { service, family } of units) {
-    if (heldFamilies.has(family)) { skippedFamilies.add(family); continue; }
+    if (heldFamilies.has(family)) { skippedFamilies.add(family); onHoldFamilies.add(family); continue; }
     const pattern = converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency);
     // Commercial, billing riders and contradictory custom terms already use
     // office scheduling. Do not invent a cadence for them from today's prices.
@@ -549,7 +550,8 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
 // estimate accepted before its 24h cutoff (findAcceptedRecurringScheduleGaps);
 // the combined-booking check asks about specific just-accepted estimates
 // (`estimateIds`, cutoff = now) and reads `coverage`, which receives, per
-// estimate id the classifier actually judged, the Set of families it skipped.
+// estimate id the classifier actually judged, { skipped, onHold }: the Set of
+// families it skipped, and the subset skipped for an active plan hold.
 async function acceptedRecurringScheduleGaps(conn, { now, cutoff, estimateIds, coverage }) {
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const estimates = await conn('estimates as e')
@@ -627,8 +629,11 @@ async function acceptedRecurringScheduleGaps(conn, { now, cutoff, estimateIds, c
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
       .filter((row) => !isStandaloneReservation(row, reservations));
     const skippedFamilies = new Set();
-    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds, skippedFamilies }));
-    coverage.set(String(estimate.id), skippedFamilies);
+    const onHoldFamilies = new Set();
+    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, {
+      todayET, heldFamilies: customer.holds, skippedFamilies, onHoldFamilies,
+    }));
+    coverage.set(String(estimate.id), { skipped: skippedFamilies, onHold: onHoldFamilies });
   }
   return findings;
 }
