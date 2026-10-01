@@ -307,3 +307,38 @@ describe('r18: an OPEN owed follow-up task takes the current plan', () => {
     expect(s.slice(at, at + 600)).toContain('return null;');
   });
 });
+
+describe('r22: the follow-up refresh is serialized with the office confirm and reconciles a late plan', () => {
+  const confirm = require('../services/outbound-review-confirm');
+  const plan = { scheduledDate: '2026-10-26', windowStart: '09:00' };
+  const world = (status) => {
+    const log = { locked: 0, updates: [] };
+    const conn = (table) => {
+      const q = {
+        where() { return q; }, whereRaw() { return q; }, orderBy() { return q; },
+        first: async () => ({ id: 't1', status, summary: 'x', payload: { street_level_address: true, scheduled_service_id: 'v1', follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' } } }),
+        update: async (u) => { log.updates.push({ table, u }); return 1; },
+      };
+      return q;
+    };
+    conn.raw = async () => { log.locked += 1; return { rows: [{}] }; };
+    return { conn, log };
+  };
+
+  test('takes the per-call lock first, so it cannot interleave with the confirm hook', async () => {
+    const spy = jest.spyOn(confirm, 'fileOwedFollowUpForStreetLevelHold').mockResolvedValue(true);
+    const { conn, log } = world('open');
+    expect(await refreshHoldFollowUpPlan(conn, { callLogId: 'c1', visitId: 'v1', plan })).toBe(true);
+    expect(log.locked).toBeGreaterThan(0);
+    expect(spy).not.toHaveBeenCalled();        // the card is still open: the hook will read the fresh plan
+    spy.mockRestore();
+  });
+
+  test('the confirm already consumed the card (resolved): the late plan is reconciled into the owed-follow-up task', async () => {
+    const spy = jest.spyOn(confirm, 'fileOwedFollowUpForStreetLevelHold').mockResolvedValue(true);
+    const { conn } = world('resolved');
+    expect(await refreshHoldFollowUpPlan(conn, { callLogId: 'c1', visitId: 'v1', plan })).toBe(true);
+    expect(spy).toHaveBeenCalledWith(conn, { id: 'v1', source_call_log_id: 'c1' });
+    spy.mockRestore();
+  });
+});

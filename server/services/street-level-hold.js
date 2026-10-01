@@ -108,6 +108,10 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
 // null plan never erases an earlier one. Returns true when a card was updated.
 async function refreshHoldFollowUpPlan(conn, { callLogId, visitId, plan }) {
   if (!plan) return false;
+  // Serialized with the office-confirm hook, which resolves the card (and consumes its plan) under the
+  // same per-call lock: either this refresh lands before the hook reads the card, or the hook already
+  // consumed it and the late plan is reconciled into the owed-follow-up task below.
+  await require('../utils/triage-locks').lockTriageCall(conn, callLogId);
   const card = await findStreetLevelHoldCard(conn, { callLogId, visitId });
   if (!card) return false;
   const next = { scheduled_date: plan.scheduledDate || null, window_start: plan.windowStart || null };
@@ -119,6 +123,11 @@ async function refreshHoldFollowUpPlan(conn, { callLogId, visitId, plan }) {
       payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: next })]),
       updated_at: new Date(),
     });
+  // The confirm already consumed this card: the new plan goes to the owed-follow-up task (an open one
+  // takes the current plan, a missing one is filed; a handled one and an existing child are left alone).
+  if (!['open', 'in_progress'].includes(card.status)) {
+    await require('./outbound-review-confirm').fileOwedFollowUpForStreetLevelHold(conn, { id: visitId, source_call_log_id: callLogId });
+  }
   return true;
 }
 
