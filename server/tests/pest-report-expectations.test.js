@@ -553,8 +553,10 @@ describe('buildWhatToExpect', () => {
         { name: 'Taurus SC', targets: ['ants'], method: 'perimeter_spray', methodInferred: false },
       ] });
       expect(out.lines[0]).toMatch(/spike in ant activity/);
-      // Two non-repellents: both active ingredients are named.
-      expect(out.lines[0]).toMatch(/dinotefuran and fipronil-based/);
+      // The band names only the application sprayed outside for ants, never
+      // the indoor roach application beside it.
+      expect(out.lines[0]).toMatch(/^We applied a fipronil-based non-repellent as a 6-foot perimeter band/);
+      expect(out.lines[0]).not.toMatch(/dinotefuran/);
     });
 
     it('toExpectationProduct carries the application targets (trimmed), null when absent', () => {

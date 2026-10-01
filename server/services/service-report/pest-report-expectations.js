@@ -602,6 +602,13 @@ function buildWhatToExpect({ products = [] } = {}) {
         return EXPECTATION_TEXT.pyrethroid(activeIngredientPhrase(classProducts.filter(hasExteriorApplicationEvidence)));
       }
       if (cls === 'non_repellent' && !nonRepellentAntBand) return EXPECTATION_TEXT.non_repellent_general(ai);
+      // The band sentence places the product outside for ants, so it names
+      // only the applications that earned it.
+      if (cls === 'non_repellent') {
+        return EXPECTATION_TEXT.non_repellent(activeIngredientPhrase(classProducts.filter(
+          (p) => hasAntTargetEvidence(p) && hasExteriorApplicationEvidence(p),
+        )));
+      }
       if (cls === 'igr') {
         const sixMonthLabel = classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name)));
         return EXPECTATION_TEXT.igr(ai, { sixMonthLabel });
