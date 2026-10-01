@@ -611,3 +611,31 @@ describe('isCompleteVisionResult — generic walk over VISION_RESULT_SCHEMA', ()
     expect(isCompleteVisionResult({ claude: fullRead(), gemini: null, composite: null })).toBe(false);
   });
 });
+
+describe('suggestLandscapeCondition (Fast Complete condition suggestion)', () => {
+  const { suggestLandscapeCondition } = require('../services/tree-shrub-assessment');
+
+  it('maps the 0-100 overall onto the report bands 85 / 70 / 55', () => {
+    expect(suggestLandscapeCondition(100)).toBe('Excellent');
+    expect(suggestLandscapeCondition(85)).toBe('Excellent');
+    expect(suggestLandscapeCondition(84)).toBe('Good');
+    expect(suggestLandscapeCondition(70)).toBe('Good');
+    expect(suggestLandscapeCondition(69)).toBe('Fair');
+    expect(suggestLandscapeCondition(55)).toBe('Fair');
+    expect(suggestLandscapeCondition(54)).toBe('Poor');
+    expect(suggestLandscapeCondition(0)).toBe('Poor');
+  });
+
+  it('accepts a numeric string and a score the preview itself produced', () => {
+    expect(suggestLandscapeCondition('88')).toBe('Excellent');
+    const scores = toCategoryScores({ foliage_fullness: 90, leaf_color_vigor: 90, pest_signals: 'none', disease_signals: 'none', water_heat_stress: 'none', pruning_mechanical: 'none' });
+    expect(suggestLandscapeCondition(calculateOverall(scores))).toBe('Excellent');
+  });
+
+  it('never suggests Declining or Recovering, and suggests nothing without a score', () => {
+    for (let score = 0; score <= 100; score += 1) {
+      expect(['Excellent', 'Good', 'Fair', 'Poor']).toContain(suggestLandscapeCondition(score));
+    }
+    for (const missing of [null, undefined, '', 'n/a', NaN]) expect(suggestLandscapeCondition(missing)).toBeNull();
+  });
+});
