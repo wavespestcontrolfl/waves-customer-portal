@@ -84,6 +84,9 @@ describe('treeShrubProductFlags', () => {
     expect(treeShrubProductFlags(fert, ctx).npBlackout).toBe(true);
     expect(treeShrubProductFlags(fert, { ...ctx, serviceDate: '2026-10-01' }).npBlackout).toBe(false);
     expect(treeShrubProductFlags(fert, { ...ctx, zone: 'north_port' }).npBlackout).toBe(false);
+    // A structured 0-N 0-P analysis wins over a fertilizer category, as at /complete.
+    const zeroNp = cat('s', 'Summer Blend', { category: 'fertilizer', fertilizer_analysis: { n: 0, p: 0, k: 16 } });
+    expect(treeShrubProductFlags(zeroNp, ctx).npBlackout).toBe(false);
     expect(treeShrubProductFlags(cat('k', 'Kontos Insecticide/Miticide'), ctx).npBlackout).toBe(false);
   });
   test('an N/P-free blend is not blackout', () => {

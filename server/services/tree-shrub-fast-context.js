@@ -34,7 +34,12 @@ const HISTORY_RECORD_LIMIT = 12;
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'incomplete', 'rescheduled']);
 
 // Classifier inputs the shared catalog list does not carry.
-const CLASSIFIER_COLUMNS = ['irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary', 'analysis_n', 'analysis_p'];
+// Every catalog field the closeout classifiers read, so these flags match what
+// /complete (which loads the full row) decides.
+const CLASSIFIER_COLUMNS = [
+  'irac_group', 'frac_group', 'hrac_group', 'hrac_group_secondary',
+  'analysis_n', 'analysis_p', 'fertilizer_analysis', 'product_type',
+];
 
 const dayNumber = (day) => {
   const [y, m, d] = String(day).split('-').map(Number);
