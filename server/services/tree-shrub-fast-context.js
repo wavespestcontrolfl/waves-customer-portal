@@ -43,12 +43,12 @@ const daysBetween = (laterDay, earlierDay) => Math.round(dayNumber(laterDay) - d
 // The server-computed flags the sheet needs per catalog product, from the SAME
 // classifiers /complete enforces (tree-shrub-closeout.js), so the sheet's
 // prompts can never disagree with the closeout's blocks.
-function treeShrubProductFlags(row, { serviceDate, zone }) {
+function treeShrubProductFlags(row, { serviceDate, zones }) {
   const ref = { catalog: row };
   return {
     insectFamily: isInsectFamilyProduct(ref),
     needsIracFrac: productNeedsIracFracLog(ref),
-    npBlackout: productHasNpFertilizer(ref) && isSummerBlackoutForZone(serviceDate, zone),
+    npBlackout: productHasNpFertilizer(ref) && zones.some((zone) => isSummerBlackoutForZone(serviceDate, zone)),
     injection: isInjectionProduct(ref),
   };
 }
@@ -90,22 +90,26 @@ const positiveOrNull = (value) => {
  * from an earlier record. A record with no scheduled_service_id has no
  * property link and is not counted.
  */
-async function loadTreeShrubHistory(svc, knex) {
+async function loadTreeShrubHistory(svc, knex, visitDate) {
   // An unresolved property proves nothing about which address a past visit
   // was at (a multi-property account), so it pre-fills nothing.
   if (!svc.property_id) return [];
   const records = await knex('service_records as sr')
     .join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.customer_id', svc.customer_id)
-    .where('sr.status', 'completed')
+    // An incomplete visit's recorded products were physically applied, so they
+    // count for amounts; only a completed record can be the last visit.
+    .whereIn('sr.status', ['completed', 'incomplete'])
     .where('sr.service_line', 'tree_shrub')
+    // Never a visit after this one (an older visit closed out late).
+    .where('sr.service_date', '<=', visitDate)
     .whereNot('sr.scheduled_service_id', svc.id)
     .where('ss.property_id', svc.property_id)
     .orderBy('sr.service_date', 'desc')
     .orderBy('sr.created_at', 'desc')
     .orderBy('sr.id', 'desc')
     .limit(HISTORY_RECORD_LIMIT)
-    .select('sr.id', 'sr.service_date', knex.raw("sr.service_data #> '{typedReportSnapshot,values}' as typed_values"));
+    .select('sr.id', 'sr.status', 'sr.service_date', knex.raw("sr.service_data #> '{typedReportSnapshot,values}' as typed_values"));
   if (!records.length) return [];
   const products = await knex('service_products')
     .whereIn('service_record_id', records.map((r) => r.id))
@@ -118,7 +122,7 @@ async function loadTreeShrubHistory(svc, knex) {
 }
 
 function buildLastVisit(history) {
-  const last = history[0];
+  const last = history.find((record) => record.status === 'completed');
   if (!last) return null;
   const typed = last.typed_values && typeof last.typed_values === 'object' ? last.typed_values : {};
   return {
@@ -183,9 +187,11 @@ function resistanceGroups(row) {
 const sameGroup = (a, b) => a.code === b.code && (a.family === b.family || a.family === 'moa' || b.family === 'moa');
 const groupLabel = (g) => `${g.family === 'moa' ? 'MOA' : g.family.toUpperCase()} ${g.code}`;
 
-const isPalmFertilizer = (row) => !!row.id && deriveTreeShrubTreatments({
-  products: [{ productId: row.id }],
-  productRows: [row],
+// A ledger row with no catalog id is classified from its recorded name and
+// category under a stand-in id.
+const isPalmFertilizer = (row) => !!(row.id || row.name) && deriveTreeShrubTreatments({
+  products: [{ productId: row.id || 'unlinked' }],
+  productRows: [{ ...row, id: row.id || 'unlinked' }],
 }).split(',').map((s) => s.trim()).includes('Palm fertilizer');
 
 /**
@@ -253,6 +259,9 @@ async function loadRecentApplications(svc, visitDate, knex) {
   const since = new Date((dayNumber(visitDate) - PALM_FERTILIZER_SPACING_DAYS) * 86400000).toISOString().slice(0, 10);
   const query = knex('property_application_history as pah')
     .leftJoin('products_catalog as pc', 'pc.id', 'pah.product_id')
+    // A row with no catalog link still names its product through the
+    // completion's service_products row.
+    .leftJoin('service_products as sp', 'sp.id', 'pah.service_product_id')
     .leftJoin('service_records as sr', 'sr.id', 'pah.service_record_id')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('pah.customer_id', svc.customer_id)
@@ -262,10 +271,11 @@ async function loadRecentApplications(svc, visitDate, knex) {
   if (svc.property_id) query.where((q) => q.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id));
   return query.select(
     'pah.application_date', 'pah.product_id', 'pah.moa_group as history_moa_group',
-    'pc.name as product_name', 'pc.active_ingredient',
+    knex.raw('COALESCE(pc.name, sp.product_name) as product_name'),
+    knex.raw('COALESCE(pc.active_ingredient, sp.active_ingredient, pah.active_ingredient) as active_ingredient'),
     // A ledger row with no catalog link keeps its own recorded category, so
     // its moa_group still resolves to the right family.
-    knex.raw('COALESCE(pc.category, pah.category) as category'),
+    knex.raw('COALESCE(pc.category, sp.product_category, pah.category) as category'),
     'pc.irac_group', 'pc.frac_group', 'pc.hrac_group', 'pc.hrac_group_secondary', 'pc.moa_group', 'pc.analysis_n', 'pc.analysis_p',
   );
 }
@@ -283,19 +293,24 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
   const visitDate = etCalendarDayOf(svc.scheduled_date);
-  // Zone inference reads the same fields /complete's typed compliance check does
-  // (the visit row plus the customer's city).
-  const zone = inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city });
+  // The property's own zone comes from the visit's resolved address. /complete's
+  // typed check still infers from the customer's city, so a product is shown as
+  // blacked out when EITHER zone is in its blackout: right for the property,
+  // and never a suggestion the server would then refuse.
+  const zones = [...new Set([
+    inferTreeShrubOrdinanceZone({ city: service.address?.city, address: service.address?.line1 }),
+    inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city }),
+  ])];
   const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS });
   // The shared loader turns a failed read into []. An empty catalog here would
   // let the sheet record a real application as "Inspection only" with none of
   // the product checks, so it sends the visit to the full form instead.
   if (!catalog.length) return { ok: true, eligible: false, reason: 'catalog_unavailable', service };
-  const products = catalog.map((row) => ({ ...row, tsFlags: treeShrubProductFlags(row, { serviceDate: visitDate, zone }) }));
+  const products = catalog.map((row) => ({ ...row, tsFlags: treeShrubProductFlags(row, { serviceDate: visitDate, zones }) }));
 
   let history = [];
   try {
-    history = await loadTreeShrubHistory(svc, knex);
+    history = await loadTreeShrubHistory(svc, knex, visitDate);
   } catch (err) {
     // No driver message: it can echo SQL and bound values. A blank pre-fill is
     // the safe degradation.

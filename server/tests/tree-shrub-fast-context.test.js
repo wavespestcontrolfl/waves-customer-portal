@@ -78,12 +78,15 @@ describe('treeShrubFastIneligibleReason', () => {
 });
 
 describe('treeShrubProductFlags', () => {
-  const ctx = { serviceDate: '2026-07-10', zone: 'manatee_parrish' };
+  const ctx = { serviceDate: '2026-07-10', zones: ['manatee_parrish'] };
   test('N/P fertilizer is blackout in summer for a blackout zone, never otherwise', () => {
     const fert = cat('f', 'LESCO 13-0-13 60% PolyPlus Landscape');
     expect(treeShrubProductFlags(fert, ctx).npBlackout).toBe(true);
     expect(treeShrubProductFlags(fert, { ...ctx, serviceDate: '2026-10-01' }).npBlackout).toBe(false);
-    expect(treeShrubProductFlags(fert, { ...ctx, zone: 'north_port' }).npBlackout).toBe(false);
+    expect(treeShrubProductFlags(fert, { ...ctx, zones: ['north_port'] }).npBlackout).toBe(false);
+    // Either zone in blackout blacks the product out (the property's, or the
+    // customer-city zone /complete still checks).
+    expect(treeShrubProductFlags(fert, { ...ctx, zones: ['north_port', 'manatee_parrish'] }).npBlackout).toBe(true);
     expect(treeShrubProductFlags(cat('k', 'Kontos Insecticide/Miticide'), ctx).npBlackout).toBe(false);
   });
   test('an N/P-free blend is not blackout', () => {
@@ -202,6 +205,16 @@ describe('buildTreeShrubWarnings', () => {
     expect(buildTreeShrubWarnings({ catalogRows: [snapshot], applications: [app(5, cat('x', 'x'), fungicideRow)], visitDate })).toEqual([]);
   });
 
+  test('an unlinked palm fertilizer application (named through its service product) still warns on spacing', () => {
+    const palmCandidate = cat('palm', 'LESCO 8-2-12 100% Poly Plus Palm & Tropical Ornamental Granular Fertilizer', { category: 'fertilizer' });
+    const unlinked = {
+      application_date: '2026-08-12', product_id: null, category: 'fertilizer',
+      product_name: 'LESCO 8-2-12 Palm & Tropical Ornamental Granular Fertilizer', moa_group: null, history_moa_group: null,
+    };
+    expect(buildTreeShrubWarnings({ catalogRows: [palmCandidate], applications: [unlinked], visitDate }))
+      .toEqual([expect.objectContaining({ type: 'palm_fertilizer_spacing', productId: 'palm', daysAgo: 50 })]);
+  });
+
   test('an IRAC code never matches a FRAC code of the same text', () => {
     const fungicide = cat('fung', 'Some Fungicide', { frac_group: '23' });
     expect(buildTreeShrubWarnings({ catalogRows: [fungicide], applications: [app(5, kontos)], visitDate })).toEqual([]);
@@ -301,8 +314,8 @@ describe('buildTreeShrubFastContext', () => {
 
   test('last visit values and per-product last amounts come from the typed snapshot and service_products', async () => {
     const records = [
-      { id: 'rec-2', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms, Shrubs', areas_treated: 'Front landscape, Foundation beds', landscape_condition: 'Good' } },
-      { id: 'rec-1', service_date: '2026-07-01', typed_values: { plant_groups: 'Hedges' } },
+      { id: 'rec-2', status: 'completed', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms, Shrubs', areas_treated: 'Front landscape, Foundation beds', landscape_condition: 'Good' } },
+      { id: 'rec-1', status: 'completed', service_date: '2026-07-01', typed_values: { plant_groups: 'Hedges' } },
     ];
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
@@ -340,13 +353,42 @@ describe('buildTreeShrubFastContext', () => {
   });
 
   test('an unresolved property pre-fills nothing from history', async () => {
-    const records = [{ id: 'rec-9', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms' } }];
+    const records = [{ id: 'rec-9', status: 'completed', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms' } }];
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({ property_id: null }), products_catalog: catalog, 'service_records as sr': records,
       service_products: [{ service_record_id: 'rec-9', product_id: 'kphite', total_amount: '2', amount_unit: 'qt' }],
     }));
     expect(ctx).toMatchObject({ ok: true, eligible: true, lastVisit: null });
     expect(ctx.monthProducts.every((m) => m.lastAmount === undefined)).toBe(true);
+  });
+
+  test('a visit at a Bradenton property for a North Port customer is blacked out in July', async () => {
+    const summerCatalog = [cat('orn', 'LESCO 13-0-13 60% PolyPlus Landscape', { category: 'fertilizer' })];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit({
+        scheduled_date: '2026-07-10', cust_city: 'North Port',
+        service_address_line1: '200 Sample Lane', service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34203',
+      }),
+      products_catalog: summerCatalog,
+    }));
+    expect(ctx.service.address.city).toBe('Bradenton');
+    expect(ctx.products[0].tsFlags.npBlackout).toBe(true);
+  });
+
+  test('history: incomplete records feed amounts but never become the last visit', async () => {
+    const records = [
+      { id: 'rec-inc', status: 'incomplete', service_date: '2026-09-20', typed_values: { plant_groups: 'Hedges' } },
+      { id: 'rec-ok', status: 'completed', service_date: '2026-09-02', typed_values: { plant_groups: 'Palms' } },
+    ];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
+      service_products: [
+        { service_record_id: 'rec-inc', product_id: 'kphite', total_amount: '3', amount_unit: 'qt' },
+        { service_record_id: 'rec-ok', product_id: 'kphite', total_amount: '2', amount_unit: 'qt' },
+      ],
+    }));
+    expect(ctx.lastVisit).toMatchObject({ serviceRecordId: 'rec-ok', plantGroups: ['Palms'] });
+    expect(ctx.monthProducts.find((m) => m.productId === 'kphite').lastAmount).toEqual({ totalAmount: 3, amountUnit: 'qt', serviceDate: '2026-09-20' });
   });
 
   test('recent ledger rows produce warnings on the context', async () => {
