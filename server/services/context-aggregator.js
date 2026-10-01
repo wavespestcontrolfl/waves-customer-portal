@@ -18,6 +18,7 @@ const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, c
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
+const { loadVisitLoops, emptyVisitLoops } = require('./visit-loops-facts');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -1290,7 +1291,7 @@ class ContextAggregator {
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
 
-    return {
+    const context = {
       known: true,
       // LIVE ETA send-time freshness snapshot input (see the comment above
       // where this is built) — [{ minutes, scheduledServiceIds }], never
@@ -1437,6 +1438,23 @@ class ContextAggregator {
       sourceHealth: { recentCalls: recentCalls === null ? 'unavailable' : 'ok' },
       summary,
     };
+    // Visit status + open loops (live tech position, lateness, missed visit,
+    // promises we owe, asks still waiting): read-only facts the drafter needs.
+    // Non-enumerable, like scheduledServiceId above: this context is serialized
+    // whole into other LLM-visible payloads (managed assistant snapshot, email
+    // reply facts, lead-response tool results), and raw tech notes / open
+    // promise text must only reach the one prompt that renders them (the SMS
+    // drafter reads the property directly). Never throws; a failed field is
+    // null/[].
+    let visitLoops;
+    try {
+      visitLoops = await loadVisitLoops({ customerId: customer.id, upcomingServices: context.upcomingServices, deriveWindow: (row) => this.deriveWindow(row) });
+    } catch (err) {
+      logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
+      visitLoops = emptyVisitLoops();
+    }
+    Object.defineProperty(context, 'visitLoops', { value: visitLoops, enumerable: false, writable: true, configurable: true });
+    return context;
   }
 
   // Last few phone calls that produced an AI summary (call-recording-processor

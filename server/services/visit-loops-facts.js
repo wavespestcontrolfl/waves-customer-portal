@@ -1,0 +1,363 @@
+/**
+ * Visit status and open loops: the READ-ONLY facts the texting AI was missing
+ * in the 2026-09-30 blind bake-off (live tech position / lateness, a missed
+ * visit, promises we owe, asks the customer is still waiting on, the tech's
+ * in-progress note). Everything here is already in Postgres; nothing writes,
+ * nothing sends.
+ *
+ * context-aggregator attaches the result as `context.visitLoops`. Every field
+ * is nullable / an empty array, and every query is isolated: a failure yields
+ * that one field null (or []) and a warn log, never a throw, so a broken
+ * dispatch table can never take the whole customer context down with it.
+ *
+ * Interpretation notes (the drafter decides what to say, not this module):
+ *  - "today's visit" = the first upcoming row whose scheduled_date is today
+ *    (ET). Position, late alert, passed-window and live-note facts are about
+ *    today's visit(s) only.
+ *  - The window judged "passed" is the CUSTOMER-FACING one (window_start plus
+ *    the standard arrival window, exactly what deriveWindow quotes), not the
+ *    internal job block in window_end: calling a 9-11 visit "late" at 10:15
+ *    because dispatch blocked 60 minutes would contradict what the customer
+ *    was told. window_end is the fallback only when there is no start.
+ *  - Gates are the helpers' own: call promises need GATE_CALL_COMMITMENTS
+ *    (isEnabled('callCommitments')); SMS rows need smsCommitmentsEnabled();
+ *    email rows need GATE_EMAIL_OPERATIONAL_ACTIONS. A gated-off source
+ *    contributes nothing.
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString, etParts } = require('../utils/datetime-et');
+const { arrivalWindowRange } = require('../utils/sms-time-format');
+const { calendarDay } = require('./live-eta-destination');
+const { JOIN_INELIGIBLE_STATUSES, UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+
+const FRESH_LOCATION_MS = 5 * 60 * 1000;
+const NOTE_MAX = 240;
+const DESCRIPTION_MAX = 120;
+const LIST_MAX = 5;
+const MISSED_LOOKBACK_DAYS = 7;
+const LATE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
+// A visit nobody has performed or started: the only statuses a "window passed"
+// or a "never completed" reading is true of.
+const NOT_STARTED_STATUSES = ['pending', 'confirmed'];
+const LIVE_STATUSES = ['en_route', 'on_site'];
+const LIVE_TRACK_STATES = ['en_route', 'on_property', 'on_site'];
+
+function emptyVisitLoops() {
+  return {
+    techPosition: null,
+    lateAlert: null,
+    pastWindow: null,
+    missedVisit: null,
+    liveNote: null,
+    weOwe: [],
+    customerWaiting: [],
+  };
+}
+
+// Run one field's loader; any failure (a sync throw from a builder, a rejected
+// query) becomes the fallback and a warn log.
+async function safely(field, fallback, fn) {
+  try {
+    const value = await fn();
+    return value === undefined ? fallback : value;
+  } catch (err) {
+    logger.warn(`[visit-loops-facts] ${field} unavailable: ${err?.message || err}`);
+    return fallback;
+  }
+}
+
+const rowId = (s) => s?.scheduledServiceId ?? s?.id ?? null;
+const clip = (value, max) => {
+  const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+};
+const toDate = (value) => {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const parseJson = (value) => {
+  if (value == null) return null;
+  if (typeof value === 'string') { try { return JSON.parse(value); } catch { return null; } }
+  return value;
+};
+const hhmmToMinutes = (value) => {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+const nowEtMinutes = (now) => {
+  const p = etParts(now);
+  return p.hour * 60 + p.minute;
+};
+const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
+
+// Coarse service family for "was a later visit of the same service booked":
+// the same buckets the customer would use, never a price or plan rule.
+function familyKey(serviceType) {
+  const t = String(serviceType || '').toLowerCase();
+  if (/lawn|turf|fertiliz|weed|sod/.test(t)) return 'lawn';
+  if (/mosquito/.test(t)) return 'mosquito';
+  if (/termite|wdo|wood.destroying/.test(t)) return 'termite';
+  if (/rodent|rat\b|mice|mouse/.test(t)) return 'rodent';
+  if (/tree|shrub|ornamental/.test(t)) return 'tree_shrub';
+  if (/pest|roach|ant\b|ants|spider|perimeter|general|bug/.test(t)) return 'pest';
+  return t.trim() || null;
+}
+
+// The customer-facing end of the arrival window, in ET minutes since midnight.
+function customerWindowEndMinutes(row) {
+  const range = arrivalWindowRange(String(row.window_start || ''));
+  if (range) return hhmmToMinutes(range.split('-')[1]);
+  return hhmmToMinutes(row.window_end);
+}
+
+function windowLabel(row, deriveWindow) {
+  try {
+    const derived = typeof deriveWindow === 'function' ? deriveWindow(row) : null;
+    if (derived) return derived;
+  } catch { /* fall through to the stored display */ }
+  const display = String(row.window_display || '').trim();
+  if (display) return display;
+  const tw = String(row.time_window || '').trim();
+  return tw ? tw.charAt(0).toUpperCase() + tw.slice(1) : null;
+}
+
+const ET_STAMP = { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+const formatEtStamp = (value) => {
+  const d = toDate(value);
+  return d ? d.toLocaleString('en-US', ET_STAMP) : null;
+};
+
+// ── today's visits ──────────────────────────────────────────────────────────
+async function loadTodayRows(upcomingServices, conn) {
+  const ids = (upcomingServices || []).filter((s) => s && s.isToday).map(rowId).filter(Boolean);
+  if (!ids.length) return [];
+  const rows = await conn('scheduled_services')
+    .whereIn('id', ids)
+    .select('id', 'technician_id', 'route_order', 'scheduled_date', 'status', 'track_state', 'window_start',
+      'window_end', 'window_display', 'time_window', 'service_type', 'notes', 'updated_at');
+  // Keep the aggregator's order (earliest-first upcoming list) and carry the
+  // tech name it already resolved.
+  const byId = new Map((rows || []).map((r) => [String(r.id), r]));
+  return upcomingServices.filter((s) => s && s.isToday && byId.has(String(rowId(s)))).map((s) => ({
+    ...byId.get(String(rowId(s))),
+    technician_name: s.tech || null,
+  }));
+}
+
+async function loadTechPosition(todayRows, { conn, now }) {
+  const visit = todayRows.find((r) => r.technician_id);
+  if (!visit) return null;
+  const status = await conn('tech_status').where({ tech_id: visit.technician_id })
+    .first('status', 'current_job_id', 'location_updated_at');
+  const updatedAt = toDate(status?.location_updated_at);
+  const ageMs = updatedAt ? now.getTime() - updatedAt.getTime() : null;
+  const fresh = ageMs != null && ageMs >= 0 && ageMs <= FRESH_LOCATION_MS;
+
+  let stopsAhead = null;
+  const routeOrder = visit.route_order == null ? null : Number(visit.route_order);
+  if (Number.isFinite(routeOrder)) {
+    const result = await conn('scheduled_services')
+      .where({ technician_id: visit.technician_id, scheduled_date: etDateString(now) })
+      .where('route_order', '<', routeOrder)
+      .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+      .count('* as count').first();
+    const n = Number(result?.count);
+    stopsAhead = Number.isFinite(n) ? n : null;
+  }
+  return {
+    techName: firstName(visit.technician_name),
+    status: fresh ? String(status.status) : 'stale',
+    minutesSinceUpdate: ageMs == null ? null : Math.max(0, Math.floor(ageMs / 60000)),
+    stopsAhead,
+    atThisVisit: Boolean(status?.current_job_id) && String(status.current_job_id) === String(visit.id),
+  };
+}
+
+async function loadLateAlert(todayRows, { conn }) {
+  const ids = todayRows.map((r) => r.id);
+  if (!ids.length) return null;
+  const alert = await conn('dispatch_alerts')
+    .whereIn('job_id', ids).whereIn('type', LATE_ALERT_TYPES).whereNull('resolved_at')
+    .orderBy('created_at', 'desc')
+    .first('type', 'severity', 'payload');
+  if (!alert) return null;
+  const minutes = Number(parseJson(alert.payload)?.delay_minutes);
+  return {
+    type: alert.type,
+    severity: alert.severity || null,
+    minutesLate: Number.isFinite(minutes) && minutes >= 0 ? Math.round(minutes) : null,
+  };
+}
+
+function findPastWindow(todayRows, { now, deriveWindow }) {
+  const nowMin = nowEtMinutes(now);
+  for (const row of todayRows) {
+    if (!NOT_STARTED_STATUSES.includes(row.status) || LIVE_TRACK_STATES.includes(row.track_state)) continue;
+    const endMin = customerWindowEndMinutes(row);
+    if (endMin == null || endMin >= nowMin) continue;
+    return {
+      row,
+      value: { type: row.service_type || null, windowDisplay: windowLabel(row, deriveWindow), minutesPast: nowMin - endMin },
+    };
+  }
+  return null;
+}
+
+function buildLiveNote(todayRows, pastWindowRow) {
+  const live = todayRows.filter((r) => LIVE_STATUSES.includes(r.status) || LIVE_TRACK_STATES.includes(r.track_state)
+    || (pastWindowRow && r.id === pastWindowRow.id));
+  for (const row of live) {
+    const text = clip(row.notes, NOTE_MAX);
+    if (!text) continue;
+    const at = toDate(row.updated_at);
+    return { text, updatedAt: at ? at.toISOString() : null };
+  }
+  return null;
+}
+
+// ── missed visit ────────────────────────────────────────────────────────────
+async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
+  const today = etDateString(now);
+  const since = etDateString(new Date(now.getTime() - MISSED_LOOKBACK_DAYS * 86400000));
+  const candidates = [];
+
+  const unfinished = await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '<', today).where('scheduled_date', '>=', since)
+    .whereIn('status', NOT_STARTED_STATUSES)
+    .orderBy('scheduled_date', 'desc')
+    .first('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'window_display', 'time_window', 'status');
+  if (unfinished) {
+    candidates.push({
+      type: unfinished.service_type || null, date: calendarDay(unfinished.scheduled_date),
+      windowDisplay: windowLabel(unfinished, deriveWindow), status: unfinished.status, reason: 'not_completed',
+    });
+  }
+
+  const noshow = await conn('reschedule_log as rl')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'rl.scheduled_service_id')
+    .where('rl.customer_id', customerId).where('rl.reason_code', 'customer_noshow')
+    .where('rl.original_date', '<=', today).where('rl.original_date', '>=', since)
+    .orderBy('rl.original_date', 'desc')
+    .first('rl.original_date', 'rl.original_window', 'ss.service_type', 'ss.window_start', 'ss.window_end',
+      'ss.window_display', 'ss.time_window', 'ss.status');
+  if (noshow) {
+    const date = calendarDay(noshow.original_date);
+    const family = familyKey(noshow.service_type);
+    // Not followed by a later visit of the same service (done, or booked).
+    const later = date && family
+      ? await conn('scheduled_services')
+        .where({ customer_id: customerId }).where('scheduled_date', '>', date)
+        .whereIn('status', [...UPCOMING_SERVICE_STATUSES, 'completed'])
+        .select('service_type')
+      : [];
+    const followedUp = (later || []).some((r) => familyKey(r.service_type) === family);
+    if (!followedUp) {
+      candidates.push({
+        type: noshow.service_type || null, date,
+        windowDisplay: windowLabel(noshow, deriveWindow) || String(noshow.original_window || '').trim() || null,
+        status: noshow.status || 'no_show', reason: 'customer_noshow',
+      });
+    }
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return candidates[0];
+}
+
+// ── open promises / asks ────────────────────────────────────────────────────
+const rowSourceAt = (r) => toDate(r.call_started_at) || toDate(r.sms_started_at) || toDate(r.created_at);
+
+async function loadCommitments({ conn, customerId, now }) {
+  const rows = [];
+  // Call promises: GATE_CALL_COMMITMENTS (nothing is written without it).
+  if (isEnabled('callCommitments')) {
+    const { listOpenCommitments } = require('./call-commitments');
+    const calls = await safely('call commitments', [], () => listOpenCommitments(conn, { customerId, limit: 50, now }));
+    for (const r of calls) rows.push({ ...r, __source: 'call' });
+  }
+  // SMS + email rows share one reader; each channel keeps its own gate.
+  await safely('sms/email commitments', null, async () => {
+    const { smsCommitmentsEnabled, listSmsCommitments } = require('./sms-operational-actions');
+    const smsOn = smsCommitmentsEnabled();
+    const emailOn = gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS');
+    if (!smsOn && !emailOn) return null;
+    const listed = await listSmsCommitments(conn, { customerId, limit: 50, now });
+    const kept = listed.filter((r) => (r.channel === 'email' ? emailOn : smsOn));
+    // The reader's select omits sms_context (basis: promise vs request, and the
+    // spoken due text); one keyed read supplies it.
+    let contexts = new Map();
+    if (kept.length) {
+      contexts = await safely('sms commitment context', new Map(), async () => {
+        const found = await conn('call_commitments').whereIn('id', kept.map((r) => r.id)).select('id', 'sms_context');
+        return new Map((found || []).map((f) => [String(f.id), parseJson(f.sms_context) || {}]));
+      });
+    }
+    for (const r of kept) rows.push({ ...r, sms_context: contexts.get(String(r.id)) || null, __source: r.channel === 'email' ? 'email' : 'sms' });
+    return null;
+  });
+
+  const seen = new Set();
+  const unique = rows.filter((r) => {
+    const key = String(r.id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const byRecent = (a, b) => (rowSourceAt(b)?.getTime() || 0) - (rowSourceAt(a)?.getTime() || 0);
+
+  // A text/email the customer sent that asks us for something (basis 'request')
+  // is the customer waiting on us; so is a customer-party call row.
+  const isWaiting = (r) => (r.__source === 'call' ? r.party === 'customer' : r.sms_context?.basis === 'request');
+  const isWeOwe = (r) => (r.__source === 'call' ? r.party === 'waves' : r.party === 'waves' && r.sms_context?.basis !== 'request');
+
+  const weOwe = unique.filter(isWeOwe).sort(byRecent).slice(0, LIST_MAX).map((r) => ({
+    kind: r.kind || null,
+    description: clip(r.description, DESCRIPTION_MAX),
+    dueText: clip(r.sms_context?.due_text || r.due_text, 80) || formatEtStamp(r.effective_due_at || r.due_at),
+    source: r.__source,
+  }));
+  const customerWaiting = unique.filter(isWaiting).sort(byRecent).slice(0, LIST_MAX).map((r) => {
+    const at = rowSourceAt(r);
+    return { kind: r.kind || null, description: clip(r.description, DESCRIPTION_MAX), since: at ? etDateString(at) : null };
+  });
+  return { weOwe, customerWaiting };
+}
+
+/**
+ * @param {object} args
+ * @param {string} args.customerId
+ * @param {Array}  args.upcomingServices  context.upcomingServices (mapped rows: isToday, tech, scheduledServiceId)
+ * @param {Date}   [args.now]
+ * @param {Function} [args.deriveWindow]  row -> customer-facing window label (the aggregator's own deriveWindow)
+ * @param {Function} [args.conn]          knex handle (tests)
+ */
+async function loadVisitLoops({ customerId, upcomingServices = [], now = new Date(), deriveWindow = null, conn = db } = {}) {
+  const out = emptyVisitLoops();
+  if (!customerId) return out;
+  const ctx = { conn, now, deriveWindow, customerId };
+
+  const todayRows = await safely('today visits', [], () => loadTodayRows(upcomingServices, conn));
+  const past = await safely('past window', null, () => findPastWindow(todayRows, ctx));
+
+  const [techPosition, lateAlert, missedVisit, commitments] = await Promise.all([
+    safely('tech position', null, () => loadTechPosition(todayRows, ctx)),
+    safely('late alert', null, () => loadLateAlert(todayRows, ctx)),
+    safely('missed visit', null, () => loadMissedVisit(ctx)),
+    safely('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
+  ]);
+
+  out.techPosition = techPosition;
+  out.lateAlert = lateAlert;
+  out.pastWindow = past ? past.value : null;
+  out.missedVisit = missedVisit;
+  out.liveNote = await safely('live note', null, async () => buildLiveNote(todayRows, past?.row || null));
+  out.weOwe = commitments.weOwe;
+  out.customerWaiting = commitments.customerWaiting;
+  return out;
+}
+
+module.exports = { loadVisitLoops, emptyVisitLoops, familyKey };
