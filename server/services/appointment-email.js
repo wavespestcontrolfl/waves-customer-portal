@@ -273,8 +273,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
   // Street-level address hold (owner ruling 2026-10-01): no email about a visit that is a live
   // unconfirmed hold until the office confirms. Same predicate as the SMS send step; fails closed.
   const holdVisitId = scheduledServiceId || moveHoldServiceId;
-  if (holdVisitId && require('../config/feature-gates').callLeadFormAddressStreetLevelLive()
-    && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) {
+  if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) {
     logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held: street-level address hold awaiting the office confirm`);
     return { ok: false, held: true, reason: 'street_level_hold' };
   }

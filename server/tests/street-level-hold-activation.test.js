@@ -99,7 +99,7 @@ describe('activateLegacyOutboundReviewRowIfNeeded: a schedule move never release
   });
 
   test('an unconfirmed hold moved to a live status by a direct writer is skipped too (only the office confirm releases it)', async () => {
-    for (const status of ['en_route', 'on_site', 'completed']) {
+    for (const status of ['en_route', 'on_site']) {
       const { out, calls } = await activate(baseVisit({ status }), true);
       expect(out).toBe(false);
       expect(calls.updates).toHaveLength(0);

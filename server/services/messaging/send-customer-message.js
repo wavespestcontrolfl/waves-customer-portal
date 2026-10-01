@@ -117,9 +117,8 @@ const STREET_LEVEL_HOLD_BLOCK = Object.freeze({
 });
 async function streetLevelHoldBlocksSend(input) {
   if (!input.appointmentId || input.audience !== 'customer') return false;
-  // Gate off (the default) is byte-identical: no lookup at all. Holds exist only while the
-  // street-level gate is on; confirm or cancel open holds before turning it off.
-  if (!require('../../config/feature-gates').callLeadFormAddressStreetLevelLive()) return false;
+  // Enforced from the DURABLE hold predicate regardless of the rollout gate: turning the gate off
+  // stops NEW holds but never releases the customer messages of holds already open.
   return require('../street-level-hold').isStreetLevelHoldVisit(input.appointmentId);
 }
 

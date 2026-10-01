@@ -109,12 +109,12 @@ describe('the SMS send step holds a live street-level hold', () => {
     expect(await actual.isStreetLevelHoldVisit('visit-1', blip)).toBe(true);
   });
 
-  test('gate off is byte-identical: no lookup at all', async () => {
+  test('the durable predicate applies whatever the rollout gate says: turning the gate off never releases an open hold', async () => {
     delete process.env[GATE];
     isStreetLevelHoldVisit.mockResolvedValue(true);
     const result = await sendCustomerMessage({ ...base, ...notices['a reschedule notice'] });
-    expect(isStreetLevelHoldVisit).not.toHaveBeenCalled();
-    expect(result.sent).toBe(true);
+    expect(isStreetLevelHoldVisit).toHaveBeenCalledWith('visit-1');
+    expect(result).toMatchObject({ sent: false, code: 'STREET_LEVEL_HOLD' });
   });
 });
 
@@ -125,6 +125,6 @@ describe('the appointment email sender holds it too', () => {
     expect(at).toBeGreaterThan(0);
     expect(at).toBeLessThan(s.indexOf('const customer = await loadCustomer(customerId);', at));
     expect(s.slice(at, at + 520)).toContain("return { ok: false, held: true, reason: 'street_level_hold' };");
-    expect(s.slice(at, at + 300)).toContain('callLeadFormAddressStreetLevelLive()');
+    expect(s.slice(at, at + 300)).not.toContain('callLeadFormAddressStreetLevelLive');
   });
 });
