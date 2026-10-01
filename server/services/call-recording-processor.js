@@ -1444,7 +1444,7 @@ const { resolveCallLeadSource } = require('../utils/call-lead-source');
 // estimate_viewed / estimate_drafted / awaiting_address / …) is covered without
 // enumerating a growing set, while won/lost/disqualified/duplicate rows fall
 // through to a fresh insert instead of hiding the inquiry on a closed lead.
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'handled'];
 
 // Coarse account classification of a phone-matched caller, used only to give the
 // extraction model context ("this caller is already a Waves customer"). Mirrors
@@ -5327,7 +5327,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         // quote hides in a closed lead the pipeline view never shows.
         const currentLead = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .first('id', 'status');
         if (!currentLead) return false;
@@ -5338,7 +5338,7 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         }
         const claimed = await inner('leads')
           .where({ id: leadId })
-          .whereNotIn('status', ['won', 'duplicate'])
+          .whereNotIn('status', ['won', 'duplicate', 'handled'])
           .where(ownedOrUnclaimedOpen)
           .update(claimUpdates);
         if (claimed) {
@@ -5380,13 +5380,13 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         q.whereNull('customer_id').orWhere('customer_id', customerId);
       const convertible = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .first('id');
       if (!convertible) return false;
       const updated = await inner('leads')
         .where({ id: leadId })
-        .whereNotIn('status', ['won', 'duplicate'])
+        .whereNotIn('status', ['won', 'duplicate', 'handled'])
         .where(ownedOrUnclaimed)
         .update({
           status: 'won',

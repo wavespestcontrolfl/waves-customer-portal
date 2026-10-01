@@ -392,6 +392,16 @@ describe('class rules', () => {
     expect(classify(note({ category: 'new_lead', link: '/admin/leads', metadata: { triggerKey: 'new_lead' } }))).toBeNull();
   });
 
+  test('new lead (codex #5477 r2/r3 P1): a lead whose CURRENT status is handled is moved on whatever the timestamps say, even when the close landed before the bell', async () => {
+    for (const updated_at of [AFTER_BELL, BEFORE_BELL, undefined]) {
+      mockTables.leads = [lead({ status: 'handled', customer_id: null, updated_at })];
+      expect((await reasonFor(leadNote())).reason).toBe('Request was handled');
+    }
+    // reopened by staff after being handled: not handled any more, so relevant again (the sweep puts the bell back)
+    mockTables.leads = [lead({ status: 'new', customer_id: null, updated_at: AFTER_BELL })];
+    expect((await reasonFor(leadNote())).reason).toBeNull();
+  });
+
   test('new lead: the lead\'s state from before the bell never counts — a website submission attached to a lead already quoted, worked or booked stays relevant', async () => {
     // applyLeadAttachUpdate keeps an open lead's status, and the intake trigger rings for the new submission.
     for (const status of ['estimate_sent', 'estimate_viewed', 'contacted', 'spam', 'cancelled', 'won', 'lost', 'duplicate']) {

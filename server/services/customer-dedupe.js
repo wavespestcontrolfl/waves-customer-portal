@@ -3371,7 +3371,7 @@ const EMAIL_BOUND_SURFACES = [
     emailColumn: 'email',
     linkColumn: 'customer_id',
     active: (q) => q.whereNull('deleted_at')
-      .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'])),
+      .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'])),
     label: 'open lead(s)',
     carriesName: true,
   },

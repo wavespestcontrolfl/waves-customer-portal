@@ -11,6 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 const leadAttribution = require('../lead-attribution');
+const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
 const LEAD_STATUSES = [
   'new',
@@ -22,10 +23,14 @@ const LEAD_STATUSES = [
   'unresponsive',
   'disqualified',
   'duplicate',
+  'handled',
 ];
-const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
+// 'handled' is system-set only (a /book request closed by the customer's own
+// booking, codex #5477 r9): readable and filterable, never written by a tool.
+const WRITABLE_LEAD_STATUSES = LEAD_STATUSES.filter((s) => s !== 'handled');
+const WRITABLE_LEAD_STATUS_SET = new Set(WRITABLE_LEAD_STATUSES);
 const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
-const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 const LEADS_TOOLS = [
   {
@@ -120,7 +125,7 @@ Use for: "move Henderson to contacted", "mark the Smith lead as lost — chose c
       properties: {
         lead_id: { type: 'string' },
         lead_name: { type: 'string', description: 'Find lead by name (partial match)' },
-        new_status: { type: 'string', enum: LEAD_STATUSES },
+        new_status: { type: 'string', enum: WRITABLE_LEAD_STATUSES },
         lost_reason: { type: 'string', description: 'Required when marking as lost' },
         notes: { type: 'string' },
       },
@@ -174,7 +179,9 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
 async function getLeadOverview(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
-  const leads = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since);
+  // Prospects only (the Leads dashboard's own denominator): a /book request its own
+  // booking closed ('handled') is neither won nor lost and must not dilute the rate.
+  const leads = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since).modify(scopeToProspects);
   const total = leads.length;
   const won = leads.filter(l => l.status === 'won').length;
   const lost = leads.filter(l => l.status === 'lost').length;
@@ -313,6 +320,7 @@ async function getLeadFunnel(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
   const stages = await db('leads').whereNull('deleted_at').where('first_contact_at', '>=', since)
+    .modify(scopeToProspects)
     .select('status', db.raw('COUNT(*) as count'))
     .groupBy('status').orderByRaw('COUNT(*) DESC');
 
@@ -352,6 +360,7 @@ async function getSourcePerformance(days) {
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .whereNull('leads.deleted_at')
     .where('leads.first_contact_at', '>=', since)
+    .modify(scopeToProspects)
     .select(
       'lead_sources.name as source',
       'lead_sources.channel',
@@ -438,6 +447,7 @@ async function getResponseTimes(days) {
     .whereNull('deleted_at')
     .where('first_contact_at', '>=', since)
     .whereNotNull('response_time_minutes')
+    .modify(scopeToProspects)
     .select('response_time_minutes', 'status');
 
   const buckets = [
@@ -506,7 +516,7 @@ async function resolveLeadForUpdate({ lead_id, lead_name }) {
 
 async function updateLeadStatus(input) {
   const { new_status, lost_reason, notes } = input;
-  if (!LEAD_STATUS_SET.has(new_status)) {
+  if (!WRITABLE_LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
@@ -541,6 +551,10 @@ async function updateLeadStatus(input) {
       .where('id', lead.id)
       .where('status', oldStatus)
       .whereNull('deleted_at')
+      // Leaving 'handled' only from the very close the card showed (codex #5477 r18):
+      // a request reopened and closed again by a later booking, or a call with no
+      // pinned version, matches nothing.
+      .where(unlessHandledSince('handled', input._expected_updated_at))
       .update(updates, ['id', 'customer_id']);
     if (!rows || rows.length === 0) return rows;
     await trx('lead_activities').insert({
@@ -638,7 +652,7 @@ async function settleBulkWon(ids) {
 
 async function bulkUpdateLeads(input) {
   const { current_status, older_than_days, new_status, lost_reason, dry_run = true, _approved_lead_ids: lead_ids } = input;
-  if (!LEAD_STATUS_SET.has(new_status)) {
+  if (!WRITABLE_LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }
 
@@ -699,6 +713,9 @@ async function bulkUpdateLeads(input) {
       throw err;
     }
   } else {
+    // An unpinned bulk move never takes leads off 'handled' (codex #5477 r18): only a
+    // confirmed card, which pins every lead's version above, can.
+    if (current_status === 'handled') return { blocked: true, updated: 0, note: "Handled requests move only from a confirmed card (each one's version pinned)." };
     rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
       .update(updates, ['id']);
   }

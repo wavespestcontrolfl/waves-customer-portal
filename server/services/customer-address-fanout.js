@@ -47,7 +47,7 @@ const {
 // still matches the old address once it settles (sent/send_failed), so the
 // next fan-out heals it.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
-const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled'];
 
 // Lowercased alphanumerics only — spacing/punctuation/casing differences
 // (including speech-to-text spacing like "Tober Morey") compare equal.
