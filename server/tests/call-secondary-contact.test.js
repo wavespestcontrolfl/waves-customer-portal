@@ -970,3 +970,25 @@ describe('secondary-contact grounding fields through the compat mappers', () => 
     expect(onSiteNotifyConsent(same)).toBe(true);
   });
 });
+
+// Pre-push codex P1 on #5467: the consent artifact is account-wide, so a
+// non-consented phone written AFTER the on-site contact's stamp would clear
+// it. The loop orders consented entries first and withholds a later
+// unconsented phone from the slot (review card keeps it).
+describe('mixed per-contact consent on one call never clears the on-site stamp (#5467)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const loopAt = src.indexOf('const orderedEntries = [...callSecondaryContacts].sort(');
+  const loop = src.slice(loopAt, loopAt + 7000);
+
+  test('consented entries are persisted before unconsented ones', () => {
+    expect(loopAt).toBeGreaterThan(-1);
+    expect(loop).toContain('Number(resolveSecondaryConsent(b, v2SmsConsentExplicit).smsConsentExplicit)');
+    expect(loop).toContain('for (const rawEntry of orderedEntries)');
+  });
+
+  test('an unconsented phone after a consented write is withheld from the slot, and the review card keeps the raw entry', () => {
+    expect(loop).toContain("(!entryConsent && rawEntry?.phone && consentedPhoneWritten)\n          ? { ...rawEntry, phone: null }");
+    expect(loop).toContain("if (result === 'written' && entryConsent && secondaryEntry?.phone) consentedPhoneWritten = true;");
+    expect(loop).toContain('extraPayload: { secondary_contact: rawEntry }');
+  });
+});

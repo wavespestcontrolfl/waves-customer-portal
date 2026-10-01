@@ -13090,17 +13090,38 @@ const CallRecordingProcessor = {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
       // dedup, cross-customer, empty slot). Stop early when slots run out.
-      for (const secondaryEntry of callSecondaryContacts) {
+      // The consent artifact is ACCOUNT-WIDE ("every slot phone is consented"),
+      // so with mixed per-contact consent on one call the order matters:
+      // persistCallSecondaryContact CLEARS the stamp when an unconsented phone
+      // lands on a stamped row. Writing the on-site spouse (stamps) and then
+      // the lender (clears) would silently lose the spouse's consent (pre-push
+      // codex P1). So: consented entries first; then an unconsented entry
+      // with a phone is written WITHOUT its phone once any entry stamped —
+      // name/email/role still land in the slot, and the phone stays on the
+      // secondary_contact_captured review item + lead extracted_data for the
+      // office. V2-explicit calls are unaffected (every entry consents).
+      const orderedEntries = [...callSecondaryContacts].sort((a, b) =>
+        Number(resolveSecondaryConsent(b, v2SmsConsentExplicit).smsConsentExplicit)
+        - Number(resolveSecondaryConsent(a, v2SmsConsentExplicit).smsConsentExplicit));
+      let consentedPhoneWritten = false;
+      for (const rawEntry of orderedEntries) {
       try {
         // On-site rule (owner 2026-09-30): consent for THIS contact is explicit
         // V2 consent OR the on-site-contact rule above; the stamp source records
         // which one authorized it.
         const { smsConsentExplicit: entryConsent, smsConsentSource } =
-          resolveSecondaryConsent(secondaryEntry, v2SmsConsentExplicit);
+          resolveSecondaryConsent(rawEntry, v2SmsConsentExplicit);
+        const secondaryEntry = (!entryConsent && rawEntry?.phone && consentedPhoneWritten)
+          ? { ...rawEntry, phone: null }
+          : rawEntry;
+        if (secondaryEntry !== rawEntry) {
+          logger.info(`[call-proc] secondary contact phone withheld from the slot for ${maskSid(callSid)} — unconsented phone would clear this call's on-site consent stamp (office confirms via review)`);
+        }
         const result = await persistCallSecondaryContact(customerId, secondaryEntry, {
           smsConsentExplicit: entryConsent,
           smsConsentSource,
         });
+        if (result === 'written' && entryConsent && secondaryEntry?.phone) consentedPhoneWritten = true;
         logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
         // Recipient double opt-in parity with the portal flow (#2956): a
         // call-created phone recipient gets the same claim + confirmation
@@ -13160,7 +13181,9 @@ const CallRecordingProcessor = {
               callLogId: call.id,
               flag: 'secondary_contact_is_existing_customer',
               extraction: v2CanonicalExtraction || undefined,
-              extraPayload: { secondary_contact: secondaryEntry },
+              // The RAW entry: the review card must show the phone even when
+              // the slot write withheld it (see consentedPhoneWritten above).
+              extraPayload: { secondary_contact: rawEntry },
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore()
