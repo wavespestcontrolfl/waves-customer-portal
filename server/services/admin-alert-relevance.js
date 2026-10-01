@@ -36,10 +36,12 @@
  * submission attached to a lead already quoted or worked), so a status or an
  * earlier estimate is never read as the new bell handled.
  *
- * A retire is `read_at = now` plus `metadata.retired = {by, reason, at}` — the
- * row reads exactly like a human dismissal to anything else — and it is also
- * DONE (done_by 'relevance', the reason in words as the resolution): the
- * subject moved on, so the row leaves the bell. A put-back clears both.
+ * A retire is DONE (done_by 'relevance', the reason in words as the resolution,
+ * `metadata.retired = {by, reason, at}`): the subject moved on, so the row
+ * leaves the bell whether or not someone had already read it (read is not
+ * done; a person's own read_at is kept, an unread row is read at the same
+ * instant). A put-back clears the done fields and the stamp, and un-reads the
+ * row only when the read was this module's own.
  *
  * The table holds only classes whose emitter never re-raises the same alert
  * on a stable dedupe key: a new lead (one intake event per submission), a
@@ -283,14 +285,16 @@ function classify(row) {
     && (!c.match || c.match(meta, row))) || null;
 }
 
-// Unread admin rows this sweep could judge: bell-visible, of a class in the
-// table, of any age (a refreshed bell keeps its first created_at, so an age
+// Open (not done) admin rows this sweep could judge: bell-visible, of a class
+// in the table, never one already retired (a person who reopened a retired row
+// keeps it open: the stamp survives a reopen and a put-back removes it), of any age (a refreshed bell keeps its first created_at, so an age
 // cut-off would hide a re-rung one for good). Keyset-paged on id: retiring a
 // row removes it from the set, so an offset would skip rows.
 function candidateQuery(cursor) {
   const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
   return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin' }))
-    .whereNull('read_at')
+    .whereNull('done_at')
+    .whereRaw("metadata->'retired' IS NULL")
     .where((q) => {
       for (const c of CLASSES) {
         q.orWhere((cq) => {
@@ -326,34 +330,34 @@ function unretired(metadata) {
 // Judges one row on a fresh read and retires it only if it is still moved on
 // and still the version judged, then judges it once more AFTER the write, on
 // the bell as it stands then (a quiet refresh rewrites content without
-// touching read_at): a change that landed between the read and the write (a
-// visit reopened, a lead reopened) puts the bell back — unless a person has read it since (their read_at wins), or a
-// refresh rang it again (the emitter's). A check after the write that fails
+// touching done_at): a change that landed between the read and the write (a
+// visit reopened, a lead reopened) puts the bell back — unless a person
+// reopened it since, or a refresh rang it again (the emitter's: a ringing
+// refresh clears the done fields, so the fence below no longer matches). A check after the write that fails
 // is no verdict, so it puts the bell back too; a put-back that fails is
 // judged again by the next run's re-arm pass (rearmRelevantAgain). No row
 // locks: see the module header. A change after the final judgement is the
 // re-arm pass's.
 async function retireIfStillMovedOn(row, cls, todayET, now) {
-  const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at')
+  const current = await db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('done_at')
     .first('id', 'category', 'link', 'metadata', 'created_at');
   if (!current || !sameRow(current, row)) return null;
   const reason = cls.rule(subjectFor(current, await loadSubjects([current]), todayET));
   if (!reason) return null;
-  // The stamp's `at` IS the read_at this write stores — an explicit
+  // The stamp's `at` IS the done_at this write stores — an explicit
   // millisecond instant, not NOW() (Postgres keeps microseconds, which a JS
   // Date read back would truncate) — so every put-back, now or on a later
-  // run, can require that this module's read is still the one on the row.
-  const readAt = new Date(now.getTime());
-  const stamp = { by: RETIRED_BY, reason, at: readAt.toISOString() };
-  const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('read_at'), current)
+  // run, can require that this module's done is still the one on the row.
+  const doneAt = new Date(now.getTime());
+  const stamp = { by: RETIRED_BY, reason, at: doneAt.toISOString() };
+  const [retired] = await sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }).whereNull('done_at'), current)
     .update({
-      read_at: readAt,
-      ...doneState().doneColumns({ by: 'relevance', resolution: reason, at: readAt }),
+      ...doneState().doneColumns({ by: 'relevance', resolution: reason, at: doneAt, keepExisting: true }),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retired: stamp })]),
     })
     .returning(['id']);
   if (!retired) return null;
-  const stillOurs = (q) => q.where({ id: row.id, read_at: readAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
+  const stillOurs = (q) => q.where({ id: row.id, done_at: doneAt }).whereRaw("metadata->'retired'->>'at' = ?", [stamp.at]);
   try {
     const latest = await stillOurs(db('notifications')).first('id', 'category', 'link', 'metadata', 'created_at');
     if (!latest) return null;
@@ -362,11 +366,11 @@ async function retireIfStillMovedOn(row, cls, todayET, now) {
   } catch (err) {
     logger.warn(`[alert-relevance] notification ${row.id}: the check after retiring failed, putting it back: ${err.message}`);
   }
-  await stillOurs(db('notifications')).update({ read_at: null, ...doneState().DONE_CLEARED, metadata: db.raw("metadata - 'retired'") });
+  await stillOurs(db('notifications')).update(undone(doneAt));
   return null;
 }
 
-// Rows this module retired (read, stamped) in the last REARM_DAYS,
+// Rows this module retired (done, stamped) in the last REARM_DAYS,
 // keyset-paged on id.
 function retiredQuery(cursor, since) {
   return db('notifications').where({ recipient_type: 'admin' })
@@ -378,17 +382,25 @@ function retiredQuery(cursor, since) {
     .select('id', 'category', 'link', 'metadata', 'read_at', 'created_at');
 }
 
-// Puts back one retired row whose subject is relevant again, unread, onto
-// exactly the version read (category, link, metadata) and only while the
-// row's read is still the one this module wrote (the stamp's `at`): a person
-// who read the bell since keeps their read, on this run and every later one.
-// Nothing is pushed.
+// The put-back write: not done, no retired stamp, and unread only when the
+// read was this module's own (a read at the stamp's instant). A person's own
+// read, before or after the retire, stands.
+const undone = (ourDone) => ({
+  read_at: db.raw('CASE WHEN read_at = ?::timestamptz THEN NULL ELSE read_at END', [ourDone]),
+  ...doneState().DONE_CLEARED,
+  metadata: db.raw("metadata - 'retired'"),
+});
+
+// Puts back one retired row whose subject is relevant again onto exactly the
+// version read (category, link, metadata) and only while the row's done is
+// still the one this module wrote (the stamp's `at`): a row a person reopened
+// is theirs, on this run and every later one. Nothing is pushed.
 function putBack(row) {
-  const ourRead = new Date(parseMeta(row.metadata).retired?.at || NaN);
-  if (Number.isNaN(ourRead.getTime())) return 0;
+  const ourDone = new Date(parseMeta(row.metadata).retired?.at || NaN);
+  if (Number.isNaN(ourDone.getTime())) return 0;
   return sameVersion(db('notifications').where({ id: row.id, recipient_type: 'admin' }), row)
-    .where({ read_at: ourRead })
-    .update({ read_at: null, ...doneState().DONE_CLEARED, metadata: db.raw("metadata - 'retired'") });
+    .where({ done_at: ourDone })
+    .update(undone(ourDone));
 }
 
 // The emitters in the table are one-shot: a booking cancelled or a visit or

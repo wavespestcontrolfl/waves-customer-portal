@@ -275,6 +275,17 @@ describe('buildActivity digests', () => {
     expect(items[1].finishedAt).toBe('2026-09-12T11:26:00.000Z');
   });
 
+  it('a digest marked done by hand reads Done: completed (even a FIX), finished at done_at, with its resolution', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'd1', title: 'Schedule — price the series', body: 'x', metadata: { kind: 'FIX', opsKey: 'k' }, read_at: '2026-09-12T10:00:00Z',
+          done_at: '2026-09-13T09:00:00Z', done_by: '7', resolution: 'Priced by phone', created_at: '2026-09-01T10:00:00Z' },
+      ],
+    });
+    expect(items[0]).toMatchObject({ status: 'completed', finishedAt: '2026-09-13T09:00:00.000Z', doneAt: '2026-09-13T09:00:00.000Z', resolution: 'Priced by phone' });
+    expect(items[0].subtitle).toBe('k · done');
+  });
+
   it('admin-alerts-brevity scope: status comes from metadata.kind (no title prefix any more), and `detail` is preferred over `body`', () => {
     const { items } = buildActivity({
       digests: [

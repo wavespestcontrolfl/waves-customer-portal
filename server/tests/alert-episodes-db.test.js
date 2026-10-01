@@ -2,7 +2,7 @@
  * Alert episodes (admin-alert-episodes closeAdminAlertKeys /
  * openAdminAlertKeys / raiseAdminAlertWithReopen) against live Postgres, the
  * SQL as the schedule-integrity watchdog runs it: a close marks the row read
- * and auto-cleared (a row a person already read keeps its own read_at), a
+ * done and auto-cleared (a row a person already read keeps its own read_at), a
  * raise on an auto-cleared row rings it again with a bumped generation, and a
  * raise on an open row that predates dedupe versions stays silent. Every row
  * these tests insert is deleted afterwards. The watchdog's own rules are
@@ -46,7 +46,7 @@ maybeDescribe('alert episodes (live Postgres)', () => {
   });
   const close = (names, reason = 'gap resolved') => helpers.closeAdminAlertKeys(db, names.map(key), reason);
 
-  test('close: an unread row is read and auto-cleared; a READ row keeps its read_at but is auto-cleared; empty list is a no-op', async () => {
+  test('close: an unread row is read, done and auto-cleared; a READ (not done) row keeps its read_at but is still done and auto-cleared; empty list is a no-op', async () => {
     const unread = await bell('close-unread');
     const read = await bell('close-read', { read: true });
     const other = await bell('close-untouched');
@@ -55,12 +55,18 @@ maybeDescribe('alert episodes (live Postgres)', () => {
 
     const u = await get(unread.id);
     expect(u.read_at).not.toBeNull();
+    // An unread row is read at the done instant.
+    expect(new Date(u.read_at).getTime()).toBe(new Date(u.done_at).getTime());
+    expect(u.done_by).toBe('episodes');
     expect(u.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'gap resolved', dedupeKey: key('close-unread') });
     expect(typeof u.metadata.autoClearedAt).toBe('string');
     const r = await get(read.id);
     expect(new Date(r.read_at).toISOString()).toBe('2026-09-01T12:00:00.000Z');
+    // Read is not done: the person's read is closed too (done_at stamped), their read_at kept.
+    expect([r.done_by, r.done_at === null]).toEqual(['episodes', false]);
     expect(r.metadata.autoCleared).toBe(true);
-    expect((await get(other.id)).read_at).toBeNull();
+    const untouched = await get(other.id);
+    expect([untouched.read_at, untouched.done_at]).toEqual([null, null]);
 
     // Already cleared: a second close rewrites nothing.
     expect(await close(['close-unread', 'close-read'])).toBe(0);

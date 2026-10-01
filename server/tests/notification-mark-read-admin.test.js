@@ -46,6 +46,7 @@ describe('markAdminDone', () => {
     db.__q.update.mockResolvedValue(2);
     db.__q.whereIn.mockClear();
     db.__q.whereNull.mockClear();
+    db.raw.mockClear();
   });
 
   test('stamps done and read on admin rows not yet done, with a plain, 200-character resolution', async () => {
@@ -55,9 +56,18 @@ describe('markAdminDone', () => {
     expect(db.__q.where).toHaveBeenCalledWith({ recipient_type: 'admin' });
     expect(db.__q.whereNull).toHaveBeenCalledWith('done_at');
     const patch = db.__q.update.mock.calls[0][0];
-    expect(patch).toMatchObject({ done_at: expect.any(Date), done_by: 'claude', read_at: expect.any(String) });
-    expect(patch.resolution).toMatch(/^Fixed in PR word word.*…$/);
-    expect(patch.resolution.length).toBeLessThanOrEqual(200);
+    // keepExisting: the first done (a person's own included) and an earlier read stand; an unread row is read at the done instant.
+    expect(patch).toMatchObject({
+      done_at: 'COALESCE(done_at, ?::timestamptz)', done_by: 'COALESCE(done_by, ?)',
+      resolution: 'COALESCE(resolution, ?)', read_at: 'COALESCE(read_at, ?::timestamptz)',
+    });
+    const bound = Object.fromEntries(db.raw.mock.calls.map(([sql, bindings]) => [sql, bindings]));
+    expect(bound['COALESCE(done_by, ?)']).toEqual(['claude']);
+    expect(bound['COALESCE(done_at, ?::timestamptz)'][0]).toBeInstanceOf(Date);
+    expect(bound['COALESCE(read_at, ?::timestamptz)']).toEqual(bound['COALESCE(done_at, ?::timestamptz)']);
+    const resolution = bound['COALESCE(resolution, ?)'][0];
+    expect(resolution).toMatch(/^Fixed in PR word word.*…$/);
+    expect(resolution.length).toBeLessThanOrEqual(200);
   });
 
   test('writes nothing without ids or an actor', async () => {

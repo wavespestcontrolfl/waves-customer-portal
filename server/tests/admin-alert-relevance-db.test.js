@@ -1,7 +1,7 @@
 /**
  * admin-alert-relevance.js against live Postgres, the SQL as the sweep runs
  * it: the re-arm pass (this module's stamp and its window, the put-back fenced
- * on the version read — a millisecond read_at compared exactly) and a new
+ * on the version read — a millisecond done_at compared exactly) and a new
  * lead's booking evidence (after the bell, never a visit that did not run).
  * The rules themselves are covered by admin-alert-relevance.test.js.
  */
@@ -37,9 +37,9 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   const stamp = (reason, at) => ({ retired: { by: 'alert-relevance', reason, at: at.toISOString() } });
   const get = (id) => db('notifications').where({ id }).first();
 
-  test('puts back what it retired in the window once the subject is relevant again; older retirements, and a person\'s later read, are final', async () => {
+  test('puts back what it retired in the window once the subject is relevant again (keeping a person\'s read); older retirements, and a person\'s own reopen, are final', async () => {
     const now = new Date();
-    // As the sweep writes it: millisecond-exact, and the stamp's `at` is that same read.
+    // As the sweep writes it: millisecond-exact, and the stamp's `at` is that same done_at (and, on an unread row, read_at).
     const recent = new Date(now.getTime() - DAY);
     const old = new Date(now.getTime() - 20 * DAY);
     const customer = await insert('customers', { first_name: 'Rearm', phone: '+15555557001' });
@@ -54,12 +54,16 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       done_at: recent, done_by: 'relevance', resolution: 'Visit is no longer in progress',
       metadata: { dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
     // The same, retired before the window: final.
-    const final = await bell({ category: 'alert', read_at: old,
+    const final = await bell({ category: 'alert', read_at: old, done_at: old, done_by: 'relevance', resolution: 'Visit is no longer in progress',
       metadata: { dedupeKey: `stale-visit:${visit.id}:old`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', old) } });
-    // Retired in the window, then read by a person (a later read_at than the stamp's): theirs.
+    // Retired in the window, then READ by a person (a later read_at than the stamp's): read is not done,
+    // so the put-back reopens it, and their read stands.
     const personRead = new Date(now.getTime() - 60 * 60 * 1000);
-    const readByPerson = await bell({ category: 'alert', read_at: personRead,
+    const readByPerson = await bell({ category: 'alert', read_at: personRead, done_at: recent, done_by: 'relevance', resolution: 'Visit is no longer in progress',
       metadata: { dedupeKey: `stale-visit:${visit.id}:read`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
+    // Retired in the window, then REOPENED by a person (done cleared, the stamp survives): theirs, never put back or re-retired.
+    const reopenedByPerson = await bell({ category: 'alert', read_at: recent,
+      metadata: { dedupeKey: `stale-visit:${visit.id}:reopened`, scheduled_service_id: visit.id, ...stamp('Visit is no longer in progress', recent) } });
 
     const result = await relevance.runAdminAlertRelevanceSweep({ now });
     expect(result.rearmed).toBeGreaterThanOrEqual(1);
@@ -71,14 +75,23 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect(back.metadata).toEqual({ dedupeKey: `stale-visit:${visit.id}`, scheduled_service_id: visit.id });
     const kept = await get(final.id);
     expect(kept.read_at).toEqual(old);
+    expect(kept.done_at).toEqual(old);
     expect(kept.metadata.retired).toMatchObject({ by: 'alert-relevance' });
-    expect((await get(readByPerson.id)).read_at).toEqual(personRead);
+    const read = await get(readByPerson.id);
+    expect(read.read_at).toEqual(personRead);
+    expect([read.done_at, read.done_by, read.resolution]).toEqual([null, null, null]);
+    expect(read.metadata.retired).toBeUndefined();
+    const theirReopen = await get(reopenedByPerson.id);
+    expect(theirReopen.done_at).toBeNull();
+    expect(theirReopen.read_at).toEqual(recent);
+    expect(theirReopen.metadata.retired).toMatchObject({ by: 'alert-relevance' });
 
     // Moved on again: the next sweep retires the bell once more.
     await db('scheduled_services').where({ id: visit.id }).update({ status: 'completed' });
     await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
     const again = await get(reopened.id);
     expect(again.read_at).toBeInstanceOf(Date);
+    expect(again.done_at).toBeInstanceOf(Date);
     expect([again.done_by, again.resolution]).toEqual(['relevance', 'Visit is no longer in progress']);
     expect(again.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'Visit is no longer in progress' });
   });
@@ -99,12 +112,14 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     // A status and an estimate from before the bell, a conversion after it, and the visit booked after it a no-show: still relevant.
     await booked('no_show');
     await relevance.runAdminAlertRelevanceSweep({ now });
-    expect((await get(leadBell.id)).read_at).toBeNull();
+    const open = await get(leadBell.id);
+    expect([open.read_at, open.done_at]).toEqual([null, null]);
     // A live visit booked after the bell: moved on.
     await booked('confirmed');
     await relevance.runAdminAlertRelevanceSweep({ now });
     const retired = await get(leadBell.id);
     expect(retired.read_at).toBeInstanceOf(Date);
+    expect(retired.done_at).toBeInstanceOf(Date);
     expect(retired.metadata.retired).toMatchObject({ by: 'alert-relevance', reason: 'A visit was booked' });
   });
 
@@ -123,6 +138,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const draft = await insert('estimates', { status: 'draft', customer_id: customer.id });
     await db('leads').where({ id: lead.id }).update({ estimate_id: draft.id });
     await relevance.runAdminAlertRelevanceSweep({ now: new Date() });
-    expect((await get(leadBell.id)).read_at).toEqual(retired.read_at);
+    const kept = await get(leadBell.id);
+    expect([kept.read_at, kept.done_at]).toEqual([retired.read_at, retired.done_at]);
   });
 });

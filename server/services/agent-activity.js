@@ -333,7 +333,7 @@ function digestItem(row) {
     subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : done ? 'done' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
-    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : row.read_at ? iso(row.read_at) : null,
+    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : done ? iso(row.done_at) : row.read_at ? iso(row.read_at) : null,
     durationMs: null,
     steps: [],
     stepsDone: status === 'completed' ? 1 : 0,
@@ -452,9 +452,13 @@ async function loadDigestRows(db, since, focusId) {
     .orderBy('created_at', 'desc')
     .limit(PINNED_CAP);
   const windowed = await base()
+    // A row marked done by hand sets neither created_at nor resolvedAt in the
+    // window, so done_at qualifies it too (and orders it): an older pinned
+    // digest a person just closed shows once as Done with its resolution.
     .where((w) => w.where('created_at', '>=', since)
-      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since]))
-    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz) DESC")
+      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since])
+      .orWhere('done_at', '>=', since))
+    .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz, done_at) DESC")
     .limit(MAX_ITEMS);
   const focused = focusId ? await base().where('id', focusId).limit(1) : [];
   const seen = new Set();

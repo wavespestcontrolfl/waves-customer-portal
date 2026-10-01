@@ -35,8 +35,7 @@ async function closeAdminAlertKeys(conn, dedupeKeys, reason, { now = new Date(),
     .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [keys])
     .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
     .update({
-      read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [now]),
-      ...NotificationService._private.doneColumns({ by: 'episodes', resolution: resolution || GENERIC_RESOLUTION, at: now, keepExisting: true }),
+      ...NotificationService._private.doneColumns({ by: 'episodes', resolution: resolution || GENERIC_RESOLUTION, at: now, keepExisting: true, conn }),
       metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
         autoCleared: true, autoClearedReason: reason, autoClearedAt: now.toISOString(),
       })]),

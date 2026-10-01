@@ -64,9 +64,10 @@ function excludeActivityOnlyFromBell(query) {
 // (an admin user id, 'claude', or a system component); resolution is one
 // plain line of what fixed it. markAdminDone is the one id-addressed writer;
 // the emitters that close a row inside their own fenced UPDATE spread
-// doneColumns into it instead. A writer that can meet an already-done row
-// (episodes, ops-digest: they stamp read rows too) passes keepExisting, which
-// COALESCEs so the first done, a person's own included, stands.
+// doneColumns into it instead. An auto-close selects rows by the condition it
+// judged and `done_at IS NULL`, never by read state (a row someone opened is
+// still open work), and passes keepExisting: done_at, done_by, resolution and
+// read_at are then COALESCEd, so a person's own read or done stands.
 const MAX_RESOLUTION_CHARS = 200;
 const DONE_CLEARED = { done_at: null, done_by: null, resolution: null };
 
@@ -75,13 +76,14 @@ function cleanResolution(text) {
   return plain ? truncateAtWord(plain, MAX_RESOLUTION_CHARS) : null;
 }
 
-function doneColumns({ by, resolution = null, at = new Date(), keepExisting = false }) {
+function doneColumns({ by, resolution = null, at = new Date(), keepExisting = false, conn = db }) {
   const columns = { done_at: at, done_by: String(by).slice(0, 64), resolution: cleanResolution(resolution) };
   if (!keepExisting) return columns;
   return {
-    done_at: db.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
-    done_by: db.raw('COALESCE(done_by, ?)', [columns.done_by]),
-    resolution: db.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    done_at: conn.raw('COALESCE(done_at, ?::timestamptz)', [columns.done_at]),
+    done_by: conn.raw('COALESCE(done_by, ?)', [columns.done_by]),
+    resolution: conn.raw('COALESCE(resolution, ?)', [columns.resolution]),
+    read_at: conn.raw('COALESCE(read_at, ?::timestamptz)', [columns.done_at]),
   };
 }
 
@@ -846,14 +848,10 @@ const NotificationService = {
   async markAdminDone(ids, { by, resolution = null, role } = {}, connection = db) {
     const list = [...new Set([].concat(ids ?? []).filter(Boolean).map(String))];
     if (!list.length || !by) return 0;
-    const at = new Date();
     const updated = await scopeAdminFeedToRole(
       connection('notifications').whereIn('id', list).where({ recipient_type: 'admin' }).whereNull('done_at'),
       role,
-    ).update({
-      ...doneColumns({ by, resolution, at }),
-      read_at: connection.raw('COALESCE(read_at, ?::timestamptz)', [at]),
-    });
+    ).update(doneColumns({ by, resolution, keepExisting: true, conn: connection }));
     if (updated) logger.info(`[notifications] marked ${updated} admin notification(s) done`);
     return updated;
   },
@@ -933,9 +931,9 @@ const NotificationService = {
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
       .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
-      .whereNull('read_at')
+      .whereNull('done_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
-      .update({ read_at: new Date(), ...doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call' }) });
+      .update(doneColumns({ by: 'supersede', resolution: 'Superseded by a newer event on the same call', keepExisting: true }));
   },
 
   // Mark all read for customer

@@ -789,14 +789,24 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
 });
 
 describe('voicemail supersedes a missed-call bell for the same call (hook P1)', () => {
-  test('supersedeMissedCallAdmin retires only unread admin missed_call bells carrying that callLogId', async () => {
+  test('supersedeMissedCallAdmin closes every OPEN admin missed_call bell carrying that callLogId (done_at IS NULL, never read_at: a read bell is still open work) and keeps a person\'s read', async () => {
     const notifications = chainMock(1);
     mockTables({ notifications });
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     await expect(NotificationService.supersedeMissedCallAdmin({ callLogId: 'call-1' })).resolves.toBe(1);
     expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
-    expect(notifications.whereNull).toHaveBeenCalledWith('read_at');
+    expect(notifications.whereNull).toHaveBeenCalledWith('done_at');
+    expect(notifications.whereNull).not.toHaveBeenCalledWith('read_at');
     expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
-    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date), done_at: expect.any(Date), done_by: 'supersede', resolution: expect.any(String) });
+    // keepExisting: COALESCE'd done_at / done_by / resolution / read_at, so a person's own read or done stands.
+    const patch = notifications.update.mock.calls[0][0];
+    expect(Object.keys(patch).sort()).toEqual(['done_at', 'done_by', 'read_at', 'resolution']);
+    expect(patch.done_at.sql).toBe('COALESCE(done_at, ?::timestamptz)');
+    expect(patch.done_by).toEqual({ sql: 'COALESCE(done_by, ?)', bindings: ['supersede'] });
+    expect(patch.resolution.sql).toBe('COALESCE(resolution, ?)');
+    // An unread row is read at the done instant; a person's own read stands.
+    expect(patch.read_at.sql).toBe('COALESCE(read_at, ?::timestamptz)');
+    expect(patch.read_at.bindings).toEqual(patch.done_at.bindings);
   });
   test('no callLogId = no-op', async () => {
     mockTables({});
