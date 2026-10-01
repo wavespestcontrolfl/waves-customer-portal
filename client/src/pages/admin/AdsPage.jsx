@@ -903,25 +903,138 @@ function ServiceLinesTab() {
 // =========================================================================
 // AI ADVISOR TAB
 // =========================================================================
-function AdvisorTab() {
+// Only these advisor actions map to an automated change (setBudget/setMode);
+// everything else (add_negative, SEO/GBP/bid/keyword actions) is advisory and
+// must be done by hand — so it never gets an Apply button that could imply it
+// was executed. An auto action without a concrete value (stale pre-apply_value
+// reports, a fallback rec with no known budget) is equally un-executable —
+// its Apply click could only ever 422 — so it renders as manual too.
+const AUTO_APPLY_ACTIONS = [
+  "increase_budget",
+  "decrease_budget",
+  "change_mode",
+];
+function canAutoApply(rec) {
+  if (!AUTO_APPLY_ACTIONS.includes(rec.apply_action)) return false;
+  if (rec.apply_action === "change_mode")
+    return ["base", "spent", "stop"].includes(rec.apply_value);
+  const n = Number(rec.apply_value);
+  return Number.isFinite(n) && n > 0;
+}
+function advisorGradeColor(g) {
+  // No grade, or an ungraded report (AI unavailable): neutral, never red.
+  if (!g || g === "N/A") return "#71717A";
+  if (g.startsWith("A")) return "#15803D";
+  if (g.startsWith("B")) return "#18181B";
+  if (g.startsWith("C")) return "#A16207";
+  return "#991B1B";
+}
+const ADVISOR_PRIORITY_COLOR = {
+  high: "#991B1B",
+  medium: "#A16207",
+  low: "#71717A",
+};
+
+// adminFetch does not check r.ok: a 401/500 body is {error}. Each load
+// validates its own response so a failed one never reads as an empty result.
+function loadAdvisorReport(setReport, setLoadError) {
+  return adminFetch("/admin/ads/advisor")
+    .then((r) => {
+      if (!r || r.error || !("report" in r)) {
+        throw new Error(r?.error || "unexpected response");
+      }
+      setReport(r.report);
+    })
+    .catch(() => {
+      setLoadError("Couldn't load the advisor report -- reload to try again.");
+    });
+}
+function loadAdvisorHistory(setHistory, setHistoryError) {
+  return adminFetch("/admin/ads/advisor/history")
+    .then((h) => {
+      if (!h || h.error || !Array.isArray(h.reports)) {
+        throw new Error(h?.error || "unexpected response");
+      }
+      setHistory(h.reports);
+    })
+    .catch(() => {
+      setHistoryError(
+        "Couldn't load the previous reports -- reload to try again.",
+      );
+    });
+}
+function useAdvisorLoad() {
   const [report, setReport] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [applied, setApplied] = useState({});
+  // A failed load shows inline instead of reading as "No Reports Yet".
+  const [loadError, setLoadError] = useState(null);
+  const [historyError, setHistoryError] = useState(null);
   useEffect(() => {
     Promise.all([
-      adminFetch("/admin/ads/advisor"),
-      adminFetch("/admin/ads/advisor/history"),
-    ])
-      .then(([r, h]) => {
-        setReport(r.report);
-        setHistory(h.reports || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      loadAdvisorReport(setReport, setLoadError),
+      loadAdvisorHistory(setHistory, setHistoryError),
+    ]).then(() => setLoading(false));
   }, []);
+  return {
+    report,
+    setReport,
+    history,
+    loading,
+    loadError,
+    setLoadError,
+    historyError,
+  };
+}
 
+function applySummary(rec) {
+  // The button label shows the parsed value, and this confirm repeats it —
+  // the server applies rec.apply_value, not whatever number the rec's prose
+  // mentions, so the admin must see the actual amount before it goes live.
+  return rec.apply_action === "change_mode"
+    ? `Set "${rec.campaign}" budget mode to "${rec.apply_value}"?`
+    : `Set "${rec.campaign}" daily budget to $${Number(rec.apply_value)}/day?`;
+}
+// Only show "Applied" when the server actually applied the change — a
+// 4xx/5xx, or an honest applied:false (couldn't resolve the campaign, no
+// concrete value, or a manual-only action), surfaces as an error instead.
+async function requestAdvisorApply(rec) {
+  try {
+    const res = await fetch(`${API_BASE}/admin/ads/advisor/apply`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: rec.apply_action,
+        campaignId: rec.campaign_id,
+        campaignName: rec.campaign,
+        value: rec.apply_value,
+        reason: rec.action,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.applied !== true) {
+      return {
+        status: "error",
+        message:
+          body.error ||
+          body.note ||
+          "Couldn't apply automatically — adjust it manually.",
+      };
+    }
+    return { status: "applied", at: new Date().toLocaleTimeString() };
+  } catch {
+    return { status: "error", message: "Network error — not applied." };
+  }
+}
+// Generate + apply share one report-generation counter: apply state belongs to
+// ONE report, so regenerating must invalidate the old report's in-flight applies.
+function useAdvisorActions(setReport, setLoadError) {
+  const [generating, setGenerating] = useState(false);
+  const [applied, setApplied] = useState({});
+  const [generateError, setGenerateError] = useState(null);
   // Apply state belongs to ONE report: regenerating replaces the rec list, so
   // stale positional state (or a late response from the old report's apply)
   // must never mark the new report's recommendations as applied. The counter
@@ -936,13 +1049,23 @@ function AdvisorTab() {
     // (Apply buttons are also disabled while generating.)
     reportGenRef.current += 1;
     setApplied({});
+    setGenerateError(null);
     try {
       const r = await adminPost("/admin/ads/advisor/generate", {});
+      if (!r || !r.report) {
+        throw new Error(r?.error || "The advisor returned no report.");
+      }
       setReport({
         report_data: r.report,
         date: etDateString(),
         grade: r.report?.grade,
       });
+      // A fresh report supersedes a failed initial load's alert.
+      setLoadError(null);
+    } catch (err) {
+      setGenerateError(
+        `Couldn't regenerate the report: ${err?.message || "request failed"}`,
+      );
     } finally {
       // A failed generation must not leave every Apply button disabled until
       // a page reload — generating gates them while true.
@@ -951,92 +1074,490 @@ function AdvisorTab() {
   };
   const handleApply = async (rec, idx) => {
     if (generating) return; // stale report — a new one is being generated
-    // The button label shows the parsed value, and this confirm repeats it —
-    // the server applies rec.apply_value, not whatever number the rec's prose
-    // mentions, so the admin must see the actual amount before it goes live.
-    const summary =
-      rec.apply_action === "change_mode"
-        ? `Set "${rec.campaign}" budget mode to "${rec.apply_value}"?`
-        : `Set "${rec.campaign}" daily budget to $${Number(rec.apply_value)}/day?`;
-    if (!window.confirm(summary)) return;
+    if (!window.confirm(applySummary(rec))) return;
     const gen = reportGenRef.current;
     const setAppliedIfCurrent = (updater) => {
       if (reportGenRef.current === gen) setApplied(updater);
     };
-    setAppliedIfCurrent((prev) => ({
-      ...prev,
-      [idx]: {
-        status: "pending",
-      },
-    }));
-    try {
-      const res = await fetch(`${API_BASE}/admin/ads/advisor/apply`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          action: rec.apply_action,
-          campaignId: rec.campaign_id,
-          campaignName: rec.campaign,
-          value: rec.apply_value,
-          reason: rec.action,
-        }),
-      });
-      const body = await res.json().catch(() => ({}));
-      // Only show "Applied" when the server actually applied the change — a
-      // 4xx/5xx, or an honest applied:false (couldn't resolve the campaign, no
-      // concrete value, or a manual-only action), surfaces as an error instead.
-      if (!res.ok || body.applied !== true) {
-        setAppliedIfCurrent((prev) => ({
-          ...prev,
-          [idx]: {
-            status: "error",
-            message:
-              body.error ||
-              body.note ||
-              "Couldn't apply automatically — adjust it manually.",
-          },
-        }));
-        return;
-      }
-      setAppliedIfCurrent((prev) => ({
-        ...prev,
-        [idx]: {
-          status: "applied",
-          at: new Date().toLocaleTimeString(),
-        },
-      }));
-    } catch {
-      setAppliedIfCurrent((prev) => ({
-        ...prev,
-        [idx]: {
-          status: "error",
-          message: "Network error — not applied.",
-        },
-      }));
-    }
+    setAppliedIfCurrent((prev) => ({ ...prev, [idx]: { status: "pending" } }));
+    const outcome = await requestAdvisorApply(rec);
+    setAppliedIfCurrent((prev) => ({ ...prev, [idx]: outcome }));
   };
+  return { generating, generateError, applied, handleGenerate, handleApply };
+}
 
-  // Only these advisor actions map to an automated change (setBudget/setMode);
-  // everything else (add_negative, SEO/GBP/bid/keyword actions) is advisory and
-  // must be done by hand — so it never gets an Apply button that could imply it
-  // was executed. An auto action without a concrete value (stale pre-apply_value
-  // reports, a fallback rec with no known budget) is equally un-executable —
-  // its Apply click could only ever 422 — so it renders as manual too.
-  const AUTO_APPLY_ACTIONS = [
-    "increase_budget",
-    "decrease_budget",
-    "change_mode",
-  ];
-  const canAutoApply = (rec) => {
-    if (!AUTO_APPLY_ACTIONS.includes(rec.apply_action)) return false;
-    if (rec.apply_action === "change_mode")
-      return ["base", "spent", "stop"].includes(rec.apply_value);
-    const n = Number(rec.apply_value);
-    return Number.isFinite(n) && n > 0;
-  };
+function AdvisorHeader({ report, generating, onGenerate }) {
+  return (
+    <div className="flex justify-between items-center">
+      {" "}
+      <div className="text-ui-body text-ink-secondary">
+        AI Campaign Advisor{" "}
+        {report?.date
+          ? `— ${new Date(report.date + "T12:00:00").toLocaleDateString(
+              "en-US",
+              {
+                month: "long",
+                day: "numeric",
+                year: "numeric",
+              },
+            )}`
+          : ""}
+      </div>{" "}
+      <Button onClick={onGenerate} disabled={generating} variant="secondary">
+        {generating ? "Regenerating..." : "Regenerate"}
+      </Button>{" "}
+    </div>
+  );
+}
+
+function AdvisorAlert({ message }) {
+  return (
+    <div
+      role="alert"
+      className="rounded-md bg-red-100 text-red-800 text-ui-body [padding:8px_12px]"
+    >
+      {message}
+    </div>
+  );
+}
+
+function AdvisorNotices({ generating, errors }) {
+  return (
+    <>
+      {generating && (
+        <div role="status" className="text-ui-body text-ink-secondary">
+          The advisor is analyzing the account. This can take a few minutes --
+          keep this page open.
+        </div>
+      )}
+      {errors.filter(Boolean).map((message) => (
+        <AdvisorAlert key={message} message={message} />
+      ))}
+    </>
+  );
+}
+
+function AdvisorNoReports() {
+  return (
+    <UiCard className="text-center [padding:60px]">
+      {" "}
+      <div className="text-ui-body [margin-bottom:16px]">AI</div>{" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
+        No Reports Yet
+      </div>{" "}
+      <div className="text-ui-body text-ink-secondary">
+        Click "Regenerate" to run the AI advisor, or wait for the daily 8 AM
+        auto-run.
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+function AdvisorGradeCard({ data }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="flex items-center [gap:20px]">
+        {" "}
+        <div
+          style={{
+            background: advisorGradeColor(data.grade) + "22",
+            color: advisorGradeColor(data.grade),
+            border: `2px solid ${advisorGradeColor(data.grade)}44`,
+          }}
+          className="[width:72px] [height:72px] rounded-md flex items-center justify-center text-ui-body font-medium"
+        >
+          {data.grade || "?"}
+        </div>{" "}
+        <div className="[flex:1]">
+          {" "}
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
+            Overall Grade
+          </div>{" "}
+          <div className="text-ui-body text-zinc-900 [line-height:1.5]">
+            {data.overall_assessment}
+          </div>{" "}
+          {data.model && (
+            <div
+              data-qa="advisor-model"
+              className="text-ui-body text-ink-secondary [margin-top:6px]"
+            >
+              Written by {data.model}
+              {data.provider ? ` (${data.provider})` : ""}
+            </div>
+          )}
+        </div>{" "}
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+// The advisor may recommend nothing, and that is a valid answer, so say so
+// instead of leaving a blank page. When secondary findings exist (waste,
+// scaling, capacity, SEO cards below), "nothing worth changing" would
+// contradict them, so the copy points at those instead.
+const ADVISOR_FLAGGED_LISTS = ["waste_alerts", "scaling_opportunities", "capacity_warnings", "seo_insights"];
+function hasFlaggedFindings(data) {
+  return ADVISOR_FLAGGED_LISTS.some((k) => Array.isArray(data?.[k]) && data[k].length > 0);
+}
+// An "N/A" grade means no analysis ran (advisor unavailable, or no campaigns),
+// so empty lists there are not advice and must not read as "nothing to change".
+function AdvisorEmptyState({ flagged, unanalysed }) {
+  return (
+    <UiCard data-qa="advisor-empty" className="p-6">
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
+        {unanalysed ? "No analysis today" : "No recommendations today"}
+      </div>
+      <div className="text-ui-body text-ink-secondary">
+        {unanalysed
+          ? "The advisor did not analyse the campaigns, so there is no advice here. Regenerate once it is available."
+          : flagged
+            ? "No campaign changes recommended — see the flagged items below."
+            : "No recommendations today — nothing worth changing."}
+      </div>
+    </UiCard>
+  );
+}
+
+function ApplyControl({ rec, state, generating, onApply }) {
+  const done = state?.status === "applied";
+  const pending = state?.status === "pending";
+  return (
+    <div>
+      <Button
+        onClick={onApply}
+        disabled={done || pending || generating}
+        variant={done ? "primary" : "secondary"}
+      >
+        {done
+          ? `Applied at ${state.at}`
+          : pending
+            ? "Applying…"
+            : rec.apply_action === "change_mode"
+              ? `Apply: set mode to ${rec.apply_value}`
+              : `Apply: ${rec.apply_action.replace(/_/g, " ")} to $${Number(rec.apply_value)}/day`}
+      </Button>
+      {state?.status === "error" && (
+        <div className="text-ui-body text-alert-fg [margin-top:6px]">
+          {state.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecommendationAction({ rec, state, generating, onApply }) {
+  if (!rec.apply_action && !rec.manual_action) return null;
+  if (rec.apply_action && canAutoApply(rec)) {
+    return (
+      <ApplyControl
+        rec={rec}
+        state={state}
+        generating={generating}
+        onApply={onApply}
+      />
+    );
+  }
+  return (
+    <div className="text-ui-body text-ink-secondary">
+      Manual action:{" "}
+      {(rec.apply_action || rec.manual_action).replace(/_/g, " ")}
+    </div>
+  );
+}
+
+function RecommendationRow({ rec, priority, state, generating, onApply }) {
+  return (
+    <div
+      style={{
+        borderLeft: `3px solid ${ADVISOR_PRIORITY_COLOR[priority]}`,
+      }}
+      className="[padding:14px_16px] bg-zinc-100 rounded-md [margin-bottom:8px]"
+    >
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
+        {rec.campaign && (
+          <span className="text-zinc-900">{rec.campaign}: </span>
+        )}
+        {rec.action}
+      </div>
+      {rec.reasoning && (
+        <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
+          {rec.reasoning}
+        </div>
+      )}
+      {rec.estimated_impact && (
+        <div className="text-ui-body text-zinc-900 [margin-bottom:8px]">
+          Est. impact: {rec.estimated_impact}
+        </div>
+      )}
+      <RecommendationAction
+        rec={rec}
+        state={state}
+        generating={generating}
+        onApply={onApply}
+      />
+    </div>
+  );
+}
+
+function RecommendationGroup({ priority, recs, applied, generating, onApply }) {
+  return (
+    <div>
+      {" "}
+      <div
+        style={{
+          color: ADVISOR_PRIORITY_COLOR[priority],
+        }}
+        className="text-ui-body font-medium [margin-bottom:8px]"
+      >
+        {" "}
+        {priority} Priority
+      </div>
+      {recs.map((rec, idx) => {
+        // Identity-carrying key: positional state from a prior report must not
+        // attach to an unrelated rec that happens to land in the same slot.
+        const globalIdx = `${priority}-${idx}-${rec.campaign || ""}-${rec.apply_action || ""}`;
+        return (
+          <RecommendationRow
+            key={idx}
+            rec={rec}
+            priority={priority}
+            state={applied[globalIdx]}
+            generating={generating}
+            onApply={() => onApply(rec, globalIdx)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function RecommendationList({ recommendations, flagged, unanalysed, applied, generating, onApply }) {
+  if (recommendations.length === 0) return <AdvisorEmptyState flagged={flagged} unanalysed={unanalysed} />;
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
+        Recommendations
+      </div>{" "}
+      <div className="flex flex-col [gap:12px]">
+        {["high", "medium", "low"].map((priority) => {
+          const recs = recommendations.filter((r) => r.priority === priority);
+          if (recs.length === 0) return null;
+          return (
+            <RecommendationGroup
+              key={priority}
+              priority={priority}
+              recs={recs}
+              applied={applied}
+              generating={generating}
+              onApply={onApply}
+            />
+          );
+        })}
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+function WasteAlertsCard({ items }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
+        Waste Alerts
+      </div>{" "}
+      <div className="overflow-x-auto">
+        {" "}
+        <Table className="[width:100%] [border-collapse:collapse]">
+          <THead>
+            <TR>
+              <TH>Search Term</TH>
+              <TH className="text-right u-nums">Spend</TH>
+              <TH className="text-right u-nums">Conv</TH>
+              <TH className="text-right u-nums">Action</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {items.map((w, i) => (
+              <TR key={i}>
+                <TD>{w.search_term}</TD>
+                <TD className="text-right u-nums text-alert-fg">
+                  {fmtDec(w.spend)}
+                </TD>
+                <TD className="text-right u-nums">{w.conversions}</TD>
+                <TD className="text-right u-nums">
+                  <span className="text-zinc-700 text-ui-body">{w.action}</span>
+                </TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>{" "}
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+function ScalingOpportunitiesCard({ items }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+        Scaling Opportunities
+      </div>
+      {items.map((s, i) => (
+        <div
+          key={i}
+          className="[padding:10px_14px] bg-zinc-100 rounded-md [margin-bottom:6px]"
+        >
+          {" "}
+          <div className="text-ui-body text-zinc-900">
+            <strong>{s.campaign}</strong>: {fmt(s.current_budget)}/d →{" "}
+            {fmt(s.suggested_budget)}/d
+          </div>{" "}
+          <div className="text-ui-body text-ink-secondary">
+            {s.headroom_reason}
+          </div>{" "}
+        </div>
+      ))}
+    </UiCard>
+  );
+}
+
+function InsightsCard({ items }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+        Insights
+      </div>{" "}
+      <div className="flex flex-col [gap:8px]">
+        {items.map((ins, i) => (
+          <div
+            key={i}
+            className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [line-height:1.5]"
+          >
+            {"•"} {ins}
+          </div>
+        ))}
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+// SEO / GBP insights
+function SeoInsightsCard({ items }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+        SEO Insights
+      </div>
+      {items.map((s, i) => (
+        <div
+          key={i}
+          className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
+        >
+          {s.detail}
+          {s.action ? ` — ${s.action}` : ""}
+        </div>
+      ))}
+    </UiCard>
+  );
+}
+
+function CapacityWarningsCard({ items }) {
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
+        Capacity Warnings
+      </div>
+      {items.map((w, i) => (
+        <div
+          key={i}
+          className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
+        >
+          {" "}
+          <strong>{w.area}</strong>at {w.utilization}% — {w.recommendation}
+        </div>
+      ))}
+    </UiCard>
+  );
+}
+
+// Each secondary list renders only when it has items.
+const ADVISOR_SECONDARY_LISTS = [
+  ["waste_alerts", WasteAlertsCard],
+  ["scaling_opportunities", ScalingOpportunitiesCard],
+  ["insights", InsightsCard],
+  ["seo_insights", SeoInsightsCard],
+  ["capacity_warnings", CapacityWarningsCard],
+];
+function AdvisorSecondaryLists({ data }) {
+  return ADVISOR_SECONDARY_LISTS.map(([key, Card]) =>
+    (data[key] || []).length > 0 ? <Card key={key} items={data[key]} /> : null,
+  );
+}
+
+function AdvisorHistory({ history }) {
+  if (history.length <= 1) return null;
+  return (
+    <UiCard className="p-6">
+      {" "}
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
+        Previous Reports
+      </div>{" "}
+      <div className="flex flex-wrap [gap:8px]">
+        {history.slice(1, 8).map((h, i) => (
+          <div
+            key={i}
+            className="[padding:8px_14px] bg-zinc-100 rounded-md text-ui-body text-ink-secondary border-hairline border-zinc-200"
+          >
+            {" "}
+            <span className="text-zinc-900">
+              {new Date(h.date + "T12:00:00").toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+              })}
+            </span>{" "}
+            <span
+              style={{
+                color: advisorGradeColor(h.grade),
+              }}
+              className="font-medium [margin-left:8px]"
+            >
+              {h.grade}
+            </span>{" "}
+            <span className="[margin-left:8px]">
+              {h.recommendation_count} recs
+            </span>
+            {h.applied_count > 0 && (
+              <span className="text-zinc-900 [margin-left:4px]">
+                ({h.applied_count} applied)
+              </span>
+            )}
+          </div>
+        ))}
+      </div>{" "}
+    </UiCard>
+  );
+}
+
+// Exported for direct tests of the Advisor panel
+export function AdvisorTab() {
+  const {
+    report,
+    setReport,
+    history,
+    loading,
+    loadError,
+    setLoadError,
+    historyError,
+  } = useAdvisorLoad();
+  const { generating, generateError, applied, handleGenerate, handleApply } =
+    useAdvisorActions(setReport, setLoadError);
   if (loading)
     return (
       <div className="text-ink-secondary [padding:40px] text-center">
@@ -1044,342 +1565,32 @@ function AdvisorTab() {
       </div>
     );
   const data = report?.report_data || {};
-  const gradeColor = (g) => {
-    if (!g) return "#71717A";
-    if (g.startsWith("A")) return "#15803D";
-    if (g.startsWith("B")) return "#18181B";
-    if (g.startsWith("C")) return "#A16207";
-    return "#991B1B";
-  };
-  const priorityColor = {
-    high: "#991B1B",
-    medium: "#A16207",
-    low: "#71717A",
-  };
   return (
     <div className="flex flex-col [gap:20px]">
-      {/* Header */}
-      <div className="flex justify-between items-center">
-        {" "}
-        <div className="text-ui-body text-ink-secondary">
-          AI Campaign Advisor{" "}
-          {report?.date
-            ? `— ${new Date(report.date + "T12:00:00").toLocaleDateString(
-                "en-US",
-                {
-                  month: "long",
-                  day: "numeric",
-                  year: "numeric",
-                },
-              )}`
-            : ""}
-        </div>{" "}
-        <Button
-          onClick={handleGenerate}
-          disabled={generating}
-          variant="secondary"
-        >
-          {generating ? "Generating..." : "Generate Report"}
-        </Button>{" "}
-      </div>
+      <AdvisorHeader
+        report={report}
+        generating={generating}
+        onGenerate={handleGenerate}
+      />
+      <AdvisorNotices
+        generating={generating}
+        errors={[generateError || loadError, historyError]}
+      />
       {!report ? (
-        <UiCard className="text-center [padding:60px]">
-          {" "}
-          <div className="text-ui-body [margin-bottom:16px]">AI</div>{" "}
-          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
-            No Reports Yet
-          </div>{" "}
-          <div className="text-ui-body text-ink-secondary">
-            Click "Generate Report" to run the AI advisor, or wait for the daily
-            8 AM auto-run.
-          </div>{" "}
-        </UiCard>
+        <AdvisorNoReports />
       ) : (
         <>
-          {/* Grade + Assessment */}
-          <UiCard className="p-6">
-            {" "}
-            <div className="flex items-center [gap:20px]">
-              {" "}
-              <div
-                style={{
-                  background: gradeColor(data.grade) + "22",
-                  color: gradeColor(data.grade),
-                  border: `2px solid ${gradeColor(data.grade)}44`,
-                }}
-                className="[width:72px] [height:72px] rounded-md flex items-center justify-center text-ui-body font-medium"
-              >
-                {data.grade || "?"}
-              </div>{" "}
-              <div className="[flex:1]">
-                {" "}
-                <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
-                  Overall Grade
-                </div>{" "}
-                <div className="text-ui-body text-zinc-900 [line-height:1.5]">
-                  {data.overall_assessment}
-                </div>{" "}
-              </div>{" "}
-            </div>{" "}
-          </UiCard>
-          {/* Recommendations */}
-          {(data.recommendations || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
-                Recommendations
-              </div>{" "}
-              <div className="flex flex-col [gap:12px]">
-                {["high", "medium", "low"].map((priority) => {
-                  const recs = (data.recommendations || []).filter(
-                    (r) => r.priority === priority,
-                  );
-                  if (recs.length === 0) return null;
-                  return (
-                    <div key={priority}>
-                      {" "}
-                      <div
-                        style={{
-                          color: priorityColor[priority],
-                        }}
-                        className="text-ui-body font-medium [margin-bottom:8px]"
-                      >
-                        {priority === "high"
-                          ? ""
-                          : priority === "medium"
-                            ? ""
-                            : ""}{" "}
-                        {priority} Priority
-                      </div>
-                      {recs.map((rec, idx) => {
-                        // Identity-carrying key: positional state from a prior
-                        // report must not attach to an unrelated rec that
-                        // happens to land in the same slot.
-                        const globalIdx = `${priority}-${idx}-${rec.campaign || ""}-${rec.apply_action || ""}`;
-                        return (
-                          <div
-                            key={idx}
-                            style={{
-                              borderLeft: `3px solid ${priorityColor[priority]}`,
-                            }}
-                            className="[padding:14px_16px] bg-zinc-100 rounded-md [margin-bottom:8px]"
-                          >
-                            {" "}
-                            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
-                              {rec.campaign && (
-                                <span className="text-zinc-900">
-                                  {rec.campaign}:{" "}
-                                </span>
-                              )}
-                              {rec.action}
-                            </div>
-                            {rec.reasoning && (
-                              <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
-                                {rec.reasoning}
-                              </div>
-                            )}
-                            {rec.estimated_impact && (
-                              <div className="text-ui-body text-zinc-900 [margin-bottom:8px]">
-                                Est. impact: {rec.estimated_impact}
-                              </div>
-                            )}
-                            {(rec.apply_action || rec.manual_action) &&
-                              (rec.apply_action && canAutoApply(rec) ? (
-                                (() => {
-                                  const st = applied[globalIdx];
-                                  const done = st?.status === "applied";
-                                  const pending = st?.status === "pending";
-                                  return (
-                                    <div>
-                                      <Button
-                                        onClick={() =>
-                                          handleApply(rec, globalIdx)
-                                        }
-                                        disabled={done || pending || generating}
-                                        variant={done ? "primary" : "secondary"}
-                                      >
-                                        {done
-                                          ? `Applied at ${st.at}`
-                                          : pending
-                                            ? "Applying…"
-                                            : rec.apply_action === "change_mode"
-                                              ? `Apply: set mode to ${rec.apply_value}`
-                                              : `Apply: ${rec.apply_action.replace(/_/g, " ")} to $${Number(rec.apply_value)}/day`}
-                                      </Button>
-                                      {st?.status === "error" && (
-                                        <div className="text-ui-body text-alert-fg [margin-top:6px]">
-                                          {st.message}
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                })()
-                              ) : (
-                                <div className="text-ui-body text-ink-secondary">
-                                  Manual action:{" "}
-                                  {(
-                                    rec.apply_action || rec.manual_action
-                                  ).replace(/_/g, " ")}
-                                </div>
-                              ))}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </div>{" "}
-            </UiCard>
-          )}
-
-          {/* Waste Alerts */}
-          {(data.waste_alerts || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
-                Waste Alerts
-              </div>{" "}
-              <div className="overflow-x-auto">
-                {" "}
-                <Table className="[width:100%] [border-collapse:collapse]">
-                  <THead>
-                    <TR>
-                      <TH>Search Term</TH>
-                      <TH className="text-right u-nums">Spend</TH>
-                      <TH className="text-right u-nums">Conv</TH>
-                      <TH className="text-right u-nums">Action</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
-                    {data.waste_alerts.map((w, i) => (
-                      <TR key={i}>
-                        <TD>{w.search_term}</TD>
-                        <TD className="text-right u-nums text-alert-fg">
-                          {fmtDec(w.spend)}
-                        </TD>
-                        <TD className="text-right u-nums">{w.conversions}</TD>
-                        <TD className="text-right u-nums">
-                          <span className="text-zinc-700 text-ui-body">
-                            {w.action}
-                          </span>
-                        </TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>{" "}
-              </div>{" "}
-            </UiCard>
-          )}
-
-          {/* Scaling Opportunities */}
-          {(data.scaling_opportunities || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Scaling Opportunities
-              </div>
-              {data.scaling_opportunities.map((s, i) => (
-                <div
-                  key={i}
-                  className="[padding:10px_14px] bg-zinc-100 rounded-md [margin-bottom:6px]"
-                >
-                  {" "}
-                  <div className="text-ui-body text-zinc-900">
-                    <strong>{s.campaign}</strong>: {fmt(s.current_budget)}/d →{" "}
-                    {fmt(s.suggested_budget)}/d
-                  </div>{" "}
-                  <div className="text-ui-body text-ink-secondary">
-                    {s.headroom_reason}
-                  </div>{" "}
-                </div>
-              ))}
-            </UiCard>
-          )}
-
-          {/* Insights */}
-          {(data.insights || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Insights
-              </div>{" "}
-              <div className="flex flex-col [gap:8px]">
-                {data.insights.map((ins, i) => (
-                  <div
-                    key={i}
-                    className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [line-height:1.5]"
-                  >
-                    {"•"} {ins}
-                  </div>
-                ))}
-              </div>{" "}
-            </UiCard>
-          )}
-
-          {/* Capacity Warnings */}
-          {(data.capacity_warnings || []).length > 0 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
-                Capacity Warnings
-              </div>
-              {data.capacity_warnings.map((w, i) => (
-                <div
-                  key={i}
-                  className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
-                >
-                  {" "}
-                  <strong>{w.area}</strong>at {w.utilization}% —{" "}
-                  {w.recommendation}
-                </div>
-              ))}
-            </UiCard>
-          )}
-
-          {/* History */}
-          {history.length > 1 && (
-            <UiCard className="p-6">
-              {" "}
-              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
-                Previous Reports
-              </div>{" "}
-              <div className="flex flex-wrap [gap:8px]">
-                {history.slice(1, 8).map((h, i) => (
-                  <div
-                    key={i}
-                    className="[padding:8px_14px] bg-zinc-100 rounded-md text-ui-body text-ink-secondary border-hairline border-zinc-200"
-                  >
-                    {" "}
-                    <span className="text-zinc-900">
-                      {new Date(h.date + "T12:00:00").toLocaleDateString(
-                        "en-US",
-                        {
-                          month: "short",
-                          day: "numeric",
-                        },
-                      )}
-                    </span>{" "}
-                    <span
-                      style={{
-                        color: gradeColor(h.grade),
-                      }}
-                      className="font-medium [margin-left:8px]"
-                    >
-                      {h.grade}
-                    </span>{" "}
-                    <span className="[margin-left:8px]">
-                      {h.recommendation_count} recs
-                    </span>
-                    {h.applied_count > 0 && (
-                      <span className="text-zinc-900 [margin-left:4px]">
-                        ({h.applied_count} applied)
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>{" "}
-            </UiCard>
-          )}
+          <AdvisorGradeCard data={data} />
+          <RecommendationList
+            recommendations={data.recommendations || []}
+            flagged={hasFlaggedFindings(data)}
+            unanalysed={data.grade === "N/A"}
+            applied={applied}
+            generating={generating}
+            onApply={handleApply}
+          />
+          <AdvisorSecondaryLists data={data} />
+          <AdvisorHistory history={history} />
         </>
       )}
     </div>
