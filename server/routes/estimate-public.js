@@ -720,12 +720,14 @@ function parseEstimateDataSafe(estimate = {}) {
   return raw || {};
 }
 
-// A wholesale estimate_data write built from a pre-transaction snapshot must
-// never drop served-disclosure evidence persisted since that read (GH Codex
-// r5 P1 on #5434): the /pdf download and the legacy page write
+// A wholesale estimate_data write built from an earlier read must never drop
+// served-disclosure evidence persisted since that read (GH Codex r5 P1 on
+// #5434; codex local max-effort review: EVERY whole-blob writer, not only the
+// accept): the /pdf download and the legacy page write
 // estimate_data.rateReviewTermsServed without touching updated_at, so the
-// accept's updated_at guard does not catch them. Merge the ROW's current
-// marker over the snapshot in SQL (a NULL marker strips to nothing).
+// writers' updated_at guards do not catch them. Merge the ROW's current
+// marker over the snapshot in SQL (a NULL marker strips to nothing). `handle`
+// is whichever knex handle the writer uses (db, a transaction, or a dbh).
 function withServedDisclosurePreserved(trx, updates) {
   if (typeof updates?.estimate_data !== 'string') return updates;
   return {
@@ -13212,7 +13214,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; }
         }
         const stamped = { ...(stampBase && typeof stampBase === 'object' ? stampBase : {}), recurringCardLaneAccepted: true };
-        await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
+        await trx('estimates').where({ id: estimate.id }).update(withServedDisclosurePreserved(trx, { estimate_data: JSON.stringify(stamped) }));
       }
 
       // Durable prepay auto-charge job (pre-push Codex P0 r3): persisted
@@ -13577,9 +13579,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // lane stamp set on a row that is already invalidated.
             .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
             .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-            .update({
+            .update(withServedDisclosurePreserved(db, {
               estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
-            });
+            }));
         }
       } catch (stampErr) {
         logger.warn(`[estimate-public] lane-stamp clear failed for estimate ${estimate.id} (retry may hide the payer pay step): ${stampErr.message}`);
@@ -15806,12 +15808,12 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
           ));
         }
       })
-      .update({
+      .update(withServedDisclosurePreserved(db, {
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
         annual_total: annualTotal,
         updated_at: db.fn.now(),
-      });
+      }));
     if (!bondUpdateCount) {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
@@ -16070,12 +16072,12 @@ router.put('/:token/interior-service', commercialInteriorSwitchLimiter, async (r
           ));
         }
       })
-      .update({
+      .update(withServedDisclosurePreserved(db, {
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
         annual_total: annualTotal,
         updated_at: db.fn.now(),
-      });
+      }));
     if (!updateCount) {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
@@ -16878,7 +16880,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
             ));
           }
         })
-        .update({
+        .update(withServedDisclosurePreserved(trx, {
           estimate_data: JSON.stringify(parsedData),
           monthly_total: next.monthlyTotal,
           annual_total: next.annualTotal,
@@ -16891,7 +16893,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
           pricing_authority: 'SERVER',
           server_computed_price: next.annualTotal,
           updated_at: trx.fn.now(),
-        });
+        }));
       if (!updateCount) return;
       // Rule 14: a deterministic green check auto-applies with an audit trail
       // and NO bell. This row is the blob-independent copy and surfaces in the
@@ -17119,13 +17121,13 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
           ));
         }
       })
-      .update({
+      .update(withServedDisclosurePreserved(db, {
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
         annual_total: annualTotal,
         onetime_total: onetimeTotal,
         updated_at: db.fn.now(),
-      });
+      }));
     if (!prefUpdateCount) {
       const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
