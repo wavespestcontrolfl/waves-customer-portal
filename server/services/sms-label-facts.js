@@ -242,7 +242,10 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   // visit that lands between two queries leaves the facts describing a visit that is no longer the last one. A connection that can open
   // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
   // (the newest date and both guards must still hold, else none on file).
-  if (typeof conn.transaction === 'function') {
+  // A connection that is ALREADY a transaction (the provider-boundary recheck runs on the send handoff's own trx, Codex #5416 r31)
+  // takes the re-check path too: a nested transaction() is only a savepoint, which cannot raise the outer READ COMMITTED isolation,
+  // and its SET LOCAL statement_timeout would outlive the savepoint and bind the rest of the handoff's transaction.
+  if (typeof conn.transaction === 'function' && conn.isTransaction !== true) {
     return conn.transaction(async (trx) => {
       // The server cancels a slow read itself (a JS-side timeout cannot release the pooled connection); the 3 s race in fetchLabelFacts stays the outer guard.
       if (typeof trx.raw === 'function') await trx.raw(`SET LOCAL statement_timeout = '${LABEL_FACTS_STATEMENT_TIMEOUT_MS}ms'`);

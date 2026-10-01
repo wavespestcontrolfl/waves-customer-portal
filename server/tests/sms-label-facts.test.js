@@ -2513,6 +2513,19 @@ describe('r34: deictic indoor stay; one consistent read of the last visit; the i
       const plain = { transaction: jest.fn(async (work) => work(makeConn({ newestDates: ['2026-06-05'] }))) };
       expect((await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn: plain })).serviceDate).toBe('2026-06-05');
     });
+    test('r31: an EXISTING transaction (the send handoff\'s trx at the provider boundary) opens no savepoint, sets no timeout, and is re-checked', async () => {
+      const steady = makeConn({ newestDates: ['2026-06-05'] });
+      steady.isTransaction = true;
+      steady.transaction = jest.fn(() => { throw new Error('no nested transaction on the handoff trx'); });
+      steady.raw = jest.fn(() => { throw new Error('no SET LOCAL on the handoff trx'); });
+      expect((await read(steady)).serviceDate).toBe('2026-06-05');
+      expect(steady.counters.max).toBe(2); // the read and the re-check
+      const moving = makeConn({ newestDates: ['2026-06-05', '2026-06-08'] });
+      moving.isTransaction = true;
+      moving.transaction = jest.fn();
+      expect(await read(moving)).toBeNull();
+      expect(moving.transaction).not.toHaveBeenCalled();
+    });
     test('fetchLabelFacts keeps its time limit and fails safe when the transaction never settles', async () => {
       const conn = { transaction: () => new Promise(() => {}) };
       expect(await labelFactsLib.fetchLabelFacts({ customerId: 'c1', conn, timeoutMs: 20 })).toBeNull();
