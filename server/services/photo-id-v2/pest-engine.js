@@ -46,7 +46,11 @@ const {
 } = require('./pest-engine-prompts');
 
 const PROMPT_VERSION = 'photo-id-v2-pest-1';
-const MAX_OUTPUT_TOKENS = 2048;
+// Gemini 3.x Flash always thinks, and its reasoning shares this budget with
+// the JSON answer. At 2048 a customer's chinch bug photo came back cut off
+// (gemini_incomplete, 2026-10-01), so the read fell to OpenAI alone and
+// climbed to "a true bug". Same cap as the v1 engine's vision leg.
+const MAX_OUTPUT_TOKENS = 8192;
 const SITE_BASE_URL = 'https://www.wavespestcontrol.com/pest-identifier/';
 const PRETTY_SURE_MIN = 0.80;
 const HARMLESS_PRETTY_SURE_MIN = 0.70;
@@ -189,10 +193,29 @@ function clausesFor(entry) {
   return HAZARD_CLAUSES.filter(([, applies]) => applies(entry)).map(([key]) => key);
 }
 
+// The entries an unnamed answer's safety line is triaged for: the catalog
+// species the models named under the answered node, plus each one's catalog
+// look-alikes. Owner 2026-10-01: a "true bug" climb from a chinch bug read
+// told the customer to call 911 because kissing and wheel bugs share the
+// group; a sibling no model named and the catalog never pairs with the read
+// does not set the warning. Any supporting read that is not a catalog entry
+// (an off-catalog name) could be anything under the node, so the node's
+// whole membership applies, as it does when nothing supports the node.
+function safetyMembersFor(nodeId, supporting = []) {
+  const all = NODE_MEMBERS.get(nodeId) || [];
+  if (!supporting.length || supporting.some((c) => !c.entry)) return all;
+  const slugs = new Set();
+  for (const c of supporting) {
+    slugs.add(c.entry.slug);
+    for (const la of catalog.lookAlikes(c.entry.slug)) slugs.add(la.slug);
+  }
+  return [...slugs].map((slug) => catalog.getEntry(slug)).filter(Boolean);
+}
+
 // An unknown answer (no node) could be anything, so it is triaged for the
 // whole catalog.
-function unnamedSafetyLineFor(nodeId) {
-  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries({ section: 'pest' });
+function unnamedSafetyLineFor(nodeId, supporting = []) {
+  const members = nodeId ? safetyMembersFor(nodeId, supporting) : catalog.listEntries({ section: 'pest' });
   const extra = new Set(members.flatMap(clausesFor));
   if (nodeId && !extra.size && !members.some(keepsDistance)) return null;
   return [
@@ -1141,7 +1164,7 @@ function buildAnswer(ctx) {
     // to the team (or an inspection) instead of borrowing a group's.
     referral: referralFor(entry),
     genericCompatibility: entry ? { safety: {} } : derivedNodeCompatibility(nodeId),
-    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId),
+    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId, candidatesSupporting(candidates, level, nodeId)),
     tier,
     topEntrySlug: entry?.slug || null,
   };
