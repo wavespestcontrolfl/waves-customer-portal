@@ -26,6 +26,7 @@ jest.mock('../services/inspection-credit', () => ({
   redeemInspectionCreditForBooking: jest.fn(async () => null),
 }));
 
+jest.setTimeout(30000);   // the first test pays the cold module load of the real hook
 postgres('an office-approved street-level hold is activated behind its address witness (real hook, real PostgreSQL)', () => {
   let knex;
   const created = { customers: [], calls: [], visits: [], techs: [] };
