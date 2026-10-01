@@ -130,33 +130,36 @@ async function loadCostBlock(dbh = db) {
 
 // ── facts → letter ─────────────────────────────────────────────────────
 
+const KEEPS_PACE = 'This change keeps pace with the costs above.';
+
+// The new-customer comparison, only for an engine-priced list (today's
+// new-customer price for this home). A book-mode fallback (cadence_mode)
+// is existing customers' rates and is never stated to the customer as one.
+function listComparison({ current, proposed, list, source }) {
+  if (['none', 'cadence_mode'].includes(source) || !(list > 0 && current > 0)) return KEEPS_PACE;
+  if (current >= list) return `Your current rate of ${money(current)} per application is in line with what we charge a new customer for the same service today (${money(list)}). ${KEEPS_PACE}`;
+  const below = `At ${money(current)} per application, that is below what we charge a new customer for the same service today (${money(list)}).`;
+  if (proposed === list) return `${below} The new rate brings you to that number, and not a dollar over it.`;
+  if (proposed < list) return `${below} I am moving it part of the way this year, to ${money(proposed)}, and you stay under the new-customer rate.`;
+  return `${below} The new rate of ${money(proposed)} keeps pace with the costs above.`;
+}
+
 // "Why your rate specifically" — only stored facts: the ranking row's
-// usable visits and treatment minutes, and today's new-customer list price.
+// usable visits and treatment minutes, and today's new-customer list price
+// (per application; a monthly line states the costs only).
 function whyFor(notice, snapshot) {
-  const parts = [];
   const visits = Number(snapshot?.usable_visits) || 0;
   const minutes = Math.round(Number(snapshot?.treatment_minutes_median) || 0);
-  if (visits >= 2 && minutes > 0) {
-    parts.push(`Over the past year our records show ${visits} applications at your home, about ${minutes} minutes of treatment each.`);
-  }
-  const unit = unitFor(notice);
-  const current = Number(snapshot?.current_rate_cents) || 0;
-  const proposed = Number(snapshot?.proposed_rate_cents) || 0;
-  const list = Number(snapshot?.list_rate_cents) || 0;
-  const perUnit = unit === 'year' ? 'application' : unit;
-  if (list > 0 && current > 0 && perUnit === 'application') {
-    if (current < list) {
-      parts.push(`At ${money(current)} per application, that is below what we charge a new customer for the same service today (${money(list)}).`);
-      if (proposed === list) parts.push('The new rate brings you to that number, and not a dollar over it.');
-      else if (proposed < list) parts.push(`I am moving it part of the way this year, to ${money(proposed)}, and you stay under the new-customer rate.`);
-      else parts.push(`The new rate of ${money(proposed)} keeps pace with the costs above.`);
-    } else {
-      parts.push(`Your current rate of ${money(current)} per application is in line with what we charge a new customer for the same service today (${money(list)}). This change keeps pace with the costs above.`);
-    }
-  } else {
-    parts.push('This change keeps pace with the costs above.');
-  }
-  return parts.join(' ');
+  const facts = visits >= 2 && minutes > 0
+    ? `Over the past year our records show ${visits} applications at your home, about ${minutes} minutes of treatment each. `
+    : '';
+  const comparison = unitFor(notice) === 'month' ? KEEPS_PACE : listComparison({
+    current: Number(snapshot?.current_rate_cents) || 0,
+    proposed: Number(snapshot?.proposed_rate_cents) || 0,
+    list: Number(snapshot?.list_rate_cents) || 0,
+    source: String(snapshot?.list_rate_source || 'none'),
+  });
+  return `${facts}${comparison}`;
 }
 
 function lineFor(notice, snapshot, customer, firstVisitDay) {
@@ -334,6 +337,8 @@ function digestFor(entries, costBlock) {
   h.update(`cost:${costBlock || ''}\n`);
   for (const e of entries) {
     if (e.reason || !e.lines.length) continue;
+    const frozen = frozenFor(e);
+    if (frozen) h.update(`frozen:${e.customerId}:${frozen.key}:${frozen.payload?.cost_block || ''}\n`);
     for (const l of [...e.lines].sort((a, b) => String(a.noticeId).localeCompare(String(b.noticeId)))) {
       h.update(`${e.customerId}:${l.noticeId}:${l.currentCents}:${l.newCents}:${l.effectiveDate}\n`);
     }
@@ -422,9 +427,26 @@ async function letterPreview(batchKey, rowId, { dbh = db, now = new Date() } = {
     lines = [{ ...lineFor(notice, row, data.customers.get(String(row.customer_id)), data.firstVisits.get(String(notice.id))), notice }];
   }
   const customer = data.customers.get(String(row.customer_id));
-  const payload = letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
+  const frozen = entry && entry.lines.length ? frozenFor(entry) : null;
+  const payload = frozen ? frozen.payload : letterPayload({ customer, lines, costBlock: costBlock || '[Cost block not written yet: write it in Settings before sending.]', noticeUrl: noticeUrlFor(lines) });
   const rendered = await renderLetter(payload);
   return { ok: true, subject: rendered.subject, html: rendered.html, costBlockReady: !!costBlock, suppressed: entry ? entry.reason : null };
+}
+
+// The key of a claim: the exact notice set one letter carries.
+function claimKeyFor(noticeIds) {
+  return crypto.createHash('sha256').update([...noticeIds].map(String).sort().join(',')).digest('hex').slice(0, 16);
+}
+
+// The words an earlier attempt froze for this exact line set (kept after an
+// attempted-but-failed send, whose email may have gone out under its
+// idempotency key) — previews, the digest and the retry all use them, so
+// what the owner approves is what a retry sends. null = nothing frozen.
+function frozenFor(entry) {
+  if (!entry.lines.length) return null;
+  const key = claimKeyFor(entry.lines.map((l) => l.noticeId));
+  const pending = entry.lines.map((l) => parseJson(l.notice.metadata, {}).pending_letter);
+  return pending.every((p) => p && p.key === key) ? pending[0] : null;
 }
 
 // ── send ───────────────────────────────────────────────────────────────
@@ -472,8 +494,8 @@ function frozenLetter(entry, payload, costBlock) {
 // dedupes on its idempotency key, so the page must show what that email
 // said, never a rebuild from data edited since.
 async function letterForClaim(dbh, entry, { claimKey, costBlock }) {
-  const pending = entry.lines.map((l) => parseJson(l.notice.metadata, {}).pending_letter);
-  if (pending.every((p) => p && p.key === claimKey)) return pending[0];
+  const existing = frozenFor(entry);
+  if (existing) return existing;
   const payload = letterPayload({ customer: entry.customer, lines: entry.lines, costBlock, noticeUrl: noticeUrlFor(entry.lines) });
   const frozen = { key: claimKey, payload, letter: frozenLetter(entry, payload, costBlock) };
   for (const l of entry.lines) {
@@ -487,8 +509,9 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
   const claimed = await claimLines(dbh, entry.lines, now);
   if (!claimed) return { outcome: 'in_flight' };
   const customer = entry.customer;
-  const claimKey = crypto.createHash('sha256').update([...claimed].sort().join(',')).digest('hex').slice(0, 16);
-  const { payload, letter } = await letterForClaim(dbh, entry, { claimKey, costBlock });
+  const claimKey = claimKeyFor(claimed);
+  const frozen = await letterForClaim(dbh, entry, { claimKey, costBlock });
+  const { payload, letter } = frozen;
   const email = await PriceChangeNotices.sendNoticeEmail({
     customer,
     idempotencyKeyBase: `rate_review:${batchKey}:${entry.customerId}:${claimKey}`,
@@ -504,19 +527,34 @@ async function sendEntry(dbh, entry, { batchKey, costBlock, actorId, now }) {
     operatorInitiated: true,
   });
   if (!email.sent && !sms.sent) {
-    const status = (email.attempted || sms.attempted) ? 'draft' : 'unreachable';
-    await dbh('price_change_notices').whereIn('id', claimed).where({ status: 'sending' }).update({ status, updated_at: new Date() });
-    return { outcome: status === 'draft' ? 'failed' : 'unreachable' };
+    const attempted = email.attempted || sms.attempted;
+    // Attempted = a provider or template failure that may still have
+    // delivered the email under its key: keep the frozen words so a retry
+    // repeats them. Never attempted (no contact, every leg policy-blocked)
+    // = definitively unsent: drop them so a retry shows current wording.
+    for (const l of entry.lines) {
+      const { pending_letter: _stale, ...meta } = parseJson(l.notice.metadata, {});
+      await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
+        status: attempted ? 'draft' : 'unreachable',
+        metadata: JSON.stringify(attempted ? { ...meta, pending_letter: frozen } : meta),
+        updated_at: new Date(),
+      });
+    }
+    return { outcome: attempted ? 'failed' : 'unreachable' };
   }
   const sentAt = new Date();
-  for (const l of entry.lines) {
-    const { pending_letter: _pending, ...meta } = parseJson(l.notice.metadata, {});
-    await dbh('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
-      status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
-      metadata: JSON.stringify({ ...meta, letter: { ...letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
-    });
-    await dbh('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
-  }
+  // Every line of one letter is stamped together: a partial stamp would
+  // leave siblings to be re-sent under a different claim key.
+  await dbh.transaction(async (trx) => {
+    for (const l of entry.lines) {
+      const { pending_letter: _frozen, ...meta } = parseJson(l.notice.metadata, {});
+      await trx('price_change_notices').where({ id: l.noticeId, status: 'sending' }).update({
+        status: 'sent', sent_at: sentAt, email_sent: !!email.sent, sms_sent: !!sms.sent,
+        metadata: JSON.stringify({ ...meta, letter: { ...letter, sent_on: etDateString(sentAt) } }), updated_at: sentAt,
+      });
+      await trx('rate_review_snapshots').where({ notice_id: l.noticeId, status: 'approved' }).update({ status: 'sent', updated_at: sentAt });
+    }
+  });
   return { outcome: 'sent', email: !!email.sent, sms: !!sms.sent };
 }
 
@@ -608,6 +646,20 @@ function publicReview(notice) {
   };
 }
 
+// What the next automatic charge at the new rate bills, in cents — the
+// account's whole debit, never one line's rate: per application the
+// application's own price; monthly the account's dues moved by the delta
+// (what applyMonthly writes to customers.monthly_rate); a prepaid renewal
+// has no automatic charge (renewals are recorded by the office) → null.
+function chargeCentsAtNewRate(notice, { current, next, customer }) {
+  if (notice.billing_lane === 'per_application') return next;
+  if (notice.billing_lane === 'monthly_membership') {
+    const dues = Math.round(Number(customer?.monthly_rate || 0) * 100);
+    return dues > 0 ? dues + (next - current) : null;
+  }
+  return null;
+}
+
 /**
  * Portal billing line: the customer's delivered, not-yet-applied rate
  * changes — the upcoming rate and the next charge at it. [] when the gate
@@ -627,14 +679,17 @@ async function upcomingRateChanges(customerId, { dbh = db, now = new Date() } = 
   // term's amount is written then), but the customer's rate only changes at
   // renewal — it stays upcoming until its effective date. Every other lane
   // drops off once the nightly apply writes the new rate.
+  const customer = rows.length ? await dbh('customers').where({ id: customerId }).first('monthly_rate') : null;
   return rows.filter((n) => !n.applied_at || n.billing_lane === 'annual_prepay').map((n) => {
     const unit = unitFor(n);
+    const current = Number(n.noticed_current_cents ?? n.current_amount_cents);
+    const next = Number(n.noticed_new_cents ?? n.new_amount_cents);
     return {
       service: SERVICE_LABELS[n.family_key] || null,
       unit,
-      current: money(n.noticed_current_cents ?? n.current_amount_cents),
-      next: money(n.noticed_new_cents ?? n.new_amount_cents),
-      nextCents: Number(n.noticed_new_cents ?? n.new_amount_cents),
+      current: money(current),
+      next: money(next),
+      chargeCents: chargeCentsAtNewRate(n, { current, next, customer }),
       effectiveDate: ymd(n.effective_date),
       noticePath: `/price-change/${n.notice_token}`,
     };

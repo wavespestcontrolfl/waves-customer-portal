@@ -33,8 +33,9 @@ function getStripe() {
 // Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-applied
 // rate change shows on the billing card as the upcoming rate and the next
 // charge at it. The charge comes from the one surcharge authority for the
-// method Auto Pay will charge — never base-rate arithmetic; no Auto Pay
-// method = no automatic charge to announce (nextCharge null). Gate off or
+// method Auto Pay will charge, over the account's whole debit — never
+// base-rate arithmetic; no Auto Pay method, or a lane with no automatic
+// charge (prepaid renewal), = nothing to announce (nextCharge null). Gate off or
 // nothing pending = no field (byte-identical payload); a read failure omits
 // the field, never the card.
 async function rateChangesField(customerId, { autopayEnabled, method, funding }) {
@@ -42,8 +43,8 @@ async function rateChangesField(customerId, { autopayEnabled, method, funding })
     const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
     if (!changes.length) return {};
     return {
-      rate_changes: changes.map(({ nextCents, ...change }) => {
-        const charge = autopayEnabled && method && nextCents > 0 ? computeChargeAmount(nextCents / 100, method.method_type, { funding }) : null;
+      rate_changes: changes.map(({ chargeCents, ...change }) => {
+        const charge = autopayEnabled && method && chargeCents > 0 ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
         return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge } : null };
       }),
     };

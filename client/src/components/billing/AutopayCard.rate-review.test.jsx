@@ -29,7 +29,7 @@ describe('AutopayCard upcoming rate line', () => {
     render(<AutopayCard customer={{}} />);
     const box = await screen.findByTestId('rate-review-upcoming');
     expect(box).toHaveTextContent('Pest control: $121 per application from Dec 10, 2026');
-    expect(box).toHaveTextContent('Now $117 per application. Next charge at the new rate: $124.50 on Dec 10, 2026 ($121.00 + $3.50 credit card surcharge).');
+    expect(box).toHaveTextContent('Now $117 per application. Next charge at the new rate: $124.50 ($121.00 + $3.50 credit card surcharge), after your first application on or after Dec 10, 2026.');
     expect(screen.getByRole('link', { name: 'View notice' })).toHaveAttribute('href', '/price-change/abc');
     expect(box).not.toHaveTextContent(/per visit|monthly/i);
   });

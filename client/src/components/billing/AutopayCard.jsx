@@ -146,6 +146,49 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
 // customer: the /me customer — its annualPrepay ({ termEnd, renewalDeclined,
 // awaitsInstallation, … }) drives the renewal copy, since billing_mode stays
 // 'annual_prepay' after the customer declines renewal.
+// Annual rate review (dark, GATE_RATE_REVIEW): a delivered rate change the
+// nightly apply has not written yet — the upcoming rate, the next charge at
+// it and the notice it came from. The server omits rate_changes when there
+// is none.
+function UpcomingRateChanges({ changes, formatDate }) {
+  if (!Array.isArray(changes) || !changes.length) return null;
+  return (
+    <div data-testid="rate-review-upcoming" data-glass="soft" style={{ margin: '12px 0', padding: '12px 14px', borderRadius: 10, border: `1px solid ${PORTAL_BILLING.borderStrong}`, background: PORTAL_BILLING.surface }}>
+      <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: PORTAL_BILLING.muted, marginBottom: 6 }}>Upcoming rate</div>
+      {changes.map((change) => (
+        <div key={change.noticePath} style={{ padding: '4px 0' }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
+            {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
+          </div>
+          <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
+            Now {change.current} per {change.unit}.{' '}
+            {/* nextCharge comes from the server's surcharge authority for
+                the Auto Pay method over the account's whole debit; an
+                application is charged after it is done, so per
+                application the date is the rule ("on or after"), never a
+                debit appointment. No nextCharge = nothing charges
+                automatically, so only the start date is stated. */}
+            {rateChangeChargeLine(change, formatDate)}{' '}
+            <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The "next charge" sentence of the upcoming-rate line (annual rate review).
+function rateChangeChargeLine(change, formatDate) {
+  const when = formatDate(change.effectiveDate);
+  const charge = change.nextCharge;
+  if (!charge) return `The new rate starts ${when}.`;
+  const amount = `$${Number(charge.total).toFixed(2)}`;
+  const split = charge.surcharge > 0 ? ` ($${Number(charge.base).toFixed(2)} + $${Number(charge.surcharge).toFixed(2)} credit card surcharge)` : '';
+  return change.unit === 'application'
+    ? `Next charge at the new rate: ${amount}${split}, after your first application on or after ${when}.`
+    : `Next charge at the new rate: ${amount}${split} on ${when}.`;
+}
+
 export default function AutopayCard({
   onStateChange, openRequest = null, onOpenRequestHandled, embedded = false, customer,
 }) {
@@ -548,32 +591,7 @@ export default function AutopayCard({
         </div>
       </div>
 
-      {/* Annual rate review (dark, GATE_RATE_REVIEW): a delivered rate
-          change the nightly apply has not written yet — the upcoming rate
-          and the next charge at it, with the notice it came from. The
-          server omits rate_changes when there is none. */}
-      {Array.isArray(data.rate_changes) && data.rate_changes.length > 0 && (
-        <div data-testid="rate-review-upcoming" data-glass="soft" style={{ margin: '12px 0', padding: '12px 14px', borderRadius: 10, border: `1px solid ${PORTAL_BILLING.borderStrong}`, background: PORTAL_BILLING.surface }}>
-          <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: PORTAL_BILLING.muted, marginBottom: 6 }}>Upcoming rate</div>
-          {data.rate_changes.map((change) => (
-            <div key={change.noticePath} style={{ padding: '4px 0' }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.4 }}>
-                {change.service ? `${change.service}: ` : ''}{change.next} per {change.unit} from {formatDate(change.effectiveDate)}
-              </div>
-              <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
-                Now {change.current} per {change.unit}.{' '}
-                {/* nextCharge comes from the server's surcharge authority for
-                    the Auto Pay method; without Auto Pay nothing charges
-                    automatically, so only the start date is stated. */}
-                {change.nextCharge
-                  ? `Next charge at the new rate: $${Number(change.nextCharge.total).toFixed(2)} on ${formatDate(change.effectiveDate)}${change.nextCharge.surcharge > 0 ? ` ($${Number(change.nextCharge.base).toFixed(2)} + $${Number(change.nextCharge.surcharge).toFixed(2)} credit card surcharge)` : ''}.`
-                  : `The new rate starts ${formatDate(change.effectiveDate)}.`}{' '}
-                <a href={change.noticePath} style={{ color: PORTAL_BILLING.text, fontWeight: 700 }}>View notice</a>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <UpcomingRateChanges changes={data.rate_changes} formatDate={formatDate} />
 
       {!modal && errorBanner}
 

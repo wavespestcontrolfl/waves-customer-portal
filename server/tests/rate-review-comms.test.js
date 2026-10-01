@@ -208,9 +208,18 @@ describe('sendBatch', () => {
     smsLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ ok: false, failed: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'draft', sent_at: null });
+    // the attempted send keeps its frozen words: an edited cost block does
+    // not change what the preview shows or what a retry sends
+    mockDb.store.rate_review_config[0].cost_block = 'An EDITED cost block.';
+    const letter = await comms.letterPreview(BATCH_KEY, ROW(1), { now: NOW });
+    expect(letter.html).toContain(COST_BLOCK);
+    expect(letter.html).not.toContain('An EDITED cost block.');
     emailLeg.mockResolvedValue({ sent: false, attempted: false });
     expect(await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW })).toMatchObject({ unreachable: 1, sent: 0 });
     expect(notices()[0]).toMatchObject({ status: 'unreachable', sent_at: null });
+    // definitively unsent: the frozen words are dropped
+    const meta = notices()[0].metadata;
+    expect((typeof meta === 'string' ? JSON.parse(meta) : meta).pending_letter).toBeUndefined();
     expect(snapshots()[0].status).toBe('approved');
   });
 
@@ -296,8 +305,14 @@ describe('the letter (real renderer over the seeded template)', () => {
 
 describe('letter wording and order', () => {
   const { whyFor, planBatch } = comms._private;
+  test('a book-mode list price (cadence_mode) is never stated as the new-customer price', () => {
+    const why = whyFor({ billing_lane: 'per_application', cadence_label: 'application' }, { current_rate_cents: 10500, proposed_rate_cents: 11700, list_rate_cents: 11700, list_rate_source: 'cadence_mode' });
+    expect(why).not.toMatch(/new customer/);
+    expect(why).toBe('This change keeps pace with the costs above.');
+  });
+
   test('a proposal above the new-customer price never claims "not a dollar over it"', () => {
-    const why = whyFor({ billing_lane: 'per_application', cadence_label: 'application' }, { current_rate_cents: 11600, proposed_rate_cents: 12000, list_rate_cents: 11700 });
+    const why = whyFor({ billing_lane: 'per_application', cadence_label: 'application' }, { current_rate_cents: 11600, proposed_rate_cents: 12000, list_rate_cents: 11700, list_rate_source: 'engine' });
     expect(why).toContain('The new rate of $120 keeps pace with the costs above.');
     expect(why).not.toContain('not a dollar over');
   });
@@ -347,10 +362,19 @@ describe('customer surfaces', () => {
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
     await comms.sendBatch(BATCH_KEY, { expectedDigest: await previewDigest(), now: NOW });
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([
-      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', nextCents: 12100, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
+      { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: 12100, effectiveDate: '2026-12-10', noticePath: `/price-change/${'1'.repeat(32)}` },
     ]);
     notices()[0].applied_at = new Date();
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([]);
+  });
+
+  test('portal: a monthly change charges the account dues moved by the delta, not the line rate', async () => {
+    const monthly = draft(1, {
+      billing_lane: 'monthly_membership', cadence_label: 'month', effective_date: '2026-12-15', status: 'sent', sent_at: NOW,
+      current_amount_cents: 4000, new_amount_cents: 4400, noticed_current_cents: 4000, noticed_new_cents: 4400,
+    });
+    mockDb.reset(book({ customers: [customer(1, { monthly_rate: '100.00' })], notices: [monthly] }));
+    expect((await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW }))[0]).toMatchObject({ unit: 'month', next: '$44', chargeCents: 10400 });
   });
 
   test('portal: a prepaid change stays upcoming after the nightly apply, until its renewal date', async () => {
@@ -360,7 +384,7 @@ describe('customer surfaces', () => {
     });
     mockDb.reset(book({ notices: [prepay] }));
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: NOW })).toEqual([
-      expect.objectContaining({ unit: 'year', current: '$468', next: '$484', nextCents: 48400, effectiveDate: '2027-05-15' }),
+      expect.objectContaining({ unit: 'year', current: '$468', next: '$484', chargeCents: null, effectiveDate: '2027-05-15' }),
     ]);
     expect(await comms.upcomingRateChanges(CUSTOMER(1), { now: new Date('2027-05-16T14:00:00Z') })).toEqual([]);
   });

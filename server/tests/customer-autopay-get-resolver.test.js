@@ -153,7 +153,7 @@ test('a cancelled (C4) session gets status scalars only — no saved-method deta
 });
 
 describe('annual rate review upcoming rate (rate_changes)', () => {
-  const change = { service: 'Pest control', unit: 'application', current: '$117', next: '$121', nextCents: 12100, effectiveDate: '2026-12-10', noticePath: '/price-change/x' };
+  const change = { service: 'Pest control', unit: 'application', current: '$117', next: '$121', chargeCents: 12100, effectiveDate: '2026-12-10', noticePath: '/price-change/x' };
 
   test('nothing pending: no rate_changes field (byte-identical payload)', async () => {
     const { body } = await getAutopay();
@@ -169,6 +169,12 @@ describe('annual rate review upcoming rate (rate_changes)', () => {
       service: 'Pest control', unit: 'application', current: '$117', next: '$121', effectiveDate: '2026-12-10', noticePath: '/price-change/x',
       nextCharge: { total: expected.total, base: expected.base, surcharge: expected.surcharge },
     }]);
+  });
+
+  test('a lane with no automatic charge (prepaid renewal) announces none', async () => {
+    mockUpcomingRateChanges.mockResolvedValueOnce([{ ...change, unit: 'year', chargeCents: null }]);
+    const { body } = await getAutopay();
+    expect(body.rate_changes[0].nextCharge).toBeNull();
   });
 
   test('Auto Pay off: no charge is announced', async () => {
