@@ -3,7 +3,10 @@
 // Owner-supplied v5 prompt pack, 2026-09-25.
 const { detectServiceLine } = require('./service-line-configs');
 const { TREE_SHRUB_MAIN_REPORT_PROMPT, RECURRING_PEST_MAIN_REPORT_PROMPT } = require('./pest-tree-copy-prompt');
-const { selectRemainingServicePrompt, REMAINING_SERVICE_PROMPT_VERSION } = require('./remaining-service-copy-prompts');
+const {
+  selectRemainingServicePrompt, resolveRemainingServiceModules, REMAINING_SERVICE_PROMPT_VERSION,
+} = require('./remaining-service-copy-prompts');
+const { WRITER_RULES_EXCLUDED_MODULES, composeWriterRulesPrompt } = require('./report-writer-rules');
 
 const LAWN_COPY_CORE = `## ROLE AND PURPOSE
 
@@ -162,42 +165,61 @@ const EXISTING_SHARED_PROFILES = new Map([
   ['termite_pretreatment', 'termite_treatment'], ['waveguard_membership', null],
 ]);
 
+// The dedicated writer line for a visit outside the remaining-service
+// modules: 'pest', 'lawn', 'tree_shrub', 'palm', 'shared' (the whole v4
+// prompt), or null when no writer may serve it.
+function resolveDedicatedWriter(serviceType, context = {}) {
+  if (context.serviceKey) {
+    // Preserve established typed pretreatment and mixed membership writers
+    // without guessing a liquid/foam treatment or a single membership family.
+    if (EXISTING_SHARED_PROFILES.has(context.serviceKey)
+      && context.findingsType === EXISTING_SHARED_PROFILES.get(context.serviceKey)) return 'shared';
+    const profile = DEDICATED_SERVICE_PROFILES.get(context.serviceKey);
+    if (!profile) return null;
+    const supportedFindingsTypes = Array.isArray(profile[1]) ? profile[1] : [profile[1]];
+    if (Object.hasOwn(context, 'findingsType') && !supportedFindingsTypes.includes(context.findingsType)) return null;
+    return profile[0];
+  }
+  if (context.findingsType) return DEDICATED_FINDINGS_FAMILIES.get(context.findingsType) || null;
+  if (context.requireCanonical) return null;
+  // Only legacy calls without any canonical identity may use the label.
+  if (/\bwdo\b|pre[- ]?slab|pre[- ]?treat/i.test(String(serviceType))) return null;
+  const serviceLine = detectServiceLine(serviceType);
+  if (serviceLine === 'pest' && !/\bpest\b/i.test(String(serviceType).replace(/[_-]+/g, ' '))) return null;
+  return serviceLine || null;
+}
+
+// GATE_REPORT_WRITER_RULES covers the recurring pest writer and every
+// remaining-service module except the lawn and palm ones: lawn and
+// tree/shrub/palm belong to another lane (owner 2026-09-30) and stay
+// byte-identical. The whole-v4 'shared' writer is not covered either.
+function writerRulesInScope(serviceType, context = {}) {
+  const remainingModules = resolveRemainingServiceModules(context);
+  if (remainingModules) return !remainingModules.some((key) => WRITER_RULES_EXCLUDED_MODULES.has(key));
+  return resolveDedicatedWriter(serviceType, context) === 'pest';
+}
+
 function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   // Keep shared safety/provenance, without the old style rules and examples
   // that demanded variation or supplied unsupported recovery timelines.
   const start = sharedPrompt.indexOf('## HARD CONSTRAINTS');
   const end = sharedPrompt.indexOf('## ANTI-TEMPLATE RULES', start);
   const sharedSafety = start >= 0 && end > start ? sharedPrompt.slice(start, end).trim() : '';
+  const writerRules = context.writerRules === true && writerRulesInScope(serviceType, context);
+  const compose = (parts) => (writerRules ? composeWriterRulesPrompt(parts) : parts.filter(Boolean).join('\n\n'));
   const remaining = selectRemainingServicePrompt(context, 'main');
-  if (remaining) return [`# ${REMAINING_SERVICE_PROMPT_VERSION}`, sharedSafety, remaining].filter(Boolean).join('\n\n');
-  let serviceLine = null;
-  if (context.serviceKey) {
-    // Preserve established typed pretreatment and mixed membership writers
-    // without guessing a liquid/foam treatment or a single membership family.
-    if (EXISTING_SHARED_PROFILES.has(context.serviceKey)
-      && context.findingsType === EXISTING_SHARED_PROFILES.get(context.serviceKey)) return sharedPrompt;
-    const profile = DEDICATED_SERVICE_PROFILES.get(context.serviceKey);
-    if (!profile) return null;
-    const supportedFindingsTypes = Array.isArray(profile[1]) ? profile[1] : [profile[1]];
-    if (Object.hasOwn(context, 'findingsType') && !supportedFindingsTypes.includes(context.findingsType)) return null;
-    [serviceLine] = profile;
-  } else if (context.findingsType) {
-    serviceLine = DEDICATED_FINDINGS_FAMILIES.get(context.findingsType);
-  } else if (!context.requireCanonical) {
-    // Only legacy calls without any canonical identity may use the label.
-    if (/\bwdo\b|pre[- ]?slab|pre[- ]?treat/i.test(String(serviceType))) return null;
-    serviceLine = detectServiceLine(serviceType);
-    if (serviceLine === 'pest' && !/\bpest\b/i.test(String(serviceType).replace(/[_-]+/g, ' '))) return null;
-  }
+  if (remaining) return compose([`# ${REMAINING_SERVICE_PROMPT_VERSION}`, sharedSafety, remaining]);
+  const writer = resolveDedicatedWriter(serviceType, context);
+  if (writer === 'shared') return sharedPrompt;
   const modules = {
     lawn: ['# SERVICE REPORT COPY — LAWN v5', LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER],
     tree_shrub: ['# SERVICE REPORT COPY — TREE AND SHRUB v1', TREE_SHRUB_MAIN_REPORT_PROMPT],
     palm: ['# SERVICE REPORT COPY — TREE AND SHRUB v1', TREE_SHRUB_MAIN_REPORT_PROMPT],
     pest: ['# SERVICE REPORT COPY — RECURRING PEST v1', RECURRING_PEST_MAIN_REPORT_PROMPT],
   };
-  const selected = modules[serviceLine];
+  const selected = modules[writer];
   if (!selected) return null;
-  return [selected[0], sharedSafety, ...selected.slice(1)].filter(Boolean).join('\n\n');
+  return compose([selected[0], sharedSafety, ...selected.slice(1)]);
 }
 
-module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, selectReportCopyPrompt };
+module.exports = { LAWN_COPY_CORE, LAWN_TECHNICIAN_ADAPTER, selectReportCopyPrompt, writerRulesInScope };

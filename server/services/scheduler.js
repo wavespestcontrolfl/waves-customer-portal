@@ -6216,15 +6216,29 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6AM — Google Ads sync (campaigns, performance, search terms)
   // =========================================================================
+  // runExclusive records job_health ('google-ads-sync'), and the sync functions
+  // run with throwOnError so a failed API call fails the job instead of being
+  // swallowed into an empty result that read as success. All three run even if
+  // one fails; the first error is rethrown at the end. job_health failures
+  // surface through ops-queue laneScheduledJobs.
   cron.schedule('0 6 * * *', async () => {
     try {
       const googleAds = require('./ads/google-ads');
       if (!googleAds.isConfigured()) return;
-      logger.info('Running: Google Ads daily sync');
-      await googleAds.syncCampaigns();
-      await googleAds.syncDailyPerformance(7);
-      await googleAds.syncSearchTerms(30);
-      logger.info('Google Ads daily sync complete');
+      await runExclusive('google-ads-sync', async () => {
+        logger.info('Running: Google Ads daily sync');
+        const opts = { throwOnError: true };
+        let firstErr = null;
+        for (const step of [
+          () => googleAds.syncCampaigns(opts),
+          () => googleAds.syncDailyPerformance(7, opts),
+          () => googleAds.syncSearchTerms(30, opts),
+        ]) {
+          try { await step(); } catch (err) { firstErr = firstErr || err; }
+        }
+        if (firstErr) throw firstErr;
+        logger.info('Google Ads daily sync complete');
+      });
     } catch (err) {
       logger.error(`Google Ads sync failed: ${err.message}`);
     }
@@ -6241,8 +6255,14 @@ function initScheduledJobs() {
       const metaAds = require('./ads/meta-ads');
       if (!metaAds.isConfigured()) return;
       logger.info('Running: Meta Ads daily sync');
-      await metaAds.syncCampaigns();
-      await metaAds.syncDailyPerformance(7);
+      // throwOnError: each step runs under its own runExclusive row
+      // (meta-ads-campaigns / meta-ads-performance), so a failure records
+      // job_health 'failed'. Both steps run even if the first fails.
+      const opts = { throwOnError: true };
+      let firstErr = null;
+      try { await metaAds.syncCampaigns(opts); } catch (err) { firstErr = err; }
+      try { await metaAds.syncDailyPerformance(7, opts); } catch (err) { firstErr = firstErr || err; }
+      if (firstErr) throw firstErr;
       logger.info('Meta Ads daily sync complete');
     } catch (err) {
       logger.error(`Meta Ads sync failed: ${err.message}`);
