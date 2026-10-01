@@ -154,6 +154,9 @@ describe('ServiceRecapModal application rates', () => {
     const input = screen.getByLabelText('Application rate for Adjourn SC');
     expect(input.value).toBe('4');
     expect(screen.getByText('oz')).toBeTruthy();
+    // 4 oz is the tank's house amount, not the label's fl oz per gallon: it is
+    // never flagged over Adjourn's 0.65 fl oz/gal label.
+    expect(screen.queryByText(/label max/)).toBeNull();
   });
 
   test('reopening a recap prefills the RECORDED rate, not the catalog default', async () => {

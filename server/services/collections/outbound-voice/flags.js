@@ -16,6 +16,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
+const { HOLD_FLAG, DISPUTE_REASON_PREFIX, PRIOR_HOLD_OPEN, PRIOR_HOLD_CLOSE, DISPUTE_TEXT_CAP } = require('../collection-hold');
 
 async function writeFlag({ customerId, flag, reason, createdBy = 'system:collections_voice' }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
@@ -84,14 +85,55 @@ async function revokeAutomatedVoiceConsent(customerId, { reason, createdBy } = {
   return res;
 }
 
-/** Dispute raised on-call: collection_hold blocks EVERY dunning channel. */
+/**
+ * Dispute raised on-call: collection_hold blocks EVERY dunning channel AND
+ * (collection-hold.js) every off-session charge. The reason text is the
+ * discriminator that makes it a money hold — it must start with
+ * DISPUTE_REASON_PREFIX. collection_hold is also a wrong-number / wrong-party
+ * fallback artifact, and the one-active-row-per-flag index means a dispute
+ * raised while such a fallback row is active would otherwise be swallowed as
+ * "already active": the existing row is upgraded to carry the dispute reason
+ * (its earlier reason kept in a trailer after it, so releasing the dispute
+ * restores the fallback instead of dropping the block).
+ */
+const DISPUTE_HOLD_ATTEMPTS = 3;
+
 async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
-  const res = await writeFlag({
-    customerId,
-    flag: 'collection_hold',
-    reason: summary ? `dispute on call: ${summary}` : 'dispute raised on call',
-    createdBy,
-  });
+  const disputeReason = summary ? `${DISPUTE_REASON_PREFIX} on call: ${summary}` : `${DISPUTE_REASON_PREFIX} raised on call`;
+  // Atomic, bounded: insert; if a hold is already active, ONE conditional
+  // UPDATE on the ACTIVE row (released_at IS NULL, reason not already a
+  // dispute) sets the dispute reason. 0 rows updated means the row was
+  // released (retry the insert) or is already a dispute row (verified). ok is
+  // reported only when an active dispute-prefixed row verifiably exists.
+  let res = { ok: false, reason: 'write_failed' };
+  try {
+    for (let attempt = 0; attempt < DISPUTE_HOLD_ATTEMPTS && !res.ok; attempt += 1) {
+      const inserted = await writeFlag({ customerId, flag: HOLD_FLAG, reason: disputeReason, createdBy });
+      if (!inserted.ok) { res = inserted; break; }
+      if (inserted.created !== false) { res = inserted; break; }
+      const upgraded = await db('collections_flags')
+        .where({ customer_id: customerId, flag: HOLD_FLAG })
+        .whereNull('released_at')
+        .whereRaw('(reason IS NULL OR reason NOT ILIKE ?)', [`${DISPUTE_REASON_PREFIX}%`]) // parenthesized: knex does not wrap raw fragments
+        .update({
+          // Same trailer as embedPriorHoldReason (collection-hold.js): releasing the
+          // dispute restores the fallback from it (collection-hold-admin).
+          reason: db.raw("left(?, ?) || ? || btrim(coalesce(reason, '')) || ?", [disputeReason, DISPUTE_TEXT_CAP, PRIOR_HOLD_OPEN, PRIOR_HOLD_CLOSE]),
+        });
+      if (Number(upgraded) > 0) { res = { ok: true, created: false, upgraded: true }; break; }
+      const activeDispute = await db('collections_flags')
+        .where({ customer_id: customerId, flag: HOLD_FLAG })
+        .whereNull('released_at')
+        .whereRaw('reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`])
+        .first('id');
+      if (activeDispute) res = { ok: true, created: false };
+      // else: released between the insert and the update - loop and insert again
+    }
+  } catch (err) {
+    logger.error(`[collections-flags] dispute hold FAILED customer=${customerId}: ${err.message}`);
+    res = { ok: false, reason: 'write_failed' };
+  }
+  if (!res.ok && !res.reason) res = { ok: false, reason: 'write_failed' };
   if (res.ok) {
     await fileFlagCard({
       customerId,
@@ -206,20 +248,25 @@ async function activeFlags(customerId) {
     .where({ customer_id: customerId })
     .whereNull('released_at')
     .orderBy('created_at', 'asc')
-    .select('flag', 'reason', 'created_by', 'created_at');
+    .select('id', 'flag', 'reason', 'created_by', 'created_at');
 }
 
 /**
  * Release an active flag — stamp released_at, never delete (the row is the
  * paper trail). Idempotent: nothing active ⇒ { ok:true, released:0 }.
+ * `id` (optional) narrows the release to exactly that row — still only while
+ * it is active and belongs to this customer + flag — so a staff release of the
+ * hold they were looking at can never lift a newer hold placed since.
  */
-async function releaseFlag({ customerId, flag }) {
+async function releaseFlag({ customerId, flag, id = null, trx = null }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
   try {
-    const released = await db('collections_flags')
-      .where({ customer_id: customerId, flag })
+    const where = { customer_id: customerId, flag };
+    if (id) where.id = id;
+    const released = await (trx || db)('collections_flags')
+      .where(where)
       .whereNull('released_at')
-      .update({ released_at: db.fn.now() });
+      .update({ released_at: (trx || db).fn.now() });
     return { ok: true, released: Number(released) || 0 };
   } catch (err) {
     logger.error(`[collections-flags] flag release FAILED customer=${customerId} flag=${flag}: ${err.message}`);
