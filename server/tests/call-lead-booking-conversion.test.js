@@ -201,10 +201,11 @@ describe('convertCallLeadOnPhoneBooking', () => {
     // phone can be shared across leads — booking one customer must never
     // steal another customer's lead. The predicate is repeated in the UPDATE
     // so a concurrent claim between read and write can't slip through. The
-    // third leads chain is the post-conversion estimate-link fetch, and the fourth is the
-    // funnel bridge's missing-row check for a reopened /book request (the won write bridges).
+    // third leads chain is the post-conversion estimate-link fetch. (The funnel bridge's
+    // missing-row check for a reopened /book request runs in its own transaction, which
+    // this mock handle does not model.)
     const leadChains = inner._chains.filter((b) => b._table === 'leads');
-    expect(leadChains).toHaveLength(4);
+    expect(leadChains).toHaveLength(3);
     for (const b of leadChains.slice(0, 2)) {
       expect(b.whereNull).toHaveBeenCalledWith('customer_id');
       expect(b.orWhere).toHaveBeenCalledWith('customer_id', 'cust-1');

@@ -588,6 +588,28 @@ jest.setTimeout(60000);
       });
     });
 
+    test('concurrent reopen vs cleanup (pre-push P1): staff reopens the request holding the lead lock; the cleanup waits, re-checks handled under the lock, and deletes nothing', async () => {
+      const { cust, req, booking } = await setupRequestAndBooking();
+      await closeBookedPreferredLeads(database, { customerId: cust, booking });
+      await attribute(cust, booking); // the booking's own row exists: the cleanup WOULD delete the request row
+      let release;
+      const hold = new Promise((r) => { release = r; });
+      const staff = database.transaction(async (trx) => {
+        await trx('leads').where({ id: req.leadId }).forUpdate().first('id');
+        await hold;
+        await trx('leads').where({ id: req.leadId }).update({ status: 'new' });
+      });
+      await tick();
+      const cleanup = dropSupersededPreferredFunnelRows(database, { booking });
+      const state = settled(cleanup);
+      await tick(250);
+      expect(state.done).toBe(false); // parked on the lead row lock
+      release();
+      await staff;
+      expect(await cleanup).toBe(0);
+      expect(await requestRow(req.leadId)).toHaveLength(1);
+    });
+
     test('the close itself never touches the request\'s funnel row (the reconcile path, which has no attributeSelfBooking, leaves it)', async () => {
       const cust = randomUUID();
       await database('customers').insert({ id: cust, phone: '+19415550100', first_name: 'Pat', last_name: 'Sample' });

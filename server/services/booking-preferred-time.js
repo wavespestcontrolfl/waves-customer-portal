@@ -679,39 +679,49 @@ async function dropSupersededPreferredFunnelRows(db, { booking = null, converted
       return meta && Array.isArray(meta.converted_lead_ids) ? meta.converted_lead_ids : [];
     });
     const converted = [...new Set([...(Array.isArray(convertedLeadIds) ? convertedLeadIds : []), ...persisted].filter(Boolean).map(String))];
-    return (await db('ad_service_attribution')
-      .whereIn('lead_id', function closedByThisBooking() {
-        this.select('a.lead_id').from('lead_activities as a')
-          .join('leads as l', 'l.id', 'a.lead_id')
-          .where('a.activity_type', 'status_change')
-          .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
-          .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)])
-          .where('l.status', CLOSED_STATUS);
-      })
-      .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
-      .whereExists(function replacementRow() {
-        // The booking's own row (keyed to this booking), OR the booked / completed
-        // funnel row of a genuine lead this booking converted instead (recurring /
-        // estimate-linked bookings convert that lead, so attributeSelfBooking writes
-        // no row of its own).
-        this.select(1).from('ad_service_attribution as booked')
-          .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
-          .where((q) => {
-            q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
-            if (converted.length) {
-              q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
-            }
-            // Lineage persisted AT the conversion: a lead this booking won carries
-            // extracted_data.won_booking_id (written by the conversion in the same statement as the win),
-            // so a crash between the conversion and the close loses nothing.
-            q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
-              .whereIn('booked.lead_id', function convertedByThisBooking() {
-                this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
-                  .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
-              }));
-          });
-      })
-      .del()) || 0;
+    // One transaction that LOCKS the closed requests' lead rows and re-checks 'handled'
+    // under the lock before deleting: staff reopening a request (and the funnel bridge
+    // restoring its row, which takes the same lock) goes before or after, never in between.
+    return await db.transaction(async (trx) => {
+      const locked = (await trx('leads as l')
+        .whereIn('l.id', function closedByThisBooking() {
+          this.select('a.lead_id').from('lead_activities as a')
+            .where('a.activity_type', 'status_change')
+            .whereRaw("a.metadata->>'reason' = ?", [CLOSE_REASON])
+            .whereRaw("a.metadata->>'booking_id' = ?", [String(booking.id)]);
+        })
+        .where('l.status', CLOSED_STATUS)
+        .forUpdate()
+        .select('l.id')) || [];
+      const closedIds = locked.map((r) => r.id);
+      if (!closedIds.length) return 0;
+      return (await trx('ad_service_attribution')
+        .whereIn('lead_id', closedIds)
+        .where((q) => q.whereNull('funnel_stage').orWhereNotIn('funnel_stage', ['booked', 'completed']))
+        .whereExists(function replacementRow() {
+          // The booking's own row (keyed to this booking), OR the booked / completed
+          // funnel row of a genuine lead this booking converted instead (recurring /
+          // estimate-linked bookings convert that lead, so attributeSelfBooking writes
+          // no row of its own).
+          this.select(1).from('ad_service_attribution as booked')
+            .whereRaw('booked.lead_id IS DISTINCT FROM ad_service_attribution.lead_id')
+            .where((q) => {
+              q.whereRaw('booked.self_booked_appointment_id = ?', [booking.id]);
+              if (converted.length) {
+                q.orWhere((c) => c.whereIn('booked.lead_id', converted).whereIn('booked.funnel_stage', ['booked', 'completed']));
+              }
+              // Lineage persisted AT the conversion: a lead this booking won carries
+              // extracted_data.won_booking_id (written by the conversion in the same statement as the win),
+              // so a crash between the conversion and the close loses nothing.
+              q.orWhere((c) => c.whereIn('booked.funnel_stage', ['booked', 'completed'])
+                .whereIn('booked.lead_id', function convertedByThisBooking() {
+                  this.select('w.id').from('leads as w').whereNull('w.deleted_at').where('w.status', 'won')
+                    .whereRaw("w.extracted_data->>'won_booking_id' = ?", [String(booking.id)]);
+                }));
+            });
+        })
+        .del()) || 0;
+    });
   } catch (err) {
     logger.warn(`[booking:preferred-time] superseded funnel row cleanup failed for booking=${booking.id}: ${err.message}`);
     return 0;
