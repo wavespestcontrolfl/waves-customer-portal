@@ -111,6 +111,14 @@ const ENGINE_SERVICE_KEYS = Object.freeze({
   termite: ['termite_bait'],
   rodent: ['rodent_bait'],
 });
+// Rider line items that the LEDGER folds into the same family slice
+// (LEDGER_FAMILIES_FOR_LINE below). A monthly-billed line's current rate
+// sums them, so its list rate sums the engine's matching items too; a
+// per-application line reads the visit's own stamp, so its list stays the
+// primary item alone.
+const ENGINE_RIDER_KEYS = Object.freeze({
+  tree_shrub: ['palm_injection'],
+});
 // customer_plan_rates.family_key vocabulary per ranking line (plan-rate-
 // ledger.js: rodent bait is `rodent_bait`, termite bait `termite_bait`, a palm
 // rider `palm_injection` beside `tree_shrub`). A line's slice is the SUM of
@@ -440,12 +448,19 @@ function revenuePerHour(paired) {
 // visits gets $/hr from those alone (pure treatment time, no allowance
 // guesswork); otherwise every paired visit counts with the allowance
 // applied to the home ones.
-function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0 } = {}) {
+// `duesRevenueCents`: for a monthly-billed line, the family's settled dues
+// attributed to each application (slice × 12 ÷ visits per year) — monthly
+// members pay at account level, so their visits carry no invoice of their
+// own. Used only for a visit with no paired revenue; flagged rph_from_dues.
+function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinutes = 0, duesRevenueCents = null } = {}) {
   const usable = [];
+  let duesAttributed = 0;
   for (const row of visitRows || []) {
     const t = treatmentMinutesFor(row, allowanceMinutes);
     if (!t) continue;
-    usable.push({ ...t, revenueCents: visitRevenueCents(row) });
+    let revenueCents = visitRevenueCents(row);
+    if (revenueCents == null && duesRevenueCents > 0) { revenueCents = duesRevenueCents; duesAttributed += 1; }
+    usable.push({ ...t, revenueCents });
   }
   const minutes = usable.map((u) => u.treatment);
   const treatmentMinutesMedian = trimmedMedian(minutes);
@@ -468,6 +483,7 @@ function lineDurationStats(visitRows, { config = DEFAULT_CONFIG, allowanceMinute
     unknownInteractionVisits: usable.length - homeVisits - notHomeVisits,
     allowanceMinutesApplied: usable.some((u) => u.adjustment === 'allowance') ? Math.max(0, finite(allowanceMinutes) || 0) : null,
     capturedConversationVisits: usable.filter((u) => u.adjustment === 'captured').length,
+    duesAttributedVisits: revenuePerHourCents != null ? duesAttributed : 0,
     treatmentMinutesMedian,
     revenuePerHourCents,
     rphFromNotHome,
@@ -588,6 +604,7 @@ function computeSnapshot(line, config = DEFAULT_CONFIG) {
   if (line.rphFromNotHome) flags.push('rph_from_not_home_visits');
   if (line.unknownInteractionVisits > 0) flags.push('interaction_unknown');
   if (line.capturedConversationVisits > 0) flags.push('conversation_minutes_captured');
+  if (line.duesAttributedVisits > 0) flags.push('rph_from_dues');
 
   const current = line.currentRateCents || 0;
   const monthlyUnit = line.rateUnit === 'month';
@@ -760,18 +777,25 @@ function listReplayInputs(inputs, { familyKey = null, cadence = null } = {}) {
   return clean;
 }
 
-function listRateFromEngineResult(result, line, cadence) {
+function listRateFromEngineResult(result, line, cadence, { includeRiders = false } = {}) {
   const keys = ENGINE_SERVICE_KEYS[line] || [];
-  const item = (result && Array.isArray(result.lineItems) ? result.lineItems : []).find((i) => keys.includes(i.service));
+  const items = result && Array.isArray(result.lineItems) ? result.lineItems : [];
+  const item = items.find((i) => keys.includes(i.service));
   if (!item || item.quoteRequired || item.requiresCustomQuote || item.requiresMeasurement) return null;
   const annual = positive(item.annualAfterDiscount ?? item.annual);
   const visits = positive(item.visitsPerYear) ?? positive(item.frequency);
   if (!annual || !visits) return null;
   const expected = CADENCE_VISITS[cadence];
   const cadenceMismatch = !!(expected && Math.round(visits) !== expected);
+  // Riders (a palm program beside Tree & Shrub) join the MONTHLY figure only,
+  // mirroring the ledger slice the monthly current rate was read from.
+  const riderKeys = includeRiders ? (ENGINE_RIDER_KEYS[line] || []) : [];
+  const riders = items.filter((i) => riderKeys.includes(i.service) && !i.quoteRequired && !i.requiresCustomQuote && !i.requiresMeasurement);
+  const riderAnnual = riders.reduce((sum, r) => sum + (positive(r.annualAfterDiscount ?? r.annual) || 0), 0);
   return {
     perAppCents: Math.round((annual / visits) * 100),
-    monthlyCents: Math.round((annual / 12) * 100),
+    monthlyCents: Math.round(((annual + riderAnnual) / 12) * 100),
+    riderServices: riders.map((r) => r.service),
     cadenceMismatch,
     tier: result.waveGuard && result.waveGuard.tier ? String(result.waveGuard.tier).toLowerCase() : null,
   };
@@ -1256,7 +1280,12 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
     const familyKey = planLine.family_key;
     const cadence = planLine.cadence;
     const current = resolveCurrentRate({ customer, planLine, liveTerms: liveTerms.get(customer.id), ledgerSlice: ledgerSliceForLine(ledger, customer.id, familyKey) });
-    const stats = lineDurationStats(visitsByLine.get(`${customer.id}|${familyKey}`) || [], { config, allowanceMinutes: allowanceFor(allowances, familyKey) });
+    const visitsPerYear = visitsPerYearFor(cadence, planLine.catalog_vpy);
+    const stats = lineDurationStats(visitsByLine.get(`${customer.id}|${familyKey}`) || [], {
+      config,
+      allowanceMinutes: allowanceFor(allowances, familyKey),
+      duesRevenueCents: current.unit === 'month' && current.cents > 0 && visitsPerYear > 0 ? Math.round((current.cents * 12) / visitsPerYear) : null,
+    });
     const first = firstVisits.get(`${customer.id}|${familyKey}`) || null;
 
     const linkedEstimates = (planLine.source_estimate_ids || []).map((id) => estimates.get(id)).filter(Boolean)
@@ -1274,7 +1303,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       const cacheKey = `${estimate.id}|${familyKey}|${cadence}`;
       if (!replayCache.has(cacheKey)) replayCache.set(cacheKey, await replayEstimate(estimate, { familyKey, cadence }, deps));
       const replay = replayCache.get(cacheKey);
-      const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence) : null;
+      const rate = replay ? listRateFromEngineResult(replay.result, familyKey, cadence, { includeRiders: current.unit === 'month' }) : null;
       if (!rate) continue;
       const estimateTier = estimate.waveguard_tier ? String(estimate.waveguard_tier).toLowerCase() : null;
       if (rate.cadenceMismatch) {
@@ -1287,7 +1316,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
 
     book.push({
       planLine, customer, familyKey, cadence,
-      visitsPerYear: visitsPerYearFor(cadence, planLine.catalog_vpy),
+      visitsPerYear,
       current, stats, first, acceptedAt, list,
       serviceKeys: planLine.service_keys || [],
     });
@@ -1399,6 +1428,7 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, trx = null
       unknownInteractionVisits: stats.unknownInteractionVisits,
       allowanceMinutesApplied: stats.allowanceMinutesApplied,
       capturedConversationVisits: stats.capturedConversationVisits,
+      duesAttributedVisits: stats.duesAttributedVisits,
       rphFromNotHome: stats.rphFromNotHome,
       treatmentMinutesMedian: stats.treatmentMinutesMedian,
       revenuePerHourCents: stats.revenuePerHourCents,

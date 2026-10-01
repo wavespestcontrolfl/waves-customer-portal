@@ -218,6 +218,22 @@ describe('treatment minutes from the customer_interaction flag', () => {
     expect(mixed.rphFromNotHome).toBe(false);
     expect(mixed.revenuePerHourCents).toBe(Math.round((351 * 100) / ((40 + 42 + 50.5) / 60)));
   });
+  test('a monthly member\'s visits carry no invoice: settled dues are attributed per application for $/hr', () => {
+    const away = (m) => fixture.visit('x', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: null });
+    const noDues = P.lineDurationStats([away(40), away(42), away(44)]);
+    expect(noDues.revenuePerHourCents).toBeNull();
+    // $39/mo quarterly → $117 per application
+    const dues = P.lineDurationStats([away(40), away(42), away(44)], { duesRevenueCents: 11700 });
+    expect(dues.revenuePerHourCents).toBe(Math.round((351 * 100) / (126 / 60)));
+    expect(dues.rphFromNotHome).toBe(true);
+    expect(dues.duesAttributedVisits).toBe(3);
+    // a visit with its own paid invoice keeps it; dues fill only the gaps
+    const mixed = P.lineDurationStats([away(40), away(42), fixture.visit('x', 'pest_control', { minutes: 44, interaction: 'not_home_full_access', revenue: 150 })], { duesRevenueCents: 11700 });
+    expect(mixed.revenuePerHourCents).toBe(Math.round(((117 + 117 + 150) * 100) / (126 / 60)));
+    expect(mixed.duesAttributedVisits).toBe(2);
+    const row = P.computeSnapshot({ batchKey: '2026-12', customerId: 'c', familyKey: 'pest_control', cadence: 'quarterly', visitsPerYear: 4, billingLane: 'monthly_membership', anniversaryDate: '2025-01-10', tenureMonths: 21, currentRateCents: 3900, rateUnit: 'month', listRateCents: 3900, usableVisits: 3, revenuePerHourCents: dues.revenuePerHourCents, duesAttributedVisits: 3, facts: fixture.facts() });
+    expect(row.flags).toContain('rph_from_dues');
+  });
   test('captured conversation minutes (future Fast Complete field) replace the allowance', () => {
     const row = fixture.visit('x', 'pest_control', { minutes: 54, interaction: 'tech_home_spoke_with_them' });
     row.service_record_structured_notes = JSON.stringify({ conversationMinutes: 8 });
@@ -518,6 +534,16 @@ describe('engine replay runs at the line\'s own cadence', () => {
     const result = { lineItems: [{ service: 'pest_control', annualAfterDiscount: 468, visitsPerYear: 4 }], waveGuard: { tier: 'bronze' } };
     expect(P.listRateFromEngineResult(result, 'pest_control', 'quarterly')).toMatchObject({ perAppCents: 11700, cadenceMismatch: false });
     expect(P.listRateFromEngineResult(result, 'pest_control', 'bimonthly')).toMatchObject({ cadenceMismatch: true });
+  });
+  test('a palm rider joins the monthly list figure exactly where the ledger slice sums it, never the per-application one', () => {
+    const result = { lineItems: [{ service: 'tree_shrub', annualAfterDiscount: 360, visitsPerYear: 6 }, { service: 'palm_injection', annualAfterDiscount: 150, visitsPerYear: 2 }], waveGuard: { tier: 'silver' } };
+    const monthly = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly', { includeRiders: true });
+    expect(monthly).toMatchObject({ monthlyCents: 4250, perAppCents: 6000, riderServices: ['palm_injection'] });
+    const perApp = P.listRateFromEngineResult(result, 'tree_shrub', 'bimonthly');
+    expect(perApp).toMatchObject({ monthlyCents: 3000, perAppCents: 6000, riderServices: [] });
+    // a rider that needs a custom quote is left out rather than priced at $0
+    const quoteRequired = { lineItems: [result.lineItems[0], { ...result.lineItems[1], quoteRequired: true }], waveGuard: { tier: 'silver' } };
+    expect(P.listRateFromEngineResult(quoteRequired, 'tree_shrub', 'bimonthly', { includeRiders: true }).monthlyCents).toBe(3000);
   });
 });
 
