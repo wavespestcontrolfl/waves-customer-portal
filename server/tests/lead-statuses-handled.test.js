@@ -116,6 +116,9 @@ describe("lead status 'handled'", () => {
     expect(handledStatusRefusal('new', 'handled', 'handled')).toBeNull(); // reopening a request staff saw handled
     expect(handledStatusRefusal(undefined, 'new', 'handled')).toBeNull(); // a notes-only edit
     expect(handledStatusRefusal('contacted', 'new', 'new')).toBeNull();
+    // a client claiming it saw 'handled' can never use that to SET it on an open lead
+    expect(handledStatusRefusal('handled', 'handled', 'new')).toMatchObject({ code: 400 });
+    expect(handledStatusRefusal('handled', 'handled', 'handled')).toBeNull(); // a no-op re-save
     // the board's handled column shows handled requests but takes no drops (codex #5477 r11)
     const board = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
     expect(board).toMatch(/const acceptsDrops = stage !== "handled";/);

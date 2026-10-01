@@ -155,9 +155,13 @@ function scopeToProspects(qb, alias = 'leads') {
 // stays possible. `seen` = the status staff loaded, `now` = the status under the row
 // lock. Returns the refusal (status code + message) or null.
 function handledStatusRefusal(requested, seen, now) {
-  if (requested === undefined || seen === 'handled') return null;
-  if (requested === 'handled') return { code: 400, error: "'handled' is set automatically when the customer books online" };
-  if (now === 'handled') return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
+  if (requested === undefined) return null;
+  // Setting it is judged on the LOCKED status only (a client-supplied `seen` must
+  // never unlock it): allowed solely as a no-op re-save of a lead already handled.
+  if (requested === 'handled') {
+    return now === 'handled' ? null : { code: 400, error: "'handled' is set automatically when the customer books online" };
+  }
+  if (now === 'handled' && seen !== 'handled') return { code: 409, error: 'This request closed on its own: the customer booked online. Reload to see it.' };
   return null;
 }
 
