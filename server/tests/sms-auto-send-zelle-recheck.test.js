@@ -68,8 +68,13 @@ function chain(overrides = {}) {
   return Object.assign(q, overrides);
 }
 
+// This file tests the DISPATCH-time seams (Zelle / payment-status rechecks) with the amount-recheck module mocked. The READINESS-time rule
+// that keeps a payment-scoped v12 reply that is not copy-only off the autonomous rung is covered in sms-auto-send-payment-status.test.js
+// and payment-status-contract.test.js; it is switched off here so these cases still reach dispatchClaimedSend with their v12 replies.
+let scopeBlockSpy;
 beforeEach(() => {
   jest.clearAllMocks();
+  scopeBlockSpy = jest.spyOn(require('../services/payment-status-contract'), 'autoSendScopeBlock').mockReturnValue(null);
   const inbound = chain({ first: jest.fn(async () => ({
     created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161',
   })) });
@@ -98,6 +103,7 @@ beforeEach(() => {
     sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}`,
   });
 });
+afterEach(() => { scopeBlockSpy.mockRestore(); });
 
 const attempt = (overrides = {}) => autoSend.maybeAutoSend({
   draftId: '00000000-0000-4000-8000-000000000001', customer: { id: '00000000-0000-4000-8000-000000000002' },
@@ -194,7 +200,7 @@ describe('payment-status recheck (PR #5331)', () => {
   test('a real-answers reply is rechecked against its snapshot and the customer inbound, and sends when clean', async () => {
     await expect(attempt({ reply: 'Your account has no balance due.', promptVersion: V12, paymentStatusSnapshot: SNAP })).resolves.toMatchObject({ sent: true });
     expect(amountRecheck.paymentStatusSendBlockReason).toHaveBeenCalledWith({
-      customerId: '00000000-0000-4000-8000-000000000002', body: 'Your account has no balance due.', snapshot: SNAP, inboundMessage: 'How do I pay?',
+      customerId: '00000000-0000-4000-8000-000000000002', body: 'Your account has no balance due.', snapshot: SNAP, inboundMessage: 'How do I pay?', autoSend: true,
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
   });

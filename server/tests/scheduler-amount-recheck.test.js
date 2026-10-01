@@ -18,7 +18,10 @@ const dbReturning = (row) => {
   db.mockImplementation(() => q);
   return q;
 };
-beforeEach(() => { jest.clearAllMocks(); db.mockReset(); });
+let priorGate;
+// real-answers on: the status-vocabulary pre-screen is a v12 feature (gate off it is main's - see the P2-4 test below)
+beforeEach(() => { jest.clearAllMocks(); db.mockReset(); priorGate = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+afterEach(() => { if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate; });
 
 describe('recheckScheduledSmsAmounts', () => {
   test('(c) a human reply with no figure, Zelle offer or payment claim does no reads at all', async () => {
@@ -26,6 +29,21 @@ describe('recheckScheduledSmsAmounts', () => {
       .resolves.toEqual({ stale: false, reason: null });
     expect(db).not.toHaveBeenCalled();
     expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+
+  // independent review P2-4: with the gate off the pre-screen is main's, so a status-vocabulary body costs no agent_decisions read and a
+  // read failure cannot block the row; amounts and Zelle claims are still rechecked
+  test('gate off: a status-only body does no reads at all (== main); a dollar figure is still rechecked', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    for (const body of ["You're paid up!", "Your payment isn't showing yet.", 'Your invoice is overdue.']) {
+      await expect(recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: body }, claimMeta })).resolves.toEqual({ stale: false, reason: null });
+    }
+    expect(db).not.toHaveBeenCalled();
+    expect(recheck.outgoingAmountsStale).not.toHaveBeenCalled();
+    dbReturning({ prompt_version: 'house_voice_v11', input_snapshot: null });
+    recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
+    await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your balance is $95.' }, claimMeta });
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledTimes(1);
   });
 
   test('(a) a human-edited Zelle offer IS rechecked, with trustOwedAmounts, and the specific reason comes back', async () => {

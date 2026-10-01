@@ -113,8 +113,9 @@ test('the payment was refunded / re-dated since the draft: not sent, claim faile
 });
 
 test('a paraphrase / invented status (no snapshot, or not the snapshotted words) is held without a billing read', async () => {
-  await expect(attempt({ reply: "You're all paid up!", paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: false, reason: 'payment_status_unauthorized' });
-  await expect(attempt({ reply: 'We got your payment on Sep 12, 2026.' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_unauthorized' });
+  // (the payment-scoped copy-only rule now refuses these before the claim; the dispatch-time detector is the second line)
+  await expect(attempt({ reply: "You're all paid up!", paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: false, reason: 'payment_status_not_auto_sendable' });
+  await expect(attempt({ reply: 'We got your payment on Sep 12, 2026.' })).resolves.toMatchObject({ sent: false, reason: 'payment_status_not_auto_sendable' });
   expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
@@ -130,9 +131,49 @@ test('another customer\'s snapshot, unavailable billing and a throwing read all 
 });
 
 test('a reply that states no status needs no billing read; a pre-v12 (gate-off) draft is never put through the contract', async () => {
-  await expect(attempt({ reply: 'Here is your pay link.', paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: true });
+  // (payment-scoped by the customer's message, so it must be inert text to auto-send: see the structural tests below)
+  await expect(attempt({ reply: 'Hi Sam, let us know if you have any questions.', paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: true });
   expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   sendCustomerMessage.mockClear();
   await expect(attempt({ reply: "You're all paid up!", paymentStatusSnapshot: null, promptVersion: 'house_voice_v11' })).resolves.toMatchObject({ sent: true });
   expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  sendCustomerMessage.mockClear();
+  // a pre-v12 draft that is payment-scoped and not copy-only is unchanged too (gate off == main)
+  await expect(attempt({ reply: 'Here is your pay link.', paymentStatusSnapshot: null, promptVersion: 'house_voice_v11' })).resolves.toMatchObject({ sent: true });
+});
+
+// Independent review of PR #5331 (STRUCTURAL): the detector is a net with holes, so a payment-scoped v12 reply auto-sends only as
+// verbatim copies plus inert text. Anything else is routed to Agent Review - before the claim, so nothing is parked or reserved.
+describe('a payment-scoped reply that is not copy-only never auto-sends', () => {
+  test.each([
+    ['P1-1: pronoun-only confirmation, no payment word anywhere', 'Did it go through?', "Yes, it went through \u2014 you're all set!"],
+    ['P1-2: pronoun receipt', 'Did you get it?', 'Yes, I see it on our end \u2014 thank you!'],
+    ['P1-2: pronoun receipt after a copied sentence', 'Did my payment go through?', `${COPY} And the one from Sep 30 too.`],
+    ['an invented extra clause after a copy', 'Did my payment go through?', `${COPY} A teammate will text you the details.`],
+    ['an ordinary answer in a payment thread', 'How can I pay?', 'Here is your pay link.'],
+  ])('%s', async (_name, inboundMessage, reply) => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    await expect(attempt({ inboundMessage, reply })).resolves.toEqual({ sent: false, reason: 'payment_status_not_auto_sendable' });
+    expect(decisions.insert).not.toHaveBeenCalled(); // no claim, nothing parked
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('copies plus inert text (greeting, thanks, "let us know if you have questions") still auto-send', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(live());
+    await expect(attempt({ reply: `Hi Sam, ${COPY} Let us know if you have any questions.` })).resolves.toMatchObject({ sent: true });
+  });
+
+  test('the thread alone makes a draft payment-scoped (snapshot.scoped), even when the reply and the latest message are bare', async () => {
+    const scoped = { customer_id: SNAP.customer_id, sentences: [], scoped: true };
+    await expect(attempt({ inboundMessage: 'ok thanks', reply: 'Sounds good, see you Tuesday!', paymentStatusSnapshot: scoped })).resolves.toEqual({ sent: false, reason: 'payment_status_not_auto_sendable' });
+    await expect(attempt({ inboundMessage: 'ok thanks', reply: 'Sounds good, see you Tuesday!', paymentStatusSnapshot: null })).resolves.toMatchObject({ sent: true });
+  });
+
+  test('dispatch-time recheck: a snapshot-scoped body that slipped past readiness is held with the claim failed', async () => {
+    // readiness sees no snapshot; the claim's own snapshot (what the decision persisted) says scoped - the executor re-judges it
+    const { paymentStatusSendBlockReason } = require('../services/sms-amount-recheck');
+    await expect(paymentStatusSendBlockReason({ customerId: 'c', body: 'Sounds good, see you Tuesday!', snapshot: { sentences: [], scoped: true }, inboundMessage: 'ok thanks', autoSend: true })).resolves.toBe('payment_status_not_auto_sendable');
+    // ...a human review (no autoSend) judges the same body by the detector only
+    await expect(paymentStatusSendBlockReason({ customerId: 'c', body: 'Sounds good, see you Tuesday!', snapshot: { sentences: [], scoped: true }, inboundMessage: 'ok thanks' })).resolves.toBeNull();
+  });
 });

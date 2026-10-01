@@ -390,3 +390,38 @@ describe('several bare amounts (round 41)', () => {
     expect(resolveZelleTargetInvoice({ openInvoices: open }, 'Can I Zelle $100 or $300?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
   });
 });
+
+// ---- Codex round-44 ------------------------------------------------------------------------------------------------------------------
+describe('round 44: bare amounts are validated before the single-open-invoice shortcut', () => {
+  const one = { openInvoices: [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 100 }] };
+  test('several distinct bare amounts, one of them not this invoice\'s, leave the target unresolved', () => {
+    expect(resolveZelleTargetInvoice(one, 'Can I Zelle $100 or $200?')).toEqual({ invoiceId: null, reason: 'ambiguous_amount' });
+    expect(resolveZelleTargetInvoice(one, 'Can I Zelle $100 or $100.00?').invoiceId).toBe('a'); // the same amount twice is one amount
+    expect(resolveZelleTargetInvoice(one, 'Can I Zelle $100?').invoiceId).toBe('a');
+    expect(resolveZelleTargetInvoice(one, 'Can I use Zelle?').invoiceId).toBe('a');
+  });
+});
+
+describe('round 44 (older threads, judged on 9f0f509): amount-based targets never resolve from a TRUNCATED list', () => {
+  const list = [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 100 }, { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 200 }];
+  test('invoice-scoped and bare amounts abstain when the open list was cut; a full invoice number still resolves', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'Zelle the $100 invoice?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'did you get my $100?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: false }, 'Zelle the $100 invoice?')).toEqual({ invoiceId: 'a', reason: 'unique_amount' });
+    expect(resolveZelleTargetInvoice({ openInvoices: list, openInvoicesTruncated: true }, 'Zelle invoice WPC-2026-0001?').invoiceId).toBe('a');
+  });
+});
+
+describe('round 44 P2: a partially paid invoice (amount due unknowable) is never a target and is never "no open invoice"', () => {
+  const sent = { id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 100 };
+  test('nothing else open: unresolved, not no_open_invoice', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: [], hasUncountedPartialDue: true }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'partially_paid_invoice' });
+    expect(resolveZelleTargetInvoice({ openInvoices: [], hasUncountedPartialDue: false }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'no_open_invoice' });
+  });
+  test('one other invoice open: it is not assumed to be the one meant; naming it (number or amount) still resolves it', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: [sent], hasUncountedPartialDue: true }, 'Can I pay by Zelle?')).toEqual({ invoiceId: null, reason: 'multiple_open_unreferenced' });
+    expect(resolveZelleTargetInvoice({ openInvoices: [sent], hasUncountedPartialDue: true }, 'Zelle invoice WPC-2026-0001?').invoiceId).toBe('a');
+    expect(resolveZelleTargetInvoice({ openInvoices: [sent], hasUncountedPartialDue: true }, 'Zelle the $100 invoice?').invoiceId).toBe('a');
+    expect(resolveZelleTargetInvoice({ openInvoices: [sent] }, 'Can I pay by Zelle?').invoiceId).toBe('a'); // unchanged without a partial
+  });
+});

@@ -632,6 +632,20 @@ async function autoSendReadiness(params, gratitudeLane) {
     return { reason: 'price_quote' };
   }
 
+  // (3.75) PAYMENT-SCOPED replies auto-send only as verbatim copies of rendered account sentences plus inert text (greeting, thanks,
+  //        "let us know if you have questions"). The status detector is a net with holes; this makes a miss fail SAFE for the
+  //        autonomous rung: anything else in a reply about payments goes to Agent Review, where a person reads it (owner ruling
+  //        2026-10-01, PR #5331). Real-answers (v12) drafts only; re-checked at dispatch with the claim's own snapshot.
+  if (!gratitudeLane && typeof params.promptVersion === 'string' && params.promptVersion.startsWith('house_voice_v12')) {
+    const scopeBlock = require('./payment-status-contract').autoSendScopeBlock({
+      reply, inboundText: params.inboundMessage == null ? null : String(params.inboundMessage), snapshot: params.paymentStatusSnapshot || null,
+    });
+    if (scopeBlock) {
+      logger.info(`[sms-auto-send] payment-scoped reply is not copy-only — routing to review (intent=${intent})`);
+      return { reason: scopeBlock };
+    }
+  }
+
   // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
   //       the real-answers prompt has the model quote the follow-up SLA
   //       phrase when the facts can't answer, and the prompt now requires an
@@ -1027,7 +1041,7 @@ async function dispatchClaimedSend({
       const { paymentStatusSendBlockReason } = require('./sms-amount-recheck');
       let statusReason;
       try {
-        statusReason = await paymentStatusSendBlockReason({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage });
+        statusReason = await paymentStatusSendBlockReason({ customerId, body: reply, snapshot: claim.paymentStatusSnapshot || null, inboundMessage, autoSend: true });
       } catch (err) {
         logger.warn(`[sms-auto-send] payment-status recheck threw (decision ${claim.decisionId}): ${err.message}`);
         statusReason = 'payment_status_recheck_failed';

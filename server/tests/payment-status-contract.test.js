@@ -196,7 +196,7 @@ describe('the detector: broad and conservative, but pay-method answers pass', ()
     "It's been refunded.", 'Your account is current.', 'You owe $95.', 'Your balance is $0.', 'Nothing is owed.', 'You have a zero balance.',
     'The charge cleared.', 'Your card was declined.', 'The funds arrived.', "We don't see your payment.", "It isn't showing yet.", 'The check posted.',
     'Your transfer settled.', "They're sorted.", "You're good.", 'Everything is set.', 'We got your payment.', 'We have your payment on file.',
-    'Your invoice is overdue.', 'Your invoice is paid.', 'We credited your account.', 'It bounced.', 'Payment came through.',
+    'Did your payment go through?', 'Your invoice is overdue.', 'Your invoice is paid.', 'We credited your account.', 'It bounced.', 'Payment came through.',
     'We received your $120.00 card payment on Sep 12.', 'Your payment will post tomorrow.', 'The refund was issued.', 'Your balance is $95.',
     // words no status list knows still name a payment thing outside the how-to-pay vocabulary
     'We banked your $120.00 payment.', 'Your payment is in the books.', 'Thanks for your payment!', 'Your Sep 12 transfer landed.', 'We banked your Zelle payment.',
@@ -211,7 +211,6 @@ describe('the detector: broad and conservative, but pay-method answers pass', ()
     'You can mail a check to our office. Technicians never take cash.',
     'A teammate will confirm that and follow up within the hour.',
     'Your invoice is attached.',
-    'Did your payment go through?',
     'Hi Sam, could you tell me the date you sent it?',
     'Sounds good, see you Tuesday!',
     'I will check on your payment and get back to you within the hour.',
@@ -229,7 +228,8 @@ describe('the detector: broad and conservative, but pay-method answers pass', ()
   });
 
   test('a question the reply asks is not an assertion; a question that asserts is', () => {
-    expect(c.assertsPaymentStatus('Did the payment go through?', { inboundText: 'hi' })).toBe(false);
+    expect(c.assertsPaymentStatus('Which invoice do you mean?', { inboundText: 'hi' })).toBe(false);
+    expect(c.assertsPaymentStatus('Do you want to pay by card?', { inboundText: 'how do I pay' })).toBe(false);
     expect(c.assertsPaymentStatus('Your payment went through, right?', { inboundText: 'hi' })).toBe(true);
   });
 });
@@ -238,8 +238,9 @@ describe('the snapshot: exactly the sentences the final reply copied', () => {
   const S = 'Your account has no balance due.';
   test('records the copied sentences and the customer; null when none were copied', () => {
     expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: S }, { text: 'x' }], reply: `Hi Sam, ${S}` })).toEqual({ customer_id: 'c1', sentences: [S] });
-    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: S }], reply: 'A teammate will confirm.' })).toBeNull();
-    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [], reply: S })).toBeNull();
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [{ text: S }], reply: 'A teammate will confirm.', inboundText: 'What time is my visit?' })).toBeNull();
+    // a draft that copied nothing but is payment-scoped records that fact (the send paths then judge its final body as scoped)
+    expect(c.paymentStatusSnapshotFor({ customerId: 'c1', sentences: [], reply: S })).toEqual({ customer_id: 'c1', sentences: [], scoped: true });
   });
 });
 
@@ -325,5 +326,173 @@ describe('mutation sweep: no near-miss of a rendered sentence is accepted', () =
       }
     }
     expect(misses).toEqual([]);
+  });
+});
+
+// ---- Independent review of PR #5331 (payment-status contract gaps) ------------------------------------------------------------------
+const chk = (reply, over = {}) => c.checkPaymentStatusReply({ reply, sentences: [], inboundText: 'Did it go through?', ...over });
+
+describe('P1-1: a pronoun-only thread is payment-scoped (no payment word anywhere in the reply or the latest message)', () => {
+  test.each([['Did it go through?'], ['Did you get it?'], ['Is it there yet?'], ['Any news?']])('inbound "%s": "Yes, it went through - you\'re all set!" is held', (inbound) => {
+    const reply = "Yes, it went through \u2014 you're all set!";
+    expect(c.assertsPaymentStatus(reply, { inboundText: inbound })).toBe(true);
+    expect(chk(reply, { inboundText: inbound }).ok).toBe(false);
+  });
+  test('the recent thread scopes a reply even when the latest message and the reply share no payment word', () => {
+    expect(c.assertsPaymentStatus("Yep, it's all set.", { inboundText: 'ok thanks', scopeTexts: ['Your invoice WPC-2026-0001 has $95.00 due.', 'ok thanks'] })).toBe(true);
+    expect(c.assertsPaymentStatus("Yep, it's all set.", { inboundText: 'ok thanks', scopeTexts: ['See you Tuesday', 'ok thanks'] })).toBe(false);
+    expect(c.assertsPaymentStatus("Yep, it's all set.", { inboundText: 'ok thanks', scoped: true })).toBe(true); // explicit flag (the snapshot)
+  });
+  test('"Hi Bill," is a name, not a bill', () => {
+    expect(c.isPaymentScopedText('Hi Bill, see you Tuesday!')).toBe(false);
+    expect(c.isPaymentScopedText('Is my bill paid?')).toBe(true);
+  });
+});
+
+describe('P1-2: pronoun-only receipts are held, alone and after a copied sentence', () => {
+  const PRONOUN_RECEIPTS = [
+    'Yes, I see it on our end \u2014 thank you!', 'It came in Tuesday.', "Yes, it's in our system.", "It's here!", "Yes, it's on your account now.",
+    'Your Zelle came in.', 'And the one from Sep 30 too.', 'We got it.', 'We have it.', 'It cleared.', 'Yes it came through.', 'I found it.',
+    'They arrived Monday.', "That one's taken care of.",
+  ];
+  test.each(PRONOUN_RECEIPTS.map((t) => [t]))('held: %s', (t) => {
+    expect(c.assertsPaymentStatus(t, { inboundText: 'Did you get it?' })).toBe(true);
+    expect(c.assertsPaymentStatus(t, { inboundText: 'Any update on my invoice?' })).toBe(true);
+  });
+  const S = 'We received your $120.00 card payment on Sep 12, 2026.';
+  test.each(PRONOUN_RECEIPTS.map((t) => [t]))('held after a verbatim copy: %s', (t) => {
+    expect(c.checkPaymentStatusReply({ reply: `${S} ${t}`, sentences: [S], inboundText: 'Did you get it?' }).ok).toBe(false);
+  });
+  test('ordinary replies in a scoped thread are not swept up', () => {
+    for (const t of ['You can pay by card or bank account through your pay link.', 'Your invoice is attached.', 'Sounds good, see you Tuesday!', 'Which invoice do you mean?'])
+      expect({ t, hit: c.assertsPaymentStatus(t, { inboundText: 'How can I pay?' }) }).toEqual({ t, hit: false });
+  });
+});
+
+describe('P1-3: an own invoice the renderer cannot model suppresses "nothing owed" and the absence sentences', () => {
+  const unpaid = { invoiceNumber: 'L-1', status: 'unpaid', total: 80, amountDue: 80 };
+  test('a legacy unpaid invoice: no "no balance due", no "no payments"', () => {
+    expect(texts(billing({ invoiceStatuses: [unpaid] }))).not.toContain('Your account has no balance due.');
+    expect(texts(billing({ invoiceStatuses: [unpaid], recentPayments: [] }))).toEqual([]);
+    expect(texts(billing({ invoiceStatuses: [unpaid] })).filter((t) => /don't see/.test(t))).toEqual([]);
+  });
+  test('the aggregator flag (over ALL invoice rows, not the cut list) does the same', () => {
+    expect(texts(billing({ hasUnmodeledInvoice: true }))).not.toContain('Your account has no balance due.');
+    expect(texts(billing({ hasUnmodeledInvoice: true, recentPayments: [] }))).toEqual([]);
+  });
+  test('a WHITELIST: any status the renderer does not model suppresses, however it is spelled', () => {
+    for (const status of ['unpaid', 'partially_paid', 'collections', 'written_off', 'sending', 'scheduled', 'disputed', '', 'weird_new_status'])
+      expect({ status, out: texts(billing({ invoiceStatuses: [{ invoiceNumber: 'Z-1', status, total: 80, amountDue: 0 }] })) }).toEqual({ status, out: expect.not.arrayContaining(['Your account has no balance due.']) });
+  });
+  test('settled / void / counted / draft invoices do not suppress it', () => {
+    for (const status of ['paid', 'prepaid', 'refunded', 'void', 'canceled', 'cancelled', 'draft', 'sent'])
+      expect({ status, out: texts(billing({ invoiceStatuses: [{ invoiceNumber: 'Z-1', status, total: 80, amountDue: 0 }] })) }).toEqual({ status, out: expect.arrayContaining(['Your account has no balance due.']) });
+  });
+});
+
+describe('P2-1: only a question with no status / receipt content is exempt', () => {
+  test.each([
+    'Would you like a receipt for the payment we received on Tuesday?', 'Is everything okay \u2014 your payment went through?', 'Do you know that your payment cleared?',
+    'Can I confirm the funds arrived?', 'Did you want me to confirm it posted?',
+  ])('held: %s', (t) => { expect(c.assertsPaymentStatus(t, { inboundText: 'Did my payment go through?' })).toBe(true); });
+  test.each(['Which invoice do you mean?', 'Would you like me to text your pay link?', 'Can you tell me the date you sent it?'])('exempt: %s', (t) => {
+    expect(c.assertsPaymentStatus(t, { inboundText: 'Did my payment go through?' })).toBe(false);
+  });
+});
+
+describe('P2-2: a partially paid invoice renders nothing', () => {
+  test('no sentence for it, and no kind left in the shape table', () => {
+    const b = billing({ invoiceStatuses: [{ invoiceNumber: 'A-2', status: 'partially_paid', total: 100, amountDue: 40 }] });
+    expect(texts(b).filter((t) => /A-2|partially/.test(t))).toEqual([]);
+    expect(Object.keys(c.SHAPES)).not.toContain('invoice_partly_paid');
+    expect(c.SHAPES.invoice_due.test('Invoice A-2 is partially paid, with $40.00 still due.')).toBe(false);
+  });
+});
+
+describe('payment plans: no balance / due / "nothing owed" for a customer on an active plan', () => {
+  const sent = { invoiceNumber: 'P-1', status: 'sent', total: 200, amountDue: 200, dueDate: '2026-10-05' };
+  test('balance, due and no-balance sentences are all withheld', () => {
+    const b = billing({ outstandingBalance: 200, openInvoice: { amountDue: 200 }, invoiceStatuses: [sent], hasActivePaymentPlan: true });
+    expect(texts(b).filter((t) => /balance|has \$|due/.test(t))).toEqual([]);
+    expect(texts(billing({ hasActivePaymentPlan: true }))).not.toContain('Your account has no balance due.');
+    expect(texts(billing({ outstandingBalance: 200, openInvoice: { amountDue: 200 }, invoiceStatuses: [sent], hasActivePaymentPlan: false }))).toContain('Your account balance is $200.00.');
+  });
+  test('payments the records show are still stated', () => {
+    expect(texts(billing({ hasActivePaymentPlan: true }))).toContain('We received your $120.00 card payment on Sep 12, 2026.');
+  });
+});
+
+describe('P2-3: no regex in the module is exponential on adversarial input', () => {
+  const N = 2000;
+  const seeds = ['-', '.', ',', '$', '#', "'", ' ', 'no', 'no-', 'got ', 'got $', "don't ", 'payment ', 'invoice-', '. ', 'Hi ', 'we received ', 'a-b '];
+  const inputs = [
+    ...seeds.map((u) => u.repeat(Math.ceil(N / u.length)).slice(0, N)),
+    `no${'-'.repeat(N - 2)}`, `got ${'$.,#\'-'.repeat(N / 5)}`.slice(0, N), `no ${'a-'.repeat(N / 2)}`.slice(0, N), `${'x'.repeat(N - 7)} payment`, `${'ab. '.repeat(N / 4)}`,
+    `no${'-'.repeat(60)} payment`, `haven't ${'-.,'.repeat(40)} the invoice`, `${'we got '.repeat(300)}x`.slice(0, N),
+  ];
+  // best of three: a backtracking blow-up is slow on EVERY run, scheduler noise on a loaded CI box is not
+  const time = (fn) => Math.min(...[0, 1, 2].map(() => { const t0 = process.hrtime.bigint(); fn(); return Number(process.hrtime.bigint() - t0) / 1e6; }));
+  test.each(Object.keys(c.REGEXES).map((k) => [k]))('%s stays under 50 ms on every adversarial 2000-char input', (key) => {
+    const re = c.REGEXES[key];
+    re.lastIndex = 0; re.test('warm up'); // (JIT, not the pattern)
+    for (const input of inputs) {
+      re.lastIndex = 0;
+      expect({ key, ms: time(() => re.test(input)) < 50 }).toEqual({ key, ms: true });
+    }
+  });
+  test('the public entry points too (detector, copy test, auto-send check)', () => {
+    const S = 'Your account has no balance due.';
+    for (const input of inputs) {
+      expect(time(() => c.assertsPaymentStatus(input, { inboundText: input }))).toBeLessThan(50);
+      expect(time(() => c.checkPaymentStatusReply({ reply: input, sentences: [S], inboundText: input }))).toBeLessThan(50);
+      expect(time(() => c.autoSendScopeBlock({ reply: input, inboundText: input, snapshot: { sentences: [S] } }))).toBeLessThan(50);
+      expect(time(() => c.isPaymentScopedText(input))).toBeLessThan(50);
+    }
+  });
+});
+
+describe('structural: a payment-scoped reply auto-sends only as verbatim copies plus inert text', () => {
+  const S = 'We received your $120.00 card payment on Sep 12, 2026.';
+  const block = (reply, over = {}) => c.autoSendScopeBlock({ reply, inboundText: 'Did my payment go through?', snapshot: { sentences: [S] }, ...over });
+  test.each([
+    [S], [`Hi Jane, ${S}`], [`Hi Jane, ${S} Let us know if you have any questions.`], [`${S} Thanks!`], [`Thank you for reaching out. ${S}`],
+    [`Hi Bill, ${S} Feel free to reach out if you have questions.`], [`${S} Have a great day!`],
+  ])('may auto-send: %s', (reply) => { expect(block(reply)).toBeNull(); });
+  test.each([
+    ['Yes, it went through.'], ['Yes, I see it on our end \u2014 thank you!'], [`${S} I also see one from Sep 30.`], [`${S} A teammate will confirm the rest.`],
+    [`${S} See you Tuesday at 9!`], ['Here is your pay link.'], [`${S} Sorry about the mix-up.`], ['Hey paid in full'], [`${S} Thanks, it's all set!`],
+    ['Sure! Anything else, let us know about the weather.'],
+  ])('goes to review: %s', (reply) => { expect(block(reply)).toBe('payment_status_not_auto_sendable'); });
+  test('a reply that is not payment-scoped is not this check\'s business', () => {
+    expect(block('Sounds good, see you Tuesday at 9!', { inboundText: 'What time is my visit?', snapshot: null })).toBeNull();
+  });
+  test('the thread (snapshot.scoped) scopes it even when the reply and the latest message do not', () => {
+    expect(block('Yes, you are in good hands. See you Tuesday!', { inboundText: 'ok', snapshot: { sentences: [], scoped: true } })).toBe('payment_status_not_auto_sendable');
+    expect(block('Yes, you are in good hands. See you Tuesday!', { inboundText: 'ok', snapshot: null })).toBeNull();
+  });
+  test('an unknown customer message is scoped', () => {
+    expect(block('See you Tuesday!', { inboundText: null, snapshot: null })).toBe('payment_status_not_auto_sendable');
+  });
+});
+
+// Codex round-44 P1 (payment-status-contract.js:165): an APPLIED prepayment is not a payment that arrived on its application date.
+describe('only rows that are money received render a receipt (prepaid applications and other non-receipt rows render nothing)', () => {
+  const applied = row({ id: 'ap', amount: 80, payment_date: '2026-09-29', metadata: JSON.stringify({ source: 'scheduled_service_prepaid', invoice_id: 'inv', method: 'zelle' }) });
+  test('a scheduled_service_prepaid application row states no receipt, whether metadata is a JSON string or an object', () => {
+    expect(texts(billing({ recentPayments: [applied] }))).toEqual(['Your account has no balance due.']);
+    expect(texts(billing({ recentPayments: [{ ...applied, metadata: { source: 'scheduled_service_prepaid' } }] }))).toEqual(['Your account has no balance due.']);
+    expect(texts(billing({ recentPayments: [row({ metadata: { source: 'admin_payment_reconcile' } })] }))).toContain('We received your $120.00 card payment on Sep 12, 2026.');
+  });
+  test('...and neither does a no-show fee, a combined-balance split, a payer row, or a refund still in flight', () => {
+    for (const metadata of [{ purpose: 'card_hold_no_show_fee' }, { purpose: 'appointment_card_no_show_fee' }, { combined_payment: true }, { combined_payment: 'true' }, { pending_refund_key: 'rk_1' }, { payer_id: 'pay_1' }]) {
+      expect({ metadata, out: texts(billing({ recentPayments: [row({ metadata })] })).filter((t) => /We received/.test(t)) }).toEqual({ metadata, out: [] });
+    }
+    expect(texts(billing({ recentPayments: [row({ payer_id: 'pay_1' })] })).filter((t) => /We received/.test(t))).toEqual([]);
+  });
+  test('a hidden row means money exists no sentence describes: no "we don\'t see a payment" sentence (since, or any)', () => {
+    expect(texts(billing({ recentPayments: [applied] })).filter((t) => /don't see/.test(t))).toEqual([]);
+    expect(texts(billing({ recentPayments: [applied, row()] })).filter((t) => /don't see/.test(t))).toEqual([]);
+    expect(texts(billing({ recentPayments: [applied, row()] }))).toContain('We received your $120.00 card payment on Sep 12, 2026.'); // the real one still renders
+    expect(texts(billing({ recentPayments: [row()] }))).toContain("We don't see a payment on your account since Sep 12, 2026.");
   });
 });

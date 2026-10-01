@@ -24,7 +24,10 @@ jest.mock('../models/db', () => {
     for (const m of ['whereNull', 'whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
     // the shared payer-linkage lookup (services/payer-linkage.js) is the only invoices query that selects stripe_charge_id
     q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
-    q.first = jest.fn(async () => (table === 'customers' ? { id: 'c1' } : undefined));
+    q.first = jest.fn(async () => {
+      if (table === 'payment_plans' && db.__planError) throw new Error('plans down');
+      return table === 'customers' ? { id: 'c1' } : (table === 'payment_plans' ? db.__activePlan : undefined);
+    });
     q.catch = jest.fn(() => Promise.resolve(rowsFor(table, q)));
     q.then = (res, rej) => { const r = rowsFor(table, q); return (r instanceof Error ? Promise.reject(r) : Promise.resolve(r)).then(res, rej); };
     return q;
@@ -106,11 +109,10 @@ describe('collectible own invoices (sent / viewed / overdue; partially_paid flag
     expect(billing.hasUncountedPartialDue).toBe(true);
     expect(billing.invoiceStatuses.map((x) => x.status)).toEqual(['partially_paid']);
   });
-  test('no balance / settlement sentence is rendered while a partially_paid invoice has an amount due; that invoice\'s own sentence is', async () => {
+  test('NO sentence is rendered for a partially_paid invoice (its paid portions live in payments), and no settlement sentence either', async () => {
     const billing = await billingFor([inv('i3', 'WPC-2026-0003', 'partially_paid', 100)]);
     const texts = sentenceTexts(billing);
-    expect(texts).toContain('Invoice WPC-2026-0003 is partially paid, with $100.00 still due.');
-    expect(texts.filter((t) => /account balance|no balance due/.test(t))).toEqual([]);
+    expect(texts.filter((t) => /WPC-2026-0003|account balance|no balance due|any payments|payment on your account since/.test(t))).toEqual([]);
     // ...and a paid invoice (no uncounted partial) renders the settlement sentence
     const clean = await billingFor([inv('i3', 'WPC-2026-0003', 'paid', 100)]);
     expect(clean.hasUncountedPartialDue).toBe(false);
@@ -337,5 +339,50 @@ describe('standalone failed payments behind the display window still count as ow
     const billing = await billingFor(new Error('boom'));
     expect(billing.unavailable).toBe(true);
     expect(billing.invoiceStatuses).toBeNull();
+  });
+});
+
+
+// Independent review of PR #5331 (P1-3 + payment plans): the renderer's "nothing owed" sentences need the aggregator to say whether any
+// own invoice is a debt the renderer cannot model, and whether the customer is on an active payment plan.
+describe('billing.hasUnmodeledInvoice / hasActivePaymentPlan', () => {
+  const db = require('../models/db');
+  const inv = (id, number, status, total, over = {}) => ({ id, invoice_number: number, status, total, credit_applied: 0, payer_id: null, scheduled_send_error: null, due_date: null, created_at: `2026-09-2${id.slice(-1)}`, ...over });
+  afterEach(() => { delete db.__rows; delete db.__activePlan; delete db.__planError; });
+  const billingFor = async (rows) => { db.__rows = { invoices: rows, payments: [] }; hasInFlightMoney.mockResolvedValue(false); return build(); };
+
+  test('a legacy "unpaid" invoice (not collectible, not uncollectible) is unmodeled; "no balance due" is NOT rendered', async () => {
+    const b = await billingFor([inv('i1', 'WPC-2026-0001', 'unpaid', 80)]);
+    expect(b.outstandingBalance).toBe(0);
+    expect(b.hasUnmodeledInvoice).toBe(true);
+    expect(sentenceTexts(b)).not.toContain('Your account has no balance due.');
+    expect(sentenceTexts(b).filter((t) => /don't see/.test(t))).toEqual([]);
+  });
+  test('it is judged over EVERY invoice row, not the 8-row status list', async () => {
+    const rows = [...Array.from({ length: 9 }, (_, i) => inv(`i${i + 1}`, `WPC-2026-01${i}0`, 'paid', 50)), inv('i9', 'WPC-2026-0999', 'unpaid', 80, { created_at: '2020-01-01' })];
+    const b = await billingFor(rows);
+    expect(b.invoiceStatuses.map((x) => x.status)).not.toContain('unpaid'); // cut off the status list
+    expect(b.hasUnmodeledInvoice).toBe(true);
+  });
+  test('settled, void, drafted and collectible invoices are modeled; a payer-billed unpaid one is not the homeowner\'s', async () => {
+    const b = await billingFor([inv('i1', 'W-1', 'paid', 50), inv('i2', 'W-2', 'void', 50), inv('i3', 'W-3', 'draft', 50), inv('i4', 'W-4', 'refunded', 50), inv('i5', 'W-5', 'unpaid', 50, { payer_id: 'pay-1' })]);
+    expect(b.hasUnmodeledInvoice).toBe(false);
+    expect(sentenceTexts(b)).toContain('Your account has no balance due.');
+  });
+  test('an active payment plan: flag true, and no balance / due / no-balance sentence', async () => {
+    db.__activePlan = { id: 'plan-1' };
+    const b = await billingFor([inv('i1', 'WPC-2026-0001', 'sent', 200, { due_date: '2026-10-05' })]);
+    expect(b.hasActivePaymentPlan).toBe(true);
+    expect(b.outstandingBalance).toBe(200);
+    expect(sentenceTexts(b).filter((t) => /balance|due/.test(t))).toEqual([]);
+  });
+  test('no active plan: the sentences render; an unreadable plan lookup reads as a plan (fail closed)', async () => {
+    const b = await billingFor([inv('i1', 'WPC-2026-0001', 'sent', 200, { due_date: '2026-10-05' })]);
+    expect(b.hasActivePaymentPlan).toBe(false);
+    expect(sentenceTexts(b)).toEqual(expect.arrayContaining(['Your account balance is $200.00.', 'Invoice WPC-2026-0001 has $200.00 due by Oct 5, 2026.']));
+    db.__planError = true;
+    const failed = await billingFor([inv('i1', 'WPC-2026-0001', 'sent', 200, { due_date: '2026-10-05' })]);
+    expect(failed.hasActivePaymentPlan).toBe(true);
+    expect(sentenceTexts(failed).filter((t) => /balance|due/.test(t))).toEqual([]);
   });
 });

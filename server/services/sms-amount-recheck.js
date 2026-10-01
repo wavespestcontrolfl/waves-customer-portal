@@ -232,12 +232,16 @@ function strictForVersion(promptVersion) {
 // assertion (the contract's detector; with the customer's message unknown, payment-scoped)? A body
 // with none (a human reply about scheduling, thanks, etc.) needs no agent_decisions /
 // customer / billing reads at all.
-function bodyNeedsPaymentRecheck(body, { inboundMessage = null } = {}) {
+//
+// The status-vocabulary trigger exists only for real-answers (v12) drafts: `promptVersion` names the decision's own version, else the
+// live gate decides. Gate off (and no v12 decision) the pre-screen is main's, byte for byte - no extra read, no new way to block.
+function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null } = {}) {
   const text = String(body || '');
   if (!text) return false;
   if (bodyAmountCents(text).length) return true;
   if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
-  if (paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
+  if (strictForVersion(promptVersion)
+      && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -308,12 +312,20 @@ async function loadCustomerContext(customerId, dbh = db) {
  *   payment_status_recheck_no_customer / payment_status_recheck_failed - unverifiable, fail closed
  * A body that copies nothing and asserts nothing needs no billing read at all.
  */
-async function paymentStatusSendBlockReason({ customerId, body, snapshot = null, inboundMessage = null, dbh = db, ctx = null } = {}) {
+async function paymentStatusSendBlockReason({ customerId, body, snapshot = null, inboundMessage = null, dbh = db, ctx = null, autoSend = false } = {}) {
   const text = String(body || '');
   const authorized = Array.isArray(snapshot?.sentences) ? snapshot.sentences.filter((s) => typeof s === 'string') : [];
   const copied = paymentStatus.copiedSentences(text, authorized);
   const remainder = text.length > paymentStatus.MAX_REPLY_CHARS ? text : paymentStatus.withoutCopies(text, copied);
-  if (paymentStatus.assertsPaymentStatus(remainder, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return 'payment_status_unauthorized';
+  const inboundText = inboundMessage == null ? null : String(inboundMessage);
+  // the draft was written from a payment-scoped thread (snapshot.scoped): the reply is judged as payment-scoped even when its own
+  // words and the latest message are not
+  if (paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped: snapshot?.scoped === true || authorized.length > 0 })) return 'payment_status_unauthorized';
+  // The AUTONOMOUS rung does not trust the detector alone: a payment-scoped reply auto-sends only as verbatim copies plus inert text.
+  if (autoSend) {
+    const scopeBlock = paymentStatus.autoSendScopeBlock({ reply: text, inboundText, snapshot });
+    if (scopeBlock) return scopeBlock;
+  }
   if (!copied.length) return null;
   if (!customerId) return 'payment_status_recheck_no_customer';
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return 'payment_status_changed';

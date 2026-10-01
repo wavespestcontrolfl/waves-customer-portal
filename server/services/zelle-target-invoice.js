@@ -49,7 +49,12 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   const open = Array.isArray(billing?.openInvoices) && billing.openInvoices.length
     ? billing.openInvoices
     : (billing?.openInvoice?.id ? [billing.openInvoice] : []);
-  if (open.length === 0) return { invoiceId: null, reason: 'no_open_invoice' };
+  // An own partially_paid invoice with an amount due is open to the customer (the pay page collects it and may show Zelle for it), but
+  // its amount due is NOT knowable here: the paid portions live in payments, not in the invoice row. It is therefore never a target,
+  // and its existence means "no open invoice" can never be concluded: the target is unresolved (abstain / ask which invoice), so a
+  // denial cannot stand on its absence and an offer cannot be grounded on a figure that is not the invoice's.
+  const partialDue = billing?.hasUncountedPartialDue === true;
+  if (open.length === 0) return { invoiceId: null, reason: partialDue ? 'partially_paid_invoice' : 'no_open_invoice' };
 
   // Explicit references are parsed FIRST — even with a single open invoice, a message that names a
   // DIFFERENT (or already settled) invoice is not about the open one (Codex round-20 P1).
@@ -95,8 +100,13 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     return { invoiceId: inv.id, reason: 'invoice_number' };
   }
 
-  if (open.length === 1) {
+  // (a lone open invoice is the target only when no partially paid invoice could be the one the customer means)
+  if (open.length === 1 && !partialDue) {
     if (namedAmounts.length && !namedAmountsAllMatch(namedAmounts, open[0])) return { invoiceId: null, reason: 'named_amount_differs' };
+    // The shortcut skips the amount logic below, so SEVERAL distinct bare amounts ("Can I Zelle $100 or $200?") are checked here too:
+    // they are explicit alternatives, and every one must be this invoice's amount (Codex round-44 P2).
+    const bare = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
+    if (!namedAmounts.length && bare.length > 1 && bare.some((a) => a !== dueCentsOf(open[0]))) return { invoiceId: null, reason: 'ambiguous_amount' };
     return { invoiceId: open[0].id, reason: 'single_open' };
   }
 

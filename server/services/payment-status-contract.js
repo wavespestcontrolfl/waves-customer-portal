@@ -57,8 +57,7 @@ function tenderWord(p) {
   const type = String(p?.payment_method_type || '').toLowerCase();
   if (type === 'card') return 'card';
   if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'ACH';
-  let meta = {};
-  try { meta = p?.metadata && typeof p.metadata === 'object' ? p.metadata : JSON.parse(p?.metadata || 'null') || {}; } catch { meta = {}; }
+  const meta = paymentMetadata(p);
   const method = String(meta.payment_method || '').toLowerCase();
   if (method === 'card') return 'card';
   if (method.includes('bank') || method === 'ach') return 'ACH';
@@ -79,7 +78,6 @@ const SHAPES = Object.freeze({
   invoice_refunded: new RegExp(`^Invoice ${INVOICE} for ${AMT} was refunded\\.$`),
   invoice_due: new RegExp(`^Invoice ${INVOICE} has ${AMT} due(?: by ${DAY})?\\.$`),
   invoice_processing: new RegExp(`^Invoice ${INVOICE} for ${AMT} is still processing\\.$`),
-  invoice_partly_paid: new RegExp(`^Invoice ${INVOICE} is partially paid, with ${AMT} still due\\.$`),
   balance: new RegExp(`^Your account balance is ${AMT}\\.$`),
   no_balance: /^Your account has no balance due\.$/,
   no_payment_since: new RegExp(`^We don't see a payment on your account since ${DAY}\\.$`),
@@ -89,12 +87,49 @@ const kindOf = (text) => Object.keys(SHAPES).find((k) => SHAPES[k].test(text)) |
 
 const billingIsReadable = (billing) => !!billing && typeof billing === 'object' && !billing.unavailable;
 
+// The invoice statuses the renderer positively models. A status in this set is either settled / void (nothing owed), counted by the
+// balance (sent / viewed / overdue, net of credit) or in flight (processing, covered by hasProcessingPayment). ANY other status of an
+// own, non-draft invoice (a legacy 'unpaid', 'partially_paid', ...) is a debt the renderer cannot describe: it suppresses every
+// "nothing owed" / "no payments" sentence. A whitelist, never a blacklist of the statuses somebody remembered.
+const MODELED_INVOICE_STATUSES = new Set(['paid', 'prepaid', 'refunded', 'void', 'voided', 'canceled', 'cancelled', 'processing', 'sent', 'viewed', 'overdue']);
+const unmodeledStatus = (inv) => {
+  const status = String(inv?.status || '').toLowerCase();
+  return status !== 'draft' && !MODELED_INVOICE_STATUSES.has(status);
+};
+// `hasUnmodeledInvoice` is the aggregator's verdict over ALL the customer's own invoice rows (the status list below is cut at 8).
+const hasUnmodeledInvoice = (billing) => billing?.hasUnmodeledInvoice === true
+  || (Array.isArray(billing?.invoiceStatuses) && billing.invoiceStatuses.some(unmodeledStatus));
+// An active payment plan changes what is due NOW (installments), and the invoice balance does not reflect installments: no sentence
+// states a balance, a due amount or "nothing owed" for such a customer (the aggregator reads true on an unreadable lookup).
+const onActivePaymentPlan = (billing) => billing?.hasActivePaymentPlan === true;
+
 // An obligation exists (or money is in flight / unknown): settlement is then neither stated nor implied.
 function hasOutstandingObligation(billing) {
   const b = billing || {};
   const inFlight = b.hasProcessingPayment !== false
     || (b.recentPayments || []).some((p) => ['pending', 'processing', 'requires_action'].includes(String(p?.status || '').toLowerCase()));
-  return Number(b.outstandingBalance) > 0 || Number(b.openInvoice?.amountDue) > 0 || inFlight || b.hasUncountedPartialDue === true;
+  return Number(b.outstandingBalance) > 0 || Number(b.openInvoice?.amountDue) > 0 || inFlight || b.hasUncountedPartialDue === true
+    || hasUnmodeledInvoice(b) || onActivePaymentPlan(b);
+}
+
+// Which payments rows may be stated as money RECEIVED? Mirrors sms-commitment-fulfillment's `paymentEvidenceRow`: a row that only
+// APPLIES earlier money is not a payment that arrived on its date. `scheduled_service_prepaid` is the row written when cash / Zelle
+// recorded on a visit is applied to its invoice later (payment_date = the application date, not the receipt date); a no-show / card
+// hold fee is not the customer's payment for an invoice; a combined-balance charge is split across several rows (no row's amount is
+// what the customer paid); a refund still in flight leaves the row's state unknown. Such a row renders nothing - and, because
+// money exists that no sentence describes, no "we don't see a payment" sentence either.
+const NON_RECEIPT_SOURCES = new Set(['scheduled_service_prepaid']);
+const NON_RECEIPT_PURPOSES = new Set(['card_hold_no_show_fee', 'appointment_card_no_show_fee']);
+function paymentMetadata(p) {
+  try { return p?.metadata && typeof p.metadata === 'object' ? p.metadata : JSON.parse(p?.metadata || 'null') || {}; } catch { return {}; }
+}
+function isReceiptRow(p) {
+  const meta = paymentMetadata(p);
+  return !NON_RECEIPT_SOURCES.has(String(meta.source || '').toLowerCase())
+    && !NON_RECEIPT_PURPOSES.has(String(meta.purpose || '').toLowerCase())
+    && String(meta.combined_payment ?? '').toLowerCase() !== 'true'
+    && !meta.pending_refund_key
+    && !meta.payer_id && !p?.payer_id;
 }
 
 function paymentSentence(p, today) {
@@ -129,7 +164,7 @@ function paymentSentence(p, today) {
   return null; // disputed, requires_action, canceled, void, unknown, ...: a person answers
 }
 
-function invoiceSentence(inv) {
+function invoiceSentence(inv, { onPlan = false } = {}) {
   const number = String(inv?.invoiceNumber || '');
   if (!new RegExp(`^${INVOICE}$`).test(number)) return null;
   const status = String(inv?.status || '').toLowerCase();
@@ -138,8 +173,8 @@ function invoiceSentence(inv) {
   if (status === 'paid' || status === 'prepaid') return total ? { kind: 'invoice_paid', text: `Invoice ${number} for ${money(total)} is paid.` } : null;
   if (status === 'refunded') return total ? { kind: 'invoice_refunded', text: `Invoice ${number} for ${money(total)} was refunded.` } : null;
   if (status === 'processing') return total ? { kind: 'invoice_processing', text: `Invoice ${number} for ${money(total)} is still processing.` } : null;
-  if (status === 'partially_paid') return due ? { kind: 'invoice_partly_paid', text: `Invoice ${number} is partially paid, with ${money(due)} still due.` } : null;
-  if (['sent', 'viewed', 'overdue'].includes(status) && due) {
+  // partially_paid renders NOTHING: its paid portions live in payments, not in the invoice row (matches the balance path's UNCOUNTED treatment)
+  if (!onPlan && ['sent', 'viewed', 'overdue'].includes(status) && due) {
     const by = dateParts(inv?.dueDate);
     return { kind: 'invoice_due', text: `Invoice ${number} has ${money(due)} due${by ? ` by ${dateText(by)}` : ''}.` };
   }
@@ -155,14 +190,19 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   if (!billingIsReadable(billing)) return [];
   const todayParts = (typeof today === 'string' ? dateParts(today) : today) || dateParts(require('../utils/datetime-et').etDateString());
   const out = [];
+  const onPlan = onActivePaymentPlan(billing);
   const owed = finiteCents(billing.outstandingBalance);
-  if (owed > 0 && billing.hasUncountedPartialDue !== true) out.push({ kind: 'balance', text: `Your account balance is ${money(owed)}.` });
-  else if (owed === 0 && !hasOutstandingObligation(billing)) out.push({ kind: 'no_balance', text: 'Your account has no balance due.' });
+  if (!onPlan) {
+    if (owed > 0 && billing.hasUncountedPartialDue !== true) out.push({ kind: 'balance', text: `Your account balance is ${money(owed)}.` });
+    else if (owed === 0 && !hasOutstandingObligation(billing)) out.push({ kind: 'no_balance', text: 'Your account has no balance due.' });
+  }
   for (const inv of Array.isArray(billing.invoiceStatuses) ? billing.invoiceStatuses : []) {
-    const s = invoiceSentence(inv);
+    const s = invoiceSentence(inv, { onPlan });
     if (s) out.push(s);
   }
-  const rows = (Array.isArray(billing.recentPayments) ? billing.recentPayments : []).filter(Boolean);
+  const allRows = (Array.isArray(billing.recentPayments) ? billing.recentPayments : []).filter(Boolean);
+  const rows = allRows.filter(isReceiptRow);
+  const hiddenRows = allRows.length !== rows.length; // money the sentences below do not describe
   // two rows with the same amount and day but a different status are ONE ambiguous payment: neither is stated
   const identityOf = (p) => { const d = dateParts(p.payment_date || p.date); return d ? `${finiteCents(p.amount)}|${dayKey(d)}` : null; };
   const statuses = new Map();
@@ -175,6 +215,8 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   // The newest row is always inside the window (newest first): nothing is dated after it. No rows at all is only "none" when the
   // window cannot be hiding more and no money is in flight.
   const days = rows.map((p) => dateParts(p.payment_date || p.date));
+  // an own invoice the renderer cannot describe may carry payments this window does not show: no absence sentence either
+  if (hasUnmodeledInvoice(billing) || hiddenRows) return out;
   if (rows.length && days.every(Boolean)) {
     const newest = days.reduce((a, b) => (dayKey(b) > dayKey(a) ? b : a));
     out.push({ kind: 'no_payment_since', text: `We don't see a payment on your account since ${dateText(newest)}.` });
@@ -263,12 +305,12 @@ const TOPIC_RE = /\b(?:payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|bill
 // Every word a payment / invoice / refund / balance STATUS can be said with, deliberately wide: one more synonym is one more
 // alternative here, never a new checker.
 const PAYMENT_NOUN = '(?:payments?(?!\\s+(?:links?|page|portal|options?|methods?|instructions?|plan|reminders?))|funds|money|transfers?|deposits?|transactions?|refunds?|invoices?|bills?)';
-const STATUS_RE = new RegExp(`\\b(?:${[
+const STATUS_ALTERNATIVES = [
   '(?:un|over|under|pre|re)?paid', 'received', 'receipts?', 'process\\w*', 'pending', 'post(?:ed|s|ing)?', 'clear(?:ed|s|ing)?', 'arriv\\w*', 'appear\\w*',
   'settle[sd]?', 'settling', 'settlement', 'completed?', 'successful(?:ly)?', 'approved', 'accepted', 'declined', 'denied', 'rejected',
   'fail(?:ed|s|ure)?', 'bounced?', 'returned', 'revers\\w*', 'refund\\w*', 'credit(?:s|ed)?', 'debit(?:s|ed)?', 'charged', 'charges', 'deducted',
   'withdrawn', 'collected', 'captured', 'applied', 'land(?:ed|s)?', 'cashed', 'deposited', 'submitted',
-  '(?:went|go(?:es)?|gone|came|come(?:s)?) through', 'made it', 'hit your',
+  '(?:went|go(?:es)?|gone|going|came|come(?:s)?|coming) (?:through|thru|in)', 'made it', 'hit your',
   'owe[sd]?', 'owing', 'due', 'overdue', 'outstanding', 'balance', 'delinquent', 'arrears', 'late fees?', 'past due',
   'all set', 'all good', 'squared(?: away| up)?', 'taken care of', 'good to go', 'up to date', 'caught up', 'current', 'in good standing',
   'nothing (?:more |else |further )?(?:owed|due|to pay|needed)', 'no (?:balance|charges?|payments?|record)', 'zero',
@@ -278,14 +320,26 @@ const STATUS_RE = new RegExp(`\\b(?:${[
   'sorted', 'handled', 'resolved', 'dealt with', 'wrapped up', 'in the clear', 'all done', 'covered',
   // a verb of having / seeing aimed at a payment noun a few words later ("we got your $120.00 card payment", "I see the transfer");
   // "payment link / page / options" is how-to-pay vocabulary, not a payment
-  `(?:got|gotten|have|has|had|see|saw|seen|find|found|take|took|taken|show|shows)\\b(?:\\W+[\\w$.,#'-]+){0,6}?\\W+${PAYMENT_NOUN}`,
+  `(?:got|gotten|have|has|had|see|saw|seen|find|found|take|took|taken|show|shows)\\b(?:\\s+\\S+){0,6}?\\s+${PAYMENT_NOUN}`,
   // a payment noun as the SUBJECT of a clause ("your payment is on its way", "the transfer will post", "invoice 1234 looks right")
   `${PAYMENT_NOUN}\\b(?:\\s+[#\\w-]+){0,2}?\\s+(?:is|are|was|were|has|have|had|will|would|did|didn't|hasn't|haven't|isn't|wasn't|went|came|got|looks?|appears?|seems?|shows?|should|must)\\b(?!\\s+(?:attached|enclosed|ready|below|above|linked|included|available|here|coming|on\\s+its\\s+way))`,
   // a negation aimed at a payment noun ("we don't a payment", "no payment yet", "haven't gotten the transfer")
-  `(?:don'?t|do not|didn'?t|did not|haven'?t|have not|hasn'?t|has not|can'?t|cannot|won'?t|no|not|never|nothing)\\b(?:\\W+[\\w$.,#'-]+){0,4}?\\W+${PAYMENT_NOUN}`,
+  `(?:don'?t|do not|didn'?t|did not|haven'?t|have not|hasn'?t|has not|can'?t|cannot|won'?t|no|not|never|nothing)\\b(?:\\s+\\S+){0,4}?\\s+${PAYMENT_NOUN}`,
   // "you're good", "it's fine", "everything is set", "that looks sorted", "the invoice is done" - a completion word said of the account
   "(?:you|it|they|everything|that|this|things|account|invoice|payment)(?:'s|'re|'ve|\\s+(?:is|are|was|were|has|have|been|looks?|seems?))?\\s+(?:all\\s+)?(?:good|fine|ok|okay|set|clear|cleared|done|fixed|complete|completed|finished)",
-].join('|')})\\b|\\$\\s?0(?:\\.0+)?(?![\\d.,])`, 'i');
+  // A receipt said with pronouns only ("I see it on our end", "it came in Tuesday", "it's in our system", "it's here", "it's on your
+  // account now", "your Zelle came in", "and the one from Sep 30 too"): no payment noun for the patterns above to key on.
+  "(?:i|we|you|they)\\s+(?:do\\s+|did\\s+|can\\s+|just\\s+|now\\s+)?(?:see|saw|seen|spot(?:ted)?|find|found|got|gotten|have|has|had|receive[ds]?)\\s+(?:it|that|this|them|mine|yours|one|those|these)",
+  '(?:on|in)\\s+(?:our|your|the)\\s+(?:end|system|records?|account|books|file|portal)',
+  "(?:it|that|this)(?:'s|\\s+is|\\s+was)\\s+(?:here|there|in|on)",
+  '(?:zelle|ach|che(?:ck|que)|transfer|deposit|wire|venmo|paypal|payments?)\\w*\\s+(?:came|come|comes|got|arrived|landed|hit|posted|cleared|went)',
+  '(?:the|that|this|another|other|your)\\s+(?:(?:other|earlier|previous|first|second|last|older|newer)\\s+)?ones?',
+];
+const STATUS_WORDS_RE = new RegExp(`\\b(?:${STATUS_ALTERNATIVES.join('|')})\\b`, 'i');
+const STATUS_RE = new RegExp(`${STATUS_WORDS_RE.source}|\\$\\s?0(?:\\.0+)?(?![\\d.,])`, 'i');
+// Punctuation read as a space: the same alternatives, matched where the text glues a word to punctuation ("see,payment").
+const PUNCT_RE = /[^\w\s$'’]+/g;
+const statusHit = (sentence) => STATUS_RE.test(sentence) || STATUS_WORDS_RE.test(sentence.replace(PUNCT_RE, ' '));
 // Belt and braces: a sentence that still NAMES a payment thing after the how-to-pay vocabulary is taken out is not a pay-method
 // answer, and whatever it says about that thing is held - so a status said in words no list knows ("we banked it", "your
 // payment is in the books") cannot pass just because it avoided the status words above.
@@ -306,24 +360,47 @@ const HOW_TO_PAY_RE = new RegExp([
 ].join('|'), 'gi');
 const INTERROGATIVE_START_RE = /^(?:and\s+|so\s+|also\s+)?(?:did|do|does|is|are|was|were|has|have|had|can|could|will|would|should|may|what|when|why|how|where|which|who)\b/i;
 const GREETING_RE = /^(?:hi|hello|hey|thanks|thank\s+you)\b[^,.!?]{0,30},\s*/i;
-const CLAUSE_BREAK_RE = /(?<=[.!?])\s+|\s*;\s*/;
+// (breaks carry no surrounding \s*: a whitespace run next to a bare `;` made the split quadratic; every consumer trims)
+const CLAUSE_BREAK_RE = /(?<=[.!?])\s+|;/;
+
+// A message that talks about a receipt without a payment noun ("did it go through?", "did you get it?", "yes, I see it on our end") is
+// payment-scoped too: the customer's pronoun refers to the payment the thread is about.
+const RECEIPT_SCOPE_RE = /\b(?:(?:went|go|goes|gone|going|came|come|comes|coming)\s+(?:through|thru)|came\s+in|made\s+it|(?:get|gotten|getting|receive[ds]?|receiving|see|saw|seen|spot(?:ted)?)\s+(?:it|that|this|them|mine|yours)|(?:on|in)\s+(?:our|your)\s+(?:end|system|records?|account|books))\b/i;
+/** Is this one message about money (a payment word, or a pronoun-only receipt phrase)? A message too long to judge counts as yes. */
+function isPaymentScopedText(text) {
+  const t = String(text ?? '').replace(/[’‘]/g, "'");
+  if (t.length > MAX_INBOUND_CHARS) return true;
+  const body = t.replace(GREETING_RE, ''); // "Hi Bill," is a name, not a bill
+  return TOPIC_RE.test(body) || RECEIPT_SCOPE_RE.test(body);
+}
+const asTexts = (list) => (Array.isArray(list) ? list : []).filter((t) => t != null).map(String);
+/**
+ * Is a draft PAYMENT-SCOPED? Yes when the reply, the customer's message, any recent thread message the draft was written from
+ * (`scopeTexts`), or an explicit `scoped` flag (the facts block put a status sentence in play, or the draft was already judged
+ * scoped) touches money. A missing customer message is unknown, and unknown is scoped.
+ */
+function isPaymentScoped({ reply = '', inboundText = null, scopeTexts = [], scoped = false } = {}) {
+  if (scoped === true || inboundText == null) return true;
+  return [reply, inboundText, ...asTexts(scopeTexts)].some(isPaymentScopedText);
+}
 
 /**
  * Does `text` (a reply with the copied sentences already removed) assert any payment status? `inboundText` null = unknown
- * (judged as scoped). A question the reply asks the customer is not an assertion.
+ * (judged as scoped). A question the reply asks the customer is not an assertion, unless it carries status / receipt content itself
+ * ("Would you like a receipt for the payment we received Tuesday?").
  */
-function assertsPaymentStatus(text, { inboundText = null } = {}) {
-  const body = String(text ?? '');
+function assertsPaymentStatus(text, { inboundText = null, scopeTexts = [], scoped = false } = {}) {
+  const body = String(text ?? '').replace(/[’‘]/g, "'");
   if (body.length > MAX_REPLY_CHARS) return true; // never truncated and passed
   const inbound = inboundText == null ? null : String(inboundText);
-  const scoped = TOPIC_RE.test(body) || inbound == null || inbound.length > MAX_INBOUND_CHARS || TOPIC_RE.test(inbound);
-  if (!scoped) return false;
+  if (!isPaymentScoped({ reply: body, inboundText: inbound, scopeTexts, scoped })) return false;
   return body.split(CLAUSE_BREAK_RE).some((raw) => {
     const sentence = raw.trim();
     if (!sentence) return false;
-    if (/\?$/.test(sentence) && INTERROGATIVE_START_RE.test(sentence.replace(GREETING_RE, ''))) return false;
+    const status = statusHit(sentence);
+    if (/\?$/.test(sentence) && INTERROGATIVE_START_RE.test(sentence.replace(GREETING_RE, ''))) return status;
     // (a Zelle sentence with a pay-method cue is a pay-method sentence: its recipient and the invoice's eligibility are rechecked by the Zelle path)
-    return STATUS_RE.test(sentence) || (!(ZELLE_METHOD_RE.test(sentence) && ZELLE_METHOD_CUE_RE.test(sentence)) && PAYMENT_THING_RE.test(sentence.replace(HOW_TO_PAY_RE, ' ')));
+    return status || (!(ZELLE_METHOD_RE.test(sentence) && ZELLE_METHOD_CUE_RE.test(sentence)) && PAYMENT_THING_RE.test(sentence.replace(HOW_TO_PAY_RE, ' ')));
   });
 }
 
@@ -331,22 +408,67 @@ function assertsPaymentStatus(text, { inboundText = null } = {}) {
  * The contract for one reply against the sentences it may copy: { ok, copied (texts), remainder }.
  * ok = after the complete verbatim copies are removed, nothing left asserts a payment status.
  */
-function checkPaymentStatusReply({ reply, sentences, inboundText = null }) {
+function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTexts = [], scoped = false }) {
   const texts = (sentences || []).map((s) => (typeof s === 'string' ? s : s.text));
   const text = String(reply ?? '');
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
   const remainder = withoutCopies(text, copied);
-  return { ok: !assertsPaymentStatus(remainder, { inboundText }), copied, remainder };
+  return { ok: !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped }), copied, remainder };
 }
 
-/** What a decision persists (input_snapshot.payment_status_snapshot) when its final reply copies a rendered sentence; else null. */
-function paymentStatusSnapshotFor({ customerId = null, sentences, reply }) {
+// ---- Auto-send: a payment-scoped reply may carry nothing but verbatim copies and inert text ---------------------------------------
+// The detector above is a net; it misses a status said in words nobody listed (it missed pronoun-only receipts for 44 rounds). So
+// the autonomous rung does not rely on it: a payment-scoped v12 reply may AUTO-send only when, once its verbatim copies are
+// removed, every clause left is on this tiny allowlist (a greeting, thanks, "let us know if you have questions"). Anything else goes
+// to Agent Review, where a person reads it.
+const INERT_CLAUSE_RES = [
+  /^(?:hi|hello|hey)(?: [a-z][a-z'.-]*){0,2}$/,
+  /^(?:thanks|thank you)(?: so much| very much| again)?(?: for (?:reaching out|your message|texting us|texting|getting in touch|letting us know|your patience))?$/,
+  /^(?:(?:please )?(?:let us know|reach out|text us|call us)|(?:feel free|don't hesitate) to (?:reach out|text us|call us|let us know))(?: anytime)?(?: if (?:you (?:have|need) (?:any |more |other )?(?:questions?|anything(?: else)?)|there's anything else|anything else comes up))?$/,
+  /^have a (?:great|good|wonderful|nice) (?:day|week|one|afternoon|evening|weekend)$/,
+];
+const INERT_CLAUSE_BREAK_RE = /(?<=[.!?])\s+|[;,\u2014\u2013]|(?<=\s)-(?=\s)/;
+function isInertClause(raw) {
+  const clause = raw.toLowerCase().replace(/[^a-z' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clause) return true;
+  if (statusHit(clause) || RECEIPT_SCOPE_RE.test(clause)) return false;
+  if (INERT_CLAUSE_RES[0].test(clause)) return true; // a greeting may carry a name that is also a payment word ("Bill")
+  if (TOPIC_RE.test(clause)) return false;
+  return INERT_CLAUSE_RES.some((re) => re.test(clause));
+}
+/** Is `remainder` (a reply with its verbatim copies removed) only inert text? */
+function remainderIsInert(remainder) {
+  const text = canonText(remainder);
+  if (text.length > MAX_REPLY_CHARS) return false;
+  return text.split(INERT_CLAUSE_BREAK_RE).every(isInertClause);
+}
+/**
+ * null when `reply` may auto-send; 'payment_status_not_auto_sendable' when it is payment-scoped and says anything beyond verbatim
+ * copies of `snapshot.sentences` and inert text. A reply that is not payment-scoped is not this check's business.
+ */
+function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
+  const sentences = asTexts(snapshot?.sentences);
+  const scoped = isPaymentScoped({ reply, inboundText, scoped: snapshot?.scoped === true || sentences.length > 0 });
+  if (!scoped) return null;
+  const copied = copiedSentences(reply, sentences);
+  return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
+}
+
+/**
+ * What a decision persists (input_snapshot.payment_status_snapshot): the sentences its final reply copies, and whether the draft was
+ * payment-scoped (the reply, the customer's message or the thread it was written from touches money). null when it is neither.
+ */
+function paymentStatusSnapshotFor({ customerId = null, sentences, reply, inboundText = null, scopeTexts = [] }) {
   const copied = copiedSentences(reply, (sentences || []).map((s) => (typeof s === 'string' ? s : s.text)));
-  return copied.length ? { customer_id: customerId ?? null, sentences: copied } : null;
+  // (a snapshot that copied a sentence is payment-scoped by that alone; `scoped` marks the draft that copied none)
+  const scoped = !copied.length && isPaymentScoped({ reply, inboundText, scopeTexts });
+  if (!copied.length && !scoped) return null;
+  return { customer_id: customerId ?? null, sentences: copied, ...(scoped ? { scoped: true } : {}) };
 }
 
 module.exports = {
+  isUnmodeledInvoice: unmodeledStatus,
   SECTION_HEADER,
   SECTION_NONE,
   SENTENCE_BULLET,
@@ -362,4 +484,10 @@ module.exports = {
   assertsPaymentStatus,
   checkPaymentStatusReply,
   paymentStatusSnapshotFor,
+  isPaymentScopedText,
+  isPaymentScoped,
+  autoSendScopeBlock,
+  remainderIsInert,
+  // every module regex, for the adversarial-input timing test
+  REGEXES: { TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, ZELLE_METHOD_RE, ZELLE_METHOD_CUE_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

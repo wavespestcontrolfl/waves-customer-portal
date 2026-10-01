@@ -9,7 +9,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 // the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
 jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
-const { buildPayerLinkage, loadPayerLinkage } = require('../services/payer-linkage');
+const { buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage } = require('../services/payer-linkage');
+const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
 
 const PAYER_INV = { id: '11111111-1111-4111-8111-111111111111', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
 const linkage = buildPayerLinkage([PAYER_INV]);
@@ -69,5 +70,45 @@ describe('the payer-invoice lookup includes the WITHDRAWAL stamp (payer_billed:)
     expect(src).toMatch(/require\('\.\.\/services\/payer-linkage'\)/);
     expect(src).toMatch(/await loadPayerLinkage\(req\.customerId\)/);
     expect(src).not.toMatch(/const isPayerLinked = /);
+  });
+});
+
+// Codex round-44 (older thread, judged on 9f0f509): the LIVE ownership scan must be bounded - a mature account may not add hundreds of
+// sequential resolver lookups to every inbound draft and send-time billing recheck.
+describe('loadLivePayerLinkage is bounded', () => {
+  const chain = (reads) => {
+    const q = {};
+    q.calls = [];
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'orWhere', 'select', 'orderBy']) q[m] = jest.fn((...a) => { if (typeof a[0] === 'function') a[0].call(q); return q; });
+    q.limit = jest.fn((n) => { q.limitedTo = n; return q; });
+    q.catch = jest.fn(() => Promise.resolve(reads.shift() ?? []));
+    return q;
+  };
+  const invoices = (n) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, customer_id: 'c1', scheduled_service_id: `s${i}`, invoice_number: `WPC-2026-${1000 + i}` }));
+  beforeEach(() => liveInvoiceOwnership.mockClear());
+
+  test('reads at most 120 unstamped invoices (limit 121); more history than that is UNVERIFIABLE (failed) and makes no resolver lookup', async () => {
+    const scan = chain([invoices(121)]);
+    const stamped = chain([[]]);
+    const dbh = jest.fn().mockReturnValueOnce(stamped).mockReturnValueOnce(scan);
+    const out = await loadLivePayerLinkage('c1', dbh);
+    expect(scan.limitedTo).toBe(121);
+    expect(out.failed).toBe(true);
+    expect(liveInvoiceOwnership).not.toHaveBeenCalled();
+  });
+
+  test('within the scan bound the resolver is capped at 30 lookups, and a cap hit is unverifiable (failed)', async () => {
+    const scan = chain([invoices(120)]);
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
+    liveInvoiceOwnership.mockResolvedValueOnce({ ownedIds: new Set(), unverifiable: true });
+    const out = await loadLivePayerLinkage('c1', dbh);
+    expect(liveInvoiceOwnership).toHaveBeenCalledWith('c1', expect.any(Array), dbh, { maxResolutions: 30 });
+    expect(out.failed).toBe(true);
+  });
+
+  test('a scan inside both bounds is judged normally', async () => {
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([invoices(5)]));
+    const out = await loadLivePayerLinkage('c1', dbh);
+    expect(out.failed).toBe(false);
   });
 });

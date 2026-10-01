@@ -103,7 +103,7 @@ async function amountsBlock({ decision, outgoingBody }) {
   if (!decision.customer_id) {
     // With no customer to re-read billing for, ANY body the recheck would judge (an amount, a Zelle claim, a payment-status
     // assertion, price grammar) cannot be verified - fail closed. Benign copy ("Your invoice is attached") needs no billing.
-    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision) })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+    return (zelleClaim || bodyNeedsPaymentRecheck(outgoingBody, { inboundMessage: resolveInboundMessage(decision), promptVersion: decision.prompt_version })) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that

@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isUnmodeledInvoice } = require('./payment-status-contract');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { loadLivePayerLinkage, excludeLiveOwnedPayerPayments, LIVE_SCAN_MAX_RESOLUTIONS } = require('./payer-linkage');
 const { loadFailedPaymentFacts, standaloneFailedTotal, excludeNeverAttemptedDeferrals } = require('./failed-payments');
@@ -1036,6 +1037,11 @@ class ContextAggregator {
     // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
     const paymentHistoryService = require('./payment-history');
     const inFlightMoneyPromise = paymentHistoryService.hasInFlightMoney(customer.id);
+    // An ACTIVE payment plan on any of the customer's invoices (payment-plans.js): installments are not reflected in the invoice
+    // balance, so the payment-status contract renders no balance / due / "nothing owed" sentence for such a customer. An unreadable
+    // lookup reads as "on a plan" (fail closed).
+    const activePlanPromise = Promise.resolve(db('payment_plans').where({ customer_id: customer.id, status: 'active' }).first('id'))
+      .then((row) => !!row, (err) => { logger.warn(`[context-aggregator] payment-plan read failed for ${customer.id}: ${err.message}`); return true; });
     // ONE LIVE payer-linkage verdict (Codex round-42 P1, PR #5331) — the same loadLivePayerLinkage the authoritative payment history and
     // the in-flight probe use: an invoice that resolves to a payer TODAY (payer_id still NULL) owns its payments through the metadata
     // invoice, alias, PaymentIntent, charge and "Invoice <n> —" description alike. It is loaded BEFORE the payments read so the
@@ -1165,6 +1171,11 @@ class ContextAggregator {
       if (unverifiable) { billingUnavailable = true; invoiceRows = []; } else liveOwnedIds = ownedIds;
     }
     const liveOwned = (inv) => liveOwnedIds.has(String(inv.id));
+    // Any own, non-draft invoice whose status the payment-status renderer does not positively model as settled / void / counted
+    // (a legacy 'unpaid', ...) is a debt it cannot describe: it suppresses "no balance due" and the "no payments" sentences. Judged
+    // over EVERY fetched row (the status list below is cut at 8); a fetch that hit its row cap may hide one, so it reads as unmodeled.
+    const hasUnmodeledInvoice = !billingUnavailable
+      && (invoiceRows.length >= 300 || invoiceRows.some((inv) => isFaceOwn(inv) && !liveOwned(inv) && isUnmodeledInvoice(inv)));
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id || liveOwned(r)).map((r) => String(r.id)));
     const paymentInvoiceId = (p) => {
       try {
@@ -1449,6 +1460,8 @@ class ContextAggregator {
         } : null,
         openInvoices,
         hasUncountedPartialDue,
+        hasUnmodeledInvoice,
+        hasActivePaymentPlan: await activePlanPromise,
         // the list is complete unless the customer has more than OPEN_INVOICES_CAP open invoices — then a caller must
         // not conclude "that invoice isn't open" from its absence (Codex round-28 P2)
         openInvoicesTruncated: collectibleOpen.length > OPEN_INVOICES_CAP,

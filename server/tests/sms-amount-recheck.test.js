@@ -518,6 +518,26 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     await expect(outgoingAmountsStale({ customerId: 'c1', body: "Zelle isn't available for this account right now.", promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
   });
 
+  // Codex round-44 (older thread, judged on 9f0f509): an unreadable billing leaves the open-invoice list EMPTY, which must not read as a
+  // genuine `no_open_invoice` that lets an account-scoped denial stand.
+  test('billing UNAVAILABLE (invoice / ownership read failed) => an account-scoped denial is blocked, never confirmed', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { unavailable: true, openInvoice: null, openInvoices: [] } });
+    const body = "Zelle isn't available for this account right now.";
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null } }); // ...and a READABLE empty list still stands
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: false });
+  });
+  // Codex round-44 P2 (context-aggregator.js:1192): an own partially_paid invoice is not in the open list but is collectible on the pay page.
+  // Its amount due is not knowable (paid portions live in payments), so it is never a target AND "no open invoice" cannot be concluded.
+  test('a partially paid invoice (amount due unknowable) => the denial is blocked as an ambiguous target, not confirmed by an empty list', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { openInvoice: null, openInvoices: [], hasUncountedPartialDue: true } });
+    const body = "Zelle isn't available for this account right now.";
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, body })).resolves.toEqual({ stale: true, reason: 'zelle_target_ambiguous' });
+  });
+
   // Codex round-38 P2 class: a denial is only true when EXPLICITLY scoped to this account / invoice; a general or business-wide
   // denial is false while a recipient is configured, whatever the invoice state.
   test('a business-wide / unscoped denial is stale while a recipient is configured, even with no open invoice or an ineligible one', async () => {
@@ -765,6 +785,7 @@ describe('outgoingAmountsStale - real-answers (strict) decisions run the status 
 });
 
 describe('bodyNeedsPaymentRecheck - the read-free pre-screen', () => {
+  beforeEach(() => { realAnswersGateOn.mockReturnValue(true); });
   test.each(['You owe $5.', "You're paid up.", 'We received your $120.00 card payment on Sep 12, 2026.', 'You can Zelle us.', "Zelle isn't available right now.", 'Your balance is fifty dollars.'])('selects: %s', (body) => {
     expect(bodyNeedsPaymentRecheck(body)).toBe(true);
   });
@@ -776,4 +797,23 @@ describe('bodyNeedsPaymentRecheck - the read-free pre-screen', () => {
     expect(bodyNeedsPaymentRecheck('It settled.', { inboundMessage: 'Did my payment go through?' })).toBe(true);
     expect(bodyNeedsPaymentRecheck('It settled.', { inboundMessage: 'What time is my visit?' })).toBe(false);
   });
+  // P2-4 (independent review): the status-vocabulary trigger is a real-answers feature. Gate off, the pre-screen is main's: the same
+  // body that selects above is left alone, so a gate-off row costs no agent_decisions read and cannot be blocked by a read failure.
+  test('gate off (and no v12 decision): the status vocabulary selects nothing; amounts and Zelle still do', () => {
+    realAnswersGateOn.mockReturnValue(false);
+    for (const body of ["You're paid up.", 'It settled.', 'We received your payment on Sep 12, 2026.', 'Your invoice is overdue.']) {
+      expect({ body, r: bodyNeedsPaymentRecheck(body) }).toEqual({ body, r: false });
+    }
+    for (const body of ['You owe $5.', 'You can Zelle us.', "Zelle isn't available right now.", 'Your balance is fifty dollars.']) {
+      expect({ body, r: bodyNeedsPaymentRecheck(body) }).toEqual({ body, r: true });
+    }
+  });
+  test('a v12 decision selects on the status vocabulary even when the live gate is off (a card outliving a rollback)', () => {
+    realAnswersGateOn.mockReturnValue(false);
+    expect(bodyNeedsPaymentRecheck("You're paid up.", { promptVersion: V12 })).toBe(true);
+    expect(bodyNeedsPaymentRecheck("You're paid up.", { promptVersion: 'house_voice_v11' })).toBe(false);
+    realAnswersGateOn.mockReturnValue(true);
+    expect(bodyNeedsPaymentRecheck("You're paid up.", { promptVersion: 'house_voice_v11' })).toBe(false); // the decision's own version wins
+  });
 });
+

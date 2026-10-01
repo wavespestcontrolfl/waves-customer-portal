@@ -95,14 +95,36 @@ test('a model that never copies is never converged: nothing publishes or sends i
   const result = await draft(drafter);
   expect(dispatched.length).toBe(drafter.MAX_REVISIONS + 1);
   expect(result.converged).toBe(false);
-  expect(result.paymentStatusSnapshot).toBeNull();
+  expect(result.paymentStatusSnapshot.sentences).toEqual([]); // (never published or sent: it copies nothing)
 });
 
-test('a hand-off that states no status converges with no snapshot', async () => {
+test('a hand-off that states no status converges, copies nothing, and records that the draft was payment-scoped', async () => {
   const { drafter } = load([HANDOFF]);
   const result = await draft(drafter);
   expect(result.converged).toBe(true);
+  // (scoped by the customer's message: every send seam then judges the final body as payment-scoped; the autonomous rung needs copy-only)
+  expect(result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [], scoped: true });
+});
+
+test('a draft in a thread that touches no money records no snapshot', async () => {
+  const { drafter } = load(['A teammate will confirm the arrival time and follow up within the hour.']);
+  const result = await drafter.generateGroundedDraft({
+    client: {}, context: { ...contextWith(), smsHistory: [{ direction: 'inbound', body: 'What time is the tech coming Tuesday?' }] }, inboundMessage: 'What time is the tech coming Tuesday?',
+    intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, voiceProfile: null,
+  });
   expect(result.paymentStatusSnapshot).toBeNull();
+});
+
+// Independent review (P1-1 / structural a): the recent thread scopes the draft, so a bare pronoun message cannot dodge the contract.
+test('the recent thread scopes the draft: "ok thanks" after a billing message cannot be answered with an unlisted status', async () => {
+  const context = { ...contextWith(), smsHistory: [{ direction: 'inbound', body: 'ok thanks' }, { direction: 'outbound', body: COPY }] };
+  const asDraft = (replies) => { const { drafter, dispatched } = load(replies); return drafter.generateGroundedDraft({ client: {}, context, inboundMessage: 'ok thanks', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, voiceProfile: null }).then((result) => ({ result, dispatched })); };
+  const held = await asDraft(["Yes, it's in our system - you're all set!"]);
+  expect(held.result.converged).toBe(false);
+  expect(held.dispatched.length).toBe(held.result.passes);
+  const fine = await asDraft(['Sounds good, see you Tuesday!']);
+  expect(fine.result.converged).toBe(true);
+  expect(fine.result.paymentStatusSnapshot).toEqual({ customer_id: 'cust-1', sentences: [], scoped: true });
 });
 
 test('an ungrounded account (billing unavailable) renders no sentence, so even a "true" status is a violation', async () => {
@@ -112,7 +134,7 @@ test('an ungrounded account (billing unavailable) renders no sentence, so even a
   const result = await draft(drafter, context);
   expect(result.factsBlock).toContain('Payment status sentences: none on file right now');
   expect(result.converged).toBe(false);
-  expect(result.paymentStatusSnapshot).toBeNull();
+  expect(result.paymentStatusSnapshot.sentences).toEqual([]);
 });
 
 test('gate off: no Payment status section, main\'s Recent payments line, nothing is judged or snapshotted', async () => {
@@ -176,10 +198,9 @@ describe('draftShadowReply persists the payment_status_snapshot where every send
     expect(out.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ paymentStatusSnapshot: SNAP }));
   });
 
-  test('a hand-off reply carries none', async () => {
+  test('a hand-off reply copies no sentence: it carries only the payment-scope marker', async () => {
     const out = await run({ deliveryMode: 'suggest', reply: HANDOFF });
-    expect(out.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ paymentStatusSnapshot: null }));
-    expect(JSON.stringify(out.insertedRows[0])).not.toContain('payment_status_snapshot');
+    expect(out.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({ paymentStatusSnapshot: { customer_id: 'cust-1', sentences: [], scoped: true } }));
   });
 
   test('a draft whose figure is not an authorized one stays shadow even though the verifier passed it', async () => {

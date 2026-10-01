@@ -4066,16 +4066,18 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     reply: text,
     sentences: paymentStatus.renderPaymentStatusSentences(context),
     inboundText: opts.inboundMessage == null ? null : String(opts.inboundMessage),
+    scopeTexts: paymentThreadTexts(context),
   });
   return !verdict.ok || remainderAmountsUngrounded(verdict.remainder, context);
 }
 
 // The reply guard inside the verify/revise loop: the facts block the model saw is the only source of copyable sentences (a frozen
 // replay reads its own). A violation feeds the same revise loop as every other deterministic check.
-function validatePaymentStatus({ reply, factsBlock, inboundMessage }) {
+function validatePaymentStatus({ reply, factsBlock, inboundMessage, context = null }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !reply) return { ok: true, violations: [] };
   const verdict = paymentStatus.checkPaymentStatusReply({
     reply, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), inboundText: inboundMessage == null ? null : String(inboundMessage),
+    scopeTexts: paymentThreadTexts(context),
   });
   return verdict.ok ? { ok: true, violations: [] } : { ok: false, violations: [PAYMENT_STATUS_VIOLATION] };
 }
@@ -4083,9 +4085,21 @@ const PAYMENT_STATUS_VIOLATION = 'the reply states a payment, invoice, refund or
 
 // The sentences the final reply copied, persisted next to open_times_snapshot so every send path can re-render them from live
 // data (sms-amount-recheck.paymentStatusSendBlockReason). null when the reply copies none.
-function computePaymentStatusSnapshot({ customerId, reply, factsBlock }) {
-  if (!reply) return null;
-  return paymentStatus.paymentStatusSnapshotFor({ customerId, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), reply });
+// Also records whether the draft was payment-scoped (its reply, the customer's message or the recent thread touches money), so every
+// send path judges the final body as payment-scoped even when the words it carries do not say so. Gate off: always null.
+function computePaymentStatusSnapshot({ customerId, reply, factsBlock, inboundMessage = null, context = null }) {
+  if (!reply || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  return paymentStatus.paymentStatusSnapshotFor({
+    customerId, sentences: paymentStatus.sentencesFromFactsBlock(factsBlock), reply,
+    inboundText: inboundMessage == null ? null : String(inboundMessage), scopeTexts: paymentThreadTexts(context),
+  });
+}
+// The recent thread messages the draft was written from (the newest few of the facts window, either direction): a reply to a thread
+// that was about money is payment-scoped even when the latest message is a bare pronoun ("did it go through?").
+const PAYMENT_SCOPE_THREAD_MESSAGES = 5;
+function paymentThreadTexts(context) {
+  return (Array.isArray(context?.smsHistory) ? context.smsHistory : []).slice(0, PAYMENT_SCOPE_THREAD_MESSAGES)
+    .map((m) => m?.body).filter((b) => b != null).map(String);
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
@@ -5434,7 +5448,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
-      paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock }),
+      paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock, inboundMessage, context }),
     };
   }
 
@@ -5462,7 +5476,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
-    const paymentStatusCheck = realAnswersApplied ? validatePaymentStatus({ reply: parsed.reply, factsBlock, inboundMessage }) : { ok: true, violations: [] };
+    const paymentStatusCheck = realAnswersApplied ? validatePaymentStatus({ reply: parsed.reply, factsBlock, inboundMessage, context }) : { ok: true, violations: [] };
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck, paymentStatusCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -5545,7 +5559,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
     // The payment-status sentences the FINAL reply copies (null = none): re-rendered from live data before any send.
-    paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock }),
+    paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock, inboundMessage, context }),
   };
 }
 
