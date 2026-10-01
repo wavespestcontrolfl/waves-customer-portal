@@ -163,7 +163,7 @@ run('callback ledger on PostgreSQL', () => {
     expect(after.read_at).not.toBeNull();
     // Staff acting on the card is the work done, not just a read.
     expect(after.done_at).not.toBeNull();
-    expect(after.done_by).toBe(String(staff.id));
+    expect(after.done_by).toBe(`callback:${staff.id}`); // a workflow close: not reopenable
     // The identity itself is re-armed by the versioned watchdog refresh
     // (tests/callback-alerts-postgres.test.js), so the key is left intact.
     expect(after.metadata.dedupeKey).toBe(key);

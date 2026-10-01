@@ -82,6 +82,15 @@ describe('markAdminDone', () => {
     expect(NotificationService._private.PERSON_DONE_BY_SQL).not.toMatch(/ops-crons/);
   });
 
+  test('a workflow close attributed to a person (callback:<id>, sms-commitments:<id>) is not a person Done: no reopen', () => {
+    const { isPersonDoneBy } = NotificationService._private;
+    const uuid = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    expect(isPersonDoneBy(uuid)).toBe(true);
+    expect(isPersonDoneBy(`callback:${uuid}`)).toBe(false);
+    expect(isPersonDoneBy(`sms-commitments:${uuid}`)).toBe(false);
+    expect(isPersonDoneBy(`email-commitments:${uuid}`)).toBe(false);
+  });
+
   test('expectedVersion fences the update on the md5 content version of the one row', async () => {
     const version = 'b'.repeat(32);
     await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });

@@ -192,7 +192,9 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'commitment_id' = ?", [id])
       .whereNull('done_at').update(require('./notification-service')._private.doneColumns({
-        by: String(actorId ?? 'staff'), resolution: `Callback ${action} by staff`, at: now, keepExisting: true, conn: trx,
+        // `callback:<staff id>`, not a bare person id: the action settled the
+        // callback itself, so this Done is not one Reopen may undo.
+        by: `callback:${actorId ?? 'staff'}`, resolution: `Callback ${action} by staff`, at: now, keepExisting: true, conn: trx,
       }));
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });

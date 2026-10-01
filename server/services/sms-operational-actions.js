@@ -838,7 +838,10 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
       // person. Any other staff update (an edit, a snooze) leaves the promise
       // open, so the bell is only read.
       .update(['dismiss', 'fulfill'].includes(action)
-        ? require('./notification-service')._private.doneColumns({ by: reviewedBy, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
+        // done_by names the workflow and the person (`sms-commitments:<id>`),
+        // never a bare person id: the follow-up itself is closed, so the bell
+        // Done is not a person's to Reopen (PERSON_DONE_BY_SQL refuses it).
+        ? require('./notification-service')._private.doneColumns({ by: `${initial.sms_log_id ? 'sms' : 'email'}-commitments:${reviewedBy}`, resolution: `Follow-up ${action === 'dismiss' ? 'dismissed' : 'marked done'} by staff`, keepExisting: true, conn: trx })
         : { read_at: trx.fn.now() });
     return updated;
   });
