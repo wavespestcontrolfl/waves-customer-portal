@@ -116,6 +116,7 @@ function refsFromRow(row) {
     visitIds: [...new Set(visitIds)],
     estimateId: uuidOrNull(first(meta.estimateId, meta.estimate_id, payload.estimateId, params.get('estimateId'))),
     leadId: uuidOrNull(first(payload.leadId, meta.leadId, params.get('lead'))),
+    promiseIds: arr(meta.promise_ids).map(uuidOrNull).filter(Boolean),
   };
 }
 
@@ -130,7 +131,7 @@ function resolveRefs(row, data) {
   return { refs, visit, lead, estimate };
 }
 
-const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map() });
+const emptyData = () => ({ visits: new Map(), leads: new Map(), estimates: new Map(), leadVisits: new Map(), leadQuotes: new Map(), promises: new Map() });
 const byId = (rows) => new Map(rows.map((r) => [String(r.id), r]));
 
 // The live records for a batch of notification rows: one query per table per
@@ -142,6 +143,10 @@ async function loadSubjects(rows, conn = db) {
   const ids = (pick) => [...new Set(all.flatMap(pick))];
   const visitIds = ids((r) => r.visitIds);
   const leadIds = ids((r) => (r.leadId ? [r.leadId] : []));
+  const promiseIds = ids((r) => r.promiseIds);
+  if (promiseIds.length) {
+    data.promises = byId(await conn('call_commitments').whereIn('id', promiseIds).select('id', 'status', 'reviewed_at'));
+  }
   if (visitIds.length) {
     // The service date as text: a DATE parsed to a JS Date lands at the
     // host's midnight, the previous ET day on a UTC host.
@@ -193,6 +198,8 @@ function subjectFor(row, data, todayET) {
     bellAt: bellAt && !Number.isNaN(bellAt.getTime()) ? bellAt : null,
     // A visit the row names, by id; loaded ids only, so a miss is a visit gone.
     visitOf: (id) => data.visits.get(id),
+    // A promise the row names, by id; loaded ids only, so a miss is a promise gone.
+    promiseOf: (id) => data.promises.get(id),
     leadBookedAt: resolved.lead?.customer_id ? data.leadVisits.get(String(resolved.lead.customer_id)) : null,
     leadQuotedAt: resolved.lead?.customer_id ? data.leadQuotes.get(String(resolved.lead.customer_id)) : null,
   };
@@ -258,6 +265,25 @@ function newLeadMovedOn(s) {
   return null;
 }
 
+// A promise-mark bell (visit-promises.js alertUnsavedVisitPromiseMarks) is
+// about technician marks that never reached the office's promise list. It is
+// settled once every promise it names is closed (done or dismissed), gone,
+// or acted on by the office after the bell (reviewed_at, stamped by a Mark
+// done, an edit, a confirm, a Reopen). A bell naming no promise is never
+// judged. The emitter closes its own bell when a resumed completion saves the
+// marks.
+function promiseMarksSettled(s) {
+  const ids = s.refs.promiseIds;
+  if (!ids.length || !s.bellAt) return null;
+  const settled = ids.every((id) => {
+    const promise = s.promiseOf(id);
+    if (!promise || String(promise.status) !== 'open') return true;
+    const reviewedAt = promise.reviewed_at ? new Date(promise.reviewed_at).getTime() : NaN;
+    return reviewedAt > s.bellAt.getTime();
+  });
+  return settled ? 'Every promise it named is settled' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -272,6 +298,10 @@ const CLASSES = [
     // submission filed as a duplicate, an email follow-up's new draft) is
     // fresh work about a lead already on file, never judged.
     key: 'new_lead', categories: ['new_lead'], match: (meta, row) => meta.triggerKey === 'new_lead' && !!refsFromRow(row).leadId, rule: newLeadMovedOn,
+  },
+  { // visit-promises.js alertUnsavedVisitPromiseMarks — one bell per visit,
+    // raised again (same key) only while a mark is still unsaved.
+    key: 'promise_marks', categories: ['alert'], prefix: 'visit-promise-marks:', rule: promiseMarksSettled,
   },
 ];
 
