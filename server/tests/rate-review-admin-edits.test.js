@@ -32,6 +32,7 @@ const ROW_A = 'a1a1a1a1-1111-4111-8111-111111111111';
 const ROW_B = 'b2b2b2b2-2222-4222-8222-222222222222';
 const ROW_C = 'c3c3c3c3-3333-4333-8333-333333333333';
 const ROW_D = 'd4d4d4d4-4444-4444-8444-444444444444';
+const ROW_NEW = 'e5e5e5e5-5555-4555-8555-555555555555';
 const ADMIN = '99999999-9999-4999-8999-999999999999';
 const CUST = (n) => `00000000-0000-4000-8000-00000000000${n}`;
 
@@ -71,6 +72,14 @@ function fakeDb(seed) {
       return q;
     };
     q.whereIn = (col, list) => { filters.push((row) => list.includes(row[strip(col)])); return q; };
+    q.whereNotIn = (col, list) => { filters.push((row) => !list.includes(row[strip(col)])); return q; };
+    q.delete = async () => {
+      const keep = [];
+      let n = 0;
+      for (const row of tables[table] || []) { if (filters.every((f) => f(row))) n += 1; else keep.push(row); }
+      tables[table] = keep;
+      return n;
+    };
     q.forUpdate = () => q;
     q.leftJoin = (t) => { joined = t.replace(/\s+as\s+\w+$/i, ''); return q; };
     q.select = (...cols) => { columns = cols.filter((c) => c !== 'r.*' && !c.startsWith('c.')).map(strip); if (cols.includes('r.*')) columns = null; return q; };
@@ -83,7 +92,23 @@ function fakeDb(seed) {
       for (const row of tables[table] || []) if (filters.every((f) => f(row))) { Object.assign(row, patch); n += 1; }
       return n;
     };
-    q.insert = async (row) => { (tables[table] = tables[table] || []).push({ ...row }); return [1]; };
+    // insert(row | rows) — awaited directly, or through .onConflict(col).merge(cols) (an upsert on `col`)
+    q.insert = (rows) => {
+      const list = (Array.isArray(rows) ? rows : [rows]).map((r) => ({ ...r }));
+      let conflict = null;
+      const pending = {
+        onConflict: (col) => ({ merge: (cols) => { conflict = { col, cols }; return pending; } }),
+        then: (resolve, reject) => Promise.resolve().then(() => {
+          for (const row of list) {
+            const existing = conflict ? (tables[table] || []).find((x) => x[conflict.col] === row[conflict.col]) : null;
+            if (existing) for (const c of conflict.cols) existing[c] = row[c];
+            else (tables[table] = tables[table] || []).push(row);
+          }
+          return [1];
+        }).then(resolve, reject),
+      };
+      return pending;
+    };
     q.then = (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject);
     return q;
   }
@@ -477,7 +502,7 @@ describe('rebuild vs decisions', () => {
     db.raw.mockImplementation(async () => { throw new Error('no build SQL expected'); });
   }
 
-  test('buildBatch refuses a batch with approved rows before any ranking query runs — under the batch lock, taken first', async () => {
+  test('buildBatch refuses a batch with approved rows before any ranking query runs; the ranking pins no transaction', async () => {
     const approved = seed();
     approved.rate_review_snapshots[0].status = 'approved';
     const fake = fakeDb(approved);
@@ -485,14 +510,42 @@ describe('rebuild vs decisions', () => {
     const out = await rateReview.buildBatch({ batchKey: '2027-01' });
     expect(out).toEqual({ ok: false, reason: 'batch_has_approved_rows', batchKey: '2027-01' });
     expect(db.raw).not.toHaveBeenCalled();
-    // The recompute runs inside one transaction that holds the lock from its first read.
-    expect(fake.transactions).toHaveLength(1);
-    expect(fake.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2027-01']);
-    expect(fake.reads.filter((r) => r.table === 'rate_review_snapshots').every((r) => r.inTx)).toBe(true);
+    // The early refusal is a plain read: no transaction, no lock — the ranking
+    // runs on the pool and only the write (below) takes the batch lock.
+    expect(fake.transactions).toHaveLength(0);
+    expect(fake.raw).not.toHaveBeenCalled();
     const sent = seed();
     sent.rate_review_snapshots[0].status = 'sent';
     useModuleDb(fakeDb(sent));
     expect(await rateReview.buildBatch({ batchKey: '2027-01' })).toMatchObject({ ok: false, reason: 'batch_has_sent_rows' });
+  });
+
+  test('the write judges the rows again under the batch lock: an edit that landed during the ranking refuses the rebuild; otherwise the undecided rows are replaced', async () => {
+    const { commitBatchRows, batchRowsForDigest } = rateReview._private;
+    const fake = fakeDb(seed());
+    const before = rateReview.batchDigest(await batchRowsForDigest(fake, '2027-01'));
+    const ranked = [snapshot(ROW_NEW, { customer_id: CUST(5), flags: [] })];
+    const commit = (expectedDigest) => commitBatchRows(fake, {
+      batchKey: '2027-01', expectedDigest, rows: ranked, computedAt: new Date('2026-12-01T11:20:00Z'),
+      batch: { window_from: '2027-01-01', window_to: '2027-01-31', allowances: '{}', config: '{}', line_rph: '{}', book_lines: 1 },
+    });
+    // an edit lands after the ranking read the rows → refused, nothing replaced, the edit stands
+    fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A).proposed_rate_cents = 11200;
+    let start = fake.reads.length;
+    expect(await commit(before)).toEqual({ refused: 'batch_changed' });
+    expect(fake.tables.rate_review_snapshots.map((r) => r.id).sort()).toEqual([ROW_A, ROW_B, ROW_C, ROW_D].sort());
+    expect(fake.tables.rate_review_snapshots.find((r) => r.id === ROW_A).proposed_rate_cents).toBe(11200);
+    expect(fake.transactions).toHaveLength(1);
+    expect(fake.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['rate_review_batch:2027-01']);
+    expect(fake.reads.slice(start).every((r) => r.inTx)).toBe(true);
+    // the rows as the ranking saw them → the undecided rows are replaced and the batch row is upserted
+    start = fake.reads.length;
+    expect(await commit(rateReview.batchDigest(await batchRowsForDigest(fake, '2027-01')))).toEqual({ refused: null });
+    expect(fake.tables.rate_review_snapshots.map((r) => r.id)).toEqual([ROW_NEW]);
+    expect(fake.tables.rate_review_snapshots.find((r) => r.id === ROW_NEW)).toMatchObject({ flags: '[]', computed_at: new Date('2026-12-01T11:20:00Z') });
+    expect(fake.tables.rate_review_batches).toHaveLength(1);
+    expect(fake.tables.rate_review_batches[0]).toMatchObject({ batch_key: '2027-01', window_from: '2027-01-01', book_lines: 1, email_sent_at: null, email_subject: null });
+    expect(fake.reads.slice(start + 1).every((r) => r.inTx)).toBe(true); // slice past the digest read made here, outside
   });
 
   test('a retried monthly tick never recomputes a batch the owner approved (the ranking\u2019s own retry keeps an unsent batch\u2019s window)', async () => {

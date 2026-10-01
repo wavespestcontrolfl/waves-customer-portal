@@ -245,7 +245,8 @@ describe('POST /batches/:key/build', () => {
   });
   test('refuses once any row in the batch was sent, or approved by the owner', async () => {
     mockBuildBatch.mockResolvedValueOnce({ ok: false, reason: 'batch_has_sent_rows', batchKey: '2026-12' })
-      .mockResolvedValueOnce({ ok: false, reason: 'batch_has_approved_rows', batchKey: '2026-12' });
+      .mockResolvedValueOnce({ ok: false, reason: 'batch_has_approved_rows', batchKey: '2026-12' })
+      .mockResolvedValueOnce({ ok: false, reason: 'batch_changed', batchKey: '2026-12' });
     await withServer(async (base) => {
       const out = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(out.status).toBe(409);
@@ -253,6 +254,10 @@ describe('POST /batches/:key/build', () => {
       const approved = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
       expect(approved.status).toBe(409);
       expect(approved.body).toEqual({ error: 'This batch has rows you approved — it cannot be recomputed over your decision.', reason: 'batch_has_approved_rows' });
+      // an edit landed while the ranking ran → the write refused instead of discarding it
+      const changed = await call(base, 'POST', '/api/admin/rate-review/batches/2026-12/build');
+      expect(changed.status).toBe(409);
+      expect(changed.body).toEqual({ error: 'This batch was edited while it was being recomputed — build it again.', reason: 'batch_changed' });
     });
   });
   test('bad dates and service 400s are 400', async () => {

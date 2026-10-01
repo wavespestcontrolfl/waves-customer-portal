@@ -143,6 +143,14 @@ router.get('/batches/:key', async (req, res) => {
   }
 });
 
+// A build the service refused → 409, worded for the owner where the reason
+// is a decision of theirs (anything else keeps the generic line).
+const BUILD_REFUSALS = {
+  batch_has_sent_rows: 'This batch already has rows that were sent to customers — it cannot be recomputed.',
+  batch_has_approved_rows: 'This batch has rows you approved — it cannot be recomputed over your decision.',
+  batch_changed: 'This batch was edited while it was being recomputed — build it again.',
+};
+
 router.post('/batches/:key/build', async (req, res) => {
   const key = validBatchKey(req, res);
   if (!key) return;
@@ -177,13 +185,7 @@ router.post('/batches/:key/build', async (req, res) => {
     }, { recordHealth: false, waitForSlot: false });
     if (wasLockSkipped(locked)) return lockBusy(res, locked);
     const { result, digest, digestStatus } = locked;
-    if (!result.ok && result.reason === 'batch_has_sent_rows') {
-      return res.status(409).json({ error: 'This batch already has rows that were sent to customers — it cannot be recomputed.', reason: result.reason });
-    }
-    if (!result.ok && result.reason === 'batch_has_approved_rows') {
-      return res.status(409).json({ error: 'This batch has rows you approved — it cannot be recomputed over your decision.', reason: result.reason });
-    }
-    if (!result.ok) return res.status(409).json({ error: 'Rate review batch could not be built', reason: result.reason });
+    if (!result.ok) return res.status(409).json({ error: BUILD_REFUSALS[result.reason] || 'Rate review batch could not be built', reason: result.reason });
     const built = { batchKey: result.batchKey, window: result.window, rows: result.rows, summary: result.summary, allowances: result.allowances, digest };
     // The rebuild landed but the owner's updated digest did not. The batch
     // now carries no delivery marker, so a later rebuild sees nothing to

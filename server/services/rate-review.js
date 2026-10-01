@@ -1888,6 +1888,40 @@ async function batchRebuildRefusal(dbh, batchKey) {
   return Number(row && row.n) > 0 ? 'batch_has_approved_rows' : null;
 }
 
+async function batchRowsForDigest(dbh, batchKey) {
+  return dbh(SNAPSHOTS).where({ batch_key: batchKey }).select('id', 'proposed_rate_cents', 'status');
+}
+
+// The build's write: ONE short transaction under the batch advisory lock —
+// the lock updateRow and approveBatch take — that judges the refusal and
+// the rows' digest again before replacing them. An edit or approval that
+// landed since the ranking read the rows changes the digest, and the
+// rebuild refuses (batch_changed) rather than discard the owner's decision;
+// the build is simply run again. Nothing in here reads the pool: with a
+// two-connection pool and the build lease holding one, a pool read inside
+// this transaction would wait on itself.
+async function commitBatchRows(dbh, { batchKey, expectedDigest, rows, computedAt, batch }) {
+  const run = async (conn) => {
+    await lockBatch(conn, batchKey);
+    const refusal = await batchRebuildRefusal(conn, batchKey);
+    if (refusal) return { refused: refusal };
+    if (batchDigest(await batchRowsForDigest(conn, batchKey)) !== expectedDigest) return { refused: 'batch_changed' };
+    // Literal table names on every WRITER (insert / merge / update): the
+    // status-integrity scan in tests/annual-prepay-term-states.test.js fails
+    // closed on a mutation chain behind a dynamic table expression. Reads
+    // keep the constants.
+    await conn('rate_review_batches')
+      .insert({ batch_key: batchKey, ...batch, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null })
+      .onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
+    await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
+    if (rows.length) {
+      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
+    }
+    return { refused: null };
+  };
+  return dbh.isTransaction ? run(dbh) : dbh.transaction(run);
+}
+
 // ── batch stages ────────────────────────────────────────────────────────
 
 // Stage 1 — every input the book needs (parallel where independent).
@@ -2256,18 +2290,20 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
   assertYmd(anniversaryTo, 'anniversaryTo');
   if (anniversaryFrom && anniversaryTo) assertWindowOrder(anniversaryFrom, anniversaryTo); // before any read
 
-  // The whole recompute — every read, the ranking and the write — runs in
-  // ONE transaction that holds the batch's advisory lock from the start, so
-  // an admin edit or approval (lockBatch too) can never land between the
-  // ranking and the write that would discard it.
-  if (!trx) return db.transaction((conn) => buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnchor, trx: conn, now, deps }));
-  const dbh = trx;
-  await lockBatch(dbh, batchKey);
+  const dbh = trx || db;
+  // A decided batch is never recomputed: refused before any ranking query,
+  // and judged again under the batch lock right before the rows are replaced.
   const refusal = await batchRebuildRefusal(dbh, batchKey);
   if (refusal) return { ok: false, reason: refusal, batchKey };
 
   const existing = await dbh(BATCHES).where({ batch_key: batchKey }).first('window_from', 'window_to', 'email_sent_at');
   const { from, to, digestReset } = resolveBatchWindow({ existing, anniversaryFrom, anniversaryTo, now, windowAnchor });
+  // The rows as they stand when the ranking starts. The ranking runs on the
+  // pool and pins no connection for its duration (a two-connection pool with
+  // the build lease holding one would otherwise wait on itself); an edit or
+  // approval that lands while it runs changes this digest, and the write
+  // refuses rather than replace rows the owner just decided.
+  const before = batchDigest(await batchRowsForDigest(dbh, batchKey));
 
   const today = etDateString(now);
   const config = await loadConfig(dbh);
@@ -2290,22 +2326,11 @@ async function buildBatch({ batchKey, anniversaryFrom, anniversaryTo, windowAnch
 
   const computedAt = now;
   const lineRphJson = Object.fromEntries([...lineRphStats].map(([family, q]) => [family, q]));
-  // Literal table names on every WRITER (insert / merge / update): the
-  // status-integrity scan in tests/annual-prepay-term-states.test.js fails
-  // closed on a mutation chain behind a dynamic table expression. Reads
-  // keep the constants.
-  const write = async (conn) => {
-    await conn('rate_review_batches').insert({
-      batch_key: batchKey, window_from: from, window_to: to,
-      allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson),
-      book_lines: book.length, computed_at: computedAt, updated_at: computedAt, email_sent_at: null, email_subject: null,
-    }).onConflict('batch_key').merge(['window_from', 'window_to', 'allowances', 'config', 'line_rph', 'book_lines', 'computed_at', 'updated_at', 'email_sent_at', 'email_subject']);
-    await conn(SNAPSHOTS).where({ batch_key: batchKey }).whereNotIn('status', SENT_STATUSES).delete();
-    if (rows.length) {
-      await conn('rate_review_snapshots').insert(rows.map((row) => ({ ...row, flags: JSON.stringify(row.flags), computed_at: computedAt, updated_at: computedAt })));
-    }
-  };
-  await write(dbh);
+  const landed = await commitBatchRows(dbh, {
+    batchKey, expectedDigest: before, rows, computedAt,
+    batch: { window_from: from, window_to: to, allowances: JSON.stringify(allowances), config: JSON.stringify(config), line_rph: JSON.stringify(lineRphJson), book_lines: book.length },
+  });
+  if (landed.refused) return { ok: false, reason: landed.refused, batchKey };
 
   const summary = summarizeRows(rows);
   logger.info(`[rate-review] batch ${batchKey} built: ${rows.length} rows (${summary.green} green, ${summary.exception} exceptions, ${summary.no_change} no-change, ${summary.skipped} skipped) from ${book.length} active plan lines`);
@@ -2635,8 +2660,8 @@ async function updateRow({ batchKey, rowId, proposedRateCents, status, includeEx
   // and roll the row update and its audit back.
   const liveConfig = await loadConfig(dbh);
   return dbh.transaction(async (trx) => {
-    // The writers' shared lock (a rebuild holds it for its whole recompute),
-    // so an edit and a recompute never interleave.
+    // The writers' shared lock (a rebuild takes it to judge and replace the
+    // rows), so an edit and a recompute's write never interleave.
     await lockBatch(trx, batchKey);
     const batchRow = await trx(BATCHES).where({ batch_key: batchKey }).first();
     if (await batchHasSentRows(trx, batchKey)) return { ok: false, reason: 'batch_has_sent_rows', error: 'This batch already has rows that were sent to customers — it can no longer be edited.' };
@@ -2983,6 +3008,8 @@ module.exports = {
   composeBatchEmail,
   _private: {
     loadReviewFacts,
+    commitBatchRows,
+    batchRowsForDigest,
     soldPosturePins,
     COMBINED_CATALOG_SQL,
     RETIRED_COMBINED_CATALOG_KEYS,
