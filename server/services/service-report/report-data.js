@@ -17,7 +17,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { resolveNitrogenApplied } = require('./lawn-program-line');
+const { resolveNitrogenApplied, resolveProgramVisit } = require('./lawn-program-line');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
@@ -5307,11 +5307,21 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // both count, and a failed product load or catalog read counts as
       // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
       let nitrogenApplied = null;
-      if (featureGates.lawnExpectationsLive()) {
+      let programVisit = false;
+      if (typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()) {
         nitrogenApplied = await resolveNitrogenApplied({
           applications,
           productsLoadFailed,
-          loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n'),
+          loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'category', 'product_type', 'subcategory'),
+        });
+        // Only a recurring lawn plan visit gets the program line: the visit's
+        // catalog service identity must be a recurring lawn plan (never the
+        // WaveGuard tier, which is a bundle discount, not a lawn program).
+        // One-time lawn jobs, callbacks and unresolved identities get null.
+        programVisit = await resolveProgramVisit({
+          scheduledService: scheduledServiceRow,
+          isCallback: !!service.is_callback,
+          loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
         });
       }
       reportV2 = buildLawnReportV2({
@@ -5319,7 +5329,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         wateringInstruction,
         mowingHeight,
         applications,
-        ...(nitrogenApplied === null ? {} : { nitrogenApplied }),
+        ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,

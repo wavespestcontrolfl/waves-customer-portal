@@ -1738,14 +1738,19 @@ Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
 says what the program focuses on that time of year, never what the visit
 applied. It is written from `server/config/protocols.json` months, and any step
 the protocol makes conditional (skipped, soil-test or weather gated, optional,
-or limited to some plans) is only stated with a qualifier such as "where the
+or on request) is only stated with a qualifier such as "where the
 lawn needs it" or "when conditions allow". It is at most about 30 words, and
 never naming a product, an ordinance, a county, a blackout, a law, a clock time,
-or watering, rain or mowing guidance. While the line is in use the snapshot also
+plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
 carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
-is null, and the old note stays, for a visit with no assessment date and for a
-June to September visit that applied a nitrogen product (the catalog's
-`analysis_n` above zero, read at build time; the program applies none then).
+is null, and the old note stays, for a visit that is not a recurring lawn plan
+visit (the visit's catalog service identity must be a recurring lawn plan:
+one-time lawn jobs, callbacks and unresolved identities get no line; the
+WaveGuard tier is never the signal), for a visit with no assessment date, and
+for a June to September visit that may have applied nitrogen (the program
+applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
+with no `analysis_n`, or any applied product the catalog cannot resolve.
 The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
 lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
 renders a program line once as a small "This time of year" card above the

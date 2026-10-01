@@ -15,7 +15,8 @@ const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
 const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
-const { lawnReportLeadLive, lawnExpectationsLive } = require('../../config/feature-gates');
+const featureGates = require('../../config/feature-gates');
+const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
@@ -554,7 +555,7 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -737,8 +738,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // permanent token). A null line (no honest line for this visit) keeps the old
   // season note. `seasonalNoteSource` marks the program line so the lead layout
   // renders it and only it; gate off adds no key (byte-identical payload).
-  const programLine = lawnExpectationsLive()
-    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied })
+  // The gate is read defensively: a partial feature-gates mock (or a missing
+  // export) means off, never a crash in a report build. Only recurring lawn
+  // plan visits (`programVisit`, resolved by the caller) get the line.
+  const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
+    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
 

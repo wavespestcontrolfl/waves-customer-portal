@@ -28,6 +28,9 @@ const WATER_MOW = /\b(water\w*|irrigat\w*|sprinkl\w*|rain\w*|mow\w*|drought|soak
 const CLOCK_TIME = /\b\d{1,2}(:\d{2})?\s?(a\.?m\.?|p\.?m\.?)\b|\b\d{1,2}:\d{2}\b|\bo['’]clock\b|\b(noon|midnight)\b/i;
 const DIGITS = /\d/;
 // Brand / product names that appear in protocols.json and the product catalog.
+// Ordinal / sequence wording assumes the customer has been on the program since
+// January ("the first of two", "final", "re-check", "continues", "completing").
+const ORDINAL_WORDS = /\b(first|second|third|fourth|final|last|continu\w*|again|re-?check\w*|re-?flush\w*|complet\w*|another|next|follow-?up|start\w*|begin\w*|round)\b|\bone of\b|\bof (?:two|three)\b/i;
 const BRANDS = /(prodiamine|celsius|acelepryn|speedzone|k-?flow|primo|maxx|dismiss|sedgehammer|headway|medallion|torque|armada|velista|atrazine|three-?way|lesco|carbonpro|hydretain|talstar|talak|arena|dylox|topchoice|anuew|t-?storm|bifen|moisture manager|dispatch|green flo|kmag|polyplus|nis\b)/i;
 
 const monthOf = (visit) => MONTH_ABBR.indexOf(String(visit.month).slice(0, 3)) + 1;
@@ -90,14 +93,15 @@ const TALK_TAGS = new Set(['seed_heads', 'dormancy_talk']);
 const GRASS_WIDE_FACTS = new Set(['mole_cricket_primary']);
 
 const CONDITION_WORDS = /\bif\b|\bonly\b|\boptional\b|\bconditional\b|gated|\bskip|\bdefer|\bhold\b|\bnon-irrigated\b|\birrigated\b|\bsoil[- ]test|\bsoil [KP]\b|\bP index\b|\bP ≥|\bwhen\b|\bunless\b|\bmaxed\b|\bmaximum\b|\bcap\b|on request|requested|\bweather\b/i;
-// Plan-tier words limit a step to some plans ("Premium only", "Premium:", "Enh/Prem only",
-// "PGR Premium ($...)", "for Premium"). "ALL TIERS", "Basic/Std get ..." and history in
-// "(was Premium-only)" do not restrict anything.
-const TIER_WORDS = /\b(?:premium|enh\/prem|basic\/std)(?: only\b|:| \(\$)|\bfor premium\b/i;
-const EVERY_TIER = /\ball[- ]tiers?\b/i;
+// Plan-tier words are NOT conditions: tiers are a bundle discount, not lawn
+// programs, and every lawn plan (9x or 12x) runs the month's protocol. They are
+// stripped before the condition words are read, so "Premium only", "Enh/Prem
+// only" or "Basic/Std" never make a step conditional on their own; the step's
+// own wording (if / only / optional / skip ...) still does.
+const TIER_WORDS = /\b(?:enh\/prem|premium|basic\/std|enhanced)\b(?:[\s-]+only\b)?/gi;
 const isConditional = (raw) => {
-  const text = raw.replace(/\(was [^)]*\)/gi, '');
-  return CONDITION_WORDS.test(text) || (!EVERY_TIER.test(text) && TIER_WORDS.test(text));
+  const text = raw.replace(/\(was [^)]*\)/gi, '').replace(TIER_WORDS, ' ');
+  return CONDITION_WORDS.test(text);
 };
 const TIER_ONLY = /^(Enh\/Prem|Premium|Basic\/Std)( only)?\.?$/i;
 const MONTH_WORD = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
@@ -179,23 +183,23 @@ describe('program line table covers protocols.json', () => {
 
   test.each(GRASSES)('%s x 12 months returns the table string', (grass) => {
     for (const month of MONTHS) {
-      const line = buildProgramLine({ grassType: grass, month });
+      const line = buildProgramLine({ programVisit: true, grassType: grass, month });
       expect(typeof line).toBe('string');
       expect(line).toBe(PROGRAM_LINES[grass][month].line);
     }
   });
 
   test('grass spelling is forgiving; unknown / mixed / null grass takes the generic line', () => {
-    expect(buildProgramLine({ grassType: 'St. Augustine'.replace('. ', '_').toLowerCase(), month: 1 })).toBe(PROGRAM_LINES.st_augustine[1].line);
-    expect(buildProgramLine({ grassType: 'Bermuda', month: 3 })).toBe(PROGRAM_LINES.bermuda[3].line);
+    expect(buildProgramLine({ programVisit: true, grassType: 'St. Augustine'.replace('. ', '_').toLowerCase(), month: 1 })).toBe(PROGRAM_LINES.st_augustine[1].line);
+    expect(buildProgramLine({ programVisit: true, grassType: 'Bermuda', month: 3 })).toBe(PROGRAM_LINES.bermuda[3].line);
     for (const grassType of [null, undefined, '', 'unknown', 'centipede', 'mixed', 'st_augustine/bermuda']) {
-      for (const month of MONTHS) expect(buildProgramLine({ grassType, month })).toBe(DEFAULT_LINES[month].line);
+      for (const month of MONTHS) expect(buildProgramLine({ programVisit: true, grassType, month })).toBe(DEFAULT_LINES[month].line);
     }
   });
 
   test('no valid month is a deliberate null', () => {
     for (const month of [null, undefined, 0, 13, 1.5, 'x', NaN]) {
-      expect(buildProgramLine({ grassType: 'bermuda', month })).toBeNull();
+      expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month })).toBeNull();
     }
     expect(buildProgramLine()).toBeNull();
   });
@@ -222,12 +226,17 @@ describe('every string is clean customer copy', () => {
     expect(validateCustomerCopy(line)).toBe(true);
   });
 
+  test.each(all)('%s: no ordinal or sequence claims (a customer may have joined mid-year)', (_label, line) => {
+    expect(line).not.toMatch(ORDINAL_WORDS);
+  });
+
   test('the banned-copy check itself catches what it should', () => {
     expect(BANNED_WORDS.test('the county fertilizer ordinance')).toBe(true);
     expect(BANNED_WORDS.test('summer blackout')).toBe(true);
     expect(BANNED_WORDS.test('state law')).toBe(true);
     expect(BANNED_WORDS.test('a healthy lawn')).toBe(false);
     expect(BRANDS.test('Celsius WG')).toBe(true);
+    for (const bad of ['the first of two applications', 'the final feeding', 'a second thatch check', 'continues large patch prevention', 're-checking for chinch bugs', 'completing the barrier', 'a follow-up round']) expect(ORDINAL_WORDS.test(bad)).toBe(true);
     expect(CLOCK_TIME.test('after 3 PM')).toBe(true);
   });
 });
@@ -265,7 +274,7 @@ describe('every claim is backed by protocols.json, conditions included', () => {
   });
 
   test('no untagged claims: text outside the claim phrases is only connecting words', () => {
-    const GLUE = new Set(['a', 'adds', 'and', 'april', 'august', 'continues', 'december', 'february', 'focuses', 'in', 'is',
+    const GLUE = new Set(['a', 'and', 'april', 'august', 'december', 'february', 'focuses', 'in', 'is',
       'january', 'july', 'june', 'march', 'may', 'month', 'november', 'october', 'on', 'plus', 'program', 'scouting',
       'september', 'the', 'with', 'zoysia']);
     const entries = [...rows.map((row) => row[3]), ...MONTHS.map((m) => DEFAULT_LINES[m])];
@@ -281,9 +290,8 @@ describe('every claim is backed by protocols.json, conditions included', () => {
     // Bahia potassium is skipped on non-irrigated properties (Jun, Sep); the soil-test skip rides every K-Flow month.
     for (const month of [4, 5, 6, 9]) expect(derivedStatus('bahia', month, 'potassium')).toBe('conditional');
     for (const grass of ['st_augustine', 'bermuda', 'zoysia']) for (const month of [4, 6, 9]) expect(derivedStatus(grass, month, 'potassium')).toBe('conditional');
-    // Premium-only, optional and request-only steps
+    // Optional and request-only steps
     expect(derivedStatus('st_augustine', 12, 'winter_touchpoint')).toBe('conditional');
-    expect(derivedStatus('st_augustine', 2, 'feed')).toBe('conditional');
     expect(derivedStatus('bahia', 10, 'fungicide')).toBe('conditional');
     // Unconditional program steps stay plain
     expect(derivedStatus('st_augustine', 1, 'pre_emergent')).toBe('plain');
@@ -298,12 +306,35 @@ describe('every claim is backed by protocols.json, conditions included', () => {
       expect(derivedStatus('bermuda', 10, 'fungicide')).toBe('plain');
       visit.primary = `${original}\n★ IF soil test is clean: SKIP Armada`;
       expect(derivedStatus('bermuda', 10, 'fungicide')).toBe('conditional');
-      visit.primary = original.replace('★ Armada 50 WDG SDS preventive ($12.41)', '★ Armada 50 WDG SDS preventive Premium only ($12.41)');
+      visit.primary = original.replace('★ Armada 50 WDG SDS preventive ($12.41)', '★ Armada 50 WDG SDS preventive only on request ($12.41)');
       expect(derivedStatus('bermuda', 10, 'fungicide')).toBe('conditional');
     } finally {
       visit.primary = original;
     }
     expect(derivedStatus('bermuda', 10, 'fungicide')).toBe('plain');
+  });
+
+  test('plan-tier wording never makes a step conditional (tiers are a bundle discount; every plan runs the month)', () => {
+    const visit = visitFor('bermuda', 10);
+    const original = visit.primary;
+    try {
+      for (const tierText of ['Premium only', 'Enh/Prem only', 'Basic/Std', 'Premium: ', 'for Enhanced']) {
+        visit.primary = original.replace('★ Armada 50 WDG SDS preventive ($12.41)', `★ Armada 50 WDG SDS preventive ${tierText} ($12.41)`);
+        expect({ tierText, status: derivedStatus('bermuda', 10, 'fungicide') }).toEqual({ tierText, status: 'plain' });
+      }
+    } finally {
+      visit.primary = original;
+    }
+    // Real protocol lines that were tier-gated now read plainly
+    expect(derivedStatus('st_augustine', 2, 'feed')).toBe('plain');
+    expect(derivedStatus('st_augustine', 8, 'scouting_visit')).toBe('plain');
+    expect(isConditional('N app 1/3 @ 0.75 lb N/1K. Enh/Prem only.')).toBe(false);
+    expect(isConditional('Primo Maxx PGR Premium only ($1.91)')).toBe(false);
+    expect(isConditional('★ OPTIONAL Basic/Std: Door hanger')).toBe(true);
+    expect(QUALIFIER_LIST.some((q) => /plan|tier/i.test(q))).toBe(false);
+    for (const entry of [...rows.map((row) => row[3]), ...MONTHS.map((m) => DEFAULT_LINES[m])]) {
+      expect(entry.line).not.toMatch(/\b(plan|tier|basic|standard|enhanced|premium|bronze|silver|gold|platinum)\b/i);
+    }
   });
 
   test('qualifiers are neutral wording: no water, tier, count or product word', () => {
@@ -332,27 +363,27 @@ describe('Jun-Sep with nitrogen applied is a deliberate null', () => {
 
   test.each([6, 7, 8, 9])('month %i: analysis_n > 0 -> null, analysis_n 0 or none -> line', (month) => {
     for (const grassType of [...GRASSES, null]) {
-      expect(buildProgramLine({ grassType, month, applications: [nApp] })).toBeNull();
-      expect(buildProgramLine({ grassType, month, applications: [kApp, nApp] })).toBeNull();
-      expect(typeof buildProgramLine({ grassType, month, applications: [kApp] })).toBe('string');
-      expect(typeof buildProgramLine({ grassType, month, applications: [] })).toBe('string');
+      expect(buildProgramLine({ programVisit: true, grassType, month, applications: [nApp] })).toBeNull();
+      expect(buildProgramLine({ programVisit: true, grassType, month, applications: [kApp, nApp] })).toBeNull();
+      expect(typeof buildProgramLine({ programVisit: true, grassType, month, applications: [kApp] })).toBe('string');
+      expect(typeof buildProgramLine({ programVisit: true, grassType, month, applications: [] })).toBe('string');
     }
   });
 
   test('either report shape and a fertilizer-analysis name count as nitrogen', () => {
-    expect(buildProgramLine({ grassType: 'bermuda', month: 7, applications: [{ analysis_n: '16' }] })).toBeNull();
-    expect(buildProgramLine({ grassType: 'bermuda', month: 7, applications: [{ product: { name: 'Synthetic 24-0-11' } }] })).toBeNull();
-    expect(buildProgramLine({ grassType: 'bermuda', month: 7, applications: [{ product: { name: 'Synthetic 0-0-25' } }] })).toEqual(expect.any(String));
+    expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, applications: [{ analysis_n: '16' }] })).toBeNull();
+    expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, applications: [{ product: { name: 'Synthetic 24-0-11' } }] })).toBeNull();
+    expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, applications: [{ product: { name: 'Synthetic 0-0-25' } }] })).toEqual(expect.any(String));
   });
 
   test('the caller-supplied catalog answer wins over the shapes', () => {
-    expect(buildProgramLine({ grassType: 'bermuda', month: 7, applications: [kApp], nitrogenApplied: true })).toBeNull();
-    expect(buildProgramLine({ grassType: 'bermuda', month: 7, applications: [nApp], nitrogenApplied: false })).toEqual(expect.any(String));
+    expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, applications: [kApp], nitrogenApplied: true })).toBeNull();
+    expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, applications: [nApp], nitrogenApplied: false })).toEqual(expect.any(String));
   });
 
   test('other months do not care about nitrogen', () => {
     for (const month of [1, 2, 3, 4, 5, 10, 11, 12]) {
-      expect(typeof buildProgramLine({ grassType: 'st_augustine', month, applications: [nApp] })).toBe('string');
+      expect(typeof buildProgramLine({ programVisit: true, grassType: 'st_augustine', month, applications: [nApp] })).toBe('string');
     }
   });
 });
@@ -391,9 +422,9 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
   const OLD_SHOULDER = /transitional stretch/;
 
   test('gate off (unset or any non-true) is byte-identical: old note, no new key', () => {
-    const baseline = withGate(undefined, () => buildLawnReportV2({ lawnAssessment: assessment() }));
+    const baseline = withGate(undefined, () => buildLawnReportV2({ lawnAssessment: assessment(), programVisit: true }));
     for (const value of ['', 'false', '0', 'off']) {
-      const off = withGate(value, () => buildLawnReportV2({ lawnAssessment: assessment() }));
+      const off = withGate(value, () => buildLawnReportV2({ lawnAssessment: assessment(), programVisit: true }));
       expect(JSON.stringify(off)).toBe(JSON.stringify(baseline));
     }
     expect(baseline.snapshot.seasonalNote).toMatch(OLD_SHOULDER);
@@ -402,12 +433,12 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
   });
 
   test('gate on: snapshot.seasonalNote is the program line from the visit month, marked as program', () => {
-    const on = withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment() }));
+    const on = withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment(), programVisit: true }));
     expect(on.snapshot.seasonalNote).toBe(PROGRAM_LINES.st_augustine[10].line);
     expect(on.snapshot.seasonalNoteSource).toBe('program');
     expect(on).not.toHaveProperty('seasonalNote');
     // Only the season note differs from the gate-off payload.
-    const off = withGate(undefined, () => buildLawnReportV2({ lawnAssessment: assessment() }));
+    const off = withGate(undefined, () => buildLawnReportV2({ lawnAssessment: assessment(), programVisit: true }));
     const strip = (v) => { const c = JSON.parse(JSON.stringify(v)); delete c.snapshot.seasonalNote; delete c.snapshot.seasonalNoteSource; return c; };
     // smsSummary and the rest are derived from other snapshot fields
     expect(strip(on)).toEqual(strip(off));
@@ -416,6 +447,7 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
   test('the month is the noon-UTC visit month, grass from the turf profile', () => {
     const month = (date, grassType) => withGate('true', () => buildLawnReportV2({
       lawnAssessment: assessment({ assessmentDate: date, turfProfile: { grassType } }),
+      programVisit: true,
     }).snapshot.seasonalNote);
     expect(month('2026-01-31', 'bermuda')).toBe(PROGRAM_LINES.bermuda[1].line);
     expect(month('2026-02-01', 'zoysia')).toBe(PROGRAM_LINES.zoysia[2].line);
@@ -426,6 +458,7 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
   test('null line (Jun-Sep nitrogen, or no assessment date) falls back to the old note, unmarked', () => {
     const june = (extra) => withGate('true', () => buildLawnReportV2({
       lawnAssessment: assessment({ assessmentDate: '2026-06-18', scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, fungusControl: 95, overallScore: 68, season: 'peak' } }),
+      programVisit: true,
       ...extra,
     }));
     const withN = june({ nitrogenApplied: true });
@@ -436,7 +469,7 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
     const byName = june({ applications: [{ product: { name: 'Synthetic 24-0-11' } }] });
     expect(byName.snapshot).not.toHaveProperty('seasonalNoteSource');
 
-    const noDate = withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment({ assessmentDate: null }) }));
+    const noDate = withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment({ assessmentDate: null }), programVisit: true }));
     expect(noDate.snapshot.seasonalNote).toMatch(OLD_SHOULDER);
     expect(noDate.snapshot).not.toHaveProperty('seasonalNoteSource');
   });
@@ -450,32 +483,97 @@ describe('buildLawnReportV2 and GATE_LAWN_EXPECTATIONS', () => {
   });
 });
 
-describe('resolveNitrogenApplied (the report-data caller)', () => {
+describe('resolveNitrogenApplied (the report-data caller) fails closed', () => {
   const { resolveNitrogenApplied } = require('../services/service-report/lawn-program-line');
   const rowsFor = (rows) => async () => rows;
+  const app = (catalogId, name = 'Synthetic Product') => ({ product: { name, ...(catalogId ? { catalogId } : {}) } });
   test('a failed product load counts as nitrogen applied, with no catalog read', async () => {
     const load = jest.fn();
     await expect(resolveNitrogenApplied({ applications: [], productsLoadFailed: true, loadCatalogRows: load })).resolves.toBe(true);
     expect(load).not.toHaveBeenCalled();
   });
   test('a failed catalog read counts as nitrogen applied', async () => {
-    const apps = [{ product: { name: 'Celsius WG', catalogId: 'c1' } }];
-    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: async () => { throw new Error('db'); } })).resolves.toBe(true);
+    await expect(resolveNitrogenApplied({ applications: [app('c1')], loadCatalogRows: async () => { throw new Error('db'); } })).resolves.toBe(true);
   });
   test('a catalog analysis_n above zero counts', async () => {
-    const apps = [{ product: { name: 'Lawn Feed', catalogId: 'c1' } }];
-    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 16 }]) })).resolves.toBe(true);
+    await expect(resolveNitrogenApplied({ applications: [app('c1')], loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 16, category: 'fertilizer' }]) })).resolves.toBe(true);
   });
-  test('an unresolved product named like a fertilizer analysis still counts (no catalogId)', async () => {
-    const apps = [{ product: { name: 'Granular 24-0-11' } }];
-    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([]) })).resolves.toBe(true);
+  test('an applied product with no catalogId counts, whatever its name says (a removed catalog row nulls product_id)', async () => {
+    const load = jest.fn(async () => []);
+    await expect(resolveNitrogenApplied({ applications: [app(null, 'Synthetic Chelated Iron Plus')], loadCatalogRows: load })).resolves.toBe(true);
+    await expect(resolveNitrogenApplied({ applications: [app('c1', 'Celsius WG'), app(null, 'Granular 24-0-11')], loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 0, category: 'herbicide' }]) })).resolves.toBe(true);
   });
-  test('a catalog-resolved product with no row still falls back to its name', async () => {
-    const apps = [{ product: { name: 'Granular 24-0-11', catalogId: 'missing' } }];
-    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([]) })).resolves.toBe(true);
+  test('a catalogId whose row the catalog no longer returns counts', async () => {
+    await expect(resolveNitrogenApplied({ applications: [app('missing')], loadCatalogRows: rowsFor([]) })).resolves.toBe(true);
+    await expect(resolveNitrogenApplied({ applications: [app('c1'), app('c2')], loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 0, category: 'herbicide' }]) })).resolves.toBe(true);
   });
-  test('no nitrogen evidence anywhere is a confirmed negative', async () => {
-    const apps = [{ product: { name: 'Celsius WG', catalogId: 'c1' } }];
-    await expect(resolveNitrogenApplied({ applications: apps, loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 0 }]) })).resolves.toBe(false);
+  test('a resolved fertilizer-type row with NULL analysis_n counts', async () => {
+    for (const row of [{ id: 'c1', analysis_n: null, category: 'fertilizer' }, { id: 'c1', category: 'Lawn Fertilizer' }, { id: 'c1', analysis_n: null, product_type: 'fertilizer' }]) {
+      await expect(resolveNitrogenApplied({ applications: [app('c1')], loadCatalogRows: rowsFor([row]) })).resolves.toBe(true);
+    }
+  });
+  test('the name check stays an extra positive signal', async () => {
+    await expect(resolveNitrogenApplied({ applications: [app('c1', 'Granular 24-0-11')], loadCatalogRows: rowsFor([{ id: 'c1', analysis_n: 0, category: 'herbicide' }]) })).resolves.toBe(true);
+  });
+  test('only fully resolved products with known analysis_n 0, or a non-fertilizer with none, clear it', async () => {
+    await expect(resolveNitrogenApplied({ applications: [app('c1'), app('c2')], loadCatalogRows: rowsFor([
+      { id: 'c1', analysis_n: 0, category: 'fertilizer' },
+      { id: 'c2', analysis_n: null, category: 'herbicide' },
+    ]) })).resolves.toBe(false);
+    await expect(resolveNitrogenApplied({ applications: [], loadCatalogRows: jest.fn() })).resolves.toBe(false);
+  });
+});
+
+describe('resolveProgramVisit: only recurring lawn plan visits get the line', () => {
+  const { resolveProgramVisit } = require('../services/service-report/lawn-program-line');
+  const visit = { id: 'v1', service_id: 's1', service_type: 'Lawn Care' };
+  const profile = (overrides) => async () => ({ serviceKey: 'lawn_care_recurring', billingType: 'recurring', ...overrides });
+  test('recurring lawn plan service identities qualify', async () => {
+    for (const serviceKey of ['lawn_care_recurring', 'lawn_care_quarterly', 'lawn_care_monthly', 'lawn_care_6week', 'lawn_care']) {
+      await expect(resolveProgramVisit({ scheduledService: visit, loadProfile: profile({ serviceKey }) })).resolves.toBe(true);
+    }
+  });
+  test('one-time lawn jobs and other lines do not', async () => {
+    for (const [serviceKey, billingType] of [['lawn_care_one_time', 'one_time'], ['lawn_pest_knockdown', 'one_time'], ['one_time_lawn', 'one_time'], ['lawn_care_one_time', 'recurring'], ['lawn_tree_shrub_combo', 'recurring'], ['lawn_aeration', 'one_time'], ['pest_control_quarterly', 'recurring'], [null, 'recurring']]) {
+      await expect({ serviceKey, billingType, ok: await resolveProgramVisit({ scheduledService: visit, loadProfile: profile({ serviceKey, billingType }) }) }).toEqual({ serviceKey, billingType, ok: false });
+    }
+  });
+  test('fails closed: no visit, a callback, a synthesized or missing profile, a lookup error, no resolver', async () => {
+    await expect(resolveProgramVisit({ scheduledService: null, loadProfile: profile({}) })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ scheduledService: visit, isCallback: true, loadProfile: profile({}) })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ scheduledService: visit, loadProfile: profile({ synthesized: true }) })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ scheduledService: visit, loadProfile: async () => null })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ scheduledService: visit, loadProfile: async () => { throw new Error('db'); } })).resolves.toBe(false);
+    await expect(resolveProgramVisit({ scheduledService: visit })).resolves.toBe(false);
+    await expect(resolveProgramVisit()).resolves.toBe(false);
+  });
+  test('the WaveGuard tier is never read', async () => {
+    const loadProfile = jest.fn(async () => ({ serviceKey: 'lawn_care_recurring', billingType: 'recurring' }));
+    await resolveProgramVisit({ scheduledService: { ...visit, waveguard_tier: 'Platinum', service_tier: 'Gold' }, loadProfile });
+    expect(loadProfile).toHaveBeenCalledTimes(1);
+    expect(resolveProgramVisit.toString()).not.toMatch(/tier/i);
+  });
+  test('buildProgramLine returns null unless programVisit is exactly true (fail closed, default off)', () => {
+    for (const programVisit of [undefined, null, false, 0, 'true', 1]) {
+      expect(buildProgramLine({ grassType: 'bermuda', month: 3, programVisit })).toBeNull();
+    }
+    expect(buildProgramLine({ grassType: 'bermuda', month: 3 })).toBeNull();
+    expect(buildProgramLine({ grassType: 'bermuda', month: 3, programVisit: true })).toEqual(expect.any(String));
+  });
+  test('buildLawnReportV2: gate on with no / false programVisit keeps the old note, unmarked', () => {
+    for (const extra of [{}, { programVisit: false }, { programVisit: null }]) {
+      const out = withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment(), ...extra }));
+      expect(out.snapshot.seasonalNote).toMatch(/transitional stretch/);
+      expect(out.snapshot).not.toHaveProperty('seasonalNoteSource');
+    }
+  });
+  test('buildLawnReportV2 never crashes on a partial feature-gates mock (gate missing = off)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false, lawnReportLeadLive: () => false }));
+      const { buildLawnReportV2: build } = require('../services/service-report/lawn-report-v2');
+      const out = build({ lawnAssessment: assessment(), programVisit: true });
+      expect(out.snapshot.seasonalNote).toMatch(/transitional stretch/);
+      expect(out.snapshot).not.toHaveProperty('seasonalNoteSource');
+    });
   });
 });
