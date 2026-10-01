@@ -502,3 +502,60 @@ describe('r23: every completion engine settles a performed completion of a hold 
     expect(typeof releaseStreetLevelHoldForPerformedCompletion).toBe('function');
   });
 });
+
+describe('r26: the shared field-advance seam and the recap delivery honor a live hold', () => {
+  const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
+  const lifecycle = require('../services/street-level-hold');
+
+  test('markOnProperty / markEnRoute skip a live hold (no throw, ids only in the log) before any state change', () => {
+    const t = read('../services/track-transitions.js');
+    expect(t.split("isStreetLevelHoldVisit(serviceId)) {").length - 1).toBe(2);
+    expect(t).toContain("skipped for ${serviceId}: street_level_hold");
+    expect(t.split("return { ok: false, reason: 'street_level_hold' };").length - 1).toBe(2);
+    // The check sits with the terminal-status guards, ahead of the future-date guard and any write.
+    const m = t.indexOf('async function markOnProperty');
+    expect(t.indexOf("reason: 'street_level_hold'", m)).toBeLessThan(t.indexOf("reason: 'future_scheduled_date'", m));
+  });
+
+  test('startJob refuses a live hold with the 409 street_level_hold error before creating any timer; the routes map it', () => {
+    const tt = read('../services/time-tracking.js');
+    const start = tt.indexOf('async function startJob');
+    const refuse = tt.indexOf("code: 'street_level_hold'", start);
+    expect(refuse).toBeGreaterThan(tt.indexOf(".forUpdate().first()", start));
+    expect(refuse).toBeLessThan(tt.indexOf(".insert({", start));
+    expect(refuse).toBeLessThan(tt.indexOf("entry_type: 'job', status: 'active' })", start));
+    expect(read('../routes/tech-timetracking.js')).toContain("err.code === 'street_level_hold') return res.status(409)");
+  });
+
+  test('geofence auto-start and the notification start both fall back through the startJob refusal (reminder / 409)', () => {
+    expect(read('../services/geofence-handler.js')).toContain('auto startJob failed, falling back to reminder');
+    expect(read('../routes/tech-notifications.js')).toContain('return res.status(409).json({ error: err.message });');
+  });
+
+  test('startJob and markOnProperty behave: hold refuses / skips, no hold proceeds', async () => {
+    jest.resetModules();
+    jest.doMock('../services/street-level-hold', () => ({ ...jest.requireActual('../services/street-level-hold'), isStreetLevelHoldVisit: jest.fn(async () => true) }));
+    const inserts = [];
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, forUpdate() { return q; }, update: async () => 1,
+        first: async () => (table === 'scheduled_services' ? { id: 'j1', customer_id: 'c1', service_type: 'x' } : { id: 'shift' }),
+        insert(r) { inserts.push(r); return q; }, returning: async () => [{ id: 'e1' }],
+      };
+      return q;
+    };
+    trx.raw = async () => ({ rows: [{}] });
+    jest.doMock('../models/db', () => { const d = jest.fn(); d.transaction = async (fn) => fn(trx); d.raw = trx.raw; return d; });
+    const tt = require('../services/time-tracking');
+    await expect(tt.startJob('tech-1', 'j1', {})).rejects.toMatchObject({ status: 409 });
+    expect(inserts).toHaveLength(0);
+    jest.dontMock('../services/street-level-hold');
+    jest.dontMock('../models/db');
+    jest.resetModules();
+  });
+
+  test('recap delivery carries the visit id so the shared send step applies the hold', () => {
+    expect(read('../services/service-report/recap-delivery.js')).toContain("scheduled_service_id: scheduledServiceId },");
+    expect(lifecycle.HOLD_REFUSAL).toBeTruthy();
+  });
+});

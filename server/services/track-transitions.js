@@ -578,6 +578,12 @@ async function markEnRouteCore(serviceId, opts = {}) {
     return { ok: false, reason: `terminal_status: ${svc.status}` };
   }
   if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
+  // A live street-level address hold is not advanced by ANY field path (geofence, Bouncie, timer start):
+  // the office confirms the address first. The shared seam skips the advance (ids only in the log).
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId)) {
+    logger.info(`[track-transitions] markEnRoute skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
@@ -992,6 +998,12 @@ async function markOnProperty(serviceId, opts = {}) {
     return { ok: false, reason: `terminal_status: ${svc.status}` };
   }
   if (String(svc.status) === 'cancelled') return { ok: false, reason: 'already_cancelled' };
+  // A live street-level address hold is not advanced by ANY field path (geofence, Bouncie, timer start):
+  // the office confirms the address first. The shared seam skips the advance (ids only in the log).
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId)) {
+    logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
+    return { ok: false, reason: 'street_level_hold' };
+  }
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }

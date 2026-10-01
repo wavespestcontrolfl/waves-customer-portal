@@ -1,4 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
+// The shared field-advance seam asks the street-level hold predicate (fails closed on a bare fake db).
+jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn(),
   sendTechArrived: jest.fn(),
@@ -1002,6 +1004,16 @@ describe('future-scheduled-date stale-attempt guard', () => {
     const result = await trackTransitions.markOnProperty('job-9');
 
     expect(result).toEqual({ ok: false, reason: 'future_scheduled_date' });
+    expect(setTechJobStatus).not.toHaveBeenCalled();
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('markOnProperty / markEnRoute skip a live street-level hold: no state change, no throw, no write', async () => {
+    const { isStreetLevelHoldVisit } = require('../services/street-level-hold');
+    isStreetLevelHoldVisit.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    db.mockReturnValueOnce(query(futureSvc({ scheduled_date: '2020-01-01' }))).mockReturnValueOnce(query(futureSvc({ scheduled_date: '2020-01-01' })));
+    expect(await trackTransitions.markOnProperty('job-9')).toEqual({ ok: false, reason: 'street_level_hold' });
+    expect(await trackTransitions.markEnRoute('job-9')).toEqual({ ok: false, reason: 'street_level_hold' });
     expect(setTechJobStatus).not.toHaveBeenCalled();
     expect(transitionJobStatus).not.toHaveBeenCalled();
   });

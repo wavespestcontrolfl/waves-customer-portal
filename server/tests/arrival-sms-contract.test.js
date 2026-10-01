@@ -7,6 +7,7 @@
 // invariants as a table so the behavior is stated once, independent of the
 // per-side-effect assertions in track-transitions.test.js.
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn(),
   sendTechArrived: jest.fn(),

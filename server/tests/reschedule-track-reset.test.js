@@ -17,6 +17,8 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+// The shared field-advance seam asks the street-level hold predicate (fails closed on a bare fake db).
+jest.mock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => false) }));
 jest.mock('../services/twilio', () => ({
   sendTechEnRoute: jest.fn().mockResolvedValue({ success: false }),
   sendTechArrived: jest.fn().mockResolvedValue({ success: false }),
