@@ -2323,7 +2323,9 @@ function BacklinksTab() {
                         ? `In ${p.currentMisses} current answer${p.currentMisses === 1 ? "" : "s"} without Waves (${p.missEngines.join(", ")})`
                         : p.tier === 2
                           ? "Cited in current answers that name Waves"
-                          : "Cited earlier in the window"}
+                          : p.currentCitations > 0
+                            ? "Cited in current answers, not to a who-to-hire question"
+                            : "Cited earlier in the window"}
                       {" · "}cited {p.citations}x · {p.category}
                       {p.subtype ? ` (${p.subtype.replace(/_/g, " ")})` : ""}
                     </div>

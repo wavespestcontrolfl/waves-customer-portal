@@ -30,7 +30,7 @@ function parseArgs() {
     const r = await loadCitedPages(db, a);
     console.log(`cited pages since ${r.since}: ${r.scanned} measured answer(s) scanned, ${r.pages.length} page(s) shown`);
     for (const p of r.pages) {
-      const why = p.currentMisses > 0 ? `${p.currentMisses} current miss(es) via ${p.missEngines.join('/')}` : p.tier === 2 ? 'current, Waves named' : 'earlier in window';
+      const why = p.currentMisses > 0 ? `${p.currentMisses} current miss(es) via ${p.missEngines.join('/')}` : p.tier === 2 ? 'current, Waves named' : p.currentCitations > 0 ? 'current, not a who-to-hire question' : 'earlier in window';
       console.log(`\n${String(p.rank).padStart(3)}. [T${p.tier}] ${p.url}`);
       console.log(`      ${p.category}${p.subtype ? `:${p.subtype}` : ''} · ${why} · cited ${p.citations}x · named in ${p.namedIn}${p.priorityCity ? ' · priority city' : ''}`);
       for (const q of p.questions.slice(0, 4)) {
@@ -41,7 +41,7 @@ function parseArgs() {
     console.log(`\nplacements live on a cited page: ${rechecks.length}`);
     for (const r of rechecks) {
       console.log(`  ${r.host} live since ${r.liveOn} (${r.daysLive}d) · ${r.verdict}`);
-      console.log(`      before: Waves named in ${r.before.named}/${r.before.answers} · after: ${r.after.named}/${r.after.answers}, named in ${r.after.namedWhenCiting}/${r.after.citingPage} answers citing the page`);
+      console.log(`      before: Waves named in ${r.before.named}/${r.before.answers} · after: ${r.after.named}/${r.after.answers} · newest answers: named in ${r.current.namedWhenCiting}/${r.current.citingPage} citing the page`);
     }
   } catch (err) {
     console.error(`[cited-pages] FAILED: ${err.stack || err.message}`);

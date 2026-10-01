@@ -23,7 +23,7 @@
  * citations, then more citations in the window, then the page key.
  */
 
-const { classifyUrl, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
+const { classifyUrl, isProviderIntentQuestion, hasBestToken, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
 const { cleanUrls, isMeasuredAnswer } = require('./aeo-measurement');
 const { LIVE_STATUSES } = require('./link-authority-selection');
 const { isNeverTargetHost } = require('./link-registry');
@@ -155,6 +155,10 @@ function finalizePage({ urlCounts, currentProviderNamed, ...p }) {
   return {
     ...p,
     url: displayUrl(topUrl),
+    // evidence about the PAGE, not the question that cited it: a directory
+    // listing, a heuristic listicle, or a best/top/near-me page. A cost guide
+    // cited for "who should I hire" is still not a list to be added to.
+    listPage: p.category === 'listing' || p.subtype === 'listicle_candidate' || hasBestToken(topUrl),
     tier: p.currentMisses > 0 ? 1 : currentProviderNamed > 0 ? 2 : 3,
     priorityCity: questions.some((q) => isPriorityCity(q.city)),
     engines: [...p.engines].sort(),
@@ -180,7 +184,7 @@ function comparePages(a, b) {
  * observation; only measured ones (isMeasuredAnswer) count as citations, so
  * a current answer that failed or could not resolve its sources is neither a
  * miss nor a citation. Each page:
- *   { key, url, host, category, subtype, tier, rank,
+ *   { key, url, host, category, subtype, listPage, tier, rank,
  *     citations, currentCitations, currentMisses, namedIn,
  *     engines, missEngines, priorityCity,
  *     questions: [{ id, query, city, service, intent, provider, current, miss, engines }] }
@@ -294,57 +298,76 @@ function daysBetween(fromDate, toDate) {
  * page_not_cited_now | not_named_yet. A placement with no live_url, or on a
  * page no engine cited before that day, is not returned.
  */
+// The placement's own page on its own host and the ET day it went live, or
+// null when it cannot be rechecked: another page on the same site (a Yelp
+// listing beside a cited Yelp search) is not this one.
+function placementTarget(pl) {
+  const host = canonicalProspectDomain(pl.target_domain);
+  const liveOn = pl.first_live_at ? liveDateOf(pl.first_live_at) : null;
+  const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
+  const onHost = liveKey && (liveKey === host || liveKey.startsWith(`${host}/`) || liveKey.startsWith(`${host}?`));
+  return host && liveOn && onHost ? { host, liveOn, liveKey } : null;
+}
+
+// One tally over measured answers: how many, how many name Waves, how many
+// cite the page, and how many do both.
+function tallyAnswers(rows, cites) {
+  const t = emptyTally();
+  for (const r of rows) {
+    const named = r.waves_mentioned === true;
+    const cited = cites(r);
+    t.answers += 1;
+    t.named += Number(named);
+    t.citingPage += Number(cited);
+    t.namedWhenCiting += Number(named && cited);
+  }
+  return t;
+}
+
+// Settle first: one early answer is not a result. First match wins.
+const RECHECK_VERDICTS = Object.freeze([
+  ['too_early', ({ daysLive, current }) => daysLive < RECHECK_SETTLE_DAYS || current.answers === 0],
+  ['named_when_cited', ({ current }) => current.namedWhenCiting > 0],
+  ['page_not_cited_now', ({ current }) => current.citingPage === 0],
+  ['not_named_yet', () => true],
+]);
+
 function recheckPlacements(placements, rows, { now = new Date(), currentSurfaces = null } = {}) {
   const today = etDateString(now);
   // every row, measured or not: a failed newest probe must stay the newest
   // answer for its question and engine; only measured rows are tallied
-  const dated = (rows || []).map((r) => ({ ...r, measured: isMeasuredAnswer(r), date: String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10), keys: new Set(isMeasuredAnswer(r) ? cleanUrls(r.cited_urls).map(pageKey).filter(Boolean) : []) }));
+  const dated = (rows || []).map((r) => {
+    const measured = isMeasuredAnswer(r);
+    const date = String(r.check_date instanceof Date ? r.check_date.toISOString() : r.check_date).slice(0, 10);
+    return { ...r, measured, date, keys: new Set(measured ? cleanUrls(r.cited_urls).map(pageKey).filter(Boolean) : []) };
+  });
   const out = [];
   for (const pl of placements || []) {
-    const host = canonicalProspectDomain(pl.target_domain);
-    if (!host || !pl.first_live_at || !liveDateOf(pl.first_live_at)) continue;
-    const liveOn = liveDateOf(pl.first_live_at);
-    // The link's own page, on the placement's own host: another page on the
-    // same site (a Yelp listing beside a cited Yelp search) is not this one.
-    const liveKey = pl.live_url ? pageKey(pl.live_url) : null;
-    if (!liveKey || !(liveKey === host || liveKey.startsWith(`${host}/`) || liveKey.startsWith(`${host}?`))) continue;
+    const target = placementTarget(pl);
+    if (!target) continue;
+    const { host, liveOn, liveKey } = target;
     // every placement gets its OWN window: the rows span the oldest
     // placement's, so a newer one must not take questions from before its own
     const windowStart = etDateString(addETDays(new Date(`${liveOn}T12:00:00Z`), -RECHECK_BEFORE_DAYS));
     const cites = (r) => r.keys.has(liveKey);
     const questions = new Set(dated.filter((r) => r.date >= windowStart && r.date < liveOn && cites(r)).map((r) => r.query));
     if (!questions.size) continue; // engines did not cite this page in the window before the link went live
-    const tally = { before: emptyTally(), after: emptyTally() };
-    // the newest post-placement answer per question and engine: the verdict
-    // reads these, so a page that stops being cited (or Waves stops being
-    // named) changes it; before/after stay cumulative for context
-    for (const r of dated) {
-      if (!questions.has(r.query) || r.date < windowStart || !r.measured) continue;
-      const t = r.date < liveOn ? tally.before : tally.after;
-      const named = r.waves_mentioned === true;
-      t.answers += 1;
-      if (named) t.named += 1;
-      if (cites(r)) { t.citingPage += 1; if (named) t.namedWhenCiting += 1; }
-    }
-    // the dashboard's own current selection over the answers since (newest
-    // per question, engine and model, current surface only); a current answer
-    // that failed or could not resolve its sources says nothing either way:
-    // it is left out, never replaced by an older one
-    const since = dated.filter((r) => questions.has(r.query) && r.date >= liveOn)
-      .sort((x, y) => compareStrings(y.date, x.date) || compareStrings(String(y.created_at || ''), String(x.created_at || '')));
+    const asked = dated.filter((r) => questions.has(r.query) && r.date >= windowStart);
+    // before/after are cumulative, for context; the verdict reads `current`:
+    // the dashboard's own selection over the answers since (newest per
+    // question, engine and model, current surface only). A current answer that
+    // failed or could not resolve its sources says nothing either way: it is
+    // left out, never replaced by an older one.
+    const since = asked.filter((r) => r.date >= liveOn).sort((x, y) => compareStrings(y.date, x.date));
     const currentIds = currentRowIds(since, currentSurfaces);
-    const latest = since.filter((r) => currentIds.has(r.id) && r.measured);
-    const current = { answers: latest.length, citingPage: latest.filter(cites).length, namedWhenCiting: latest.filter((r) => cites(r) && r.waves_mentioned === true).length };
+    const tallies = {
+      before: tallyAnswers(asked.filter((r) => r.measured && r.date < liveOn), cites),
+      after: tallyAnswers(since.filter((r) => r.measured), cites),
+      current: tallyAnswers(since.filter((r) => r.measured && currentIds.has(r.id)), cites),
+    };
     const daysLive = daysBetween(liveOn, today);
-    // settle first: one early answer is not a result
-    let verdict = 'not_named_yet';
-    if (daysLive < RECHECK_SETTLE_DAYS || current.answers === 0) verdict = 'too_early';
-    else if (current.namedWhenCiting > 0) verdict = 'named_when_cited';
-    else if (current.citingPage === 0) verdict = 'page_not_cited_now';
-    out.push({
-      prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(),
-      before: tally.before, after: tally.after, current, verdict,
-    });
+    const [verdict] = RECHECK_VERDICTS.find(([, test]) => test({ daysLive, current: tallies.current }));
+    out.push({ prospectId: pl.id, host, liveOn, daysLive, page: liveKey, questions: [...questions].sort(), ...tallies, verdict });
   }
   return out.sort((a, b) => compareStrings(b.liveOn, a.liveOn) || compareStrings(a.host, b.host));
 }

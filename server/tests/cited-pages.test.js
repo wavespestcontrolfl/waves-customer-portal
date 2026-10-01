@@ -121,6 +121,12 @@ describe('rankCitedPages', () => {
     expect(rankCitedPages(rows, [])[0]).toMatchObject({ tier: 3, currentMisses: 0, currentCitations: 0, citations: 1 });
   });
 
+  test('listPage is evidence about the page itself — a cost guide cited for a hire question is not a list', () => {
+    const rows = [row({ query: Q1, urls: ['https://www.bobvila.com/articles/pest-control-cost/', 'https://floridist.com/best-pest-control-sarasota', 'https://www.yelp.com/biz/acme'] })];
+    const byHost = Object.fromEntries(rankCitedPages(rows, []).map((p) => [p.host, p.listPage]));
+    expect(byHost).toEqual({ 'bobvila.com': false, 'floridist.com': true, 'yelp.com': true });
+  });
+
   test('one answer citing the same page twice counts once', () => {
     const rows = [row({ query: Q1, urls: ['https://floridist.com/best?utm_source=a', 'https://floridist.com/best/'] })];
     expect(rankCitedPages(rows, [])[0]).toMatchObject({ citations: 1, currentMisses: 1 });
@@ -160,7 +166,7 @@ describe('recheckPlacements', () => {
       page: 'floridist.com/best-pest-control-sarasota', questions: [Q1],
       before: { answers: 2, named: 0, citingPage: 2, namedWhenCiting: 0 },
       after: { answers: 2, named: 1, citingPage: 1, namedWhenCiting: 1 },
-      current: { answers: 2, citingPage: 1, namedWhenCiting: 1 },
+      current: { answers: 2, named: 1, citingPage: 1, namedWhenCiting: 1 },
       verdict: 'named_when_cited',
     });
   });
@@ -191,7 +197,7 @@ describe('recheckPlacements', () => {
     ];
     const [r] = recheckPlacements([placement()], rows, { now: NOW });
     expect(r.after).toMatchObject({ answers: 2, namedWhenCiting: 1 });
-    expect(r.current).toEqual({ answers: 1, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.current).toEqual({ answers: 1, named: 0, citingPage: 0, namedWhenCiting: 0 });
     expect(r.verdict).toBe('page_not_cited_now');
   });
 
@@ -203,7 +209,7 @@ describe('recheckPlacements', () => {
     ];
     const [r] = recheckPlacements([placement()], rows, { now: NOW });
     expect(r.after).toMatchObject({ answers: 1, namedWhenCiting: 1 });
-    expect(r.current).toEqual({ answers: 0, citingPage: 0, namedWhenCiting: 0 });
+    expect(r.current).toEqual({ answers: 0, named: 0, citingPage: 0, namedWhenCiting: 0 });
     expect(r.verdict).toBe('too_early');
   });
 
@@ -215,7 +221,7 @@ describe('recheckPlacements', () => {
     ];
     const [r] = recheckPlacements([placement()], rows, { now: NOW, currentSurfaces: { chatgpt: 'app', gemini: 'app' } });
     // the newer API row is a retired surface; only the app row is current
-    expect(r.current).toEqual({ answers: 1, citingPage: 1, namedWhenCiting: 0 });
+    expect(r.current).toEqual({ answers: 1, named: 0, citingPage: 1, namedWhenCiting: 0 });
     expect(r.verdict).toBe('not_named_yet');
   });
 

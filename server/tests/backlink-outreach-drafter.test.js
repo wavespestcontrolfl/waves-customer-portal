@@ -26,7 +26,7 @@ jest.mock('../services/seo/cited-pages', () => ({
 
 const worker = require('../services/seo/link-prospect-worker');
 const drafter = require('../services/seo/backlink-outreach-drafter');
-const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPageFor, citedPagesByHost, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
+const { parseDraft, pickLocation, SYSTEM_PROMPT, citedPageFor, citedPagesByHost, citedPageVerdict, buildUserPrompt, WAVES_FACTS, WAVES_LISTED_RE } = drafter._internals;
 
 const fakeAnthropic = (text) => ({ messages: { create: async () => ({ content: [{ type: 'text', text }] }) } });
 const noFetch = async () => null; // skip personalization fetch in tests
@@ -192,7 +192,7 @@ describe('run', () => {
 describe('cited-page pitches', () => {
   const citedPage = (o = {}) => ({
     key: 'floridist.com/best-pest-control-sarasota', host: 'floridist.com', url: 'https://floridist.com/best-pest-control-sarasota',
-    tier: 1, rank: 1, currentMisses: 2,
+    listPage: true, tier: 1, rank: 1, currentMisses: 2,
     questions: [{ id: 'Q1', query: 'Who is the best pest control company in Sarasota FL?', engines: ['claude', 'perplexity'], provider: true, miss: true, current: true }],
     ...o,
   });
@@ -266,6 +266,18 @@ describe('cited-page pitches', () => {
     const r = await drafter.run({ anthropic: { messages: { create } }, fetchPageFn: async () => ({ title: 't', snippet: 's', text: null }), citedPagesFn: async () => ({ pages: [citedPage()] }) });
     expect(create).not.toHaveBeenCalled();
     expect(r.failed).toBe(1);
+  });
+
+  test('an empty extracted page (script-rendered shell) fails; a redirect to another page skips', () => {
+    const c = citedPage();
+    expect(citedPageVerdict({ text: '   ', finalUrl: c.url }, c)).toEqual({ fail: expect.stringMatching(/could not be read in full/) });
+    expect(citedPageVerdict({ text: 'Our picks', finalUrl: 'https://floridist.com/' }, c)).toEqual({ skip: expect.stringMatching(/now redirects to https:\/\/floridist\.com\//) });
+    expect(citedPageVerdict({ text: 'Our picks', finalUrl: 'https://www.floridist.com/best-pest-control-sarasota/' }, c)).toBeNull();
+    expect(citedPageVerdict({ text: 'Our picks' }, c)).toBeNull();
+  });
+
+  test('a page that is not itself a list never carries the angle, whatever question cited it', () => {
+    expect(citedPageFor({ target_domain: 'floridist.com' }, citedPagesByHost([citedPage({ listPage: false })]))).toBeNull();
   });
 
   test('only pages cited for a provider question carry the angle — a cost guide keeps the usual pitch', () => {
